@@ -7,8 +7,8 @@ rust-version = "1.92"
 license = "MIT OR Apache-2.0"
 repository = "https://github.com/sagikazarmark/dioxus-typst"
 readme = "README.md"
-keywords = []
-categories = []
+keywords = ["typst", "documents", "packaging", "archive", "fonts"]
+categories = ["command-line-utilities", "text-processing", "filesystem"]
 
 [[bin]]
 name = "typst-pack"
