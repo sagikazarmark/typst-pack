@@ -1,0 +1,92 @@
+type Tests {
+  let project: Directory! = Dagger.currentModule.source.directory("fixtures/project")
+  let packages: Directory! = Dagger.currentModule.source.directory("fixtures/packages")
+
+  let pack: File! {
+    Dagger.typstPack.create(
+      source: self.project,
+      packageDir: self.packages,
+      include: ["notes.txt"],
+    )
+  }
+
+  """
+  Create a pack and inspect its discovered project files and vendored package.
+  """
+  createInspect: Void @check {
+    let pack = self.pack
+    let output = Dagger.typstPack.inspect(pack)
+
+    assert { pack.name == "project.typk" }
+    assert { output.contains("entrypoint: main.typ") }
+    assert { output.contains("main.typ") }
+    assert { output.contains("chapters/intro.typ") }
+    assert { output.contains("data.csv") }
+    assert { output.contains("notes.txt") }
+    assert { output.contains("@local/greet:0.1.0") }
+
+    null
+  }
+
+  """
+  Extract a pack back into project files and vendored packages.
+  """
+  extract: Void @check {
+    let extracted = Dagger.typstPack.extract(pack: self.pack, packages: true)
+
+    assert { extracted.file("main.typ").contents.contains("@local/greet:0.1.0") }
+    assert { extracted.file("chapters/intro.typ").contents.contains("Introduction") }
+    assert { extracted.file("data.csv").contents == "a,b\n1,2\n" }
+    assert { extracted.file("notes.txt").contents == "extra\n" }
+    assert { extracted.file("packages/local/greet/0.1.0/lib.typ").contents.contains("Hello") }
+    assert { extracted.file("packages/local/greet/0.1.0/typst.toml").contents.contains("name = \"greet\"") }
+
+    null
+  }
+
+  """
+  Compile a pack to PDF using SOURCE_DATE_EPOCH for reproducible metadata.
+  """
+  compilePdf: Void @check {
+    let pdf = Dagger.typstPack.compile(
+      pack: self.pack,
+      sourceDateEpoch: "1700000000",
+    )
+
+    assert { pdf.name == "output.pdf" }
+    assert { pdf.size > 0 }
+
+    null
+  }
+
+  """
+  Compile a pack to PNG.
+  """
+  compilePng: Void @check {
+    let png = Dagger.typstPack.compile(
+      pack: self.pack,
+      format: TypstPackFormat.PNG,
+    )
+
+    assert { png.name == "output.png" }
+    assert { png.size > 0 }
+
+    null
+  }
+
+  """
+  Compile a pack to HTML with Typst's experimental HTML feature enabled.
+  """
+  compileHtml: Void @check {
+    let html = Dagger.typstPack.compile(
+      pack: self.pack,
+      format: TypstPackFormat.HTML,
+      features: ["html"],
+    )
+
+    assert { html.name == "output.html" }
+    assert { html.contents.contains("Dagger") }
+
+    null
+  }
+}

@@ -1,0 +1,22 @@
+[graph]
+all-features = true
+
+[licenses]
+allow = [
+  "Apache-2.0",
+  "MIT",
+
+  "Unicode-3.0",
+  "BSD-3-Clause",
+  "ISC",
+  "CDLA-Permissive-2.0",
+  "CC0-1.0",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "warn"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

@@ -1,0 +1,75 @@
+[package]
+name = "typst-pack"
+version = "0.1.0"
+description = "Portable single-file packs of Typst projects: sources, assets, packages, and fonts"
+edition = "2024"
+rust-version = "1.92"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sagikazarmark/dioxus-typst"
+readme = "README.md"
+keywords = []
+categories = []
+
+[[bin]]
+name = "typst-pack"
+path = "src/main.rs"
+required-features = ["cli"]
+
+[dependencies]
+ecow = "0.2"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+tiny-skia = "0.12"
+toml = "0.9"
+typst = "=0.15.0"
+typst-html = "=0.15.0"
+typst-kit = { version = "=0.15.0", default-features = false }
+typst-layout = "=0.15.0"
+typst-pdf = "=0.15.0"
+typst-render = "=0.15.0"
+typst-svg = "=0.15.0"
+zip = { version = "6", default-features = false, features = ["deflate"] }
+
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }
+clap = { version = "4", features = ["derive", "env"], optional = true }
+open = { version = "5", optional = true }
+walkdir = { version = "2", optional = true }
+
+[features]
+default = ["embedded-fonts", "fs", "cli"]
+# Ship Typst's default fonts (Libertinus Serif, New Computer Modern, ...) so
+# packs that only use them render without any font embedding.
+embedded-fonts = ["typst-kit/embedded-fonts"]
+# Filesystem-based packing: directory discovery, package download and caching,
+# system font scanning. Not available on wasm targets.
+fs = [
+    "dep:walkdir",
+    "typst-kit/datetime",
+    "typst-kit/scan-fonts",
+    "typst-kit/system-downloader",
+    "typst-kit/system-files",
+]
+# The typst-pack command line tool.
+cli = [
+    "embedded-fonts",
+    "fs",
+    "dep:chrono",
+    "dep:clap",
+    "dep:open",
+    "typst-kit/emit-diagnostics",
+]
+
+[dev-dependencies]
+tempfile = "3"
+
+[package.metadata.release]
+sign-commit = true
+sign-tag = true
+shared-version = true
+tag-message = "Release {{version}}"
+tag-name = "v{{version}}"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

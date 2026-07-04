@@ -1,0 +1,11 @@
+ignore = [".devenv", "target"]
+
+[modules.typst-pack]
+source = "."
+entrypoint = true
+
+[modules.tests]
+source = ".dagger/modules/tests"
+
+[modules.rust]
+source = "github.com/sagikazarmark/daggerverse-beta/rust"

@@ -1,0 +1,347 @@
+type TypstPack {
+  let rust: Rust!
+  let packageCache: CacheVolume!
+
+  new(
+    """
+    Cache volume for Typst package downloads.
+    """
+    packageCache: CacheVolume! = Dagger.cacheVolume("typst-pack-packages"),
+  ) {
+    let rustVersion: String! = "1.96.0-slim-trixie@sha256:082a5849a6870672b5f7a5bf4eddc71723fce38756fd834a0d734a5306a310ab"
+
+    let packages = ["pkg-config", "libssl-dev"]
+
+    let container = Dagger
+      .container
+      .from("rust:" + rustVersion)
+      .withMountedCache("/var/cache/apt/archives", Dagger.cacheVolume("debian-apt-archives"))
+      # .withMountedCache("/var/lib/apt/lists", Dagger.cacheVolume("debian-apt-lists"))
+      .withEnvVariable("DEBIAN_FRONTEND", "noninteractive")
+      .withExec(["apt-get", "update"])
+      .withExec(["apt-get", "install", "-y", "--no-install-recommends"] + packages)
+
+    self.rust = Dagger.rust(version: rustVersion, container: container)
+    self.packageCache = packageCache
+
+    self
+  }
+
+  """
+  The typst-pack CLI.
+  """
+  build: File! @check {
+    self
+      .rust
+      .build(release: true)
+      .file("typst-pack")
+  }
+
+  """
+  A Debian container with the typst-pack CLI installed.
+  """
+  container: Container! {
+    Dagger
+      .container
+      .from("debian:trixie-slim")
+      .withMountedCache("/var/cache/apt/archives", Dagger.cacheVolume("typst-pack-debian-apt-archives"))
+      .withEnvVariable("DEBIAN_FRONTEND", "noninteractive")
+      .withExec(["apt-get", "update"])
+      .withExec(["apt-get", "install", "-y", "--no-install-recommends", "ca-certificates"])
+      .withFile("/usr/local/bin/typst-pack", self.build)
+      .withEnvVariable("TYPST_PACK_PACKAGE_CACHE_PATH", "/work/package-cache")
+      .withMountedCache("/work/package-cache", self.packageCache)
+  }
+
+  """
+  Pack a Typst project directory into a typst-pack archive.
+  """
+  create(
+    """
+    Typst project directory to pack. It is mounted at /work/src.
+    """
+    source: Directory!,
+    """
+    Entrypoint relative to the project root.
+    """
+    entrypoint: String,
+    """
+    Do not vendor Typst packages into the pack.
+    """
+    noPackages: Boolean! = false,
+    """
+    Embed fonts used by the document.
+    """
+    embedFonts: Boolean! = false,
+    """
+    Also embed fonts identical to Typst's defaults.
+    """
+    includeDefaultFonts: Boolean! = false,
+    """
+    Additional files or directories inside the project root to pack.
+    """
+    include: [String!]! = [],
+    """
+    KEY=VALUE pairs visible through sys.inputs during discovery.
+    """
+    inputs: [String!]! = [],
+    """
+    Optional font directory mounted at /work/fonts and added to the font search path.
+    """
+    fontDir: Directory,
+    """
+    Additional font directories. Relative paths resolve from /work/src; absolute paths can reference other mounts.
+    """
+    fontPaths: [String!]! = [],
+    """
+    Optional Typst package directory mounted at /work/packages.
+    """
+    packageDir: Directory,
+    """
+    Disallow network access while resolving packages.
+    """
+    offline: Boolean! = false,
+    """
+    Human-readable pack metadata name.
+    """
+    name: String,
+    """
+    Pack metadata description.
+    """
+    description: String,
+    """
+    Pack metadata authors.
+    """
+    authors: [String!]! = [],
+  ): File! {
+    let args = [
+      "typst-pack", "create", ".",
+      "--output", "/work/out/project.typk",
+      "--ignore-system-fonts",
+    ]
+
+    if (fontDir != null) {
+      args += ["--font-path", "/work/fonts"]
+    }
+    if (entrypoint != null and entrypoint != "") {
+      args += ["--entrypoint", entrypoint]
+    }
+    if (noPackages) { args += ["--no-packages"] }
+    if (embedFonts) { args += ["--embed-fonts"] }
+    if (includeDefaultFonts) { args += ["--include-default-fonts"] }
+    include.each { path => args += ["--include", path] }
+    inputs.each { input => args += ["--input", input] }
+    fontPaths.each { path => args += ["--font-path", path] }
+    if (packageDir != null) {
+      args += ["--package-path", "/work/packages"]
+    }
+    if (offline) { args += ["--offline"] }
+    if (name != null and name != "") {
+      args += ["--name", name]
+    }
+    if (description != null and description != "") {
+      args += ["--description", description]
+    }
+    authors.each { author => args += ["--author", author] }
+
+    let container = self
+      .container
+      .withWorkdir("/work/src")
+      .withMountedDirectory(".", source)
+
+    if (fontDir != null) {
+      container = container.withMountedDirectory("/work/fonts", fontDir)
+    }
+    if (packageDir != null) {
+      container = container.withMountedDirectory("/work/packages", packageDir)
+    }
+
+    container
+      .withExec(["mkdir", "-p", "/work/out"])
+      .withExec(args)
+      .file("/work/out/project.typk")
+  }
+
+  """
+  Show what is inside a typst-pack archive.
+  """
+  inspect(
+    """
+    Pack file to inspect. It is mounted at /work/src/<name>.
+    """
+    pack: File!,
+  ): String! {
+    self
+      .container
+      .withWorkdir("/work/src")
+      .withMountedFile("project.typk", pack)
+      .withExec(["typst-pack", "inspect", "project.typk"])
+      .stdout
+  }
+
+  """
+  Extract a typst-pack archive into a directory.
+  """
+  extract(
+    """
+    Pack file to extract. It is mounted at /work/src/<name>.
+    """
+    pack: File!,
+    """
+    Also extract vendored packages to packages/.
+    """
+    packages: Boolean! = false,
+    """
+    Also extract embedded fonts to fonts/.
+    """
+    fonts: Boolean! = false,
+    """
+    Extract everything.
+    """
+    all: Boolean! = false,
+  ): Directory! {
+    let args = ["typst-pack", "extract", "project.typk", "--output", "/work/out"]
+
+    if (packages) { args += ["--packages"] }
+    if (fonts) { args += ["--fonts"] }
+    if (all) { args += ["--all"] }
+
+    self
+      .container
+      .withWorkdir("/work/src")
+      .withMountedFile("project.typk", pack)
+      .withExec(["mkdir", "-p", "/work/out"])
+      .withExec(args)
+      .directory("/work/out")
+  }
+
+  """
+  Compile a typst-pack archive to a single output file.
+  """
+  compile(
+    """
+    Pack file to compile. It is mounted at /work/src/<name>.
+    """
+    pack: File!,
+    """
+    Output format: pdf, png, svg, or html.
+    """
+    format: Format! = Format.PDF,
+    """
+    Experimental Typst features to enable.
+    """
+    features: [String!]! = [],
+    """
+    Pages to export, for example 1,3-5,9-.
+    """
+    pages: String,
+    """
+    PPI for PNG export.
+    """
+    ppi: String,
+    """
+    KEY=VALUE pairs visible through sys.inputs.
+    """
+    inputs: [String!]! = [],
+    """
+    Optional font directory mounted at /work/fonts and added to the font search path.
+    """
+    fontDir: Directory,
+    """
+    Additional font directories. Relative paths resolve from /work/src; absolute paths can reference other mounts.
+    """
+    fontPaths: [String!]! = [],
+    """
+    Do not use Typst's embedded default fonts.
+    """
+    ignoreEmbeddedFonts: Boolean! = false,
+    """
+    PDF standards to enforce.
+    """
+    pdfStandards: [String!]! = [],
+    """
+    SOURCE_DATE_EPOCH value used as the document creation date when --creation-timestamp is absent.
+    """
+    sourceDateEpoch: String,
+    """
+    Optional Typst package directory mounted at /work/packages.
+    """
+    packageDir: Directory,
+    """
+    Disallow network access while resolving packages.
+    """
+    offline: Boolean! = false,
+    """
+    Diagnostic format: human or short.
+    """
+    diagnosticFormat: DiagnosticFormat! = DiagnosticFormat.HUMAN,
+  ): File! {
+    let outputPath = "/work/out/output." + formatName(format)
+    let args = [
+      "typst-pack", "compile", "project.typk", outputPath,
+      "--format", formatName(format),
+      "--ignore-system-fonts",
+      "--diagnostic-format", diagnosticFormatName(diagnosticFormat),
+    ]
+
+    if (fontDir != null) {
+      args += ["--font-path", "/work/fonts"]
+    }
+    features.each { feature => args += ["--features", feature] }
+    if (pages != null and pages != "") {
+      args += ["--pages", pages]
+    }
+    if (ppi != null and ppi != "") {
+      args += ["--ppi", ppi]
+    }
+    inputs.each { input => args += ["--input", input] }
+    fontPaths.each { path => args += ["--font-path", path] }
+    if (ignoreEmbeddedFonts) { args += ["--ignore-embedded-fonts"] }
+    pdfStandards.each { standard => args += ["--pdf-standard", standard] }
+    if (packageDir != null) {
+      args += ["--package-path", "/work/packages"]
+    }
+    if (offline) { args += ["--offline"] }
+
+    let container = self
+      .container
+      .withWorkdir("/work/src")
+      .withMountedFile("project.typk", pack)
+
+    if (fontDir != null) {
+      container = container.withMountedDirectory("/work/fonts", fontDir)
+    }
+    if (packageDir != null) {
+      container = container.withMountedDirectory("/work/packages", packageDir)
+    }
+
+    if (sourceDateEpoch != null and sourceDateEpoch != "") {
+      container = container.withEnvVariable("SOURCE_DATE_EPOCH", sourceDateEpoch)
+    }
+
+    container
+      .withExec(["mkdir", "-p", "/work/out"])
+      .withExec(args)
+      .file(outputPath)
+  }
+}
+
+enum Format {
+  PDF
+  PNG
+  SVG
+  HTML
+}
+
+enum DiagnosticFormat {
+  HUMAN
+  SHORT
+}
+
+let formatName(format: Format!): String! {
+  toString(format).toLower
+}
+
+let diagnosticFormatName(format: DiagnosticFormat!): String! {
+  toString(format).toLower
+}
