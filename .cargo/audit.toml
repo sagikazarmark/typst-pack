@@ -1,0 +1,13 @@
+[advisories]
+ignore = [
+  # Remaining quick-xml 0.38.x path is pinned by typst-library 0.15.0
+  # through hayagriva/citationberg.
+  "RUSTSEC-2026-0194",
+  "RUSTSEC-2026-0195",
+
+  # Unmaintained crates are transitive through Typst 0.15.0 dependencies.
+  "RUSTSEC-2025-0141",
+  "RUSTSEC-2024-0436",
+  "RUSTSEC-2026-0192",
+  "RUSTSEC-2024-0320",
+]
