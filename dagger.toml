@@ -9,3 +9,9 @@ source = ".dagger/modules/tests"
 
 [modules.rust]
 source = "github.com/sagikazarmark/daggerverse-beta/rust"
+
+[modules.dagger-gha]
+source = "github.com/sagikazarmark/daggerverse-beta/dagger-gha"
+
+[modules.dagger-gha.settings]
+daggerCommit = "86d1d2f5791bcf3213d56903cfa81a3ba0abe54a"
