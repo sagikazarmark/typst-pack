@@ -95,15 +95,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "arbitrary"
-version = "1.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
-dependencies = [
- "derive_arbitrary",
-]
-
-[[package]]
 name = "arrayref"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -513,17 +504,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7cd812cc2bc1d69d4764bd80df88b4317eaef9e773c75226407d9bc0876b211c"
 
 [[package]]
-name = "derive_arbitrary"
-version = "1.4.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e567bd82dcff979e4b03460c307b3cdc9e96fde3d73bed1496d2bc75d9dd62a"
-dependencies = [
- "proc-macro2",
- "quote",
- "syn",
-]
-
-[[package]]
 name = "dirs"
 version = "6.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -563,6 +543,12 @@ checksum = "78e4f79b296fbaab6ce2e22d52cb4c7f010fe0ebe7a32e34fa25885fd797bd02"
 dependencies = [
  "serde",
 ]
+
+[[package]]
+name = "ecow"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62bac48c16a993694c703f2991527d422d9efb8ec5625756004ba30e97683720"
 
 [[package]]
 name = "either"
@@ -2650,17 +2636,17 @@ dependencies = [
 
 [[package]]
 name = "toml"
-version = "0.9.12+spec-1.1.0"
+version = "1.1.2+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cf92845e79fc2e2def6a5d828f0801e29a2f8acc037becc5ab08595c7d5e9863"
+checksum = "81f3d15e84cbcd896376e6730314d59fb5a87f31e4b038454184435cd57defee"
 dependencies = [
  "indexmap",
  "serde_core",
  "serde_spanned 1.1.1",
- "toml_datetime 0.7.5+spec-1.1.0",
+ "toml_datetime 1.1.1+spec-1.1.0",
  "toml_parser",
  "toml_writer",
- "winnow 0.7.15",
+ "winnow 1.0.3",
 ]
 
 [[package]]
@@ -2674,9 +2660,9 @@ dependencies = [
 
 [[package]]
 name = "toml_datetime"
-version = "0.7.5+spec-1.1.0"
+version = "1.1.1+spec-1.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "92e1cfed4a3038bc5a127e35a2d360f145e1f4b971b551a2ba5fd7aedf7e1347"
+checksum = "3165f65f62e28e0115a00b2ebdd37eb6f3b641855f9d636d3cd4103767159ad7"
 dependencies = [
  "serde_core",
 ]
@@ -2743,6 +2729,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6af6ae20167a9ece4bcb41af5b80f8a1f1df981f6391189ce00fd257af04126a"
 
 [[package]]
+name = "typed-path"
+version = "0.12.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e28f89b80c87b8fb0cf04ab448d5dd0dd0ade2f8891bae878de66a75a28600e"
+
+[[package]]
 name = "typst"
 version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2750,7 +2742,7 @@ checksum = "3c8bf2a5a9d58cc542764a88dd43c8a679b683db4ae23e36267219339ab36b01"
 dependencies = [
  "arrayvec",
  "comemo",
- "ecow",
+ "ecow 0.2.6",
  "rustc-hash",
  "typst-eval",
  "typst-html",
@@ -2779,7 +2771,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4d064876305073ab75d5af039ae5e8dcb32c4cac4aa9f43d0f5aae347baef7c3"
 dependencies = [
  "comemo",
- "ecow",
+ "ecow 0.2.6",
  "indexmap",
  "rustc-hash",
  "stacker",
@@ -2801,7 +2793,7 @@ dependencies = [
  "az",
  "bumpalo",
  "comemo",
- "ecow",
+ "ecow 0.2.6",
  "palette",
  "rustc-hash",
  "time",
@@ -2824,7 +2816,7 @@ dependencies = [
  "chrono",
  "codespan-reporting",
  "dirs",
- "ecow",
+ "ecow 0.2.6",
  "env_proxy",
  "fastrand",
  "flate2",
@@ -2856,7 +2848,7 @@ dependencies = [
  "bumpalo",
  "codex",
  "comemo",
- "ecow",
+ "ecow 0.2.6",
  "either",
  "hypher",
  "icu_properties",
@@ -2896,7 +2888,7 @@ dependencies = [
  "codex",
  "comemo",
  "csv",
- "ecow",
+ "ecow 0.2.6",
  "either",
  "flate2",
  "fontdb",
@@ -2967,13 +2959,13 @@ version = "0.1.1"
 dependencies = [
  "chrono",
  "clap",
- "ecow",
+ "ecow 0.3.0",
  "open",
  "serde",
  "tempfile",
  "thiserror",
  "tiny-skia",
- "toml 0.9.12+spec-1.1.0",
+ "toml 1.1.2+spec-1.1.0",
  "typst",
  "typst-html",
  "typst-kit",
@@ -2995,7 +2987,7 @@ dependencies = [
  "bytemuck",
  "codex",
  "comemo",
- "ecow",
+ "ecow 0.2.6",
  "flate2",
  "image",
  "indexmap",
@@ -3023,7 +3015,7 @@ dependencies = [
  "arrayvec",
  "bumpalo",
  "comemo",
- "ecow",
+ "ecow 0.2.6",
  "regex",
  "typst-html",
  "typst-library",
@@ -3064,7 +3056,7 @@ checksum = "878b6e1293c2bea77a8be50670d1cbca4e676af96480313a105cba539da51d1c"
 dependencies = [
  "base64",
  "comemo",
- "ecow",
+ "ecow 0.2.6",
  "flate2",
  "hayro",
  "hayro-svg",
@@ -3089,7 +3081,7 @@ version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22bf7f87450e5841debd4986b0f912b0f7a2251e600c08aca406305ff52c67b4"
 dependencies = [
- "ecow",
+ "ecow 0.2.6",
  "rustc-hash",
  "serde",
  "toml 0.8.23",
@@ -3754,15 +3746,15 @@ dependencies = [
 
 [[package]]
 name = "zip"
-version = "6.0.0"
+version = "8.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eb2a05c7c36fde6c09b08576c9f7fb4cda705990f73b58fe011abf7dfb24168b"
+checksum = "2d04a6b5381502aa6087c94c669499eb1602eb9c5e8198e534de571f7154809b"
 dependencies = [
- "arbitrary",
  "crc32fast",
  "flate2",
  "indexmap",
  "memchr",
+ "typed-path",
  "zopfli",
 ]
 
