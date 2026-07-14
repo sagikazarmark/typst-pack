@@ -20,7 +20,7 @@ ecow = "0.2"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tiny-skia = "0.12"
-toml = "0.9"
+toml = "1.1"
 typst = "=0.15.0"
 typst-html = "=0.15.0"
 typst-kit = { version = "=0.15.0", default-features = false }
@@ -28,7 +28,7 @@ typst-layout = "=0.15.0"
 typst-pdf = "=0.15.0"
 typst-render = "=0.15.0"
 typst-svg = "=0.15.0"
-zip = { version = "6", default-features = false, features = ["deflate"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }
 clap = { version = "4", features = ["derive", "env"], optional = true }
