@@ -16,7 +16,7 @@ path = "src/main.rs"
 required-features = ["cli"]
 
 [dependencies]
-ecow = "0.3"
+ecow = "0.2"
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 tiny-skia = "0.12"
