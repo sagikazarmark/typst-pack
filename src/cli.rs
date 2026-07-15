@@ -363,7 +363,7 @@ fn create(args: CreateArgs) -> Result<(), String> {
     let report = &outcome.report;
     println!(
         "packed {} project resource(s), {} package(s), {} font(s) into `{}`",
-        report.packed_resources().len(),
+        report.files.len(),
         report.packages_vendored.len(),
         report.fonts.len(),
         output.display(),

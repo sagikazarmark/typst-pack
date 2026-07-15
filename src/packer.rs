@@ -2,7 +2,7 @@
 
 #![cfg(feature = "fs")]
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
@@ -191,6 +191,10 @@ impl Packer {
     }
 
     /// Adds a loader for External Project Resources used during discovery.
+    ///
+    /// Loaders are only consulted under
+    /// [`AllowExternalProjectResources`](ProjectResourcePolicy::AllowExternalProjectResources);
+    /// registering one does not change the default strict policy.
     pub fn external_resource_loader(
         mut self,
         loader: impl FileLoader + Send + Sync + 'static,
@@ -258,6 +262,7 @@ impl Packer {
                 external_loaders: self.external_resource_loaders,
                 external_resources: Mutex::new(explicit_external_resources.clone()),
                 explicit_external_resources,
+                source_requests: Mutex::new(HashSet::new()),
             }),
             fonts,
             time: Time::system(),
@@ -481,16 +486,6 @@ pub struct PackReport {
     pub compile_warnings: EcoVec<SourceDiagnostic>,
 }
 
-impl PackReport {
-    /// Root-relative paths of the packed project resources.
-    ///
-    /// This vocabulary-specific accessor preserves the existing [`files`](Self::files)
-    /// field for library compatibility.
-    pub fn packed_resources(&self) -> &[String] {
-        &self.files
-    }
-}
-
 /// A failure while packing a project directory.
 #[derive(Debug, thiserror::Error)]
 pub enum PackerError {
@@ -569,17 +564,16 @@ impl World for DiscoveryWorld {
 
     fn source(&self, id: FileId) -> FileResult<Source> {
         if matches!(id.root(), VirtualRoot::Project) {
-            if self
-                .store
-                .loader()
-                .explicit_external_resources
-                .contains(id.vpath().get_without_slash())
-            {
+            let loader = self.store.loader();
+            if loader.is_external(id) {
                 return Err(FileError::NotFound(PathBuf::from(
                     id.vpath().get_without_slash(),
                 )));
             }
-            self.store.loader().primary.load(id)?;
+            // FileStore shares one loader for source and raw-file requests.
+            // Tag this call so the loader keeps source resolution primary-only.
+            let _request = loader.source_request(id);
+            return self.store.source(id);
         }
         self.store.source(id)
     }
@@ -603,6 +597,22 @@ struct DiscoveryLoader {
     external_loaders: Vec<Box<dyn FileLoader + Send + Sync>>,
     external_resources: Mutex<BTreeSet<String>>,
     explicit_external_resources: BTreeSet<String>,
+    source_requests: Mutex<HashSet<FileId>>,
+}
+
+struct SourceRequest<'a> {
+    loader: &'a DiscoveryLoader,
+    id: FileId,
+}
+
+impl Drop for SourceRequest<'_> {
+    fn drop(&mut self) {
+        self.loader
+            .source_requests
+            .lock()
+            .expect("source request lock poisoned")
+            .remove(&self.id);
+    }
 }
 
 impl DiscoveryLoader {
@@ -625,10 +635,28 @@ impl DiscoveryLoader {
             .cloned()
             .collect()
     }
+
+    fn source_request(&self, id: FileId) -> SourceRequest<'_> {
+        self.source_requests
+            .lock()
+            .expect("source request lock poisoned")
+            .insert(id);
+        SourceRequest { loader: self, id }
+    }
+
+    fn is_source_request(&self, id: FileId) -> bool {
+        self.source_requests
+            .lock()
+            .expect("source request lock poisoned")
+            .contains(&id)
+    }
 }
 
 impl FileLoader for DiscoveryLoader {
     fn load(&self, id: FileId) -> FileResult<Bytes> {
+        if matches!(id.root(), VirtualRoot::Project) && self.is_source_request(id) {
+            return self.primary.load(id);
+        }
         match self.primary.load(id) {
             Ok(data) => {
                 if matches!(id.root(), VirtualRoot::Project)

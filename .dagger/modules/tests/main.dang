@@ -108,6 +108,7 @@ type Tests {
     assert { output.contains("external project resources:") }
     assert { output.contains("branding/name.txt") }
     assert { output.contains("branding/first-only.txt") }
+    assert { output.contains("branding/from-second-root.txt") }
     assert { output.contains("branding/conditional.txt") }
     assert { !output.contains("branding/second-only.txt") }
 

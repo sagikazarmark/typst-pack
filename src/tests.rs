@@ -647,7 +647,6 @@ Rows: #csv("data.csv").len()
             .unwrap();
 
         assert_eq!(outcome.report.files, ["main.typ"]);
-        assert_eq!(outcome.report.packed_resources(), ["main.typ"]);
         assert_eq!(outcome.report.external_resources, ["assets/logo.png"]);
         assert!(outcome.pack.file("assets/logo.png").is_none());
 
@@ -802,6 +801,59 @@ Rows: #csv("data.csv").len()
         assert!(outcome.pack.file("assets/logo.png").is_some());
         assert!(outcome.report.external_resources.is_empty());
         assert_eq!(fallback_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn discovery_reads_project_sources_once_without_external_fallback() {
+        use std::io::Write as _;
+        use std::process::Command;
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("main.typ"),
+            "#import \"chapter.typ\": chapter\n#chapter",
+        )
+        .unwrap();
+
+        let chapter = project.join("chapter.typ");
+        assert!(
+            Command::new("mkfifo")
+                .arg(&chapter)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let writer = std::thread::spawn({
+            let chapter = chapter.clone();
+            move || {
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(&chapter)
+                    .unwrap();
+                fs::remove_file(&chapter).unwrap();
+                file.write_all(b"#let chapter = rect(width: 1pt, height: 1pt)")
+                    .unwrap();
+            }
+        });
+
+        let (loader, calls) = MemoryProjectFile::tracked(
+            "chapter.typ",
+            b"#let chapter = rect(width: 2pt, height: 2pt)".to_vec(),
+        );
+        let outcome = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .project_resource_policy(ProjectResourcePolicy::AllowExternalProjectResources)
+            .external_resource_loader(loader)
+            .pack()
+            .unwrap();
+        writer.join().unwrap();
+
+        assert!(outcome.pack.file("chapter.typ").is_some());
+        assert!(outcome.report.external_resources.is_empty());
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 
     #[cfg(feature = "embedded-fonts")]

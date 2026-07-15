@@ -139,13 +139,7 @@ impl FileLoader for PackLoader {
                 if let Some(data) = self.pack.file(path) {
                     return Ok(data.clone());
                 }
-                if !self
-                    .pack
-                    .manifest()
-                    .project
-                    .external_resources
-                    .contains(path)
-                {
+                if !self.pack.is_external_resource(path) {
                     return Err(FileError::NotFound(PathBuf::from(path)));
                 }
                 load_external_resource(&self.external_resource_loaders, id)

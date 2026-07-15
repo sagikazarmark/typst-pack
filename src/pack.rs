@@ -90,6 +90,10 @@ impl Pack {
             .map(String::as_str)
     }
 
+    pub(crate) fn is_external_resource(&self, path: &str) -> bool {
+        self.manifest.project.external_resources.contains(path)
+    }
+
     /// The vendored packages and their files.
     pub fn packages(
         &self,

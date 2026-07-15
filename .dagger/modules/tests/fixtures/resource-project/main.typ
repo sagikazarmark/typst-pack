@@ -4,6 +4,7 @@
 } else {
   read("branding/second-only.txt").trim()
 }
+#let from-second-root = read("branding/from-second-root.txt").trim()
 
 #set page(width: 10cm, height: 4cm)
-Brand: #brand (#detail)
+Brand: #brand (#detail, #from-second-root)
