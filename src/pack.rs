@@ -355,7 +355,7 @@ pub enum PackWriteError {
 ///
 /// This is the constructor to use when the project does not live on a file
 /// system, for example in a web editor. For packing a project directory, use
-/// [`Packer`](crate::Packer) instead (requires the `fs` feature).
+/// `Packer` instead (requires the `fs` feature).
 #[derive(Debug)]
 pub struct PackBuilder {
     entrypoint: String,

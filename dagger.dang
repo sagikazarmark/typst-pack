@@ -8,7 +8,7 @@ type TypstPack {
     """
     packageCache: CacheVolume! = Dagger.cacheVolume("typst-pack-packages"),
   ) {
-    let rustVersion: String! = "1.96.0-slim-trixie@sha256:082a5849a6870672b5f7a5bf4eddc71723fce38756fd834a0d734a5306a310ab"
+    let rustVersion: String! = "1.97-slim-trixie@sha256:14c4fe50ea427dc42381a1a09a9a839c1d2346a2e508cd491bf02c659dbc0ed7"
 
     let packages = ["pkg-config", "libssl-dev"]
 
@@ -33,7 +33,10 @@ type TypstPack {
   build: File! @check {
     self
       .rust
-      .build(release: true)
+      .build(
+        release: true,
+        feature: ["cli"],
+      )
       .file("typst-pack")
   }
 

@@ -5,8 +5,8 @@ description = "Portable single-file packs of Typst projects: sources, resources,
 edition = "2024"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"
-repository = "https://github.com/sagikazarmark/dioxus-typst"
-readme = "README.md"
+repository = "https://github.com/sagikazarmark/typst-pack"
+homepage = "https://github.com/sagikazarmark/typst-pack"
 keywords = ["typst", "documents", "packaging", "archive", "fonts"]
 categories = ["command-line-utilities", "text-processing", "filesystem"]
 
@@ -15,28 +15,17 @@ name = "typst-pack"
 path = "src/main.rs"
 required-features = ["cli"]
 
-[dependencies]
-ecow = "0.2"
-serde = { version = "1", features = ["derive"] }
-thiserror = "2"
-tiny-skia = "0.12"
-toml = "1.1"
-typst = "=0.15.0"
-typst-html = "=0.15.0"
-typst-kit = { version = "=0.15.0", default-features = false }
-typst-layout = "=0.15.0"
-typst-pdf = "=0.15.0"
-typst-render = "=0.15.0"
-typst-svg = "=0.15.0"
-zip = { version = "8", default-features = false, features = ["deflate"] }
-
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }
-clap = { version = "4", features = ["derive", "env"], optional = true }
-open = { version = "5", optional = true }
-walkdir = { version = "2", optional = true }
-
 [features]
-default = ["embedded-fonts", "fs", "cli"]
+default = []
+# The typst-pack command line tool.
+cli = [
+    "dep:chrono",
+    "dep:clap",
+    "dep:open",
+    "embedded-fonts",
+    "fs",
+    "typst-kit/emit-diagnostics",
+]
 # Ship Typst's default fonts (Libertinus Serif, New Computer Modern, ...) so
 # packs that only use them render without any font embedding.
 embedded-fonts = ["typst-kit/embedded-fonts"]
@@ -49,18 +38,34 @@ fs = [
     "typst-kit/system-downloader",
     "typst-kit/system-files",
 ]
-# The typst-pack command line tool.
-cli = [
-    "embedded-fonts",
-    "fs",
-    "dep:chrono",
-    "dep:clap",
-    "dep:open",
-    "typst-kit/emit-diagnostics",
-]
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }
+clap = { version = "4", features = ["derive", "env"], optional = true }
+ecow = "0.2"
+open = { version = "5", optional = true }
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+toml = "1.1"
+# Typst crates share internal types and must resolve to the same exact release.
+typst = "=0.15.0"
+typst-html = "=0.15.0"
+typst-kit = { version = "=0.15.0", default-features = false }
+typst-layout = "=0.15.0"
+typst-pdf = "=0.15.0"
+typst-render = "=0.15.0"
+typst-svg = "=0.15.0"
+walkdir = { version = "2", optional = true }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 tempfile = "3"
+tiny-skia = "0.12"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"
 
 [package.metadata.release]
 sign-commit = true
@@ -68,8 +73,3 @@ sign-tag = true
 shared-version = true
 tag-message = "Release {{version}}"
 tag-name = "v{{version}}"
-
-# The profile that 'dist' will build with
-[profile.dist]
-inherits = "release"
-lto = "thin"
