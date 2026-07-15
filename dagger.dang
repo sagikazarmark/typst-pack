@@ -82,6 +82,18 @@ type TypstPack {
     """
     include: [String!]! = [],
     """
+    Optional External Project Resource directory mounted at /work/resources.
+    """
+    resourceDir: Directory,
+    """
+    External Project Resource roots. Relative paths resolve from /work/src; absolute paths can reference other mounts.
+    """
+    resourcePaths: [String!]! = [],
+    """
+    Root-relative paths to declare as External Project Resources.
+    """
+    externalResources: [String!]! = [],
+    """
     KEY=VALUE pairs visible through sys.inputs during discovery.
     """
     inputs: [String!]! = [],
@@ -130,6 +142,8 @@ type TypstPack {
     if (embedFonts) { args += ["--embed-fonts"] }
     if (includeDefaultFonts) { args += ["--include-default-fonts"] }
     include.each { path => args += ["--include", path] }
+    resourcePaths.each { path => args += ["--resource-path", path] }
+    externalResources.each { path => args += ["--external-resource", path] }
     inputs.each { input => args += ["--input", input] }
     fontPaths.each { path => args += ["--font-path", path] }
     if (packageDir != null) {
@@ -151,6 +165,9 @@ type TypstPack {
 
     if (fontDir != null) {
       container = container.withMountedDirectory("/work/fonts", fontDir)
+    }
+    if (resourceDir != null) {
+      container = container.withMountedDirectory("/work/resources", resourceDir)
     }
     if (packageDir != null) {
       container = container.withMountedDirectory("/work/packages", packageDir)
@@ -244,6 +261,14 @@ type TypstPack {
     """
     inputs: [String!]! = [],
     """
+    Optional External Project Resource directory mounted at /work/resources.
+    """
+    resourceDir: Directory,
+    """
+    External Project Resource roots. Relative paths resolve from /work/src; absolute paths can reference other mounts.
+    """
+    resourcePaths: [String!]! = [],
+    """
     Optional font directory mounted at /work/fonts and added to the font search path.
     """
     fontDir: Directory,
@@ -295,6 +320,7 @@ type TypstPack {
       args += ["--ppi", ppi]
     }
     inputs.each { input => args += ["--input", input] }
+    resourcePaths.each { path => args += ["--resource-path", path] }
     fontPaths.each { path => args += ["--font-path", path] }
     if (ignoreEmbeddedFonts) { args += ["--ignore-embedded-fonts"] }
     pdfStandards.each { standard => args += ["--pdf-standard", standard] }
@@ -310,6 +336,9 @@ type TypstPack {
 
     if (fontDir != null) {
       container = container.withMountedDirectory("/work/fonts", fontDir)
+    }
+    if (resourceDir != null) {
+      container = container.withMountedDirectory("/work/resources", resourceDir)
     }
     if (packageDir != null) {
       container = container.withMountedDirectory("/work/packages", packageDir)

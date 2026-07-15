@@ -15,11 +15,14 @@ use typst_kit::fonts::{FontSource, FontStore};
 
 use crate::pack::Pack;
 
-/// A complete Typst [`World`] that serves all resources from a [`Pack`].
+/// A complete Typst [`World`] backed by a [`Pack`].
 ///
 /// Project files and vendored package files come from the pack. Fonts come
 /// from the pack, plus any fonts configured on the builder. Files of packages
 /// that are not vendored are only available if a package loader is configured.
+/// Declared External Project Resources may come from external resource loaders;
+/// these loaders cannot replace packed files or supply Typst source or package
+/// files.
 pub struct PackWorld {
     library: LazyHash<Library>,
     main: FileId,
@@ -59,6 +62,18 @@ impl World for PackWorld {
     }
 
     fn source(&self, id: FileId) -> FileResult<Source> {
+        if matches!(id.root(), VirtualRoot::Project)
+            && self
+                .store
+                .loader()
+                .pack
+                .file(id.vpath().get_without_slash())
+                .is_none()
+        {
+            return Err(FileError::NotFound(PathBuf::from(
+                id.vpath().get_without_slash(),
+            )));
+        }
         self.store.source(id)
     }
 
@@ -97,18 +112,38 @@ enum Clock {
 /// that are not vendored.
 struct PackLoader {
     pack: Arc<Pack>,
+    external_resource_loaders: Vec<Box<dyn FileLoader + Send + Sync>>,
     package_loader: Option<Box<dyn FileLoader + Send + Sync>>,
+}
+
+pub(crate) fn load_external_resource(
+    loaders: &[Box<dyn FileLoader + Send + Sync>],
+    id: FileId,
+) -> FileResult<Bytes> {
+    for loader in loaders {
+        match loader.load(id) {
+            Err(FileError::NotFound(_)) => {}
+            result => return result,
+        }
+    }
+    Err(FileError::NotFound(PathBuf::from(
+        id.vpath().get_without_slash(),
+    )))
 }
 
 impl FileLoader for PackLoader {
     fn load(&self, id: FileId) -> FileResult<Bytes> {
         let path = id.vpath().get_without_slash();
         match id.root() {
-            VirtualRoot::Project => self
-                .pack
-                .file(path)
-                .cloned()
-                .ok_or_else(|| FileError::NotFound(PathBuf::from(path))),
+            VirtualRoot::Project => {
+                if let Some(data) = self.pack.file(path) {
+                    return Ok(data.clone());
+                }
+                if !self.pack.is_external_resource(path) {
+                    return Err(FileError::NotFound(PathBuf::from(path)));
+                }
+                load_external_resource(&self.external_resource_loaders, id)
+            }
             VirtualRoot::Package(spec) => {
                 if self.pack.has_package(spec) {
                     self.pack
@@ -140,6 +175,7 @@ pub struct PackWorldBuilder {
     #[cfg_attr(not(feature = "embedded-fonts"), allow(dead_code))]
     embedded_fonts: bool,
     extra_fonts: Vec<(BoxedFontSource, FontInfo)>,
+    external_resource_loaders: Vec<Box<dyn FileLoader + Send + Sync>>,
     package_loader: Option<Box<dyn FileLoader + Send + Sync>>,
 }
 
@@ -161,6 +197,7 @@ impl PackWorldBuilder {
             clock: Clock::None,
             embedded_fonts: cfg!(feature = "embedded-fonts"),
             extra_fonts: Vec::new(),
+            external_resource_loaders: Vec::new(),
             package_loader: None,
         }
     }
@@ -226,6 +263,17 @@ impl PackWorldBuilder {
         self
     }
 
+    /// Adds a loader for declared External Project Resources.
+    ///
+    /// Loaders are tried in registration order after packed project files.
+    pub fn external_resource_loader(
+        mut self,
+        loader: impl FileLoader + Send + Sync + 'static,
+    ) -> Self {
+        self.external_resource_loaders.push(Box::new(loader));
+        self
+    }
+
     /// Builds the world.
     pub fn build(self) -> Result<PackWorld, PackWorldError> {
         let entrypoint = self
@@ -258,6 +306,7 @@ impl PackWorldBuilder {
             main,
             store: FileStore::new(PackLoader {
                 pack: Arc::new(self.pack),
+                external_resource_loaders: self.external_resource_loaders,
                 package_loader: self.package_loader,
             }),
             fonts,

@@ -25,7 +25,9 @@ pub use world::{PackWorld, PackWorldBuilder, PackWorldError};
 #[cfg(feature = "fs")]
 pub use extract::{ExtractError, ExtractOptions, ExtractReport, extract};
 #[cfg(feature = "fs")]
-pub use packer::{DiscoveryWorld, PackOutcome, PackReport, Packer, PackerError};
+pub use packer::{
+    DiscoveryWorld, PackOutcome, PackReport, Packer, PackerError, ProjectResourcePolicy,
+};
 #[cfg(feature = "fs")]
 pub use world::{OfflineDownloader, SystemPackageLoader};
 

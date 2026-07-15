@@ -1,5 +1,6 @@
 //! The pack manifest stored as `typst-pack.toml` inside the archive.
 
+use std::collections::BTreeSet;
 use std::str::FromStr;
 
 use serde::{Deserialize, Serialize};
@@ -37,6 +38,9 @@ pub struct Manifest {
 pub struct ProjectManifest {
     /// The root-relative path of the entrypoint file, e.g. `main.typ`.
     pub entrypoint: String,
+    /// Non-source project resources supplied externally at compilation time.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub external_resources: BTreeSet<String>,
 }
 
 /// The `[packages]` section.
@@ -98,6 +102,8 @@ pub enum ManifestError {
     UnsupportedVersion(u32),
     #[error("invalid entrypoint path `{path}`: {message}")]
     InvalidEntrypoint { path: String, message: String },
+    #[error("invalid external project resource path `{path}`: {message}")]
+    InvalidExternalResource { path: String, message: String },
     #[error("invalid package spec `{spec}`: {message}")]
     InvalidPackageSpec { spec: String, message: String },
     #[error("invalid font path `{path}`: {message}")]
@@ -107,14 +113,17 @@ pub enum ManifestError {
 impl Manifest {
     /// Parses and validates a manifest from TOML text.
     pub fn from_toml(text: &str) -> Result<Self, ManifestError> {
-        let manifest: Manifest = toml::from_str(text)?;
+        let mut manifest: Manifest = toml::from_str(text)?;
+        manifest.normalize_external_resources();
         manifest.validate()?;
         Ok(manifest)
     }
 
     /// Serializes the manifest to TOML text.
     pub fn to_toml(&self) -> String {
-        toml::to_string_pretty(self).expect("manifest is always serializable")
+        let mut manifest = self.clone();
+        manifest.normalize_external_resources();
+        toml::to_string_pretty(&manifest).expect("manifest is always serializable")
     }
 
     /// Checks internal consistency of the manifest.
@@ -123,6 +132,20 @@ impl Manifest {
             return Err(ManifestError::UnsupportedVersion(self.format_version));
         }
         self.entrypoint()?;
+        for path in &self.project.external_resources {
+            let virtual_path =
+                VirtualPath::new(path).map_err(|err| ManifestError::InvalidExternalResource {
+                    path: path.clone(),
+                    message: err.to_string(),
+                })?;
+            let canonical = virtual_path.get_without_slash();
+            if canonical != path {
+                return Err(ManifestError::InvalidExternalResource {
+                    path: path.clone(),
+                    message: format!("path is not canonical; use `{canonical}`"),
+                });
+            }
+        }
         for spec in self.packages.vendored.iter().chain(&self.packages.external) {
             parse_spec(spec)?;
         }
@@ -161,6 +184,19 @@ impl Manifest {
             .iter()
             .map(|spec| parse_spec(spec))
             .collect()
+    }
+
+    fn normalize_external_resources(&mut self) {
+        self.project.external_resources = self
+            .project
+            .external_resources
+            .iter()
+            .map(|path| {
+                VirtualPath::new(path)
+                    .map(|path| path.get_without_slash().to_owned())
+                    .unwrap_or_else(|_| path.clone())
+            })
+            .collect();
     }
 }
 

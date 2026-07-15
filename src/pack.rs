@@ -1,6 +1,6 @@
 //! The in-memory pack model and its archive serialization.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{Cursor, Read, Seek, Write};
 use std::str::FromStr;
 
@@ -24,11 +24,10 @@ const PACKAGES_PREFIX: &str = "packages/";
 
 /// A portable pack of a Typst project.
 ///
-/// A pack holds everything needed to compile one Typst project: the project
-/// files (sources, images, data files), optionally the files of the packages
-/// the project imports, and optionally the fonts it uses. Its archive form is
-/// a Zip file with a `typst-pack.toml` manifest, conventionally named
-/// `*.typk`.
+/// A pack holds project files (sources, images, and data files), optionally
+/// package files and fonts, and the declared paths of any External Project
+/// Resources whose bytes are supplied externally when requested. Its archive form is
+/// a Zip file with a `typst-pack.toml` manifest, conventionally named `*.typk`.
 #[derive(Debug, Clone)]
 pub struct Pack {
     manifest: Manifest,
@@ -80,6 +79,19 @@ impl Pack {
     /// Looks up a project file by root-relative path.
     pub fn file(&self, path: &str) -> Option<&Bytes> {
         self.files.get(path)
+    }
+
+    /// The root-relative paths of resources supplied externally at compilation time.
+    pub fn external_resources(&self) -> impl Iterator<Item = &str> {
+        self.manifest
+            .project
+            .external_resources
+            .iter()
+            .map(String::as_str)
+    }
+
+    pub(crate) fn is_external_resource(&self, path: &str) -> bool {
+        self.manifest.project.external_resources.contains(path)
     }
 
     /// The vendored packages and their files.
@@ -175,6 +187,15 @@ impl Pack {
                     .or_insert_with(|| Bytes::new(data));
             }
             // Unknown top-level entries are ignored for forward compatibility.
+        }
+
+        if let Some(path) = manifest
+            .project
+            .external_resources
+            .iter()
+            .find(|path| files.contains_key(path.as_str()))
+        {
+            return Err(PackReadError::ExternalResourceConflict(path.clone()));
         }
 
         if !files.contains_key(&manifest.project.entrypoint) {
@@ -315,6 +336,8 @@ pub enum PackReadError {
     MissingPackage(String),
     #[error("entrypoint `{0}` is missing from the archive")]
     MissingEntrypoint(String),
+    #[error("project path `{0}` cannot be both packed and an external project resource")]
+    ExternalResourceConflict(String),
     #[error("font file `{0}` is declared in the manifest but missing from the archive")]
     MissingFont(String),
 }
@@ -337,6 +360,7 @@ pub enum PackWriteError {
 pub struct PackBuilder {
     entrypoint: String,
     files: BTreeMap<String, Bytes>,
+    external_resources: BTreeSet<String>,
     packages: BTreeMap<String, PackageFiles>,
     external_packages: Vec<PackageSpec>,
     fonts: Vec<PackFont>,
@@ -349,6 +373,7 @@ impl PackBuilder {
         Self {
             entrypoint: entrypoint.into(),
             files: BTreeMap::new(),
+            external_resources: BTreeSet::new(),
             packages: BTreeMap::new(),
             external_packages: Vec::new(),
             fonts: Vec::new(),
@@ -364,6 +389,12 @@ impl PackBuilder {
     ) -> Result<Self, PackBuildError> {
         let path = valid_path(path.as_ref())?;
         self.files.insert(path, Bytes::new(data.into()));
+        Ok(self)
+    }
+
+    /// Declares a non-source project resource whose bytes will be supplied externally.
+    pub fn external_resource(mut self, path: impl AsRef<str>) -> Result<Self, PackBuildError> {
+        self.external_resources.insert(valid_path(path.as_ref())?);
         Ok(self)
     }
 
@@ -426,10 +457,20 @@ impl PackBuilder {
         if !self.files.contains_key(&entrypoint) {
             return Err(PackBuildError::MissingEntrypoint(entrypoint));
         }
+        if let Some(path) = self
+            .external_resources
+            .iter()
+            .find(|path| self.files.contains_key(path.as_str()))
+        {
+            return Err(PackBuildError::ExternalResourceConflict(path.clone()));
+        }
 
         let manifest = Manifest {
             format_version: FORMAT_VERSION,
-            project: ProjectManifest { entrypoint },
+            project: ProjectManifest {
+                entrypoint,
+                external_resources: self.external_resources,
+            },
             packages: PackagesManifest {
                 vendored: self.packages.keys().cloned().collect(),
                 external: self
@@ -482,7 +523,7 @@ impl PackBuilder {
     }
 }
 
-fn valid_path(path: &str) -> Result<String, PackBuildError> {
+pub(crate) fn valid_path(path: &str) -> Result<String, PackBuildError> {
     match VirtualPath::new(path) {
         Ok(vpath) => Ok(vpath.get_without_slash().to_owned()),
         Err(err) => Err(PackBuildError::InvalidPath {
@@ -499,6 +540,8 @@ pub enum PackBuildError {
     InvalidPath { path: String, message: String },
     #[error("entrypoint `{0}` was not added as a file")]
     MissingEntrypoint(String),
+    #[error("project path `{0}` cannot be both packed and an external project resource")]
+    ExternalResourceConflict(String),
     #[error("font data could not be parsed as a font")]
     UnrecognizedFont,
 }
