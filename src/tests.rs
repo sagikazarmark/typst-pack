@@ -55,6 +55,28 @@ struct ErrorProjectLoader {
     calls: Arc<AtomicUsize>,
 }
 
+#[cfg(feature = "fs")]
+struct BlockingProjectFile {
+    path: String,
+    data: Bytes,
+    entered: Arc<std::sync::Barrier>,
+    release: Arc<std::sync::Barrier>,
+}
+
+#[cfg(feature = "fs")]
+impl FileLoader for BlockingProjectFile {
+    fn load(&self, id: FileId) -> FileResult<Bytes> {
+        let path = id.vpath().get_without_slash();
+        if matches!(id.root(), VirtualRoot::Project) && path == self.path {
+            self.entered.wait();
+            self.release.wait();
+            Ok(self.data.clone())
+        } else {
+            Err(FileError::NotFound(PathBuf::from(path)))
+        }
+    }
+}
+
 impl ErrorProjectLoader {
     fn tracked(error: FileError) -> (Self, Arc<AtomicUsize>) {
         let calls = Arc::new(AtomicUsize::new(0));
@@ -160,6 +182,21 @@ fn manifest_normalizes_external_project_resources_deterministically() {
             .to_toml()
             .contains("external-resources = [\n    \"logo.png\",\n    \"z.png\",\n]")
     );
+}
+
+#[test]
+fn manifest_validation_rejects_noncanonical_external_project_resource_path() {
+    let mut manifest =
+        Manifest::from_toml("format-version = 1\n[project]\nentrypoint = \"main.typ\"\n").unwrap();
+    manifest
+        .project
+        .external_resources
+        .insert("assets/../logo.png".to_owned());
+
+    assert!(matches!(
+        manifest.validate(),
+        Err(ManifestError::InvalidExternalResource { .. })
+    ));
 }
 
 #[test]
@@ -854,6 +891,46 @@ Rows: #csv("data.csv").len()
         assert!(outcome.pack.file("chapter.typ").is_some());
         assert!(outcome.report.external_resources.is_empty());
         assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn concurrent_external_file_load_cannot_satisfy_discovery_source_request() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("main.typ"), "#rect(width: 1pt, height: 1pt)").unwrap();
+
+        let entered = Arc::new(std::sync::Barrier::new(2));
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let outcome = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .project_resource_policy(ProjectResourcePolicy::AllowExternalProjectResources)
+            .external_resource_loader(BlockingProjectFile {
+                path: "external.typ".to_owned(),
+                data: Bytes::new(b"#let injected = true".to_vec()),
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            })
+            .pack()
+            .unwrap();
+        let id = project_file_id("external.typ");
+
+        std::thread::scope(|scope| {
+            let file = scope.spawn(|| outcome.world.file(id));
+            entered.wait();
+            let releaser = scope.spawn(|| {
+                // Let source() contend with the paused raw-file request before it completes.
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                release.wait();
+            });
+
+            assert!(matches!(
+                outcome.world.source(id),
+                Err(FileError::NotFound(_))
+            ));
+            assert!(file.join().unwrap().is_ok());
+            releaser.join().unwrap();
+        });
     }
 
     #[cfg(feature = "embedded-fonts")]

@@ -114,8 +114,8 @@ impl Manifest {
     /// Parses and validates a manifest from TOML text.
     pub fn from_toml(text: &str) -> Result<Self, ManifestError> {
         let mut manifest: Manifest = toml::from_str(text)?;
-        manifest.validate()?;
         manifest.normalize_external_resources();
+        manifest.validate()?;
         Ok(manifest)
     }
 
@@ -133,10 +133,16 @@ impl Manifest {
         }
         self.entrypoint()?;
         for path in &self.project.external_resources {
-            if let Err(err) = VirtualPath::new(path) {
-                return Err(ManifestError::InvalidExternalResource {
+            let virtual_path =
+                VirtualPath::new(path).map_err(|err| ManifestError::InvalidExternalResource {
                     path: path.clone(),
                     message: err.to_string(),
+                })?;
+            let canonical = virtual_path.get_without_slash();
+            if canonical != path {
+                return Err(ManifestError::InvalidExternalResource {
+                    path: path.clone(),
+                    message: format!("path is not canonical; use `{canonical}`"),
                 });
             }
         }

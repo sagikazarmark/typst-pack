@@ -2,10 +2,10 @@
 
 #![cfg(feature = "fs")]
 
-use std::collections::{BTreeMap, BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use ecow::EcoVec;
 use typst::diag::{FileError, FileResult, SourceDiagnostic, Warned};
@@ -251,18 +251,21 @@ impl Packer {
             fonts.extend(typst_kit::fonts::system());
         }
 
-        let system_files = SystemFiles::new(FsRoot::new(root.clone()), packages);
+        let primary = Arc::new(PrimaryLoader {
+            system: SystemFiles::new(FsRoot::new(root.clone()), packages),
+            cache: Mutex::new(HashMap::new()),
+        });
         let mut world = DiscoveryWorld {
             root: root.clone(),
             library: LazyHash::new(Library::builder().with_inputs(self.inputs.clone()).build()),
             main: RootedPath::new(VirtualRoot::Project, entrypoint.clone()).intern(),
-            store: FileStore::new(DiscoveryLoader {
-                primary: system_files,
+            sources: FileStore::new(Arc::clone(&primary)),
+            files: FileStore::new(DiscoveryLoader {
+                primary,
                 policy: self.project_resource_policy,
                 external_loaders: self.external_resource_loaders,
                 external_resources: Mutex::new(explicit_external_resources.clone()),
                 explicit_external_resources,
-                source_requests: Mutex::new(HashSet::new()),
             }),
             fonts,
             time: Time::system(),
@@ -292,16 +295,35 @@ impl Packer {
         };
 
         // Partition the observed dependencies.
-        let dependencies: Vec<FileId> = {
-            let (_, iter) = world.store.dependencies();
+        let source_dependencies: Vec<FileId> = {
+            let (_, iter) = world.sources.dependencies();
             iter.collect()
         };
-        let mut project_files: Vec<FileId> = Vec::new();
+        let file_dependencies: Vec<FileId> = {
+            let (_, iter) = world.files.dependencies();
+            iter.collect()
+        };
+        enum ProjectFileOrigin {
+            Source,
+            File,
+        }
+        let mut project_files: Vec<(FileId, ProjectFileOrigin)> = Vec::new();
         let mut package_files: BTreeMap<String, (PackageSpec, FileId)> = BTreeMap::new();
-        for id in dependencies {
+        for id in source_dependencies {
             match id.root() {
-                VirtualRoot::Project if world.store.loader().is_external(id) => {}
-                VirtualRoot::Project => project_files.push(id),
+                VirtualRoot::Project => project_files.push((id, ProjectFileOrigin::Source)),
+                VirtualRoot::Package(spec) => {
+                    package_files
+                        .entry(spec.to_string())
+                        .or_insert_with(|| (spec.clone(), id));
+                }
+            }
+        }
+        for id in file_dependencies {
+            match id.root() {
+                VirtualRoot::Project if world.files.loader().is_external(id) => {}
+                VirtualRoot::Project if project_files.iter().any(|(source, _)| *source == id) => {}
+                VirtualRoot::Project => project_files.push((id, ProjectFileOrigin::File)),
                 VirtualRoot::Package(spec) => {
                     package_files
                         .entry(spec.to_string())
@@ -312,16 +334,20 @@ impl Packer {
 
         let mut builder = Pack::builder(entrypoint.get_without_slash());
 
-        for path in world.store.loader().external_resources() {
+        for path in world.files.loader().external_resources() {
             report.external_resources.push(path.clone());
             builder = builder.external_resource(path)?;
         }
 
         // Project files, from the compile's own cache.
-        project_files.sort_by_key(|id| id.vpath().get_with_slash().to_owned());
-        for id in project_files {
+        project_files.sort_by_key(|(id, _)| id.vpath().get_with_slash().to_owned());
+        for (id, origin) in project_files {
             let path = id.vpath().get_without_slash();
-            match world.store.file(id) {
+            let data = match origin {
+                ProjectFileOrigin::Source => world.sources.file(id),
+                ProjectFileOrigin::File => world.files.file(id),
+            };
+            match data {
                 Ok(data) => {
                     report.files.push(path.to_owned());
                     builder = builder.file(path, data.to_vec())?;
@@ -393,7 +419,7 @@ impl Packer {
             if self.vendor_packages {
                 let package_root =
                     world
-                        .store
+                        .files
                         .loader()
                         .root(*id)
                         .map_err(|err| PackerError::Package {
@@ -529,7 +555,8 @@ pub struct DiscoveryWorld {
     root: PathBuf,
     library: LazyHash<Library>,
     main: FileId,
-    store: FileStore<DiscoveryLoader>,
+    sources: FileStore<Arc<PrimaryLoader>>,
+    files: FileStore<DiscoveryLoader>,
     fonts: FontStore,
     time: Time,
 }
@@ -563,23 +590,17 @@ impl World for DiscoveryWorld {
     }
 
     fn source(&self, id: FileId) -> FileResult<Source> {
-        if matches!(id.root(), VirtualRoot::Project) {
-            let loader = self.store.loader();
-            if loader.is_external(id) {
-                return Err(FileError::NotFound(PathBuf::from(
-                    id.vpath().get_without_slash(),
-                )));
-            }
-            // FileStore shares one loader for source and raw-file requests.
-            // Tag this call so the loader keeps source resolution primary-only.
-            let _request = loader.source_request(id);
-            return self.store.source(id);
+        if matches!(id.root(), VirtualRoot::Project) && self.files.loader().is_explicit_external(id)
+        {
+            return Err(FileError::NotFound(PathBuf::from(
+                id.vpath().get_without_slash(),
+            )));
         }
-        self.store.source(id)
+        self.sources.source(id)
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
-        self.store.file(id)
+        self.files.file(id)
     }
 
     fn font(&self, index: usize) -> Option<Font> {
@@ -591,28 +612,35 @@ impl World for DiscoveryWorld {
     }
 }
 
+struct PrimaryLoader {
+    system: SystemFiles,
+    cache: Mutex<HashMap<FileId, FileResult<Bytes>>>,
+}
+
+impl PrimaryLoader {
+    fn root(&self, id: FileId) -> FileResult<FsRoot> {
+        self.system.root(id)
+    }
+}
+
+impl FileLoader for PrimaryLoader {
+    fn load(&self, id: FileId) -> FileResult<Bytes> {
+        let mut cache = self.cache.lock().expect("primary file cache lock poisoned");
+        if let Some(result) = cache.get(&id) {
+            return result.clone();
+        }
+        let result = self.system.load(id);
+        cache.insert(id, result.clone());
+        result
+    }
+}
+
 struct DiscoveryLoader {
-    primary: SystemFiles,
+    primary: Arc<PrimaryLoader>,
     policy: ProjectResourcePolicy,
     external_loaders: Vec<Box<dyn FileLoader + Send + Sync>>,
     external_resources: Mutex<BTreeSet<String>>,
     explicit_external_resources: BTreeSet<String>,
-    source_requests: Mutex<HashSet<FileId>>,
-}
-
-struct SourceRequest<'a> {
-    loader: &'a DiscoveryLoader,
-    id: FileId,
-}
-
-impl Drop for SourceRequest<'_> {
-    fn drop(&mut self) {
-        self.loader
-            .source_requests
-            .lock()
-            .expect("source request lock poisoned")
-            .remove(&self.id);
-    }
 }
 
 impl DiscoveryLoader {
@@ -627,6 +655,11 @@ impl DiscoveryLoader {
             .contains(id.vpath().get_without_slash())
     }
 
+    fn is_explicit_external(&self, id: FileId) -> bool {
+        self.explicit_external_resources
+            .contains(id.vpath().get_without_slash())
+    }
+
     fn external_resources(&self) -> Vec<String> {
         self.external_resources
             .lock()
@@ -635,28 +668,10 @@ impl DiscoveryLoader {
             .cloned()
             .collect()
     }
-
-    fn source_request(&self, id: FileId) -> SourceRequest<'_> {
-        self.source_requests
-            .lock()
-            .expect("source request lock poisoned")
-            .insert(id);
-        SourceRequest { loader: self, id }
-    }
-
-    fn is_source_request(&self, id: FileId) -> bool {
-        self.source_requests
-            .lock()
-            .expect("source request lock poisoned")
-            .contains(&id)
-    }
 }
 
 impl FileLoader for DiscoveryLoader {
     fn load(&self, id: FileId) -> FileResult<Bytes> {
-        if matches!(id.root(), VirtualRoot::Project) && self.is_source_request(id) {
-            return self.primary.load(id);
-        }
         match self.primary.load(id) {
             Ok(data) => {
                 if matches!(id.root(), VirtualRoot::Project)
