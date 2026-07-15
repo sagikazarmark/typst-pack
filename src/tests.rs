@@ -102,6 +102,14 @@ fn project_file_id(path: &str) -> FileId {
 }
 
 fn raw_stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    let entries = entries
+        .iter()
+        .map(|(name, data)| (name.as_bytes(), false, *data))
+        .collect::<Vec<_>>();
+    raw_stored_zip_with_raw_names(&entries)
+}
+
+fn raw_stored_zip_with_raw_names(entries: &[(&[u8], bool, &[u8])]) -> Vec<u8> {
     fn crc32(data: &[u8]) -> u32 {
         let mut crc = !0u32;
         for byte in data {
@@ -123,12 +131,13 @@ fn raw_stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
 
     let mut archive = Vec::new();
     let mut central_entries = Vec::new();
-    for (name, data) in entries {
+    for &(name, utf8, data) in entries {
         let offset = archive.len();
         let crc = crc32(data);
+        let flags: u16 = if utf8 { 1 << 11 } else { 0 };
         archive.extend_from_slice(b"PK\x03\x04");
         archive.extend_from_slice(&20u16.to_le_bytes());
-        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&flags.to_le_bytes());
         archive.extend_from_slice(&0u16.to_le_bytes());
         archive.extend_from_slice(&0u16.to_le_bytes());
         archive.extend_from_slice(&0u16.to_le_bytes());
@@ -137,17 +146,17 @@ fn raw_stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
         archive.extend_from_slice(&u32_bytes(data.len()));
         archive.extend_from_slice(&u16_bytes(name.len()));
         archive.extend_from_slice(&0u16.to_le_bytes());
-        archive.extend_from_slice(name.as_bytes());
+        archive.extend_from_slice(name);
         archive.extend_from_slice(data);
-        central_entries.push((name, data.len(), crc, offset));
+        central_entries.push((name, flags, data.len(), crc, offset));
     }
 
     let central_start = archive.len();
-    for (name, size, crc, offset) in central_entries {
+    for (name, flags, size, crc, offset) in central_entries {
         archive.extend_from_slice(b"PK\x01\x02");
         archive.extend_from_slice(&20u16.to_le_bytes());
         archive.extend_from_slice(&20u16.to_le_bytes());
-        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&flags.to_le_bytes());
         archive.extend_from_slice(&0u16.to_le_bytes());
         archive.extend_from_slice(&0u16.to_le_bytes());
         archive.extend_from_slice(&0u16.to_le_bytes());
@@ -161,7 +170,7 @@ fn raw_stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
         archive.extend_from_slice(&0u16.to_le_bytes());
         archive.extend_from_slice(&0u32.to_le_bytes());
         archive.extend_from_slice(&u32_bytes(offset));
-        archive.extend_from_slice(name.as_bytes());
+        archive.extend_from_slice(name);
     }
     let central_size = archive.len() - central_start;
     archive.extend_from_slice(b"PK\x05\x06");
@@ -208,8 +217,8 @@ fn manifest_roundtrip() {
     )
     .unwrap();
     assert_eq!(manifest.project().entrypoint(), "main.typ");
-    assert_eq!(manifest.vendored_packages().unwrap().len(), 1);
-    assert_eq!(manifest.unvendored_packages().unwrap().len(), 1);
+    assert_eq!(manifest.vendored_packages().len(), 1);
+    assert_eq!(manifest.unvendored_packages().len(), 1);
 
     let serialized = manifest.to_toml();
     assert!(serialized.contains("external ="));
@@ -250,8 +259,14 @@ fn manifest_declarations_are_exposed_read_only_through_accessors() {
         manifest.project().external_resources().collect::<Vec<_>>(),
         ["logo.png"]
     );
-    assert_eq!(manifest.packages().vendored(), ["@preview/cetz:0.3.4"]);
-    assert_eq!(manifest.packages().unvendored(), ["@preview/tablex:0.0.9"]);
+    let vendored = "@preview/cetz:0.3.4"
+        .parse::<typst::syntax::package::PackageSpec>()
+        .unwrap();
+    let unvendored = "@preview/tablex:0.0.9"
+        .parse::<typst::syntax::package::PackageSpec>()
+        .unwrap();
+    assert_eq!(manifest.packages().vendored(), &[vendored]);
+    assert_eq!(manifest.packages().unvendored(), &[unvendored]);
     assert_eq!(manifest.fonts()[0].path(), "fonts/test.ttf");
     assert_eq!(manifest.fonts()[0].index(), 2);
     assert_eq!(manifest.fonts()[0].families(), ["Test"]);
@@ -508,6 +523,31 @@ fn pack_construction_rejects_font_paths_reserved_for_project_files() {
 }
 
 #[test]
+fn pack_construction_rejects_font_paths_at_reserved_namespace_roots() {
+    for (path, conflicting_role) in [
+        ("project", PackPathRole::ProjectFile),
+        ("packages", PackPathRole::PackageFile),
+    ] {
+        let manifest = format!(
+            "format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"{path}\"\nfamilies = [\"Informational\"]\n"
+        );
+        let bytes = raw_stored_zip(&[
+            (MANIFEST_PATH, manifest.as_bytes()),
+            ("project/main.typ", b"Hello"),
+            (path, b"not a font"),
+        ]);
+
+        assert!(matches!(
+            Pack::from_bytes(bytes),
+            Err(PackReadError::Invariant(PackInvariantError::ReservedFontPath {
+                path: ref actual,
+                conflicting_role: actual_role,
+            })) if actual == path && actual_role == conflicting_role
+        ));
+    }
+}
+
+#[test]
 fn a_constructed_pack_builds_a_world_without_revalidation() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", Vec::new())
@@ -718,6 +758,27 @@ fn read_rejects_distinct_archive_entries_with_one_canonical_identity() {
                 ..
             }
         )) if canonical == "project/main.typ"
+    ));
+}
+
+#[test]
+fn read_rejects_distinct_raw_names_with_one_decoded_identity() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
+    let bytes = raw_stored_zip_with_raw_names(&[
+        (MANIFEST_PATH.as_bytes(), false, manifest),
+        (b"project/main.typ", false, b"Hello"),
+        ("project/é.txt".as_bytes(), true, b"UTF-8"),
+        (b"project/\x82.txt", false, b"CP437"),
+    ]);
+
+    assert!(matches!(
+        Pack::from_bytes(bytes),
+        Err(PackReadError::Invariant(
+            PackInvariantError::CanonicalArchiveEntryCollision {
+                ref canonical,
+                ..
+            }
+        )) if canonical == "project/é.txt"
     ));
 }
 
@@ -1558,12 +1619,18 @@ Rows: #csv("data.csv").len()
         let result = Packer::new(&project, "main.typ")
             .system_fonts(false)
             .external_resource("main.typ")
+            .external_resource("assets")
+            .external_resource("assets/logo.png")
             .pack();
 
         assert!(matches!(
             result,
             Err(PackerError::Build(PackBuildError::Invariant(
-                PackInvariantError::EntrypointIsExternalResource(ref path)
+                PackInvariantError::PathRoleConflict {
+                    ref path,
+                    first: PackPathRole::ProjectFile,
+                    second: PackPathRole::ExternalProjectResource,
+                }
             ))) if path == "main.typ"
         ));
     }
@@ -1602,7 +1669,7 @@ Rows: #csv("data.csv").len()
             result,
             Err(PackerError::Build(PackBuildError::Invariant(
                 PackInvariantError::PathTreeConflict {
-                    ancestor_role: PackPathRole::Entrypoint,
+                    ancestor_role: PackPathRole::ProjectFile,
                     descendant_role: PackPathRole::ExternalProjectResource,
                     package: None,
                     ..
@@ -1810,42 +1877,28 @@ Rows: #csv("data.csv").len()
     }
 
     #[test]
-    fn concurrent_successful_discovery_fallback_records_one_provenance_entry() {
-        let entered = Arc::new(std::sync::Barrier::new(3));
-        let release = Arc::new(std::sync::Barrier::new(3));
-        let discovery = crate::external_resource::Discovery::new(
-            vec![Box::new(BlockingProjectFile {
-                path: "shared.bin".to_owned(),
-                data: Bytes::new(b"external".to_vec()),
-                entered: Arc::clone(&entered),
-                release: Arc::clone(&release),
-            })],
-            true,
-            std::collections::BTreeSet::new(),
+    fn explicit_and_inferred_provenance_yield_one_packer_declaration() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("main.typ"), "#read(\"shared.bin\")").unwrap();
+        let (reference, calls) = MemoryProjectFile::tracked("shared.bin", b"external".to_vec());
+
+        let outcome = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .project_resource_policy(ProjectResourcePolicy::AllowExternalFallback)
+            .external_resource("shared.bin")
+            .external_resource_reference(reference)
+            .pack()
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(outcome.report.external_resources, ["shared.bin"]);
+        assert_eq!(
+            outcome.pack.external_resources().collect::<Vec<_>>(),
+            ["shared.bin"]
         );
-        let id = project_file_id("shared.bin");
-
-        std::thread::scope(|scope| {
-            let first = scope.spawn(|| {
-                discovery.file(id, || Err(FileError::NotFound(PathBuf::from("shared.bin"))))
-            });
-            let second = scope.spawn(|| {
-                discovery.file(id, || Err(FileError::NotFound(PathBuf::from("shared.bin"))))
-            });
-            entered.wait();
-            release.wait();
-
-            assert_eq!(
-                first.join().unwrap().unwrap(),
-                Bytes::new(b"external".to_vec())
-            );
-            assert_eq!(
-                second.join().unwrap().unwrap(),
-                Bytes::new(b"external".to_vec())
-            );
-        });
-
-        assert_eq!(discovery.external_resources(), vec!["shared.bin"]);
+        assert!(outcome.pack.file("shared.bin").is_none());
     }
 
     #[cfg(feature = "embedded-fonts")]

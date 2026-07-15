@@ -1,9 +1,9 @@
 //! The pack manifest stored as `typst-pack.toml` inside the archive.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use typst::syntax::package::PackageSpec;
 
 /// The archive entry name of the manifest.
@@ -37,22 +37,24 @@ struct Version1Manifest {
     format_version: u32,
     project: ProjectManifest,
     #[serde(default)]
-    packages: PackagesManifest,
+    packages: Version1PackagesManifest,
     #[serde(default)]
     fonts: Vec<FontManifest>,
     #[serde(default)]
     metadata: Option<PackMetadata>,
 }
 
-impl From<Version1Manifest> for PackManifest {
-    fn from(manifest: Version1Manifest) -> Self {
-        Self {
+impl TryFrom<Version1Manifest> for PackManifest {
+    type Error = PackManifestError;
+
+    fn try_from(manifest: Version1Manifest) -> Result<Self, Self::Error> {
+        Ok(Self {
             format_version: manifest.format_version,
             project: manifest.project,
-            packages: manifest.packages,
+            packages: manifest.packages.try_into()?,
             fonts: manifest.fonts,
             metadata: manifest.metadata,
-        }
+        })
     }
 }
 
@@ -72,7 +74,7 @@ impl<'de> Deserialize<'de> for PackManifest {
             )));
         }
         let wire: Version1Manifest = value.try_into().map_err(serde::de::Error::custom)?;
-        let manifest = Self::from(wire);
+        let manifest = Self::try_from(wire).map_err(serde::de::Error::custom)?;
         manifest.validate().map_err(serde::de::Error::custom)?;
         Ok(manifest)
     }
@@ -90,17 +92,64 @@ pub struct ProjectManifest {
 }
 
 /// The `[packages]` section.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct PackagesManifest {
     /// Exact specs of packages whose files are stored inside the pack.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    vendored: Vec<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_package_specs"
+    )]
+    vendored: Vec<PackageSpec>,
     /// Exact specs of observed dependencies that are *not* stored inside the
     /// pack and must be resolved from a package directory, cache, or registry
     /// when compiling.
-    #[serde(default, rename = "external", skip_serializing_if = "Vec::is_empty")]
+    #[serde(
+        default,
+        rename = "external",
+        skip_serializing_if = "Vec::is_empty",
+        serialize_with = "serialize_package_specs"
+    )]
+    unvendored: Vec<PackageSpec>,
+}
+
+#[derive(Default, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct Version1PackagesManifest {
+    #[serde(default)]
+    vendored: Vec<String>,
+    #[serde(default, rename = "external")]
     unvendored: Vec<String>,
+}
+
+impl TryFrom<Version1PackagesManifest> for PackagesManifest {
+    type Error = PackManifestError;
+
+    fn try_from(packages: Version1PackagesManifest) -> Result<Self, Self::Error> {
+        Ok(Self {
+            vendored: parse_specs(packages.vendored)?,
+            unvendored: parse_specs(packages.unvendored)?,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for PackagesManifest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Version1PackagesManifest::deserialize(deserializer)?
+            .try_into()
+            .map_err(serde::de::Error::custom)
+    }
+}
+
+fn serialize_package_specs<S>(specs: &[PackageSpec], serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: Serializer,
+{
+    serializer.collect_seq(specs.iter().map(ToString::to_string))
 }
 
 /// One `[[fonts]]` entry.
@@ -151,12 +200,12 @@ impl ProjectManifest {
 
 impl PackagesManifest {
     /// Exact specifications of packages stored inside the Pack.
-    pub fn vendored(&self) -> &[String] {
+    pub fn vendored(&self) -> &[PackageSpec] {
         &self.vendored
     }
 
     /// Exact specifications of packages resolved outside the Pack.
-    pub fn unvendored(&self) -> &[String] {
+    pub fn unvendored(&self) -> &[PackageSpec] {
         &self.unvendored
     }
 
@@ -245,8 +294,8 @@ impl PackManifest {
     pub(crate) fn new(
         entrypoint: String,
         external_resources: BTreeSet<String>,
-        vendored_packages: Vec<String>,
-        external_packages: Vec<String>,
+        vendored_packages: Vec<PackageSpec>,
+        external_packages: Vec<PackageSpec>,
         fonts: Vec<FontManifest>,
         metadata: Option<PackMetadata>,
     ) -> Self {
@@ -257,8 +306,8 @@ impl PackManifest {
                 external_resources,
             },
             packages: PackagesManifest {
-                vendored: vendored_packages,
-                unvendored: external_packages,
+                vendored: canonical_specs(vendored_packages),
+                unvendored: canonical_specs(external_packages),
             },
             fonts,
             metadata,
@@ -303,7 +352,7 @@ impl PackManifest {
             return Err(PackManifestError::UnsupportedVersion(probe.format_version));
         }
         let wire: Version1Manifest = toml::from_str(text)?;
-        let manifest = Self::from(wire);
+        let manifest = Self::try_from(wire)?;
         manifest.validate()?;
         Ok(manifest)
     }
@@ -318,39 +367,38 @@ impl PackManifest {
         if self.format_version != FORMAT_VERSION {
             return Err(PackManifestError::UnsupportedVersion(self.format_version));
         }
-        for spec in self
-            .packages
-            .vendored
-            .iter()
-            .chain(&self.packages.unvendored)
-        {
-            parse_spec(spec)?;
-        }
         Ok(())
     }
 
-    /// The vendored package specs, parsed.
-    pub fn vendored_packages(&self) -> Result<Vec<PackageSpec>, PackManifestError> {
-        self.packages
-            .vendored
-            .iter()
-            .map(|spec| parse_spec(spec))
-            .collect()
+    /// The vendored package specs.
+    pub fn vendored_packages(&self) -> &[PackageSpec] {
+        &self.packages.vendored
     }
 
-    /// The unvendored package specs, parsed.
-    pub fn unvendored_packages(&self) -> Result<Vec<PackageSpec>, PackManifestError> {
-        self.packages
-            .unvendored
-            .iter()
-            .map(|spec| parse_spec(spec))
-            .collect()
+    /// The unvendored package specs.
+    pub fn unvendored_packages(&self) -> &[PackageSpec] {
+        &self.packages.unvendored
     }
 }
 
-fn parse_spec(spec: &str) -> Result<PackageSpec, PackManifestError> {
-    PackageSpec::from_str(spec).map_err(|err| PackManifestError::InvalidPackageSpec {
-        spec: spec.to_owned(),
-        message: err.to_string(),
-    })
+fn parse_specs(specs: Vec<String>) -> Result<Vec<PackageSpec>, PackManifestError> {
+    specs
+        .into_iter()
+        .map(|spec| {
+            PackageSpec::from_str(&spec).map_err(|err| PackManifestError::InvalidPackageSpec {
+                spec,
+                message: err.to_string(),
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()
+        .map(canonical_specs)
+}
+
+fn canonical_specs(specs: Vec<PackageSpec>) -> Vec<PackageSpec> {
+    specs
+        .into_iter()
+        .map(|spec| (spec.to_string(), spec))
+        .collect::<BTreeMap<_, _>>()
+        .into_values()
+        .collect()
 }

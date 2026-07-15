@@ -168,24 +168,27 @@ impl Pack {
 
         let vendored_packages = manifest
             .vendored_packages()
-            .expect("accepted Pack Manifest contains valid package specifications")
-            .into_iter()
-            .map(|spec| spec.to_string())
-            .collect::<BTreeSet<_>>();
+            .iter()
+            .cloned()
+            .map(|spec| (spec.to_string(), spec))
+            .collect::<BTreeMap<_, _>>();
         let external_packages = manifest
             .unvendored_packages()
-            .expect("accepted Pack Manifest contains valid package specifications")
-            .into_iter()
-            .map(|spec| spec.to_string())
-            .collect::<BTreeSet<_>>();
-        if let Some(spec) = vendored_packages.intersection(&external_packages).next() {
+            .iter()
+            .cloned()
+            .map(|spec| (spec.to_string(), spec))
+            .collect::<BTreeMap<_, _>>();
+        if let Some(spec) = vendored_packages
+            .keys()
+            .find(|spec| external_packages.contains_key(*spec))
+        {
             return Err(PackInvariantError::PackageRoleConflict(spec.clone()));
         }
 
         let mut canonical_packages = BTreeMap::new();
         for (_, package) in packages {
             let key = package.spec.to_string();
-            if !vendored_packages.contains(&key) {
+            if !vendored_packages.contains_key(&key) {
                 return Err(PackInvariantError::UndeclaredPackageData(key));
             }
             let package_files = package.files;
@@ -214,7 +217,7 @@ impl Pack {
             );
         }
         if let Some(spec) = vendored_packages
-            .iter()
+            .keys()
             .find(|spec| !canonical_packages.contains_key(*spec))
         {
             return Err(PackInvariantError::MissingVendoredPackageData(spec.clone()));
@@ -227,9 +230,13 @@ impl Pack {
             let path = canonical_path(PackPathRole::FontData, entry.path())?;
             let conflicting_role = if path.as_str() == MANIFEST_PATH {
                 Some(PackPathRole::PackManifest)
-            } else if path.as_str().starts_with(PROJECT_PREFIX) {
+            } else if path.as_str() == PROJECT_PREFIX.trim_end_matches('/')
+                || path.as_str().starts_with(PROJECT_PREFIX)
+            {
                 Some(PackPathRole::ProjectFile)
-            } else if path.as_str().starts_with(PACKAGES_PREFIX) {
+            } else if path.as_str() == PACKAGES_PREFIX.trim_end_matches('/')
+                || path.as_str().starts_with(PACKAGES_PREFIX)
+            {
                 Some(PackPathRole::PackageFile)
             } else {
                 None
@@ -269,8 +276,8 @@ impl Pack {
                 .into_iter()
                 .map(CanonicalPath::into_string)
                 .collect(),
-            vendored_packages.into_iter().collect(),
-            external_packages.into_iter().collect(),
+            vendored_packages.into_values().collect(),
+            external_packages.into_values().collect(),
             canonical_fonts
                 .iter()
                 .map(|font| font.entry.clone())
@@ -378,6 +385,7 @@ impl Pack {
         struct UnknownEntry {
             index: usize,
             archive_name: String,
+            raw_name: Vec<u8>,
             canonical_name: String,
             regular_file: bool,
         }
@@ -387,9 +395,10 @@ impl Pack {
         let mut package_entries = Vec::new();
         let mut unknown_entries = Vec::new();
         let mut canonical_archive_entries = BTreeMap::new();
-        for index in 0..archive.len() {
+        for (index, raw_entry) in raw_entries.iter().enumerate() {
             let entry = archive.by_index_raw(index)?;
             let archive_name = entry.name().to_owned();
+            let raw_name = raw_entry.name.clone();
             let prefix_normalized_name = strip_current_directory_prefix(&archive_name);
             if archive_name.is_empty()
                 || archive_name.starts_with('/')
@@ -412,7 +421,7 @@ impl Pack {
             register_archive_identity(
                 &mut canonical_archive_entries,
                 canonical_name.clone(),
-                &archive_name,
+                &raw_name,
             )?;
             if entry.is_dir() {
                 continue;
@@ -436,7 +445,7 @@ impl Pack {
                 register_archive_identity(
                     &mut canonical_archive_entries,
                     MANIFEST_PATH.to_owned(),
-                    &archive_name,
+                    &raw_name,
                 )?;
                 manifest_entry = Some((index, regular_file));
             } else if let Some(path) = role_name.strip_prefix(PROJECT_PREFIX) {
@@ -447,7 +456,7 @@ impl Pack {
                 register_archive_identity(
                     &mut canonical_archive_entries,
                     format!("{PROJECT_PREFIX}{path}"),
-                    &archive_name,
+                    &raw_name,
                 )?;
                 project_entries.push(ProjectEntry { index, path });
             } else if let Some(rest) = role_name.strip_prefix(PACKAGES_PREFIX) {
@@ -461,13 +470,14 @@ impl Pack {
                         "{PACKAGES_PREFIX}{}/{}/{}/{path}",
                         spec.namespace, spec.name, spec.version
                     ),
-                    &archive_name,
+                    &raw_name,
                 )?;
                 package_entries.push(PackageEntry { index, spec, path });
             } else {
                 unknown_entries.push(UnknownEntry {
                     index,
                     archive_name,
+                    raw_name,
                     canonical_name,
                     regular_file,
                 });
@@ -503,7 +513,7 @@ impl Pack {
                 register_archive_identity(
                     &mut canonical_archive_entries,
                     path.to_string(),
-                    &entry.archive_name,
+                    &entry.raw_name,
                 )?;
                 font_entries.push((entry.index, path.clone()));
             }
@@ -751,11 +761,14 @@ impl PackBuilder {
     pub(crate) fn validate_declarations(&self) -> Result<(), PackBuildError> {
         let entrypoint = canonical_path(PackPathRole::Entrypoint, &self.entrypoint)?;
         if self.external_resources.contains(&entrypoint) {
-            return Err(
-                PackInvariantError::EntrypointIsExternalResource(entrypoint.to_string()).into(),
-            );
+            return Err(PackInvariantError::PathRoleConflict {
+                path: entrypoint.to_string(),
+                first: PackPathRole::ProjectFile,
+                second: PackPathRole::ExternalProjectResource,
+            }
+            .into());
         }
-        let mut project_paths = vec![(entrypoint, PackPathRole::Entrypoint)];
+        let mut project_paths = vec![(entrypoint, PackPathRole::ProjectFile)];
         project_paths.extend(
             self.external_resources
                 .iter()
@@ -846,11 +859,11 @@ impl PackBuilder {
                 .into_iter()
                 .map(CanonicalPath::into_string)
                 .collect(),
-            self.packages.keys().cloned().collect(),
-            self.unvendored_packages
-                .iter()
-                .map(ToString::to_string)
+            self.packages
+                .values()
+                .map(|package| package.spec.clone())
                 .collect(),
+            self.unvendored_packages.clone(),
             self.fonts.iter().map(|font| font.entry.clone()).collect(),
             self.metadata,
         );
@@ -966,22 +979,31 @@ fn find_path_tree_conflict(
 }
 
 fn register_archive_identity(
-    entries: &mut BTreeMap<String, String>,
+    entries: &mut BTreeMap<String, Vec<u8>>,
     canonical: String,
-    archive_name: &str,
+    raw_name: &[u8],
 ) -> Result<(), PackInvariantError> {
     if let Some(first_entry) = entries.get(&canonical) {
-        if first_entry == archive_name {
+        if first_entry == raw_name {
             return Ok(());
         }
         return Err(PackInvariantError::CanonicalArchiveEntryCollision {
             canonical,
-            first_entry: first_entry.clone(),
-            second_entry: archive_name.to_owned(),
+            first_entry: display_archive_name(first_entry),
+            second_entry: display_archive_name(raw_name),
         });
     }
-    entries.insert(canonical, archive_name.to_owned());
+    entries.insert(canonical, raw_name.to_owned());
     Ok(())
+}
+
+fn display_archive_name(raw_name: &[u8]) -> String {
+    String::from_utf8(raw_name.to_owned()).unwrap_or_else(|_| {
+        raw_name
+            .iter()
+            .flat_map(|byte| std::ascii::escape_default(*byte).map(char::from))
+            .collect()
+    })
 }
 
 /// A failure while building a pack in memory.
