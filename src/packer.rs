@@ -111,8 +111,8 @@ impl Packer {
     }
 
     /// Whether font embedding also stores fonts that are identical to Typst's
-    /// embedded default fonts. Defaults to `false` since compiling a pack has
-    /// those fonts available anyway.
+    /// embedded default fonts. Defaults to `false`; consumers then need the
+    /// `embedded-fonts` feature or another source for those fonts.
     pub fn include_default_fonts(mut self, include: bool) -> Self {
         self.include_default_fonts = include;
         self

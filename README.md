@@ -5,7 +5,7 @@
 [![crates.io](https://img.shields.io/crates/v/typst-pack?style=flat-square)](https://crates.io/crates/typst-pack)
 [![docs.rs](https://img.shields.io/docsrs/typst-pack?style=flat-square)](https://docs.rs/typst-pack)
 
-**Portable single-file packs of [Typst](https://typst.app) projects.**
+**Portable single-file packs of Typst projects: sources, resources, packages, and fonts.**
 
 A *pack* (`.typk`) captures the compilation contract of one Typst project:
 
@@ -26,7 +26,26 @@ Note: this is unrelated to Typst's own *bundle export* (the `typst-bundle`
 crate), which is a multi-file **output** target. A pack is an **input**
 archive: a portable form of a project's sources and resources.
 
+## Features
+
+- **Portable project archives**: bundle Typst sources, resources, packages, and
+  fonts into one `.typk` file.
+- **Automatic discovery**: observe the files a real Typst compilation reads and
+  include additional conditional files explicitly.
+- **Reproducible compilation**: compile without network or system font access,
+  with support for fixed timestamps and vendored packages.
+- **External Project Resources**: keep declared project resources outside a
+  reusable pack and supply them for each compilation.
+- **Library and CLI APIs**: create, inspect, compile, and extract packs in memory
+  or on the file system.
+
 ## CLI
+
+Install the command-line tool with its opt-in `cli` feature:
+
+```console
+cargo install typst-pack --features cli
+```
 
 ```console
 # Pack a project directory (entrypoint main.typ), vendoring all packages:
@@ -124,13 +143,13 @@ self-contained.
 Fonts are *not* embedded by default. With `--embed-fonts`, the fonts used by
 the rendered document are stored in the pack, except fonts identical to
 Typst's embedded defaults (Libertinus Serif, New Computer Modern, Deja Vu
-Sans Mono), which every consumer of this crate already has; pass
-`--include-default-fonts` to store those too. Mind font licenses when
-redistributing packs with embedded fonts.
+Sans Mono). Consumers need the `embedded-fonts` feature to supply omitted
+defaults; pass `--include-default-fonts` to make the pack independent of that
+feature. Mind font licenses when redistributing packs with embedded fonts.
 
 When compiling a pack, fonts are used in this order of preference:
-`--font-path` fonts, pack fonts, embedded default fonts, and system fonts
-(disable the latter with `--ignore-system-fonts`).
+pack fonts, `--font-path` fonts, system fonts, and embedded default fonts
+(disable system fonts with `--ignore-system-fonts`).
 
 ### Output formats
 
@@ -142,6 +161,16 @@ it with `PackWorldBuilder::feature(typst::Feature::Html)` and compile with
 `OutputFormat::Html`.
 
 ## Library
+
+Add the crate with filesystem-backed packing support and Typst's default
+fonts:
+
+```toml
+[dependencies]
+typst-pack = { version = "0.3", features = ["embedded-fonts", "fs"] }
+```
+
+The core in-memory packing and compilation APIs require no crate features.
 
 ```rust,ignore
 use typst_pack::{compile, CompileOptions, OutputFormat, Pack, PackWorld, Packer};
@@ -195,11 +224,13 @@ Resources.
 
 ### Feature flags
 
-- `fs` *(default)*: [`Packer`], [`extract`], package download and caching,
+- `fs`: `Packer`, `extract`, package download and caching,
   system font scanning. Requires a file system, so disable this (and `cli`)
   for wasm targets.
-- `cli` *(default)*: the `typst-pack` binary.
-- `embedded-fonts` *(default)*: compile packs against Typst's default fonts.
+- `cli`: the `typst-pack` binary.
+- `embedded-fonts`: compile packs against Typst's default fonts.
+
+All crate features are opt-in.
 
 ## Pack format
 
@@ -248,6 +279,18 @@ field remain valid and are read as having no External Project Resources.
 The format version remains 1. Released older readers reject manifests that use
 `external-resources` because they reject unknown fields; this intentional
 compatibility break does not affect old packs read by newer versions.
+
+## Development
+
+Minimum verification:
+
+- `cargo fmt --all -- --check`
+- `cargo clippy --all-targets --all-features -- -D warnings`
+- `cargo test --all-features`
+
+Run CI's containerized checks with [Dagger](https://dagger.io):
+
+- `dagger check`
 
 ## License
 

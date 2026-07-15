@@ -1,2 +1,5 @@
 [["version","1"]]
-["","git.head",["https://github.com/sagikazarmark/daggerverse-beta"],"52e6d83ceed256a01ac9fc86c34acf0d56b282ef","float"]
+["","container.from",["docker.io/library/debian:trixie-slim","linux/arm64"],"sha256:020c0d20b9880058cbe785a9db107156c3c75c2ac944a6aa7ab59f2add76a7bd","pin"]
+["","container.from",["ghcr.io/sagikazarmark/dang:latest","linux/arm64"],"sha256:5b0c46c1b4b85b275d751b2fd344daa64f1a93c0a826ea66e999a0f380dba3f8","pin"]
+["","git.head",["https://github.com/rustsec/advisory-db.git"],"9f3e138091487e69144f536d36976e427a7a3307","float"]
+["","git.head",["https://github.com/sagikazarmark/daggerverse-beta"],"a9ec8c1cb616c7e8660c39ab5af871171d4863a1","float"]

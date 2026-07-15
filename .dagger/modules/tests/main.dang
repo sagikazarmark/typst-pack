@@ -1,6 +1,12 @@
 type Tests {
-  let project: Directory! = Dagger.currentModule.source.directory("fixtures/project")
-  let packages: Directory! = Dagger.currentModule.source.directory("fixtures/packages")
+  let project: Directory! = Dagger
+    .currentModule
+    .source
+    .directory("fixtures/project")
+  let packages: Directory! = Dagger
+    .currentModule
+    .source
+    .directory("fixtures/packages")
 
   let pack: File! {
     Dagger.typstPack.create(
@@ -35,12 +41,40 @@ type Tests {
   extract: Void @check {
     let extracted = Dagger.typstPack.extract(pack: self.pack, packages: true)
 
-    assert { extracted.file("main.typ").contents.contains("@local/greet:0.1.0") }
-    assert { extracted.file("chapters/intro.typ").contents.contains("Introduction") }
-    assert { extracted.file("data.csv").contents == "a,b\n1,2\n" }
-    assert { extracted.file("notes.txt").contents == "extra\n" }
-    assert { extracted.file("packages/local/greet/0.1.0/lib.typ").contents.contains("Hello") }
-    assert { extracted.file("packages/local/greet/0.1.0/typst.toml").contents.contains("name = \"greet\"") }
+    assert {
+      extracted
+        .file("main.typ")
+        .contents
+        .contains("@local/greet:0.1.0")
+    }
+    assert {
+      extracted
+        .file("chapters/intro.typ")
+        .contents
+        .contains("Introduction")
+    }
+    assert {
+      extracted
+        .file("data.csv")
+        .contents == "a,b\n1,2\n"
+    }
+    assert {
+      extracted
+        .file("notes.txt")
+        .contents == "extra\n"
+    }
+    assert {
+      extracted
+        .file("packages/local/greet/0.1.0/lib.typ")
+        .contents
+        .contains("Hello")
+    }
+    assert {
+      extracted
+        .file("packages/local/greet/0.1.0/typst.toml")
+        .contents
+        .contains("name = \"greet\"")
+    }
 
     null
   }
@@ -95,8 +129,14 @@ type Tests {
   Create and compile a pack with ordered External Project Resource roots.
   """
   externalProjectResources: Void @check {
-    let source = Dagger.currentModule.source.directory("fixtures/resource-project")
-    let resources = Dagger.currentModule.source.directory("fixtures/resources")
+    let source = Dagger
+      .currentModule
+      .source
+      .directory("fixtures/resource-project")
+    let resources = Dagger
+      .currentModule
+      .source
+      .directory("fixtures/resources")
     let resourcePaths = ["/work/resources/first", "/work/resources/second"]
     let pack = Dagger.typstPack.create(
       source: source,
