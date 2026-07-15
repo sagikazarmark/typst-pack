@@ -622,6 +622,92 @@ fn package_requests_do_not_consult_external_project_resource_loaders() {
     assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
 
+#[test]
+fn project_requests_do_not_consult_package_loader() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"#read(\"missing.txt\")".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let (loader, calls) = MemoryProjectFile::tracked("missing.txt", b"host file".to_vec());
+    let world = PackWorld::builder(pack)
+        .package_loader(loader)
+        .build()
+        .unwrap();
+
+    assert!(compile(&world, OutputFormat::Svg, &CompileOptions::default()).is_err());
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn vendored_package_compiles_without_consulting_package_loader() {
+    use std::str::FromStr as _;
+
+    let spec = typst::syntax::package::PackageSpec::from_str("@local/inside:1.0.0").unwrap();
+    let pack = Pack::builder("main.typ")
+        .file(
+            "main.typ",
+            b"#import \"@local/inside:1.0.0\": mark\n#mark".to_vec(),
+        )
+        .unwrap()
+        .package_file(
+            spec.clone(),
+            "typst.toml",
+            b"[package]\nname = \"inside\"\nversion = \"1.0.0\"\nentrypoint = \"lib.typ\"\n"
+                .to_vec(),
+        )
+        .unwrap()
+        .package_file(
+            spec,
+            "lib.typ",
+            b"#let mark = rect(width: 1pt, height: 1pt)".to_vec(),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+    let (loader, calls) = MemoryProjectFile::tracked("unused", Vec::new());
+    let world = PackWorld::builder(pack)
+        .package_loader(loader)
+        .build()
+        .unwrap();
+
+    assert!(compile(&world, OutputFormat::Svg, &CompileOptions::default()).is_ok());
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn missing_vendored_package_file_does_not_fall_through_to_package_loader() {
+    use std::str::FromStr as _;
+
+    let spec = typst::syntax::package::PackageSpec::from_str("@local/inside:1.0.0").unwrap();
+    let pack = Pack::builder("main.typ")
+        .file(
+            "main.typ",
+            b"#import \"@local/inside:1.0.0\": mark\n#mark".to_vec(),
+        )
+        .unwrap()
+        .package_file(
+            spec,
+            "typst.toml",
+            b"[package]\nname = \"inside\"\nversion = \"1.0.0\"\nentrypoint = \"missing.typ\"\n"
+                .to_vec(),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+    let (loader, calls) = MemoryProjectFile::tracked(
+        "missing.typ",
+        b"#let mark = rect(width: 1pt, height: 1pt)".to_vec(),
+    );
+    let world = PackWorld::builder(pack)
+        .package_loader(loader)
+        .build()
+        .unwrap();
+
+    assert!(compile(&world, OutputFormat::Svg, &CompileOptions::default()).is_err());
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+}
+
 #[cfg(feature = "fs")]
 mod fs {
     use super::*;
@@ -665,6 +751,7 @@ Rows: #csv("data.csv").len()
             "#let greet(name) = [Hello #name!]\n",
         )
         .unwrap();
+        fs::write(package.join("unused.txt"), "complete package").unwrap();
 
         (project, packages)
     }
@@ -709,6 +796,86 @@ Rows: #csv("data.csv").len()
         assert!(outcome.pack.has_package(spec));
         assert!(outcome.pack.package_file(spec, "lib.typ").is_some());
         assert!(outcome.pack.package_file(spec, "typst.toml").is_some());
+        assert!(outcome.pack.package_file(spec, "unused.txt").is_some());
+    }
+
+    #[test]
+    fn package_data_precedes_package_cache_during_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("main.typ"),
+            "#import \"@local/chosen:0.1.0\": mark\n#mark",
+        )
+        .unwrap();
+
+        let data_package = dir.path().join("data/local/chosen/0.1.0");
+        fs::create_dir_all(&data_package).unwrap();
+        fs::write(
+            data_package.join("typst.toml"),
+            "[package]\nname = \"chosen\"\nversion = \"0.1.0\"\nentrypoint = \"lib.typ\"\n",
+        )
+        .unwrap();
+        fs::write(
+            data_package.join("lib.typ"),
+            "#let mark = rect(width: 1pt, height: 1pt)",
+        )
+        .unwrap();
+
+        let cache_package = dir.path().join("cache/local/chosen/0.1.0");
+        fs::create_dir_all(&cache_package).unwrap();
+        fs::write(cache_package.join("lib.typ"), "this is not valid Typst: {").unwrap();
+
+        let outcome = Packer::new(&project, "main.typ")
+            .package_path(dir.path().join("data"))
+            .package_cache_path(dir.path().join("cache"))
+            .system_fonts(false)
+            .pack()
+            .unwrap();
+
+        assert_eq!(outcome.report.packages_vendored.len(), 1);
+    }
+
+    #[test]
+    fn package_cache_resolves_during_online_and_offline_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("main.typ"),
+            "#import \"@preview/cached:0.1.0\": mark\n#mark",
+        )
+        .unwrap();
+
+        let data = dir.path().join("data");
+        fs::create_dir_all(&data).unwrap();
+        let cache = dir.path().join("cache/preview/cached/0.1.0");
+        fs::create_dir_all(&cache).unwrap();
+        fs::write(
+            cache.join("typst.toml"),
+            "[package]\nname = \"cached\"\nversion = \"0.1.0\"\nentrypoint = \"lib.typ\"\n",
+        )
+        .unwrap();
+        fs::write(
+            cache.join("lib.typ"),
+            "#let mark = rect(width: 1pt, height: 1pt)",
+        )
+        .unwrap();
+
+        for offline in [false, true] {
+            let outcome = Packer::new(&project, "main.typ")
+                .package_path(&data)
+                .package_cache_path(dir.path().join("cache"))
+                .offline(offline)
+                .system_fonts(false)
+                .pack()
+                .unwrap();
+
+            let spec = &outcome.report.packages_vendored[0];
+            assert_eq!(spec.to_string(), "@preview/cached:0.1.0");
+            assert!(outcome.pack.package_file(spec, "lib.typ").is_some());
+        }
     }
 
     #[test]
@@ -1021,7 +1188,19 @@ Rows: #csv("data.csv").len()
 
         // Without a loader, compilation must fail...
         let world = PackWorld::builder(pack.clone()).build().unwrap();
-        assert!(compile(&world, OutputFormat::Pdf, &CompileOptions::default()).is_err());
+        let error = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap_err();
+        let CompileError::Diagnostics { errors, .. } = error else {
+            panic!("unvendored package did not produce a compilation diagnostic");
+        };
+        let messages = errors
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            messages.contains("no package loader is configured"),
+            "{messages}"
+        );
 
         // ...with a loader pointed at the package path, it succeeds.
         use typst_kit::downloader::SystemDownloader;
@@ -1169,6 +1348,15 @@ mod offline {
             .package_path(&empty)
             .package_cache_path(&empty)
             .pack();
-        assert!(matches!(result, Err(PackerError::Compile { .. })));
+        let Err(PackerError::Compile { errors, .. }) = result else {
+            panic!("uncached package did not produce a compilation error");
+        };
+        let messages = errors
+            .iter()
+            .map(|diagnostic| diagnostic.message.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(messages.contains("package not found"), "{messages}");
+        assert!(!messages.contains("network"), "{messages}");
     }
 }

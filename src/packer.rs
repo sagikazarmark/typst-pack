@@ -17,18 +17,13 @@ use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, LibraryExt, World};
 use typst_kit::datetime::Time;
-use typst_kit::downloader::SystemDownloader;
 use typst_kit::files::{FileLoader, FileStore, FsRoot, SystemFiles};
 use typst_kit::fonts::FontStore;
-use typst_kit::packages::{FsPackages, SystemPackages, UniversePackages};
 use typst_layout::PagedDocument;
 
 use crate::manifest::PackMetadata;
 use crate::pack::{Pack, PackBuildError, valid_path};
-use crate::world::load_external_resource;
-
-/// The user agent used when downloading packages from Typst Universe.
-const USER_AGENT: &str = concat!("typst-pack/", env!("CARGO_PKG_VERSION"));
+use crate::world::{load_external_resource, system_packages};
 
 /// Controls whether discovery may fall back to External Project Resource loaders.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
@@ -224,20 +219,11 @@ impl Packer {
             .map_err(|_| PackerError::OutsideRoot(entrypoint_abs.clone()))?;
 
         // Build the discovery world.
-        let data = match &self.package_path {
-            Some(path) => Some(FsPackages::new(path.clone())),
-            None => FsPackages::system_data(),
-        };
-        let cache = match &self.package_cache_path {
-            Some(path) => Some(FsPackages::new(path.clone())),
-            None => FsPackages::system_cache(),
-        };
-        let universe = if self.offline {
-            UniversePackages::new(crate::world::OfflineDownloader)
-        } else {
-            UniversePackages::new(SystemDownloader::new(USER_AGENT))
-        };
-        let packages = SystemPackages::from_parts(data, cache, universe);
+        let packages = system_packages(
+            self.package_path.as_deref(),
+            self.package_cache_path.as_deref(),
+            self.offline,
+        );
 
         let mut fonts = FontStore::new();
         for path in &self.font_paths {

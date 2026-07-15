@@ -15,6 +15,35 @@ use typst_kit::fonts::{FontSource, FontStore};
 
 use crate::pack::Pack;
 
+#[cfg(feature = "fs")]
+const USER_AGENT: &str = concat!("typst-pack/", env!("CARGO_PKG_VERSION"));
+
+#[cfg(feature = "fs")]
+pub(crate) fn system_packages(
+    package_path: Option<&std::path::Path>,
+    package_cache_path: Option<&std::path::Path>,
+    offline: bool,
+) -> typst_kit::packages::SystemPackages {
+    use typst_kit::downloader::SystemDownloader;
+    use typst_kit::packages::{FsPackages, SystemPackages, UniversePackages};
+
+    let data = match package_path {
+        Some(path) => Some(FsPackages::new(path)),
+        None => FsPackages::system_data(),
+    };
+    let cache = match package_cache_path {
+        Some(path) => Some(FsPackages::new(path)),
+        None => FsPackages::system_cache(),
+    };
+    let universe = if offline {
+        UniversePackages::new(OfflineDownloader)
+    } else {
+        UniversePackages::new(SystemDownloader::new(USER_AGENT))
+    };
+
+    SystemPackages::from_parts(data, cache, universe)
+}
+
 /// A complete Typst [`World`] backed by a [`Pack`].
 ///
 /// Project files and vendored package files come from the pack. Fonts come
@@ -327,18 +356,13 @@ impl SystemPackageLoader {
     /// Creates a loader using the standard package directories and the
     /// official Typst Universe registry.
     pub fn system() -> Self {
-        Self(typst_kit::packages::SystemPackages::new(
-            typst_kit::downloader::SystemDownloader::new(concat!(
-                "typst-pack/",
-                env!("CARGO_PKG_VERSION")
-            )),
-        ))
+        Self(system_packages(None, None, false))
     }
 
     /// Creates a loader that only uses the standard local package
     /// directories and never accesses the network.
     pub fn offline() -> Self {
-        Self(typst_kit::packages::SystemPackages::new(OfflineDownloader))
+        Self(system_packages(None, None, true))
     }
 }
 

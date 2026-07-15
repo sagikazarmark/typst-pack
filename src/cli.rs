@@ -527,11 +527,11 @@ fn compile_command(args: CompileArgs) -> Result<(), String> {
     let mut builder = PackWorld::builder(pack)
         .embedded_fonts(!args.ignore_embedded_fonts)
         .inputs(parse_inputs(&args.inputs)?)
-        .package_loader(system_package_loader(
+        .package_loader(SystemPackageLoader(crate::world::system_packages(
             args.package_path.as_deref(),
             args.package_cache_path.as_deref(),
             args.offline,
-        ));
+        )));
     if args.features.iter().any(|feature| feature == "html") {
         builder = builder.feature(typst::Feature::Html);
     }
@@ -743,33 +743,6 @@ fn parse_inputs(pairs: &[String]) -> Result<Dict, String> {
         dict.insert(key.into(), value.into_value());
     }
     Ok(dict)
-}
-
-fn system_package_loader(
-    package_path: Option<&Path>,
-    package_cache_path: Option<&Path>,
-    offline: bool,
-) -> SystemPackageLoader {
-    use typst_kit::downloader::SystemDownloader;
-    use typst_kit::packages::{FsPackages, SystemPackages, UniversePackages};
-
-    let data = match package_path {
-        Some(path) => Some(FsPackages::new(path)),
-        None => FsPackages::system_data(),
-    };
-    let cache = match package_cache_path {
-        Some(path) => Some(FsPackages::new(path)),
-        None => FsPackages::system_cache(),
-    };
-    let universe = if offline {
-        UniversePackages::new(crate::world::OfflineDownloader)
-    } else {
-        UniversePackages::new(SystemDownloader::new(concat!(
-            "typst-pack/",
-            env!("CARGO_PKG_VERSION")
-        )))
-    };
-    SystemPackageLoader(SystemPackages::from_parts(data, cache, universe))
 }
 
 struct ProjectResourceRoot(FsRoot);
