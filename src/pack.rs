@@ -12,7 +12,7 @@ use zip::write::SimpleFileOptions;
 use zip::{ZipArchive, ZipWriter};
 
 use crate::manifest::{
-    FORMAT_VERSION, FontManifest, MANIFEST_PATH, Manifest, ManifestError, Metadata,
+    FORMAT_VERSION, FontManifest, MANIFEST_PATH, PackManifest, PackManifestError, PackMetadata,
     PackagesManifest, ProjectManifest,
 };
 
@@ -30,7 +30,7 @@ const PACKAGES_PREFIX: &str = "packages/";
 /// a Zip file with a `typst-pack.toml` manifest, conventionally named `*.typk`.
 #[derive(Debug, Clone)]
 pub struct Pack {
-    manifest: Manifest,
+    manifest: PackManifest,
     files: BTreeMap<String, Bytes>,
     /// Vendored packages, keyed by spec string for deterministic order.
     packages: BTreeMap<String, PackageFiles>,
@@ -62,7 +62,7 @@ impl Pack {
     }
 
     /// The pack manifest.
-    pub fn manifest(&self) -> &Manifest {
+    pub fn manifest(&self) -> &PackManifest {
         &self.manifest
     }
 
@@ -134,7 +134,7 @@ impl Pack {
                 .map_err(|_| PackReadError::MissingManifest)?;
             let mut text = String::new();
             entry.read_to_string(&mut text)?;
-            Manifest::from_toml(&text)?
+            PackManifest::from_toml(&text)?
         };
 
         let mut files = BTreeMap::new();
@@ -325,7 +325,7 @@ pub enum PackReadError {
     #[error("the archive contains no {MANIFEST_PATH} manifest (is this a Typst pack?)")]
     MissingManifest,
     #[error(transparent)]
-    Manifest(#[from] ManifestError),
+    Manifest(#[from] PackManifestError),
     #[error("archive entry `{0}` has an unsafe path")]
     UnsafeEntry(String),
     #[error("invalid archive entry `{entry}`: {message}")]
@@ -362,9 +362,9 @@ pub struct PackBuilder {
     files: BTreeMap<String, Bytes>,
     external_resources: BTreeSet<String>,
     packages: BTreeMap<String, PackageFiles>,
-    external_packages: Vec<PackageSpec>,
+    unvendored_packages: Vec<PackageSpec>,
     fonts: Vec<PackFont>,
-    metadata: Option<Metadata>,
+    metadata: Option<PackMetadata>,
 }
 
 impl PackBuilder {
@@ -375,7 +375,7 @@ impl PackBuilder {
             files: BTreeMap::new(),
             external_resources: BTreeSet::new(),
             packages: BTreeMap::new(),
-            external_packages: Vec::new(),
+            unvendored_packages: Vec::new(),
             fonts: Vec::new(),
             metadata: None,
         }
@@ -418,9 +418,9 @@ impl PackBuilder {
     }
 
     /// Records a package dependency that is intentionally not vendored.
-    pub fn external_package(mut self, spec: PackageSpec) -> Self {
-        if !self.external_packages.contains(&spec) {
-            self.external_packages.push(spec);
+    pub fn unvendored_package(mut self, spec: PackageSpec) -> Self {
+        if !self.unvendored_packages.contains(&spec) {
+            self.unvendored_packages.push(spec);
         }
         self
     }
@@ -446,7 +446,7 @@ impl PackBuilder {
     }
 
     /// Sets descriptive metadata.
-    pub fn metadata(mut self, metadata: Metadata) -> Self {
+    pub fn metadata(mut self, metadata: PackMetadata) -> Self {
         self.metadata = Some(metadata);
         self
     }
@@ -465,7 +465,7 @@ impl PackBuilder {
             return Err(PackBuildError::ExternalResourceConflict(path.clone()));
         }
 
-        let manifest = Manifest {
+        let manifest = PackManifest {
             format_version: FORMAT_VERSION,
             project: ProjectManifest {
                 entrypoint,
@@ -473,8 +473,8 @@ impl PackBuilder {
             },
             packages: PackagesManifest {
                 vendored: self.packages.keys().cloned().collect(),
-                external: self
-                    .external_packages
+                unvendored: self
+                    .unvendored_packages
                     .iter()
                     .map(|spec| spec.to_string())
                     .collect(),

@@ -23,7 +23,7 @@ use typst_kit::fonts::FontStore;
 use typst_kit::packages::{FsPackages, SystemPackages, UniversePackages};
 use typst_layout::PagedDocument;
 
-use crate::manifest::Metadata;
+use crate::manifest::PackMetadata;
 use crate::pack::{Pack, PackBuildError, valid_path};
 use crate::world::load_external_resource;
 
@@ -55,7 +55,7 @@ pub struct Packer {
     entrypoint: PathBuf,
     vendor_packages: bool,
     embed_fonts: bool,
-    include_default_fonts: bool,
+    include_typst_embedded_fonts: bool,
     include: Vec<PathBuf>,
     font_paths: Vec<PathBuf>,
     system_fonts: bool,
@@ -63,7 +63,7 @@ pub struct Packer {
     package_path: Option<PathBuf>,
     package_cache_path: Option<PathBuf>,
     offline: bool,
-    metadata: Option<Metadata>,
+    metadata: Option<PackMetadata>,
     project_resource_policy: ProjectResourcePolicy,
     external_resources: BTreeSet<String>,
     external_resource_loaders: Vec<Box<dyn FileLoader + Send + Sync>>,
@@ -78,7 +78,7 @@ impl Packer {
             entrypoint: entrypoint.into(),
             vendor_packages: true,
             embed_fonts: false,
-            include_default_fonts: false,
+            include_typst_embedded_fonts: false,
             include: Vec::new(),
             font_paths: Vec::new(),
             system_fonts: true,
@@ -95,7 +95,7 @@ impl Packer {
 
     /// Whether to store the files of all observed package dependencies inside
     /// the pack. Defaults to `true`; when disabled, dependencies are recorded
-    /// as external and must be resolvable when the pack is compiled.
+    /// as unvendored and must be resolvable when the pack is compiled.
     pub fn vendor_packages(mut self, vendor: bool) -> Self {
         self.vendor_packages = vendor;
         self
@@ -111,10 +111,10 @@ impl Packer {
     }
 
     /// Whether font embedding also stores fonts that are identical to Typst's
-    /// embedded default fonts. Defaults to `false`; consumers then need the
+    /// embedded fonts. Defaults to `false`; consumers then need the
     /// `embedded-fonts` feature or another source for those fonts.
-    pub fn include_default_fonts(mut self, include: bool) -> Self {
-        self.include_default_fonts = include;
+    pub fn include_typst_embedded_fonts(mut self, include: bool) -> Self {
+        self.include_typst_embedded_fonts = include;
         self
     }
 
@@ -171,7 +171,7 @@ impl Packer {
     }
 
     /// Sets descriptive metadata recorded in the pack manifest.
-    pub fn metadata(mut self, metadata: Metadata) -> Self {
+    pub fn metadata(mut self, metadata: PackMetadata) -> Self {
         self.metadata = Some(metadata);
         self
     }
@@ -288,7 +288,7 @@ impl Packer {
             files: Vec::new(),
             external_resources: Vec::new(),
             packages_vendored: Vec::new(),
-            packages_external: Vec::new(),
+            packages_unvendored: Vec::new(),
             fonts: Vec::new(),
             warnings: Vec::new(),
             compile_warnings: warnings,
@@ -444,8 +444,8 @@ impl Packer {
                 }
                 report.packages_vendored.push(spec.clone());
             } else {
-                builder = builder.external_package(spec.clone());
-                report.packages_external.push(spec.clone());
+                builder = builder.unvendored_package(spec.clone());
+                report.packages_unvendored.push(spec.clone());
             }
         }
 
@@ -456,7 +456,7 @@ impl Packer {
                 collect_fonts(&page.frame, &mut used);
             }
             for font in used {
-                if !self.include_default_fonts && is_default_font(&font) {
+                if !self.include_typst_embedded_fonts && is_typst_embedded_font(&font) {
                     continue;
                 }
                 builder = builder.font(font.data().to_vec(), font.index())?;
@@ -503,7 +503,7 @@ pub struct PackReport {
     /// Packages stored inside the pack.
     pub packages_vendored: Vec<PackageSpec>,
     /// Observed dependencies that were not vendored.
-    pub packages_external: Vec<PackageSpec>,
+    pub packages_unvendored: Vec<PackageSpec>,
     /// Archive paths of embedded fonts.
     pub fonts: Vec<String>,
     /// Non-fatal problems encountered while packing.
@@ -730,8 +730,8 @@ fn collect_fonts(frame: &Frame, used: &mut Vec<Font>) {
     }
 }
 
-/// Whether the font is one of Typst's embedded default fonts.
-fn is_default_font(font: &Font) -> bool {
+/// Whether the font is one of Typst's embedded fonts.
+fn is_typst_embedded_font(font: &Font) -> bool {
     #[cfg(feature = "embedded-fonts")]
     {
         typst_kit::fonts::embedded()

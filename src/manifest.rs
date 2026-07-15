@@ -16,7 +16,7 @@ pub const FORMAT_VERSION: u32 = 1;
 /// The parsed contents of `typst-pack.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct Manifest {
+pub struct PackManifest {
     /// The pack format version. Readers must reject versions they don't know.
     pub format_version: u32,
     /// The packed Typst project.
@@ -29,7 +29,7 @@ pub struct Manifest {
     pub fonts: Vec<FontManifest>,
     /// Optional descriptive metadata about the packed project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<Metadata>,
+    pub metadata: Option<PackMetadata>,
 }
 
 /// The `[project]` section.
@@ -53,13 +53,13 @@ pub struct PackagesManifest {
     /// Exact specs of observed dependencies that are *not* stored inside the
     /// pack and must be resolved from a package directory, cache, or registry
     /// when compiling.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub external: Vec<String>,
+    #[serde(default, rename = "external", skip_serializing_if = "Vec::is_empty")]
+    pub unvendored: Vec<String>,
 }
 
 impl PackagesManifest {
     fn is_empty(&self) -> bool {
-        self.vendored.is_empty() && self.external.is_empty()
+        self.vendored.is_empty() && self.unvendored.is_empty()
     }
 }
 
@@ -84,7 +84,7 @@ fn is_zero(index: &u32) -> bool {
 /// The optional `[metadata]` section.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct Metadata {
+pub struct PackMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -95,7 +95,7 @@ pub struct Metadata {
 
 /// A manifest that could not be accepted.
 #[derive(Debug, thiserror::Error)]
-pub enum ManifestError {
+pub enum PackManifestError {
     #[error("failed to parse manifest: {0}")]
     Parse(#[from] toml::de::Error),
     #[error("unsupported pack format version {0} (this reader supports up to {FORMAT_VERSION})")]
@@ -110,10 +110,10 @@ pub enum ManifestError {
     InvalidFontPath { path: String, message: String },
 }
 
-impl Manifest {
+impl PackManifest {
     /// Parses and validates a manifest from TOML text.
-    pub fn from_toml(text: &str) -> Result<Self, ManifestError> {
-        let mut manifest: Manifest = toml::from_str(text)?;
+    pub fn from_toml(text: &str) -> Result<Self, PackManifestError> {
+        let mut manifest: PackManifest = toml::from_str(text)?;
         manifest.normalize_external_resources();
         manifest.validate()?;
         Ok(manifest)
@@ -127,31 +127,37 @@ impl Manifest {
     }
 
     /// Checks internal consistency of the manifest.
-    pub fn validate(&self) -> Result<(), ManifestError> {
+    pub fn validate(&self) -> Result<(), PackManifestError> {
         if self.format_version > FORMAT_VERSION {
-            return Err(ManifestError::UnsupportedVersion(self.format_version));
+            return Err(PackManifestError::UnsupportedVersion(self.format_version));
         }
         self.entrypoint()?;
         for path in &self.project.external_resources {
-            let virtual_path =
-                VirtualPath::new(path).map_err(|err| ManifestError::InvalidExternalResource {
+            let virtual_path = VirtualPath::new(path).map_err(|err| {
+                PackManifestError::InvalidExternalResource {
                     path: path.clone(),
                     message: err.to_string(),
-                })?;
+                }
+            })?;
             let canonical = virtual_path.get_without_slash();
             if canonical != path {
-                return Err(ManifestError::InvalidExternalResource {
+                return Err(PackManifestError::InvalidExternalResource {
                     path: path.clone(),
                     message: format!("path is not canonical; use `{canonical}`"),
                 });
             }
         }
-        for spec in self.packages.vendored.iter().chain(&self.packages.external) {
+        for spec in self
+            .packages
+            .vendored
+            .iter()
+            .chain(&self.packages.unvendored)
+        {
             parse_spec(spec)?;
         }
         for font in &self.fonts {
             if let Err(err) = VirtualPath::new(&font.path) {
-                return Err(ManifestError::InvalidFontPath {
+                return Err(PackManifestError::InvalidFontPath {
                     path: font.path.clone(),
                     message: err.to_string(),
                 });
@@ -161,15 +167,17 @@ impl Manifest {
     }
 
     /// The entrypoint as a validated virtual path.
-    pub fn entrypoint(&self) -> Result<VirtualPath, ManifestError> {
-        VirtualPath::new(&self.project.entrypoint).map_err(|err| ManifestError::InvalidEntrypoint {
-            path: self.project.entrypoint.clone(),
-            message: err.to_string(),
+    pub fn entrypoint(&self) -> Result<VirtualPath, PackManifestError> {
+        VirtualPath::new(&self.project.entrypoint).map_err(|err| {
+            PackManifestError::InvalidEntrypoint {
+                path: self.project.entrypoint.clone(),
+                message: err.to_string(),
+            }
         })
     }
 
     /// The vendored package specs, parsed.
-    pub fn vendored_packages(&self) -> Result<Vec<PackageSpec>, ManifestError> {
+    pub fn vendored_packages(&self) -> Result<Vec<PackageSpec>, PackManifestError> {
         self.packages
             .vendored
             .iter()
@@ -177,10 +185,10 @@ impl Manifest {
             .collect()
     }
 
-    /// The external (non-vendored) package specs, parsed.
-    pub fn external_packages(&self) -> Result<Vec<PackageSpec>, ManifestError> {
+    /// The unvendored package specs, parsed.
+    pub fn unvendored_packages(&self) -> Result<Vec<PackageSpec>, PackManifestError> {
         self.packages
-            .external
+            .unvendored
             .iter()
             .map(|spec| parse_spec(spec))
             .collect()
@@ -200,8 +208,8 @@ impl Manifest {
     }
 }
 
-fn parse_spec(spec: &str) -> Result<PackageSpec, ManifestError> {
-    PackageSpec::from_str(spec).map_err(|err| ManifestError::InvalidPackageSpec {
+fn parse_spec(spec: &str) -> Result<PackageSpec, PackManifestError> {
+    PackageSpec::from_str(spec).map_err(|err| PackManifestError::InvalidPackageSpec {
         spec: spec.to_owned(),
         message: err.to_string(),
     })

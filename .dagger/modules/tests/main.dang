@@ -83,10 +83,11 @@ type Tests {
   Compile a pack to PDF using SOURCE_DATE_EPOCH for reproducible metadata.
   """
   compilePdf: Void @check {
-    let pdf = Dagger.typstPack.compile(
+    let output = Dagger.typstPack.compile(
       pack: self.pack,
       sourceDateEpoch: "1700000000",
     )
+    let pdf = output.file("output.pdf")
 
     assert { pdf.name == "output.pdf" }
     assert { pdf.size > 0 }
@@ -98,13 +99,39 @@ type Tests {
   Compile a pack to PNG.
   """
   compilePng: Void @check {
-    let png = Dagger.typstPack.compile(
+    let output = Dagger.typstPack.compile(
       pack: self.pack,
-      format: TypstPackFormat.PNG,
+      format: TypstPackOutputFormat.PNG,
     )
+    let png = output.file("page-1.png")
 
-    assert { png.name == "output.png" }
+    assert { png.name == "page-1.png" }
     assert { png.size > 0 }
+
+    null
+  }
+
+  """
+  Compile selected source pages to deterministically named page artifacts.
+  """
+  compileSelectedPages: Void @check {
+    let source = Dagger
+      .currentModule
+      .source
+      .directory("fixtures/multi-page")
+    let pack = Dagger.typstPack.create(source: source)
+    let output = Dagger.typstPack.compile(
+      pack: pack,
+      format: TypstPackOutputFormat.PNG,
+      pages: "5,2",
+    )
+    let entries = output.entries
+
+    assert { entries.length == 2 }
+    assert { entries.contains("page-2.png") }
+    assert { entries.contains("page-5.png") }
+    assert { output.file("page-2.png").size > 0 }
+    assert { output.file("page-5.png").size > 0 }
 
     null
   }
@@ -113,11 +140,12 @@ type Tests {
   Compile a pack to HTML with Typst's experimental HTML feature enabled.
   """
   compileHtml: Void @check {
-    let html = Dagger.typstPack.compile(
+    let output = Dagger.typstPack.compile(
       pack: self.pack,
-      format: TypstPackFormat.HTML,
+      format: TypstPackOutputFormat.HTML,
       features: ["html"],
     )
+    let html = output.file("output.html")
 
     assert { html.name == "output.html" }
     assert { html.contents.contains("Dagger") }
@@ -153,11 +181,14 @@ type Tests {
     assert { output.contains("branding/conditional.txt") }
     assert { !output.contains("branding/second-only.txt") }
 
-    let pdf = Dagger.typstPack.compile(
-      pack: pack,
-      resourceDir: resources,
-      resourcePaths: resourcePaths,
-    )
+    let pdf = Dagger
+      .typstPack
+      .compile(
+        pack: pack,
+        resourceDir: resources,
+        resourcePaths: resourcePaths,
+      )
+      .file("output.pdf")
     assert { pdf.size > 0 }
 
     null

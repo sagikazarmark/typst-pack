@@ -11,10 +11,11 @@ mod world;
 pub mod cli;
 
 pub use compile::{
-    CompileError, CompileOptions, CompileOutput, OutputFormat, PageRange, compile, parse_pages,
+    CompilationArtifact, CompilationOutput, CompileError, CompileOptions, OutputFormat, PageRange,
+    PageSelection, compile, parse_page_selection,
 };
 pub use manifest::{
-    FORMAT_VERSION, FontManifest, MANIFEST_PATH, Manifest, ManifestError, Metadata,
+    FORMAT_VERSION, FontManifest, MANIFEST_PATH, PackManifest, PackManifestError, PackMetadata,
     PackagesManifest, ProjectManifest,
 };
 pub use pack::{

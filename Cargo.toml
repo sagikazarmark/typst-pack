@@ -26,7 +26,7 @@ cli = [
     "fs",
     "typst-kit/emit-diagnostics",
 ]
-# Ship Typst's default fonts (Libertinus Serif, New Computer Modern, ...) so
+# Ship Typst's embedded fonts (Libertinus Serif, New Computer Modern, ...) so
 # packs that only use them render without any font embedding.
 embedded-fonts = ["typst-kit/embedded-fonts"]
 # Filesystem-based packing: directory discovery, package download and caching,
@@ -59,6 +59,7 @@ walkdir = { version = "2", optional = true }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
+hayro-syntax = "0.7"
 tempfile = "3"
 tiny-skia = "0.12"
 

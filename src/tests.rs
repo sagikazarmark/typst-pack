@@ -103,7 +103,7 @@ fn project_file_id(path: &str) -> FileId {
 
 #[test]
 fn manifest_roundtrip() {
-    let manifest = Manifest::from_toml(
+    let manifest = PackManifest::from_toml(
         r#"
         format-version = 1
 
@@ -112,6 +112,7 @@ fn manifest_roundtrip() {
 
         [packages]
         vendored = ["@preview/cetz:0.3.4"]
+        external = ["@preview/tablex:0.0.9"]
 
         [[fonts]]
         path = "fonts/test.ttf"
@@ -124,22 +125,27 @@ fn manifest_roundtrip() {
     .unwrap();
     assert_eq!(manifest.project.entrypoint, "main.typ");
     assert_eq!(manifest.vendored_packages().unwrap().len(), 1);
+    assert_eq!(manifest.unvendored_packages().unwrap().len(), 1);
 
-    let reparsed = Manifest::from_toml(&manifest.to_toml()).unwrap();
+    let serialized = manifest.to_toml();
+    assert!(serialized.contains("external ="));
+    assert!(!serialized.contains("unvendored ="));
+    let reparsed = PackManifest::from_toml(&serialized).unwrap();
     assert_eq!(manifest, reparsed);
 }
 
 #[test]
 fn old_manifest_has_no_external_project_resources() {
     let manifest =
-        Manifest::from_toml("format-version = 1\n[project]\nentrypoint = \"main.typ\"\n").unwrap();
+        PackManifest::from_toml("format-version = 1\n[project]\nentrypoint = \"main.typ\"\n")
+            .unwrap();
 
     assert!(manifest.project.external_resources.is_empty());
 }
 
 #[test]
 fn manifest_rejects_unsafe_external_project_resource_path() {
-    let result = Manifest::from_toml(
+    let result = PackManifest::from_toml(
         r#"
         format-version = 1
 
@@ -151,13 +157,13 @@ fn manifest_rejects_unsafe_external_project_resource_path() {
 
     assert!(matches!(
         result,
-        Err(ManifestError::InvalidExternalResource { .. })
+        Err(PackManifestError::InvalidExternalResource { .. })
     ));
 }
 
 #[test]
 fn manifest_normalizes_external_project_resources_deterministically() {
-    let manifest = Manifest::from_toml(
+    let manifest = PackManifest::from_toml(
         r#"
         format-version = 1
 
@@ -187,7 +193,8 @@ fn manifest_normalizes_external_project_resources_deterministically() {
 #[test]
 fn manifest_validation_rejects_noncanonical_external_project_resource_path() {
     let mut manifest =
-        Manifest::from_toml("format-version = 1\n[project]\nentrypoint = \"main.typ\"\n").unwrap();
+        PackManifest::from_toml("format-version = 1\n[project]\nentrypoint = \"main.typ\"\n")
+            .unwrap();
     manifest
         .project
         .external_resources
@@ -195,14 +202,18 @@ fn manifest_validation_rejects_noncanonical_external_project_resource_path() {
 
     assert!(matches!(
         manifest.validate(),
-        Err(ManifestError::InvalidExternalResource { .. })
+        Err(PackManifestError::InvalidExternalResource { .. })
     ));
 }
 
 #[test]
 fn manifest_rejects_future_version() {
-    let result = Manifest::from_toml("format-version = 99\n[project]\nentrypoint = \"main.typ\"\n");
-    assert!(matches!(result, Err(ManifestError::UnsupportedVersion(99))));
+    let result =
+        PackManifest::from_toml("format-version = 99\n[project]\nentrypoint = \"main.typ\"\n");
+    assert!(matches!(
+        result,
+        Err(PackManifestError::UnsupportedVersion(99))
+    ));
 }
 
 #[test]
@@ -320,17 +331,17 @@ fn read_rejects_external_project_resource_file_conflicts() {
 }
 
 #[test]
-fn parse_pages_understands_ranges() {
+fn parse_page_selection_understands_ranges() {
     use std::num::NonZeroUsize;
     let one = NonZeroUsize::new(1);
     let three = NonZeroUsize::new(3);
     let five = NonZeroUsize::new(5);
     let nine = NonZeroUsize::new(9);
     assert_eq!(
-        parse_pages("1,3-5,9-").unwrap(),
-        vec![one..=one, three..=five, nine..=None]
+        parse_page_selection("1,3-5,9-").unwrap().ranges(),
+        &[one..=one, three..=five, nine..=None]
     );
-    assert!(parse_pages("nope").is_err());
+    assert!(parse_page_selection("nope").is_err());
 }
 
 #[cfg(feature = "cli")]
@@ -366,6 +377,33 @@ fn cli_accepts_external_project_resource_options() {
     );
 }
 
+#[cfg(feature = "cli")]
+#[test]
+fn cli_uses_typst_embedded_font_terminology() {
+    use clap::Parser as _;
+
+    assert!(
+        crate::cli::Cli::try_parse_from([
+            "typst-pack",
+            "create",
+            "project",
+            "--embed-fonts",
+            "--include-typst-embedded-fonts",
+        ])
+        .is_ok()
+    );
+    assert!(
+        crate::cli::Cli::try_parse_from([
+            "typst-pack",
+            "create",
+            "project",
+            "--embed-fonts",
+            "--include-default-fonts",
+        ])
+        .is_err()
+    );
+}
+
 #[cfg(feature = "embedded-fonts")]
 #[test]
 fn compile_in_memory_pack_to_pdf_and_svg() {
@@ -383,19 +421,23 @@ fn compile_in_memory_pack_to_pdf_and_svg() {
     let world = PackWorld::builder(pack).build().unwrap();
 
     let pdf = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap();
-    assert_eq!(pdf.outputs.len(), 1);
-    assert!(pdf.outputs[0].starts_with(b"%PDF"));
+    assert_eq!(pdf.artifacts.len(), 1);
+    assert!(pdf.artifacts[0].bytes().starts_with(b"%PDF"));
 
     let svg = compile(&world, OutputFormat::Svg, &CompileOptions::default()).unwrap();
-    assert_eq!(svg.outputs.len(), 1);
+    assert_eq!(svg.artifacts.len(), 1);
     assert!(
-        std::str::from_utf8(&svg.outputs[0])
+        std::str::from_utf8(svg.artifacts[0].bytes())
             .unwrap()
             .contains("<svg")
     );
 
     let png = compile(&world, OutputFormat::Png, &CompileOptions::default()).unwrap();
-    assert!(png.outputs[0].starts_with(&[0x89, b'P', b'N', b'G']));
+    assert!(
+        png.artifacts[0]
+            .bytes()
+            .starts_with(&[0x89, b'P', b'N', b'G'])
+    );
 }
 
 #[test]
@@ -417,12 +459,16 @@ fn declared_external_project_resource_compiles_through_loader() {
         .build()
         .unwrap();
     let pdf = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap();
-    assert!(pdf.outputs[0].starts_with(b"%PDF"));
+    assert!(pdf.artifacts[0].bytes().starts_with(b"%PDF"));
     let png = compile(&world, OutputFormat::Png, &CompileOptions::default()).unwrap();
-    assert!(png.outputs[0].starts_with(&[0x89, b'P', b'N', b'G']));
+    assert!(
+        png.artifacts[0]
+            .bytes()
+            .starts_with(&[0x89, b'P', b'N', b'G'])
+    );
     let svg = compile(&world, OutputFormat::Svg, &CompileOptions::default()).unwrap();
     assert!(
-        std::str::from_utf8(&svg.outputs[0])
+        std::str::from_utf8(svg.artifacts[0].bytes())
             .unwrap()
             .contains("<svg")
     );
@@ -434,7 +480,7 @@ fn declared_external_project_resource_compiles_through_loader() {
         .unwrap();
     let html = compile(&world, OutputFormat::Html, &CompileOptions::default()).unwrap();
     assert!(
-        std::str::from_utf8(&html.outputs[0])
+        std::str::from_utf8(html.artifacts[0].bytes())
             .unwrap()
             .contains("<html")
     );
@@ -657,7 +703,7 @@ Rows: #csv("data.csv").len()
             report.packages_vendored[0].to_string(),
             "@local/greet:0.1.0"
         );
-        assert!(report.packages_external.is_empty());
+        assert!(report.packages_unvendored.is_empty());
 
         let spec = &report.packages_vendored[0];
         assert!(outcome.pack.has_package(spec));
@@ -708,7 +754,7 @@ Rows: #csv("data.csv").len()
             .unwrap();
         let output = compile(&world, OutputFormat::Svg, &CompileOptions::default()).unwrap();
         assert!(
-            std::str::from_utf8(&output.outputs[0])
+            std::str::from_utf8(output.artifacts[0].bytes())
                 .unwrap()
                 .contains("<svg")
         );
@@ -954,12 +1000,12 @@ Rows: #csv("data.csv").len()
         let pack = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
         let world = PackWorld::builder(pack).build().unwrap();
         let output = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap();
-        assert!(output.outputs[0].starts_with(b"%PDF"));
+        assert!(output.artifacts[0].bytes().starts_with(b"%PDF"));
     }
 
     #[cfg(feature = "embedded-fonts")]
     #[test]
-    fn external_packages_resolve_through_package_loader() {
+    fn unvendored_packages_resolve_through_package_loader() {
         let dir = tempfile::tempdir().unwrap();
         let (project, packages) = fixture(dir.path());
         let outcome = Packer::new(&project, "main.typ")
@@ -969,7 +1015,7 @@ Rows: #csv("data.csv").len()
             .pack()
             .unwrap();
         assert!(outcome.report.packages_vendored.is_empty());
-        assert_eq!(outcome.report.packages_external.len(), 1);
+        assert_eq!(outcome.report.packages_unvendored.len(), 1);
 
         let pack = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
 
@@ -990,12 +1036,12 @@ Rows: #csv("data.csv").len()
             .build()
             .unwrap();
         let output = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap();
-        assert!(output.outputs[0].starts_with(b"%PDF"));
+        assert!(output.artifacts[0].bytes().starts_with(b"%PDF"));
     }
 
     #[cfg(feature = "embedded-fonts")]
     #[test]
-    fn font_embedding_skips_default_fonts_unless_asked() {
+    fn font_embedding_skips_typst_embedded_fonts_unless_asked() {
         let dir = tempfile::tempdir().unwrap();
         let (project, packages) = fixture(dir.path());
 
@@ -1007,14 +1053,14 @@ Rows: #csv("data.csv").len()
             .unwrap();
         assert!(
             slim.pack.fonts().is_empty(),
-            "only default fonts are used, so nothing should be embedded"
+            "only Typst embedded fonts are used, so nothing should be embedded"
         );
 
         let full = Packer::new(&project, "main.typ")
             .package_path(&packages)
             .system_fonts(false)
             .embed_fonts(true)
-            .include_default_fonts(true)
+            .include_typst_embedded_fonts(true)
             .pack()
             .unwrap();
         assert!(!full.pack.fonts().is_empty());
@@ -1080,7 +1126,7 @@ fn html_output_is_gated_by_the_html_feature() {
         .build()
         .unwrap();
     let output = compile(&world, OutputFormat::Html, &CompileOptions::default()).unwrap();
-    let html = std::str::from_utf8(&output.outputs[0]).unwrap();
+    let html = std::str::from_utf8(output.artifacts[0].bytes()).unwrap();
     assert!(html.contains("<html"));
     assert!(html.contains("Hello from HTML"));
     assert!(!output.warnings.is_empty());
