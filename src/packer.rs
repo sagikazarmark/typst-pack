@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
 use ecow::EcoVec;
-use typst::diag::{FileError, FileResult, SourceDiagnostic, Warned};
+use typst::diag::{FileResult, SourceDiagnostic, Warned};
 use typst::foundations::{Bytes, Datetime, Dict, Duration};
 use typst::layout::{Frame, FrameItem};
 use typst::syntax::package::PackageSpec;
@@ -21,17 +21,18 @@ use typst_kit::files::{FileLoader, FileStore, FsRoot, SystemFiles};
 use typst_kit::fonts::FontStore;
 use typst_layout::PagedDocument;
 
+use crate::external_resource::{Discovery as ExternalResources, Reference};
 use crate::manifest::PackMetadata;
-use crate::pack::{Pack, PackBuildError, valid_path};
-use crate::world::{load_external_resource, system_packages};
+use crate::pack::{Pack, PackBuildError};
+use crate::world::system_packages;
 
-/// Controls whether discovery may fall back to External Project Resource loaders.
+/// Controls whether discovery may fall back to External Resource References.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub enum ProjectResourcePolicy {
-    /// Missing project files cannot fall back to external loaders.
+    /// Missing project files cannot fall back to External Resource References.
     #[default]
     DisallowExternalFallback,
-    /// Missing non-source resources may come from configured external loaders.
+    /// Missing non-source resources may come from configured External Resource References.
     AllowExternalFallback,
 }
 
@@ -40,8 +41,8 @@ pub enum ProjectResourcePolicy {
 /// The packer performs a discovery compile of the project and records every
 /// file Typst actually reads. Source-project files are packed by default.
 /// When [`AllowExternalFallback`](ProjectResourcePolicy::AllowExternalFallback)
-/// is selected, non-source resources resolved by configured external loaders
-/// are declared in the manifest instead of storing their bytes. Files that a
+/// is selected, non-source resources resolved by configured External Resource
+/// References are declared in the manifest instead of storing their bytes. Files that a
 /// compile with different inputs or a different date would read are not
 /// discovered; add packed files with [`include`](Self::include) or declare an
 /// External Project Resource with [`external_resource`](Self::external_resource).
@@ -61,7 +62,7 @@ pub struct Packer {
     metadata: Option<PackMetadata>,
     project_resource_policy: ProjectResourcePolicy,
     external_resources: BTreeSet<String>,
-    external_resource_loaders: Vec<Box<dyn FileLoader + Send + Sync>>,
+    external_resource_references: Vec<Reference>,
 }
 
 impl Packer {
@@ -84,7 +85,7 @@ impl Packer {
             metadata: None,
             project_resource_policy: ProjectResourcePolicy::default(),
             external_resources: BTreeSet::new(),
-            external_resource_loaders: Vec::new(),
+            external_resource_references: Vec::new(),
         }
     }
 
@@ -171,7 +172,7 @@ impl Packer {
         self
     }
 
-    /// Controls whether discovery may use configured External Project Resource loaders.
+    /// Controls whether discovery may use configured External Resource References.
     pub fn project_resource_policy(mut self, policy: ProjectResourcePolicy) -> Self {
         self.project_resource_policy = policy;
         self
@@ -183,26 +184,21 @@ impl Packer {
         self
     }
 
-    /// Adds a loader for External Project Resources used during discovery.
+    /// Adds an External Resource Reference used during discovery.
     ///
-    /// Loaders are only consulted under
+    /// References are only consulted under
     /// [`AllowExternalFallback`](ProjectResourcePolicy::AllowExternalFallback);
     /// registering one does not change the default strict policy.
-    pub fn external_resource_loader(
+    pub fn external_resource_reference(
         mut self,
-        loader: impl FileLoader + Send + Sync + 'static,
+        reference: impl FileLoader + Send + Sync + 'static,
     ) -> Self {
-        self.external_resource_loaders.push(Box::new(loader));
+        self.external_resource_references.push(Box::new(reference));
         self
     }
 
     /// Runs the discovery compile and assembles the pack.
     pub fn pack(self) -> Result<PackOutcome, PackerError> {
-        let explicit_external_resources = self
-            .external_resources
-            .iter()
-            .map(|path| valid_path(path))
-            .collect::<Result<BTreeSet<_>, _>>()?;
         let root = self
             .root
             .canonicalize()
@@ -217,6 +213,12 @@ impl Packer {
             .map_err(|err| PackerError::io("failed to resolve entrypoint", err))?;
         let entrypoint = VirtualPath::virtualize(&root, &entrypoint_abs)
             .map_err(|_| PackerError::OutsideRoot(entrypoint_abs.clone()))?;
+        let mut builder = Pack::builder(entrypoint.get_without_slash());
+        for path in &self.external_resources {
+            builder = builder.external_resource(path)?;
+        }
+        builder.validate_declarations()?;
+        let explicit_external_resources = builder.external_resource_paths();
 
         // Build the discovery world.
         let packages = system_packages(
@@ -246,10 +248,11 @@ impl Packer {
             sources: FileStore::new(Arc::clone(&primary)),
             files: FileStore::new(DiscoveryLoader {
                 primary,
-                policy: self.project_resource_policy,
-                external_loaders: self.external_resource_loaders,
-                external_resources: Mutex::new(explicit_external_resources.clone()),
-                explicit_external_resources,
+                external_resources: ExternalResources::new(
+                    self.external_resource_references,
+                    self.project_resource_policy == ProjectResourcePolicy::AllowExternalFallback,
+                    explicit_external_resources,
+                ),
             }),
             fonts,
             time: Time::system(),
@@ -317,8 +320,6 @@ impl Packer {
                 }
             }
         }
-
-        let mut builder = Pack::builder(entrypoint.get_without_slash());
 
         for path in world.files.loader().external_resources() {
             report.external_resources.push(path.clone());
@@ -457,7 +458,7 @@ impl Packer {
         report.fonts = pack
             .fonts()
             .iter()
-            .map(|font| font.entry.path.clone())
+            .map(|font| font.manifest().path().to_owned())
             .collect();
 
         Ok(PackOutcome {
@@ -586,17 +587,13 @@ impl World for DiscoveryWorld {
     }
 
     fn source(&self, id: FileId) -> FileResult<Source> {
-        if matches!(id.root(), VirtualRoot::Project) && self.files.loader().is_explicit_external(id)
-        {
-            return Err(FileError::NotFound(PathBuf::from(
-                id.vpath().get_without_slash(),
-            )));
-        }
-        #[cfg(test)]
-        if let Some(hook) = &self.source_request_hook {
-            hook(id);
-        }
-        self.sources.source(id)
+        self.files.loader().external_resources.source(id, || {
+            #[cfg(test)]
+            if let Some(hook) = &self.source_request_hook {
+                hook(id);
+            }
+            self.sources.source(id)
+        })
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
@@ -635,10 +632,7 @@ impl FileLoader for PrimaryLoader {
 
 struct DiscoveryLoader {
     primary: Arc<PrimaryLoader>,
-    policy: ProjectResourcePolicy,
-    external_loaders: Vec<Box<dyn FileLoader + Send + Sync>>,
-    external_resources: Mutex<BTreeSet<String>>,
-    explicit_external_resources: BTreeSet<String>,
+    external_resources: ExternalResources,
 }
 
 impl DiscoveryLoader {
@@ -647,56 +641,17 @@ impl DiscoveryLoader {
     }
 
     fn is_external(&self, id: FileId) -> bool {
-        self.external_resources
-            .lock()
-            .expect("external resource provenance lock poisoned")
-            .contains(id.vpath().get_without_slash())
-    }
-
-    fn is_explicit_external(&self, id: FileId) -> bool {
-        self.explicit_external_resources
-            .contains(id.vpath().get_without_slash())
+        self.external_resources.is_external(id)
     }
 
     fn external_resources(&self) -> Vec<String> {
-        self.external_resources
-            .lock()
-            .expect("external resource provenance lock poisoned")
-            .iter()
-            .cloned()
-            .collect()
+        self.external_resources.external_resources()
     }
 }
 
 impl FileLoader for DiscoveryLoader {
     fn load(&self, id: FileId) -> FileResult<Bytes> {
-        match self.primary.load(id) {
-            Ok(data) => {
-                if matches!(id.root(), VirtualRoot::Project)
-                    && self
-                        .explicit_external_resources
-                        .contains(id.vpath().get_without_slash())
-                {
-                    self.external_resources
-                        .lock()
-                        .expect("external resource provenance lock poisoned")
-                        .insert(id.vpath().get_without_slash().to_owned());
-                }
-                Ok(data)
-            }
-            Err(FileError::NotFound(_))
-                if matches!(id.root(), VirtualRoot::Project)
-                    && self.policy == ProjectResourcePolicy::AllowExternalFallback =>
-            {
-                let data = load_external_resource(&self.external_loaders, id)?;
-                self.external_resources
-                    .lock()
-                    .expect("external resource provenance lock poisoned")
-                    .insert(id.vpath().get_without_slash().to_owned());
-                Ok(data)
-            }
-            Err(err) => Err(err),
-        }
+        self.external_resources.file(id, || self.primary.load(id))
     }
 }
 

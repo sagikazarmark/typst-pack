@@ -3,8 +3,7 @@
 use std::collections::BTreeSet;
 use std::str::FromStr;
 
-use serde::{Deserialize, Serialize};
-use typst::syntax::VirtualPath;
+use serde::{Deserialize, Deserializer, Serialize};
 use typst::syntax::package::PackageSpec;
 
 /// The archive entry name of the manifest.
@@ -14,22 +13,69 @@ pub const MANIFEST_PATH: &str = "typst-pack.toml";
 pub const FORMAT_VERSION: u32 = 1;
 
 /// The parsed contents of `typst-pack.toml`.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub struct PackManifest {
     /// The pack format version. Readers must reject versions they don't know.
-    pub format_version: u32,
+    format_version: u32,
     /// The packed Typst project.
-    pub project: ProjectManifest,
+    project: ProjectManifest,
     /// Package dependencies observed while creating the pack.
     #[serde(default, skip_serializing_if = "PackagesManifest::is_empty")]
-    pub packages: PackagesManifest,
+    packages: PackagesManifest,
     /// Fonts embedded in the pack.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub fonts: Vec<FontManifest>,
+    fonts: Vec<FontManifest>,
     /// Optional descriptive metadata about the packed project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<PackMetadata>,
+    metadata: Option<PackMetadata>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+struct Version1Manifest {
+    format_version: u32,
+    project: ProjectManifest,
+    #[serde(default)]
+    packages: PackagesManifest,
+    #[serde(default)]
+    fonts: Vec<FontManifest>,
+    #[serde(default)]
+    metadata: Option<PackMetadata>,
+}
+
+impl From<Version1Manifest> for PackManifest {
+    fn from(manifest: Version1Manifest) -> Self {
+        Self {
+            format_version: manifest.format_version,
+            project: manifest.project,
+            packages: manifest.packages,
+            fonts: manifest.fonts,
+            metadata: manifest.metadata,
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PackManifest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let value = toml::Value::deserialize(deserializer)?;
+        let version = value
+            .get("format-version")
+            .and_then(toml::Value::as_integer)
+            .ok_or_else(|| serde::de::Error::custom("missing or invalid `format-version`"))?;
+        if version != i64::from(FORMAT_VERSION) {
+            return Err(serde::de::Error::custom(format!(
+                "unsupported pack format version {version}"
+            )));
+        }
+        let wire: Version1Manifest = value.try_into().map_err(serde::de::Error::custom)?;
+        let manifest = Self::from(wire);
+        manifest.validate().map_err(serde::de::Error::custom)?;
+        Ok(manifest)
+    }
 }
 
 /// The `[project]` section.
@@ -37,10 +83,10 @@ pub struct PackManifest {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct ProjectManifest {
     /// The root-relative path of the entrypoint file, e.g. `main.typ`.
-    pub entrypoint: String,
+    entrypoint: String,
     /// Non-source project resources supplied externally at compilation time.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    pub external_resources: BTreeSet<String>,
+    external_resources: BTreeSet<String>,
 }
 
 /// The `[packages]` section.
@@ -49,18 +95,12 @@ pub struct ProjectManifest {
 pub struct PackagesManifest {
     /// Exact specs of packages whose files are stored inside the pack.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub vendored: Vec<String>,
+    vendored: Vec<String>,
     /// Exact specs of observed dependencies that are *not* stored inside the
     /// pack and must be resolved from a package directory, cache, or registry
     /// when compiling.
     #[serde(default, rename = "external", skip_serializing_if = "Vec::is_empty")]
-    pub unvendored: Vec<String>,
-}
-
-impl PackagesManifest {
-    fn is_empty(&self) -> bool {
-        self.vendored.is_empty() && self.unvendored.is_empty()
-    }
+    unvendored: Vec<String>,
 }
 
 /// One `[[fonts]]` entry.
@@ -68,13 +108,13 @@ impl PackagesManifest {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct FontManifest {
     /// The archive entry holding the font data, e.g. `fonts/dejavu-sans.ttf`.
-    pub path: String,
+    path: String,
     /// The face index inside the font file (non-zero for collections).
     #[serde(default, skip_serializing_if = "is_zero")]
-    pub index: u32,
+    index: u32,
     /// Family names provided by this face, informational only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub families: Vec<String>,
+    families: Vec<String>,
 }
 
 fn is_zero(index: &u32) -> bool {
@@ -86,11 +126,108 @@ fn is_zero(index: &u32) -> bool {
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct PackMetadata {
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<String>,
+    description: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub authors: Vec<String>,
+    authors: Vec<String>,
+}
+
+impl ProjectManifest {
+    /// The root-relative entrypoint path.
+    pub fn entrypoint(&self) -> &str {
+        &self.entrypoint
+    }
+
+    /// The declared External Project Resource paths in deterministic order.
+    pub fn external_resources(&self) -> impl Iterator<Item = &str> {
+        self.external_resources.iter().map(String::as_str)
+    }
+
+    pub(crate) fn contains_external_resource(&self, path: &str) -> bool {
+        self.external_resources.contains(path)
+    }
+}
+
+impl PackagesManifest {
+    /// Exact specifications of packages stored inside the Pack.
+    pub fn vendored(&self) -> &[String] {
+        &self.vendored
+    }
+
+    /// Exact specifications of packages resolved outside the Pack.
+    pub fn unvendored(&self) -> &[String] {
+        &self.unvendored
+    }
+
+    fn is_empty(&self) -> bool {
+        self.vendored.is_empty() && self.unvendored.is_empty()
+    }
+}
+
+impl FontManifest {
+    /// The archive path containing this font's bytes.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// The face index within the font data.
+    pub fn index(&self) -> u32 {
+        self.index
+    }
+
+    /// Informational family names declared for this face.
+    pub fn families(&self) -> &[String] {
+        &self.families
+    }
+
+    pub(crate) fn new(path: String, index: u32, families: Vec<String>) -> Self {
+        Self {
+            path,
+            index,
+            families,
+        }
+    }
+}
+
+impl PackMetadata {
+    /// Creates empty Pack metadata.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Sets the human-readable Pack name.
+    pub fn with_name(mut self, name: impl Into<String>) -> Self {
+        self.name = Some(name.into());
+        self
+    }
+
+    /// Sets the Pack description.
+    pub fn with_description(mut self, description: impl Into<String>) -> Self {
+        self.description = Some(description.into());
+        self
+    }
+
+    /// Adds a Pack author.
+    pub fn with_author(mut self, author: impl Into<String>) -> Self {
+        self.authors.push(author.into());
+        self
+    }
+
+    /// The human-readable Pack name.
+    pub fn name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    /// The Pack description.
+    pub fn description(&self) -> Option<&str> {
+        self.description.as_deref()
+    }
+
+    /// The Pack authors.
+    pub fn authors(&self) -> &[String] {
+        &self.authors
+    }
 }
 
 /// A manifest that could not be accepted.
@@ -98,54 +235,88 @@ pub struct PackMetadata {
 pub enum PackManifestError {
     #[error("failed to parse manifest: {0}")]
     Parse(#[from] toml::de::Error),
-    #[error("unsupported pack format version {0} (this reader supports up to {FORMAT_VERSION})")]
+    #[error("unsupported pack format version {0} (this reader supports version {FORMAT_VERSION})")]
     UnsupportedVersion(u32),
-    #[error("invalid entrypoint path `{path}`: {message}")]
-    InvalidEntrypoint { path: String, message: String },
-    #[error("invalid external project resource path `{path}`: {message}")]
-    InvalidExternalResource { path: String, message: String },
     #[error("invalid package spec `{spec}`: {message}")]
     InvalidPackageSpec { spec: String, message: String },
-    #[error("invalid font path `{path}`: {message}")]
-    InvalidFontPath { path: String, message: String },
 }
 
 impl PackManifest {
+    pub(crate) fn new(
+        entrypoint: String,
+        external_resources: BTreeSet<String>,
+        vendored_packages: Vec<String>,
+        external_packages: Vec<String>,
+        fonts: Vec<FontManifest>,
+        metadata: Option<PackMetadata>,
+    ) -> Self {
+        Self {
+            format_version: FORMAT_VERSION,
+            project: ProjectManifest {
+                entrypoint,
+                external_resources,
+            },
+            packages: PackagesManifest {
+                vendored: vendored_packages,
+                unvendored: external_packages,
+            },
+            fonts,
+            metadata,
+        }
+    }
+
+    /// The Pack format version.
+    pub fn format_version(&self) -> u32 {
+        self.format_version
+    }
+
+    /// The project declarations.
+    pub fn project(&self) -> &ProjectManifest {
+        &self.project
+    }
+
+    /// The package declarations.
+    pub fn packages(&self) -> &PackagesManifest {
+        &self.packages
+    }
+
+    /// The embedded font declarations.
+    pub fn fonts(&self) -> &[FontManifest] {
+        &self.fonts
+    }
+
+    /// Optional descriptive Pack metadata.
+    pub fn metadata(&self) -> Option<&PackMetadata> {
+        self.metadata.as_ref()
+    }
+
     /// Parses and validates a manifest from TOML text.
     pub fn from_toml(text: &str) -> Result<Self, PackManifestError> {
-        let mut manifest: PackManifest = toml::from_str(text)?;
-        manifest.normalize_external_resources();
+        #[derive(Deserialize)]
+        #[serde(rename_all = "kebab-case")]
+        struct VersionProbe {
+            format_version: u32,
+        }
+
+        let probe: VersionProbe = toml::from_str(text)?;
+        if probe.format_version != FORMAT_VERSION {
+            return Err(PackManifestError::UnsupportedVersion(probe.format_version));
+        }
+        let wire: Version1Manifest = toml::from_str(text)?;
+        let manifest = Self::from(wire);
         manifest.validate()?;
         Ok(manifest)
     }
 
     /// Serializes the manifest to TOML text.
     pub fn to_toml(&self) -> String {
-        let mut manifest = self.clone();
-        manifest.normalize_external_resources();
-        toml::to_string_pretty(&manifest).expect("manifest is always serializable")
+        toml::to_string_pretty(self).expect("manifest is always serializable")
     }
 
     /// Checks internal consistency of the manifest.
-    pub fn validate(&self) -> Result<(), PackManifestError> {
-        if self.format_version > FORMAT_VERSION {
+    fn validate(&self) -> Result<(), PackManifestError> {
+        if self.format_version != FORMAT_VERSION {
             return Err(PackManifestError::UnsupportedVersion(self.format_version));
-        }
-        self.entrypoint()?;
-        for path in &self.project.external_resources {
-            let virtual_path = VirtualPath::new(path).map_err(|err| {
-                PackManifestError::InvalidExternalResource {
-                    path: path.clone(),
-                    message: err.to_string(),
-                }
-            })?;
-            let canonical = virtual_path.get_without_slash();
-            if canonical != path {
-                return Err(PackManifestError::InvalidExternalResource {
-                    path: path.clone(),
-                    message: format!("path is not canonical; use `{canonical}`"),
-                });
-            }
         }
         for spec in self
             .packages
@@ -155,25 +326,7 @@ impl PackManifest {
         {
             parse_spec(spec)?;
         }
-        for font in &self.fonts {
-            if let Err(err) = VirtualPath::new(&font.path) {
-                return Err(PackManifestError::InvalidFontPath {
-                    path: font.path.clone(),
-                    message: err.to_string(),
-                });
-            }
-        }
         Ok(())
-    }
-
-    /// The entrypoint as a validated virtual path.
-    pub fn entrypoint(&self) -> Result<VirtualPath, PackManifestError> {
-        VirtualPath::new(&self.project.entrypoint).map_err(|err| {
-            PackManifestError::InvalidEntrypoint {
-                path: self.project.entrypoint.clone(),
-                message: err.to_string(),
-            }
-        })
     }
 
     /// The vendored package specs, parsed.
@@ -192,19 +345,6 @@ impl PackManifest {
             .iter()
             .map(|spec| parse_spec(spec))
             .collect()
-    }
-
-    fn normalize_external_resources(&mut self) {
-        self.project.external_resources = self
-            .project
-            .external_resources
-            .iter()
-            .map(|path| {
-                VirtualPath::new(path)
-                    .map(|path| path.get_without_slash().to_owned())
-                    .unwrap_or_else(|_| path.clone())
-            })
-            .collect();
     }
 }
 

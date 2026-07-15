@@ -15,7 +15,7 @@ fn five_page_world() -> PackWorld {
         .build()
         .unwrap();
 
-    PackWorld::builder(pack).build().unwrap()
+    PackWorld::builder(pack).build()
 }
 
 #[test]
@@ -29,7 +29,7 @@ fn pdf_is_one_document_format_artifact() {
         .unwrap()
         .build()
         .unwrap();
-    let world = PackWorld::builder(pack).build().unwrap();
+    let world = PackWorld::builder(pack).build();
 
     let output = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap();
 
@@ -52,7 +52,7 @@ fn page_format_selection_matching_no_source_page_fails() {
         .unwrap()
         .build()
         .unwrap();
-    let world = PackWorld::builder(pack).build().unwrap();
+    let world = PackWorld::builder(pack).build();
     for expression in ["2-1", "9", "9-"] {
         let options = CompileOptions {
             page_selection: typst_pack::parse_page_selection(expression).unwrap(),
@@ -238,8 +238,7 @@ fn html_is_one_document_format_artifact() {
         .unwrap();
     let world = PackWorld::builder(pack)
         .feature(typst::Feature::Html)
-        .build()
-        .unwrap();
+        .build();
 
     let output = compile(&world, OutputFormat::Html, &CompileOptions::default()).unwrap();
 
@@ -265,7 +264,7 @@ fn no_matching_source_pages_error_retains_compilation_warnings() {
         .unwrap()
         .build()
         .unwrap();
-    let world = PackWorld::builder(pack).build().unwrap();
+    let world = PackWorld::builder(pack).build();
     let options = CompileOptions {
         page_selection: typst_pack::parse_page_selection("9").unwrap(),
         ..CompileOptions::default()

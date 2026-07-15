@@ -13,6 +13,7 @@ use typst::{Feature, Library, LibraryExt, World};
 use typst_kit::files::{FileLoader, FileStore};
 use typst_kit::fonts::{FontSource, FontStore};
 
+use crate::external_resource::{Compilation as ExternalResources, Reference};
 use crate::pack::Pack;
 
 #[cfg(feature = "fs")]
@@ -49,9 +50,9 @@ pub(crate) fn system_packages(
 /// Project files and vendored package files come from the pack. Fonts come
 /// from the pack, plus any fonts configured on the builder. Files of packages
 /// that are not vendored are only available if a package loader is configured.
-/// Declared External Project Resources may come from external resource loaders;
-/// these loaders cannot replace packed files or supply Typst source or package
-/// files.
+/// Declared External Project Resources may come from External Resource
+/// References; these references cannot replace packed files or supply Typst
+/// source or package files.
 pub struct PackWorld {
     library: LazyHash<Library>,
     main: FileId,
@@ -67,7 +68,7 @@ impl PackWorld {
     }
 
     /// Creates a world with default configuration.
-    pub fn new(pack: Pack) -> Result<Self, PackWorldError> {
+    pub fn new(pack: Pack) -> Self {
         Self::builder(pack).build()
     }
 
@@ -91,19 +92,10 @@ impl World for PackWorld {
     }
 
     fn source(&self, id: FileId) -> FileResult<Source> {
-        if matches!(id.root(), VirtualRoot::Project)
-            && self
-                .store
-                .loader()
-                .pack
-                .file(id.vpath().get_without_slash())
-                .is_none()
-        {
-            return Err(FileError::NotFound(PathBuf::from(
-                id.vpath().get_without_slash(),
-            )));
-        }
-        self.store.source(id)
+        let loader = self.store.loader();
+        loader
+            .external_resources
+            .source(&loader.pack, id, || self.store.source(id))
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
@@ -141,38 +133,18 @@ enum Clock {
 /// that are not vendored.
 struct PackLoader {
     pack: Arc<Pack>,
-    external_resource_loaders: Vec<Box<dyn FileLoader + Send + Sync>>,
+    external_resources: ExternalResources,
     package_loader: Option<Box<dyn FileLoader + Send + Sync>>,
-}
-
-pub(crate) fn load_external_resource(
-    loaders: &[Box<dyn FileLoader + Send + Sync>],
-    id: FileId,
-) -> FileResult<Bytes> {
-    for loader in loaders {
-        match loader.load(id) {
-            Err(FileError::NotFound(_)) => {}
-            result => return result,
-        }
-    }
-    Err(FileError::NotFound(PathBuf::from(
-        id.vpath().get_without_slash(),
-    )))
 }
 
 impl FileLoader for PackLoader {
     fn load(&self, id: FileId) -> FileResult<Bytes> {
         let path = id.vpath().get_without_slash();
         match id.root() {
-            VirtualRoot::Project => {
-                if let Some(data) = self.pack.file(path) {
-                    return Ok(data.clone());
-                }
-                if !self.pack.is_external_resource(path) {
-                    return Err(FileError::NotFound(PathBuf::from(path)));
-                }
-                load_external_resource(&self.external_resource_loaders, id)
-            }
+            VirtualRoot::Project => self
+                .external_resources
+                .file(&self.pack, id)
+                .expect("project requests are handled by External Project Resource resolution"),
             VirtualRoot::Package(spec) => {
                 if self.pack.has_package(spec) {
                     self.pack
@@ -204,7 +176,7 @@ pub struct PackWorldBuilder {
     #[cfg_attr(not(feature = "embedded-fonts"), allow(dead_code))]
     embedded_fonts: bool,
     extra_fonts: Vec<(BoxedFontSource, FontInfo)>,
-    external_resource_loaders: Vec<Box<dyn FileLoader + Send + Sync>>,
+    external_resource_references: Vec<Reference>,
     package_loader: Option<Box<dyn FileLoader + Send + Sync>>,
 }
 
@@ -226,7 +198,7 @@ impl PackWorldBuilder {
             clock: Clock::None,
             embedded_fonts: cfg!(feature = "embedded-fonts"),
             extra_fonts: Vec::new(),
-            external_resource_loaders: Vec::new(),
+            external_resource_references: Vec::new(),
             package_loader: None,
         }
     }
@@ -292,30 +264,26 @@ impl PackWorldBuilder {
         self
     }
 
-    /// Adds a loader for declared External Project Resources.
+    /// Adds an External Resource Reference for declared External Project Resources.
     ///
-    /// Loaders are tried in registration order after packed project files.
-    pub fn external_resource_loader(
+    /// References are tried in registration order after packed project files.
+    pub fn external_resource_reference(
         mut self,
-        loader: impl FileLoader + Send + Sync + 'static,
+        reference: impl FileLoader + Send + Sync + 'static,
     ) -> Self {
-        self.external_resource_loaders.push(Box::new(loader));
+        self.external_resource_references.push(Box::new(reference));
         self
     }
 
     /// Builds the world.
-    pub fn build(self) -> Result<PackWorld, PackWorldError> {
-        let entrypoint = self
-            .pack
-            .manifest()
-            .entrypoint()
-            .map_err(|err| PackWorldError::InvalidPack(err.to_string()))?;
+    pub fn build(self) -> PackWorld {
+        let entrypoint = typst::syntax::VirtualPath::new(self.pack.entrypoint())
+            .expect("Pack entrypoint invariant violated");
         let main = RootedPath::new(VirtualRoot::Project, entrypoint).intern();
 
         let mut fonts = FontStore::new();
         for pack_font in self.pack.fonts() {
-            let font = Font::new(pack_font.data.clone(), pack_font.entry.index)
-                .ok_or_else(|| PackWorldError::InvalidFont(pack_font.entry.path.clone()))?;
+            let font = pack_font.font().clone();
             let info = font.info().clone();
             fonts.push((font, info));
         }
@@ -330,17 +298,17 @@ impl PackWorldBuilder {
             .with_features(self.features.into_iter().collect())
             .build();
 
-        Ok(PackWorld {
+        PackWorld {
             library: LazyHash::new(library),
             main,
             store: FileStore::new(PackLoader {
                 pack: Arc::new(self.pack),
-                external_resource_loaders: self.external_resource_loaders,
+                external_resources: ExternalResources::new(self.external_resource_references),
                 package_loader: self.package_loader,
             }),
             fonts,
             clock: self.clock,
-        })
+        }
     }
 }
 
@@ -399,13 +367,4 @@ impl FileLoader for SystemPackageLoader {
             VirtualRoot::Package(spec) => Ok(self.0.obtain(spec)?.load(id.vpath())?),
         }
     }
-}
-
-/// A failure while building a [`PackWorld`].
-#[derive(Debug, thiserror::Error)]
-pub enum PackWorldError {
-    #[error("pack is not usable: {0}")]
-    InvalidPack(String),
-    #[error("embedded font `{0}` could not be loaded")]
-    InvalidFont(String),
 }

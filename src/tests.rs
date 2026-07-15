@@ -101,6 +101,90 @@ fn project_file_id(path: &str) -> FileId {
     RootedPath::new(VirtualRoot::Project, VirtualPath::new(path).unwrap()).intern()
 }
 
+fn raw_stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
+    fn crc32(data: &[u8]) -> u32 {
+        let mut crc = !0u32;
+        for byte in data {
+            crc ^= u32::from(*byte);
+            for _ in 0..8 {
+                crc = (crc >> 1) ^ (0xedb8_8320 & (0u32.wrapping_sub(crc & 1)));
+            }
+        }
+        !crc
+    }
+
+    fn u16_bytes(value: usize) -> [u8; 2] {
+        u16::try_from(value).unwrap().to_le_bytes()
+    }
+
+    fn u32_bytes(value: usize) -> [u8; 4] {
+        u32::try_from(value).unwrap().to_le_bytes()
+    }
+
+    let mut archive = Vec::new();
+    let mut central_entries = Vec::new();
+    for (name, data) in entries {
+        let offset = archive.len();
+        let crc = crc32(data);
+        archive.extend_from_slice(b"PK\x03\x04");
+        archive.extend_from_slice(&20u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&crc.to_le_bytes());
+        archive.extend_from_slice(&u32_bytes(data.len()));
+        archive.extend_from_slice(&u32_bytes(data.len()));
+        archive.extend_from_slice(&u16_bytes(name.len()));
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(name.as_bytes());
+        archive.extend_from_slice(data);
+        central_entries.push((name, data.len(), crc, offset));
+    }
+
+    let central_start = archive.len();
+    for (name, size, crc, offset) in central_entries {
+        archive.extend_from_slice(b"PK\x01\x02");
+        archive.extend_from_slice(&20u16.to_le_bytes());
+        archive.extend_from_slice(&20u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&crc.to_le_bytes());
+        archive.extend_from_slice(&u32_bytes(size));
+        archive.extend_from_slice(&u32_bytes(size));
+        archive.extend_from_slice(&u16_bytes(name.len()));
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u16.to_le_bytes());
+        archive.extend_from_slice(&0u32.to_le_bytes());
+        archive.extend_from_slice(&u32_bytes(offset));
+        archive.extend_from_slice(name.as_bytes());
+    }
+    let central_size = archive.len() - central_start;
+    archive.extend_from_slice(b"PK\x05\x06");
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive.extend_from_slice(&u16_bytes(entries.len()));
+    archive.extend_from_slice(&u16_bytes(entries.len()));
+    archive.extend_from_slice(&u32_bytes(central_size));
+    archive.extend_from_slice(&u32_bytes(central_start));
+    archive.extend_from_slice(&0u16.to_le_bytes());
+    archive
+}
+
+fn with_first_zip_entry_unix_mode(mut archive: Vec<u8>, mode: u32) -> Vec<u8> {
+    let eocd = archive.len() - 22;
+    let central_start =
+        u32::from_le_bytes(archive[eocd + 16..eocd + 20].try_into().unwrap()) as usize;
+    archive[central_start + 4..central_start + 6]
+        .copy_from_slice(&((3u16 << 8) | 20).to_le_bytes());
+    archive[central_start + 38..central_start + 42].copy_from_slice(&(mode << 16).to_le_bytes());
+    archive
+}
+
 #[test]
 fn manifest_roundtrip() {
     let manifest = PackManifest::from_toml(
@@ -123,7 +207,7 @@ fn manifest_roundtrip() {
         "#,
     )
     .unwrap();
-    assert_eq!(manifest.project.entrypoint, "main.typ");
+    assert_eq!(manifest.project().entrypoint(), "main.typ");
     assert_eq!(manifest.vendored_packages().unwrap().len(), 1);
     assert_eq!(manifest.unvendored_packages().unwrap().len(), 1);
 
@@ -135,75 +219,87 @@ fn manifest_roundtrip() {
 }
 
 #[test]
-fn old_manifest_has_no_external_project_resources() {
-    let manifest =
-        PackManifest::from_toml("format-version = 1\n[project]\nentrypoint = \"main.typ\"\n")
-            .unwrap();
-
-    assert!(manifest.project.external_resources.is_empty());
-}
-
-#[test]
-fn manifest_rejects_unsafe_external_project_resource_path() {
-    let result = PackManifest::from_toml(
-        r#"
-        format-version = 1
-
-        [project]
-        entrypoint = "main.typ"
-        external-resources = ["../secret.png"]
-        "#,
-    );
-
-    assert!(matches!(
-        result,
-        Err(PackManifestError::InvalidExternalResource { .. })
-    ));
-}
-
-#[test]
-fn manifest_normalizes_external_project_resources_deterministically() {
+fn manifest_declarations_are_exposed_read_only_through_accessors() {
     let manifest = PackManifest::from_toml(
         r#"
         format-version = 1
 
         [project]
         entrypoint = "main.typ"
-        external-resources = ["z.png", "assets/../logo.png", "./logo.png"]
+        external-resources = ["logo.png"]
+
+        [packages]
+        vendored = ["@preview/cetz:0.3.4"]
+        external = ["@preview/tablex:0.0.9"]
+
+        [[fonts]]
+        path = "fonts/test.ttf"
+        index = 2
+        families = ["Test"]
+
+        [metadata]
+        name = "Test pack"
+        authors = ["A. U. Thor"]
         "#,
     )
     .unwrap();
 
+    assert_eq!(manifest.format_version(), 1);
+    assert_eq!(manifest.project().entrypoint(), "main.typ");
     assert_eq!(
-        manifest
-            .project
-            .external_resources
-            .iter()
-            .map(String::as_str)
-            .collect::<Vec<_>>(),
-        ["logo.png", "z.png"]
+        manifest.project().external_resources().collect::<Vec<_>>(),
+        ["logo.png"]
     );
-    assert!(
-        manifest
-            .to_toml()
-            .contains("external-resources = [\n    \"logo.png\",\n    \"z.png\",\n]")
-    );
+    assert_eq!(manifest.packages().vendored(), ["@preview/cetz:0.3.4"]);
+    assert_eq!(manifest.packages().unvendored(), ["@preview/tablex:0.0.9"]);
+    assert_eq!(manifest.fonts()[0].path(), "fonts/test.ttf");
+    assert_eq!(manifest.fonts()[0].index(), 2);
+    assert_eq!(manifest.fonts()[0].families(), ["Test"]);
+    assert_eq!(manifest.metadata().unwrap().name(), Some("Test pack"));
+    assert_eq!(manifest.metadata().unwrap().authors(), ["A. U. Thor"]);
 }
 
 #[test]
-fn manifest_validation_rejects_noncanonical_external_project_resource_path() {
-    let mut manifest =
+fn old_manifest_has_no_external_project_resources() {
+    let manifest =
         PackManifest::from_toml("format-version = 1\n[project]\nentrypoint = \"main.typ\"\n")
             .unwrap();
-    manifest
-        .project
-        .external_resources
-        .insert("assets/../logo.png".to_owned());
+
+    assert!(manifest.project().external_resources().next().is_none());
+}
+
+#[test]
+fn pack_rejects_unsafe_external_project_resource_declarations() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\nexternal-resources = [\"../secret.png\"]\n";
+    let bytes = raw_stored_zip(&[(MANIFEST_PATH, manifest), ("project/main.typ", b"Hello")]);
 
     assert!(matches!(
-        manifest.validate(),
-        Err(PackManifestError::InvalidExternalResource { .. })
+        Pack::from_bytes(bytes),
+        Err(PackReadError::Invariant(PackInvariantError::InvalidPath {
+            role: PackPathRole::ExternalProjectResource,
+            ..
+        }))
     ));
+}
+
+#[test]
+fn pack_normalizes_external_project_resources_deterministically() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\nexternal-resources = [\"z.png\", \"assets/../logo.png\", \"./logo.png\"]\n";
+    let pack = Pack::from_bytes(raw_stored_zip(&[
+        (MANIFEST_PATH, manifest),
+        ("project/main.typ", b"Hello"),
+    ]))
+    .unwrap();
+
+    assert_eq!(
+        pack.external_resources().collect::<Vec<_>>(),
+        ["logo.png", "z.png"]
+    );
+    assert!(
+        pack.manifest()
+            .to_toml()
+            .contains("external-resources = [\n    \"logo.png\",\n    \"z.png\",\n]")
+    );
 }
 
 #[test]
@@ -217,9 +313,232 @@ fn manifest_rejects_future_version() {
 }
 
 #[test]
-fn builder_requires_entrypoint_file() {
-    let result = Pack::builder("main.typ").build();
-    assert!(matches!(result, Err(PackBuildError::MissingEntrypoint(_))));
+fn manifest_dispatches_version_before_interpreting_version_specific_fields() {
+    let text = "format-version = 99\nfuture-field = true\n[project]\nentrypoint = \"main.typ\"\n";
+
+    assert!(matches!(
+        PackManifest::from_toml(text),
+        Err(PackManifestError::UnsupportedVersion(99))
+    ));
+    assert!(toml::from_str::<PackManifest>(text).is_err());
+}
+
+#[test]
+fn pack_construction_requires_a_contained_entrypoint() {
+    let built = Pack::builder("main.typ").build();
+    assert!(matches!(
+        built,
+        Err(PackBuildError::Invariant(
+            PackInvariantError::MissingEntrypoint(ref path)
+        )) if path == "main.typ"
+    ));
+
+    use std::io::Write;
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    let mut zip = zip::ZipWriter::new(&mut buffer);
+    zip.start_file(MANIFEST_PATH, zip::write::SimpleFileOptions::default())
+        .unwrap();
+    zip.write_all(b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n")
+        .unwrap();
+    zip.finish().unwrap();
+
+    let read = Pack::from_bytes(buffer.into_inner());
+    assert!(matches!(
+        read,
+        Err(PackReadError::Invariant(
+            PackInvariantError::MissingEntrypoint(ref path)
+        )) if path == "main.typ"
+    ));
+}
+
+#[test]
+fn pack_builder_rejects_paths_that_cannot_name_root_relative_files() {
+    assert!(matches!(
+        Pack::builder("").build(),
+        Err(PackBuildError::Invariant(PackInvariantError::InvalidPath {
+            role: PackPathRole::Entrypoint,
+            ..
+        }))
+    ));
+    assert!(matches!(
+        Pack::builder("main.typ").file("/main.typ", Vec::new()),
+        Err(PackBuildError::Invariant(PackInvariantError::InvalidPath {
+            role: PackPathRole::ProjectFile,
+            ..
+        }))
+    ));
+    assert!(matches!(
+        Pack::builder("main.typ").external_resource("."),
+        Err(PackBuildError::Invariant(PackInvariantError::InvalidPath {
+            role: PackPathRole::ExternalProjectResource,
+            ..
+        }))
+    ));
+    for path in ["C:outside.txt", "./C:/outside.txt"] {
+        assert!(matches!(
+            Pack::builder("main.typ").file(path, Vec::new()),
+            Err(PackBuildError::Invariant(PackInvariantError::InvalidPath {
+                role: PackPathRole::ProjectFile,
+                ..
+            }))
+        ));
+    }
+}
+
+#[test]
+fn pack_construction_rejects_conflicting_project_tree_roles() {
+    let built = Pack::builder("main.typ")
+        .file("main.typ", Vec::new())
+        .unwrap()
+        .file("assets", b"packed".to_vec())
+        .unwrap()
+        .file("assets-foo", b"interleaved".to_vec())
+        .unwrap()
+        .external_resource("assets/logo.png")
+        .unwrap()
+        .build();
+    assert!(matches!(
+        built,
+        Err(PackBuildError::Invariant(
+            PackInvariantError::PathTreeConflict {
+                ref ancestor,
+                ref descendant,
+                ancestor_role: PackPathRole::ProjectFile,
+                descendant_role: PackPathRole::ExternalProjectResource,
+                package: None,
+            }
+        )) if ancestor == "assets" && descendant == "assets/logo.png"
+    ));
+
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\nexternal-resources = [\"assets/logo.png\"]\n";
+    let bytes = raw_stored_zip(&[
+        (MANIFEST_PATH, manifest),
+        ("project/main.typ", b"Hello"),
+        ("project/assets", b"packed"),
+        ("project/assets-foo", b"interleaved"),
+    ]);
+    assert!(matches!(
+        Pack::from_bytes(bytes),
+        Err(PackReadError::Invariant(
+            PackInvariantError::PathTreeConflict {
+                ref ancestor,
+                ref descendant,
+                ancestor_role: PackPathRole::ProjectFile,
+                descendant_role: PackPathRole::ExternalProjectResource,
+                package: None,
+            }
+        )) if ancestor == "assets" && descendant == "assets/logo.png"
+    ));
+}
+
+#[test]
+fn pack_construction_rejects_conflicting_package_roles() {
+    use std::str::FromStr as _;
+
+    let spec = typst::syntax::package::PackageSpec::from_str("@local/example:1.0.0").unwrap();
+    let built = Pack::builder("main.typ")
+        .file("main.typ", Vec::new())
+        .unwrap()
+        .package_file(spec.clone(), "lib.typ", b"Hello".to_vec())
+        .unwrap()
+        .unvendored_package(spec)
+        .build();
+    assert!(matches!(
+        built,
+        Err(PackBuildError::Invariant(
+            PackInvariantError::PackageRoleConflict(ref spec)
+        )) if spec == "@local/example:1.0.0"
+    ));
+
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[packages]\nvendored = [\"@local/example:1.0.0\"]\nexternal = [\"@local/example:1.0.0\"]\n";
+    let bytes = raw_stored_zip(&[
+        (MANIFEST_PATH, manifest),
+        ("project/main.typ", b"Hello"),
+        ("packages/local/example/1.0.0/lib.typ", b"Hello"),
+    ]);
+    assert!(matches!(
+        Pack::from_bytes(bytes),
+        Err(PackReadError::Invariant(
+            PackInvariantError::PackageRoleConflict(ref spec)
+        )) if spec == "@local/example:1.0.0"
+    ));
+}
+
+#[test]
+fn pack_construction_rejects_invalid_contained_font_data() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"custom-font.bin\"\nindex = 3\nfamilies = [\"Informational\"]\n";
+    let bytes = raw_stored_zip(&[
+        (MANIFEST_PATH, manifest),
+        ("project/main.typ", b"Hello"),
+        ("custom-font.bin", b"not a font"),
+    ]);
+
+    assert!(matches!(
+        Pack::from_bytes(bytes),
+        Err(PackReadError::Invariant(PackInvariantError::InvalidFont {
+            path: Some(ref path),
+            index: 3,
+        })) if path == "custom-font.bin"
+    ));
+}
+
+#[test]
+fn pack_builder_reports_invalid_font_data_as_a_shared_invariant() {
+    assert!(matches!(
+        Pack::builder("main.typ").font(b"not a font".to_vec(), 2),
+        Err(PackBuildError::Invariant(PackInvariantError::InvalidFont {
+            path: None,
+            index: 2,
+        }))
+    ));
+}
+
+#[test]
+fn pack_construction_rejects_font_paths_reserved_for_project_files() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"project/main.typ\"\nfamilies = [\"Informational\"]\n";
+    let bytes = raw_stored_zip(&[(MANIFEST_PATH, manifest), ("project/main.typ", b"Hello")]);
+
+    assert!(matches!(
+        Pack::from_bytes(bytes),
+        Err(PackReadError::Invariant(PackInvariantError::ReservedFontPath {
+            ref path,
+            conflicting_role: PackPathRole::ProjectFile,
+        })) if path == "project/main.typ"
+    ));
+}
+
+#[test]
+fn a_constructed_pack_builds_a_world_without_revalidation() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", Vec::new())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let _: PackWorld = PackWorld::builder(pack).build();
+}
+
+#[test]
+fn pack_world_accepts_an_external_resource_reference() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", Vec::new())
+        .unwrap()
+        .external_resource("resource.bin")
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let world = PackWorld::builder(pack)
+        .external_resource_reference(MemoryProjectFile::new("resource.bin", b"external".to_vec()))
+        .build();
+
+    assert_eq!(
+        world
+            .file(project_file_id("resource.bin"))
+            .unwrap()
+            .as_slice(),
+        b"external"
+    );
 }
 
 #[test]
@@ -284,11 +603,13 @@ fn pack_builder_rejects_external_project_resource_file_conflicts() {
 
     assert!(matches!(
         packed_first,
-        Err(PackBuildError::ExternalResourceConflict(path)) if path == "logo.png"
+        Err(PackBuildError::Invariant(PackInvariantError::PathRoleConflict { path, .. }))
+            if path == "logo.png"
     ));
     assert!(matches!(
         declared_first,
-        Err(PackBuildError::ExternalResourceConflict(path)) if path == "logo.png"
+        Err(PackBuildError::Invariant(PackInvariantError::PathRoleConflict { path, .. }))
+            if path == "logo.png"
     ));
 }
 
@@ -303,6 +624,158 @@ fn read_rejects_archives_without_manifest() {
     zip.finish().unwrap();
     let result = Pack::from_bytes(buffer.into_inner());
     assert!(matches!(result, Err(PackReadError::MissingManifest)));
+}
+
+#[test]
+fn read_reports_a_non_utf8_manifest_specifically() {
+    let bytes = raw_stored_zip(&[(MANIFEST_PATH, &[0xff]), ("project/main.typ", b"Hello")]);
+
+    assert!(matches!(
+        Pack::from_bytes(bytes),
+        Err(PackReadError::ManifestNotUtf8(_))
+    ));
+}
+
+#[test]
+fn read_reports_a_non_file_manifest_specifically() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
+    let bytes = with_first_zip_entry_unix_mode(
+        raw_stored_zip(&[(MANIFEST_PATH, manifest), ("project/main.typ", b"Hello")]),
+        0o120777,
+    );
+
+    assert!(matches!(
+        Pack::from_bytes(bytes),
+        Err(PackReadError::ManifestNotFile)
+    ));
+}
+
+#[test]
+fn read_rejects_unsafe_unknown_directories_before_ignoring_them() {
+    use std::io::Write as _;
+
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    let mut zip = zip::ZipWriter::new(&mut buffer);
+    let options = zip::write::SimpleFileOptions::default();
+    zip.start_file(MANIFEST_PATH, options).unwrap();
+    zip.write_all(b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n")
+        .unwrap();
+    zip.start_file("project/main.typ", options).unwrap();
+    zip.write_all(b"Hello").unwrap();
+    zip.add_directory("../ignored/", options).unwrap();
+    zip.finish().unwrap();
+
+    assert!(matches!(
+        Pack::from_bytes(buffer.into_inner()),
+        Err(PackReadError::UnsafeEntry(_))
+    ));
+}
+
+#[test]
+fn read_rejects_a_windows_prefix_hidden_by_a_current_directory_alias() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
+    let bytes = raw_stored_zip(&[
+        (MANIFEST_PATH, manifest),
+        ("project/main.typ", b"Hello"),
+        ("./C:/ignored", b"must not be ignored"),
+    ]);
+
+    assert!(matches!(
+        Pack::from_bytes(bytes),
+        Err(PackReadError::UnsafeEntry(_))
+    ));
+}
+
+#[test]
+fn read_rejects_duplicate_manifest_entries() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
+    let bytes = raw_stored_zip(&[
+        (MANIFEST_PATH, manifest),
+        (MANIFEST_PATH, manifest),
+        ("project/main.typ", b"Hello"),
+    ]);
+
+    assert!(matches!(
+        Pack::from_bytes(bytes),
+        Err(PackReadError::DuplicateManifest)
+    ));
+}
+
+#[test]
+fn read_rejects_distinct_archive_entries_with_one_canonical_identity() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
+    let bytes = raw_stored_zip(&[
+        (MANIFEST_PATH, manifest),
+        ("project/main.typ", b"first"),
+        ("project/./main.typ", b"second"),
+    ]);
+
+    assert!(matches!(
+        Pack::from_bytes(bytes),
+        Err(PackReadError::Invariant(
+            PackInvariantError::CanonicalArchiveEntryCollision {
+                ref canonical,
+                ..
+            }
+        )) if canonical == "project/main.typ"
+    ));
+}
+
+#[test]
+fn read_rejects_canonical_collisions_between_unknown_entries() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
+    let bytes = raw_stored_zip(&[
+        (MANIFEST_PATH, manifest),
+        ("project/main.typ", b"Hello"),
+        ("future/data", b"first"),
+        ("future/./data", b"second"),
+    ]);
+
+    assert!(matches!(
+        Pack::from_bytes(bytes),
+        Err(PackReadError::Invariant(
+            PackInvariantError::CanonicalArchiveEntryCollision {
+                ref canonical,
+                ..
+            }
+        )) if canonical == "future/data"
+    ));
+}
+
+#[test]
+fn read_does_not_normalize_a_known_role_into_an_ignored_archive_entry() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
+    for invalid in ["project/../ignored", "./project/../ignored"] {
+        let bytes = raw_stored_zip(&[
+            (MANIFEST_PATH, manifest),
+            ("project/main.typ", b"Hello"),
+            (invalid, b"must not be ignored"),
+        ]);
+
+        assert!(matches!(
+            Pack::from_bytes(bytes),
+            Err(PackReadError::Invariant(PackInvariantError::InvalidPath {
+                role: PackPathRole::ProjectFile,
+                ..
+            }))
+        ));
+    }
+}
+
+#[test]
+fn read_classifies_safe_archive_prefix_aliases_by_their_canonical_role() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
+    let pack = Pack::from_bytes(raw_stored_zip(&[
+        (MANIFEST_PATH, manifest),
+        ("./project/main.typ", b"Hello"),
+    ]))
+    .unwrap();
+
+    assert_eq!(pack.file("main.typ").unwrap().as_slice(), b"Hello");
+    assert_eq!(
+        pack.files().map(|(path, _)| path).collect::<Vec<_>>(),
+        ["main.typ"]
+    );
 }
 
 #[test]
@@ -326,7 +799,8 @@ fn read_rejects_external_project_resource_file_conflicts() {
     let result = Pack::from_bytes(buffer.into_inner());
     assert!(matches!(
         result,
-        Err(PackReadError::ExternalResourceConflict(path)) if path == "logo.png"
+        Err(PackReadError::Invariant(PackInvariantError::PathRoleConflict { path, .. }))
+            if path == "logo.png"
     ));
 }
 
@@ -346,7 +820,7 @@ fn parse_page_selection_understands_ranges() {
 
 #[cfg(feature = "cli")]
 #[test]
-fn cli_accepts_external_project_resource_options() {
+fn cli_accepts_source_references_without_a_resource_path_alias() {
     use clap::Parser as _;
 
     assert!(
@@ -354,9 +828,9 @@ fn cli_accepts_external_project_resource_options() {
             "typst-pack",
             "create",
             "project",
-            "--resource-path",
+            "--source-reference",
             "resources/first",
-            "--resource-path",
+            "--source-reference",
             "resources/second",
             "--external-resource",
             "assets/logo.png",
@@ -368,12 +842,22 @@ fn cli_accepts_external_project_resource_options() {
             "typst-pack",
             "compile",
             "project.typk",
-            "--resource-path",
+            "--source-reference",
             "resources/first",
-            "--resource-path",
+            "--source-reference",
             "resources/second",
         ])
         .is_ok()
+    );
+    assert!(
+        crate::cli::Cli::try_parse_from([
+            "typst-pack",
+            "compile",
+            "project.typk",
+            "--resource-path",
+            "resources/old",
+        ])
+        .is_err()
     );
 }
 
@@ -418,7 +902,7 @@ fn compile_in_memory_pack_to_pdf_and_svg() {
         .build()
         .unwrap();
 
-    let world = PackWorld::builder(pack).build().unwrap();
+    let world = PackWorld::builder(pack).build();
 
     let pdf = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap();
     assert_eq!(pdf.artifacts.len(), 1);
@@ -441,7 +925,7 @@ fn compile_in_memory_pack_to_pdf_and_svg() {
 }
 
 #[test]
-fn declared_external_project_resource_compiles_through_loader() {
+fn declared_external_project_resource_compiles_through_a_reference() {
     let pack = Pack::builder("main.typ")
         .file(
             "main.typ",
@@ -455,9 +939,8 @@ fn declared_external_project_resource_compiles_through_loader() {
         .unwrap();
 
     let world = PackWorld::builder(pack.clone())
-        .external_resource_loader(MemoryProjectFile::new("assets/logo.png", tiny_png()))
-        .build()
-        .unwrap();
+        .external_resource_reference(MemoryProjectFile::new("assets/logo.png", tiny_png()))
+        .build();
     let pdf = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap();
     assert!(pdf.artifacts[0].bytes().starts_with(b"%PDF"));
     let png = compile(&world, OutputFormat::Png, &CompileOptions::default()).unwrap();
@@ -474,10 +957,9 @@ fn declared_external_project_resource_compiles_through_loader() {
     );
 
     let world = PackWorld::builder(pack)
-        .external_resource_loader(MemoryProjectFile::new("assets/logo.png", tiny_png()))
+        .external_resource_reference(MemoryProjectFile::new("assets/logo.png", tiny_png()))
         .feature(typst::Feature::Html)
-        .build()
-        .unwrap();
+        .build();
     let html = compile(&world, OutputFormat::Html, &CompileOptions::default()).unwrap();
     assert!(
         std::str::from_utf8(html.artifacts[0].bytes())
@@ -487,7 +969,7 @@ fn declared_external_project_resource_compiles_through_loader() {
 }
 
 #[test]
-fn external_project_resource_loader_cannot_supply_typst_source() {
+fn external_resource_reference_cannot_supply_typst_source() {
     let pack = Pack::builder("main.typ")
         .file(
             "main.typ",
@@ -499,18 +981,17 @@ fn external_project_resource_loader_cannot_supply_typst_source() {
         .build()
         .unwrap();
     let world = PackWorld::builder(pack)
-        .external_resource_loader(MemoryProjectFile::new(
+        .external_resource_reference(MemoryProjectFile::new(
             "external.typ",
             b"#let mark = rect(width: 1pt, height: 1pt)".to_vec(),
         ))
-        .build()
-        .unwrap();
+        .build();
 
     assert!(compile(&world, OutputFormat::Svg, &CompileOptions::default()).is_err());
 }
 
 #[test]
-fn external_project_resource_loaders_follow_registration_order() {
+fn external_resource_references_follow_registration_order() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", Vec::new())
         .unwrap()
@@ -523,10 +1004,9 @@ fn external_project_resource_loaders_follow_registration_order() {
     let (first, first_calls) = MemoryProjectFile::tracked("resource.bin", b"first".to_vec());
     let (second, second_calls) = MemoryProjectFile::tracked("resource.bin", b"second".to_vec());
     let world = PackWorld::builder(pack.clone())
-        .external_resource_loader(first)
-        .external_resource_loader(second)
-        .build()
-        .unwrap();
+        .external_resource_reference(first)
+        .external_resource_reference(second)
+        .build();
     assert_eq!(world.file(id).unwrap().as_slice(), b"first");
     assert_eq!(first_calls.load(Ordering::Relaxed), 1);
     assert_eq!(second_calls.load(Ordering::Relaxed), 0);
@@ -535,10 +1015,9 @@ fn external_project_resource_loaders_follow_registration_order() {
     let (fallback, fallback_calls) =
         MemoryProjectFile::tracked("resource.bin", b"fallback".to_vec());
     let world = PackWorld::builder(pack.clone())
-        .external_resource_loader(missing)
-        .external_resource_loader(fallback)
-        .build()
-        .unwrap();
+        .external_resource_reference(missing)
+        .external_resource_reference(fallback)
+        .build();
     assert_eq!(world.file(id).unwrap().as_slice(), b"fallback");
     assert_eq!(missing_calls.load(Ordering::Relaxed), 1);
     assert_eq!(fallback_calls.load(Ordering::Relaxed), 1);
@@ -546,17 +1025,62 @@ fn external_project_resource_loaders_follow_registration_order() {
     let (denied, denied_calls) = ErrorProjectLoader::tracked(FileError::AccessDenied);
     let (masked, masked_calls) = MemoryProjectFile::tracked("resource.bin", b"masked".to_vec());
     let world = PackWorld::builder(pack)
-        .external_resource_loader(denied)
-        .external_resource_loader(masked)
-        .build()
-        .unwrap();
+        .external_resource_reference(denied)
+        .external_resource_reference(masked)
+        .build();
     assert_eq!(world.file(id), Err(FileError::AccessDenied));
     assert_eq!(denied_calls.load(Ordering::Relaxed), 1);
     assert_eq!(masked_calls.load(Ordering::Relaxed), 0);
 }
 
 #[test]
-fn packed_and_undeclared_project_paths_do_not_consult_external_loaders() {
+fn all_missing_external_resource_references_report_the_requested_project_path_lazily() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", Vec::new())
+        .unwrap()
+        .external_resource("requested.bin")
+        .unwrap()
+        .external_resource("unused.bin")
+        .unwrap()
+        .build()
+        .unwrap();
+    let (reference, calls) = ErrorProjectLoader::tracked(FileError::NotFound(PathBuf::from(
+        "/host-specific/missing.bin",
+    )));
+    let world = PackWorld::builder(pack)
+        .external_resource_reference(reference)
+        .build();
+
+    assert_eq!(
+        world.file(project_file_id("requested.bin")),
+        Err(FileError::NotFound(PathBuf::from("requested.bin")))
+    );
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn source_requests_do_not_consult_external_resource_references() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", Vec::new())
+        .unwrap()
+        .external_resource("external.typ")
+        .unwrap()
+        .build()
+        .unwrap();
+    let (reference, calls) = MemoryProjectFile::tracked("external.typ", b"injected".to_vec());
+    let world = PackWorld::builder(pack)
+        .external_resource_reference(reference)
+        .build();
+
+    assert!(matches!(
+        world.source(project_file_id("external.typ")),
+        Err(FileError::NotFound(_))
+    ));
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn packed_and_undeclared_project_paths_do_not_consult_external_resource_references() {
     let packed = Pack::builder("main.typ")
         .file("main.typ", Vec::new())
         .unwrap()
@@ -566,9 +1090,8 @@ fn packed_and_undeclared_project_paths_do_not_consult_external_loaders() {
         .unwrap();
     let (loader, calls) = MemoryProjectFile::tracked("resource.bin", b"external".to_vec());
     let world = PackWorld::builder(packed)
-        .external_resource_loader(loader)
-        .build()
-        .unwrap();
+        .external_resource_reference(loader)
+        .build();
     assert_eq!(
         world
             .file(project_file_id("resource.bin"))
@@ -585,9 +1108,8 @@ fn packed_and_undeclared_project_paths_do_not_consult_external_loaders() {
         .unwrap();
     let (loader, calls) = MemoryProjectFile::tracked("missing.bin", b"external".to_vec());
     let world = PackWorld::builder(undeclared)
-        .external_resource_loader(loader)
-        .build()
-        .unwrap();
+        .external_resource_reference(loader)
+        .build();
     assert!(matches!(
         world.file(project_file_id("missing.bin")),
         Err(FileError::NotFound(_))
@@ -596,7 +1118,7 @@ fn packed_and_undeclared_project_paths_do_not_consult_external_loaders() {
 }
 
 #[test]
-fn package_requests_do_not_consult_external_project_resource_loaders() {
+fn package_requests_do_not_consult_external_resource_references() {
     use std::str::FromStr as _;
 
     let pack = Pack::builder("main.typ")
@@ -608,9 +1130,8 @@ fn package_requests_do_not_consult_external_project_resource_loaders() {
         .unwrap();
     let (loader, calls) = MemoryProjectFile::tracked("lib.typ", b"external".to_vec());
     let world = PackWorld::builder(pack)
-        .external_resource_loader(loader)
-        .build()
-        .unwrap();
+        .external_resource_reference(loader)
+        .build();
     let spec = typst::syntax::package::PackageSpec::from_str("@local/example:1.0.0").unwrap();
     let id = RootedPath::new(
         VirtualRoot::Package(spec),
@@ -630,10 +1151,7 @@ fn project_requests_do_not_consult_package_loader() {
         .build()
         .unwrap();
     let (loader, calls) = MemoryProjectFile::tracked("missing.txt", b"host file".to_vec());
-    let world = PackWorld::builder(pack)
-        .package_loader(loader)
-        .build()
-        .unwrap();
+    let world = PackWorld::builder(pack).package_loader(loader).build();
 
     assert!(compile(&world, OutputFormat::Svg, &CompileOptions::default()).is_err());
     assert_eq!(calls.load(Ordering::Relaxed), 0);
@@ -666,10 +1184,7 @@ fn vendored_package_compiles_without_consulting_package_loader() {
         .build()
         .unwrap();
     let (loader, calls) = MemoryProjectFile::tracked("unused", Vec::new());
-    let world = PackWorld::builder(pack)
-        .package_loader(loader)
-        .build()
-        .unwrap();
+    let world = PackWorld::builder(pack).package_loader(loader).build();
 
     assert!(compile(&world, OutputFormat::Svg, &CompileOptions::default()).is_ok());
     assert_eq!(calls.load(Ordering::Relaxed), 0);
@@ -699,10 +1214,7 @@ fn missing_vendored_package_file_does_not_fall_through_to_package_loader() {
         "missing.typ",
         b"#let mark = rect(width: 1pt, height: 1pt)".to_vec(),
     );
-    let world = PackWorld::builder(pack)
-        .package_loader(loader)
-        .build()
-        .unwrap();
+    let world = PackWorld::builder(pack).package_loader(loader).build();
 
     assert!(compile(&world, OutputFormat::Svg, &CompileOptions::default()).is_err());
     assert_eq!(calls.load(Ordering::Relaxed), 0);
@@ -910,7 +1422,7 @@ Rows: #csv("data.csv").len()
         let outcome = Packer::new(&project, "main.typ")
             .system_fonts(false)
             .project_resource_policy(ProjectResourcePolicy::AllowExternalFallback)
-            .external_resource_loader(MemoryProjectFile::new("assets/logo.png", tiny_png()))
+            .external_resource_reference(MemoryProjectFile::new("assets/logo.png", tiny_png()))
             .pack()
             .unwrap();
 
@@ -923,7 +1435,7 @@ Rows: #csv("data.csv").len()
             pack.external_resources().collect::<Vec<_>>(),
             ["assets/logo.png"]
         );
-        let world = PackWorld::builder(pack.clone()).build().unwrap();
+        let world = PackWorld::builder(pack.clone()).build();
         match compile(&world, OutputFormat::Svg, &CompileOptions::default()) {
             Err(CompileError::Diagnostics { errors, .. }) => assert!(
                 errors
@@ -934,9 +1446,8 @@ Rows: #csv("data.csv").len()
         }
 
         let world = PackWorld::builder(pack)
-            .external_resource_loader(MemoryProjectFile::new("assets/logo.png", tiny_png()))
-            .build()
-            .unwrap();
+            .external_resource_reference(MemoryProjectFile::new("assets/logo.png", tiny_png()))
+            .build();
         let output = compile(&world, OutputFormat::Svg, &CompileOptions::default()).unwrap();
         assert!(
             std::str::from_utf8(output.artifacts[0].bytes())
@@ -971,7 +1482,7 @@ Rows: #csv("data.csv").len()
         );
 
         let pack = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
-        let world = PackWorld::builder(pack.clone()).build().unwrap();
+        let world = PackWorld::builder(pack.clone()).build();
         match compile(&world, OutputFormat::Svg, &CompileOptions::default()) {
             Err(CompileError::Diagnostics { errors, .. }) => assert!(
                 errors
@@ -981,9 +1492,8 @@ Rows: #csv("data.csv").len()
             _ => panic!("missing External Project Resource did not produce a file diagnostic"),
         }
         let world = PackWorld::builder(pack.clone())
-            .external_resource_loader(MemoryProjectFile::new("assets/logo.png", tiny_png()))
-            .build()
-            .unwrap();
+            .external_resource_reference(MemoryProjectFile::new("assets/logo.png", tiny_png()))
+            .build();
         assert!(compile(&world, OutputFormat::Svg, &CompileOptions::default()).is_ok());
 
         let target = dir.path().join("extracted");
@@ -1032,8 +1542,72 @@ Rows: #csv("data.csv").len()
 
         assert!(matches!(
             result,
-            Err(PackerError::Build(PackBuildError::ExternalResourceConflict(path)))
-                if path == "conditional.txt"
+            Err(PackerError::Build(PackBuildError::Invariant(
+                PackInvariantError::PathRoleConflict { path, .. }
+            ))) if path == "conditional.txt"
+        ));
+    }
+
+    #[test]
+    fn external_entrypoint_declaration_fails_before_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("main.typ"), "Hello").unwrap();
+
+        let result = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .external_resource("main.typ")
+            .pack();
+
+        assert!(matches!(
+            result,
+            Err(PackerError::Build(PackBuildError::Invariant(
+                PackInvariantError::EntrypointIsExternalResource(ref path)
+            ))) if path == "main.typ"
+        ));
+    }
+
+    #[test]
+    fn external_resource_tree_conflicts_fail_before_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("main.typ"), "#panic(\"discovery ran\")").unwrap();
+
+        let result = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .external_resource("assets")
+            .external_resource("assets/logo.png")
+            .pack();
+
+        assert!(matches!(
+            result,
+            Err(PackerError::Build(PackBuildError::Invariant(
+                PackInvariantError::PathTreeConflict {
+                    ancestor_role: PackPathRole::ExternalProjectResource,
+                    descendant_role: PackPathRole::ExternalProjectResource,
+                    package: None,
+                    ..
+                }
+            )))
+        ));
+
+        let result = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .external_resource("main.typ/child")
+            .pack();
+
+        assert!(matches!(
+            result,
+            Err(PackerError::Build(PackBuildError::Invariant(
+                PackInvariantError::PathTreeConflict {
+                    ancestor_role: PackPathRole::Entrypoint,
+                    descendant_role: PackPathRole::ExternalProjectResource,
+                    package: None,
+                    ..
+                }
+            )))
         ));
     }
 
@@ -1052,7 +1626,7 @@ Rows: #csv("data.csv").len()
             MemoryProjectFile::tracked("assets/logo.png", tiny_png());
         let strict = Packer::new(&project, "main.typ")
             .system_fonts(false)
-            .external_resource_loader(strict_loader)
+            .external_resource_reference(strict_loader)
             .pack();
         assert!(matches!(strict, Err(PackerError::Compile { .. })));
         assert_eq!(strict_calls.load(Ordering::Relaxed), 0);
@@ -1063,12 +1637,72 @@ Rows: #csv("data.csv").len()
         let outcome = Packer::new(&project, "main.typ")
             .system_fonts(false)
             .project_resource_policy(ProjectResourcePolicy::AllowExternalFallback)
-            .external_resource_loader(fallback)
+            .external_resource_reference(fallback)
             .pack()
             .unwrap();
         assert!(outcome.pack.file("assets/logo.png").is_some());
         assert!(outcome.report.external_resources.is_empty());
         assert_eq!(fallback_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn discovery_uses_external_resource_references_in_registration_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("main.typ"), "#read(\"resource.bin\")").unwrap();
+
+        let (missing, missing_calls) = MemoryProjectFile::tracked("other.bin", Vec::new());
+        let (fallback, fallback_calls) =
+            MemoryProjectFile::tracked("resource.bin", b"fallback".to_vec());
+        let outcome = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .project_resource_policy(ProjectResourcePolicy::AllowExternalFallback)
+            .external_resource_reference(missing)
+            .external_resource_reference(fallback)
+            .pack()
+            .unwrap();
+
+        assert_eq!(missing_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(fallback_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(outcome.report.external_resources, ["resource.bin"]);
+        assert!(outcome.pack.file("resource.bin").is_none());
+    }
+
+    #[test]
+    fn strict_discovery_does_not_resolve_an_explicit_missing_resource() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("main.typ"), "#read(\"resource.bin\")").unwrap();
+
+        let (reference, calls) = MemoryProjectFile::tracked("resource.bin", b"external".to_vec());
+        let result = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .external_resource("resource.bin")
+            .external_resource_reference(reference)
+            .pack();
+
+        assert!(matches!(result, Err(PackerError::Compile { .. })));
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn discovery_does_not_mask_a_non_missing_primary_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(project.join("resource.bin")).unwrap();
+        fs::write(project.join("main.typ"), "#read(\"resource.bin\")").unwrap();
+
+        let (reference, calls) = MemoryProjectFile::tracked("resource.bin", b"external".to_vec());
+        let result = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .project_resource_policy(ProjectResourcePolicy::AllowExternalFallback)
+            .external_resource_reference(reference)
+            .pack();
+
+        assert!(matches!(result, Err(PackerError::Compile { .. })));
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 
     #[cfg(unix)]
@@ -1114,7 +1748,7 @@ Rows: #csv("data.csv").len()
         let outcome = Packer::new(&project, "main.typ")
             .system_fonts(false)
             .project_resource_policy(ProjectResourcePolicy::AllowExternalFallback)
-            .external_resource_loader(loader)
+            .external_resource_reference(loader)
             .pack()
             .unwrap();
         writer.join().unwrap();
@@ -1136,7 +1770,7 @@ Rows: #csv("data.csv").len()
         let mut outcome = Packer::new(&project, "main.typ")
             .system_fonts(false)
             .project_resource_policy(ProjectResourcePolicy::AllowExternalFallback)
-            .external_resource_loader(BlockingProjectFile {
+            .external_resource_reference(BlockingProjectFile {
                 path: "external.typ".to_owned(),
                 data: Bytes::new(b"#let injected = true".to_vec()),
                 entered: Arc::clone(&raw_entered),
@@ -1175,6 +1809,45 @@ Rows: #csv("data.csv").len()
         });
     }
 
+    #[test]
+    fn concurrent_successful_discovery_fallback_records_one_provenance_entry() {
+        let entered = Arc::new(std::sync::Barrier::new(3));
+        let release = Arc::new(std::sync::Barrier::new(3));
+        let discovery = crate::external_resource::Discovery::new(
+            vec![Box::new(BlockingProjectFile {
+                path: "shared.bin".to_owned(),
+                data: Bytes::new(b"external".to_vec()),
+                entered: Arc::clone(&entered),
+                release: Arc::clone(&release),
+            })],
+            true,
+            std::collections::BTreeSet::new(),
+        );
+        let id = project_file_id("shared.bin");
+
+        std::thread::scope(|scope| {
+            let first = scope.spawn(|| {
+                discovery.file(id, || Err(FileError::NotFound(PathBuf::from("shared.bin"))))
+            });
+            let second = scope.spawn(|| {
+                discovery.file(id, || Err(FileError::NotFound(PathBuf::from("shared.bin"))))
+            });
+            entered.wait();
+            release.wait();
+
+            assert_eq!(
+                first.join().unwrap().unwrap(),
+                Bytes::new(b"external".to_vec())
+            );
+            assert_eq!(
+                second.join().unwrap().unwrap(),
+                Bytes::new(b"external".to_vec())
+            );
+        });
+
+        assert_eq!(discovery.external_resources(), vec!["shared.bin"]);
+    }
+
     #[cfg(feature = "embedded-fonts")]
     #[test]
     fn packed_project_compiles_offline() {
@@ -1183,7 +1856,7 @@ Rows: #csv("data.csv").len()
 
         // Round-trip through bytes: nothing may depend on the file system.
         let pack = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
-        let world = PackWorld::builder(pack).build().unwrap();
+        let world = PackWorld::builder(pack).build();
         let output = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap();
         assert!(output.artifacts[0].bytes().starts_with(b"%PDF"));
     }
@@ -1205,7 +1878,7 @@ Rows: #csv("data.csv").len()
         let pack = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
 
         // Without a loader, compilation must fail...
-        let world = PackWorld::builder(pack.clone()).build().unwrap();
+        let world = PackWorld::builder(pack.clone()).build();
         let error = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap_err();
         let CompileError::Diagnostics { errors, .. } = error else {
             panic!("unvendored package did not produce a compilation diagnostic");
@@ -1228,10 +1901,7 @@ Rows: #csv("data.csv").len()
             None,
             UniversePackages::new(SystemDownloader::new("typst-pack-test")),
         ));
-        let world = PackWorld::builder(pack)
-            .package_loader(loader)
-            .build()
-            .unwrap();
+        let world = PackWorld::builder(pack).package_loader(loader).build();
         let output = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap();
         assert!(output.artifacts[0].bytes().starts_with(b"%PDF"));
     }
@@ -1263,7 +1933,7 @@ Rows: #csv("data.csv").len()
         assert!(!full.pack.fonts().is_empty());
         // The embedded fonts must load again from the pack.
         let pack = Pack::from_bytes(full.pack.to_bytes().unwrap()).unwrap();
-        PackWorld::builder(pack).build().unwrap();
+        PackWorld::builder(pack).build();
     }
 
     #[test]
@@ -1314,14 +1984,13 @@ fn html_output_is_gated_by_the_html_feature() {
         .unwrap();
 
     // Without the feature, Typst itself rejects HTML export.
-    let world = PackWorld::builder(pack.clone()).build().unwrap();
+    let world = PackWorld::builder(pack.clone()).build();
     assert!(compile(&world, OutputFormat::Html, &CompileOptions::default()).is_err());
 
     // With the feature, it produces a document plus an "experimental" warning.
     let world = PackWorld::builder(pack)
         .feature(typst::Feature::Html)
-        .build()
-        .unwrap();
+        .build();
     let output = compile(&world, OutputFormat::Html, &CompileOptions::default()).unwrap();
     let html = std::str::from_utf8(output.artifacts[0].bytes()).unwrap();
     assert!(html.contains("<html"));
