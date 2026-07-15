@@ -678,7 +678,7 @@ Rows: #csv("data.csv").len()
 
         let outcome = Packer::new(&project, "main.typ")
             .system_fonts(false)
-            .project_resource_policy(ProjectResourcePolicy::AllowExternalProjectResources)
+            .project_resource_policy(ProjectResourcePolicy::AllowExternalFallback)
             .external_resource_loader(MemoryProjectFile::new("assets/logo.png", tiny_png()))
             .pack()
             .unwrap();
@@ -807,7 +807,7 @@ Rows: #csv("data.csv").len()
     }
 
     #[test]
-    fn discovery_policy_keeps_source_project_resources_authoritative() {
+    fn discovery_policy_keeps_source_project_files_authoritative() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
         fs::create_dir_all(project.join("assets")).unwrap();
@@ -831,7 +831,7 @@ Rows: #csv("data.csv").len()
             MemoryProjectFile::tracked("assets/logo.png", b"not the packed image".to_vec());
         let outcome = Packer::new(&project, "main.typ")
             .system_fonts(false)
-            .project_resource_policy(ProjectResourcePolicy::AllowExternalProjectResources)
+            .project_resource_policy(ProjectResourcePolicy::AllowExternalFallback)
             .external_resource_loader(fallback)
             .pack()
             .unwrap();
@@ -882,7 +882,7 @@ Rows: #csv("data.csv").len()
         );
         let outcome = Packer::new(&project, "main.typ")
             .system_fonts(false)
-            .project_resource_policy(ProjectResourcePolicy::AllowExternalProjectResources)
+            .project_resource_policy(ProjectResourcePolicy::AllowExternalFallback)
             .external_resource_loader(loader)
             .pack()
             .unwrap();
@@ -900,36 +900,47 @@ Rows: #csv("data.csv").len()
         fs::create_dir_all(&project).unwrap();
         fs::write(project.join("main.typ"), "#rect(width: 1pt, height: 1pt)").unwrap();
 
-        let entered = Arc::new(std::sync::Barrier::new(2));
-        let release = Arc::new(std::sync::Barrier::new(2));
-        let outcome = Packer::new(&project, "main.typ")
+        let raw_entered = Arc::new(std::sync::Barrier::new(2));
+        let raw_release = Arc::new(std::sync::Barrier::new(2));
+        let mut outcome = Packer::new(&project, "main.typ")
             .system_fonts(false)
-            .project_resource_policy(ProjectResourcePolicy::AllowExternalProjectResources)
+            .project_resource_policy(ProjectResourcePolicy::AllowExternalFallback)
             .external_resource_loader(BlockingProjectFile {
                 path: "external.typ".to_owned(),
                 data: Bytes::new(b"#let injected = true".to_vec()),
-                entered: Arc::clone(&entered),
-                release: Arc::clone(&release),
+                entered: Arc::clone(&raw_entered),
+                release: Arc::clone(&raw_release),
             })
             .pack()
             .unwrap();
         let id = project_file_id("external.typ");
+        let source_entered = Arc::new(std::sync::Barrier::new(2));
+        let source_release = Arc::new(std::sync::Barrier::new(2));
+        outcome.world.set_source_request_hook({
+            let source_entered = Arc::clone(&source_entered);
+            let source_release = Arc::clone(&source_release);
+            move |source_id| {
+                if source_id == id {
+                    source_entered.wait();
+                    source_release.wait();
+                }
+            }
+        });
 
         std::thread::scope(|scope| {
             let file = scope.spawn(|| outcome.world.file(id));
-            entered.wait();
-            let releaser = scope.spawn(|| {
-                // Let source() contend with the paused raw-file request before it completes.
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                release.wait();
-            });
+            raw_entered.wait();
+            let source = scope.spawn(|| outcome.world.source(id));
+            source_entered.wait();
+
+            raw_release.wait();
+            assert!(file.join().unwrap().is_ok());
+            source_release.wait();
 
             assert!(matches!(
-                outcome.world.source(id),
+                source.join().unwrap(),
                 Err(FileError::NotFound(_))
             ));
-            assert!(file.join().unwrap().is_ok());
-            releaser.join().unwrap();
         });
     }
 

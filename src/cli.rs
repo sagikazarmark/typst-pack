@@ -309,8 +309,7 @@ fn create(args: CreateArgs) -> Result<(), String> {
         packer = packer.include(path);
     }
     if !args.resource_paths.is_empty() {
-        packer =
-            packer.project_resource_policy(ProjectResourcePolicy::AllowExternalProjectResources);
+        packer = packer.project_resource_policy(ProjectResourcePolicy::AllowExternalFallback);
     }
     for path in &args.resource_paths {
         packer = packer.external_resource_loader(ProjectResourceRoot::new(path.clone()));
@@ -362,7 +361,7 @@ fn create(args: CreateArgs) -> Result<(), String> {
 
     let report = &outcome.report;
     println!(
-        "packed {} project resource(s), {} package(s), {} font(s) into `{}`",
+        "packed {} project file(s), {} package(s), {} font(s) into `{}`",
         report.files.len(),
         report.packages_vendored.len(),
         report.fonts.len(),
@@ -408,7 +407,7 @@ fn inspect(args: InspectArgs) -> Result<(), String> {
         }
     }
 
-    println!("\npacked project resources:");
+    println!("\npacked project files:");
     for (path, data) in pack.files() {
         println!("  {path} ({})", human_size(data.len()));
     }

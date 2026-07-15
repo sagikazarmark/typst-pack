@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use ecow::EcoVec;
 use typst::diag::{FileError, FileResult, SourceDiagnostic, Warned};
@@ -30,23 +30,21 @@ use crate::world::load_external_resource;
 /// The user agent used when downloading packages from Typst Universe.
 const USER_AGENT: &str = concat!("typst-pack/", env!("CARGO_PKG_VERSION"));
 
-/// Controls whether discovery may load project resources from outside the source project.
+/// Controls whether discovery may fall back to External Project Resource loaders.
 #[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
 pub enum ProjectResourcePolicy {
-    /// Missing project resources cannot fall back to external loaders.
-    ///
-    /// Source-project resources are packed unless they are explicitly declared external.
+    /// Missing project files cannot fall back to external loaders.
     #[default]
-    RequirePackedProjectResources,
+    DisallowExternalFallback,
     /// Missing non-source resources may come from configured external loaders.
-    AllowExternalProjectResources,
+    AllowExternalFallback,
 }
 
 /// Packs a Typst project directory into a [`Pack`].
 ///
 /// The packer performs a discovery compile of the project and records every
 /// file Typst actually reads. Source-project files are packed by default.
-/// When [`AllowExternalProjectResources`](ProjectResourcePolicy::AllowExternalProjectResources)
+/// When [`AllowExternalFallback`](ProjectResourcePolicy::AllowExternalFallback)
 /// is selected, non-source resources resolved by configured external loaders
 /// are declared in the manifest instead of storing their bytes. Files that a
 /// compile with different inputs or a different date would read are not
@@ -193,7 +191,7 @@ impl Packer {
     /// Adds a loader for External Project Resources used during discovery.
     ///
     /// Loaders are only consulted under
-    /// [`AllowExternalProjectResources`](ProjectResourcePolicy::AllowExternalProjectResources);
+    /// [`AllowExternalFallback`](ProjectResourcePolicy::AllowExternalFallback);
     /// registering one does not change the default strict policy.
     pub fn external_resource_loader(
         mut self,
@@ -269,6 +267,8 @@ impl Packer {
             }),
             fonts,
             time: Time::system(),
+            #[cfg(test)]
+            source_request_hook: None,
         };
 
         // Discovery compile.
@@ -496,7 +496,7 @@ pub struct PackOutcome {
 /// A summary of the compilation contract discovered by a [`Packer`].
 #[derive(Debug, Clone)]
 pub struct PackReport {
-    /// Root-relative paths of the packed project resources.
+    /// Root-relative paths of the packed project files.
     pub files: Vec<String>,
     /// Root-relative paths of observed or explicitly declared External Project Resources.
     pub external_resources: Vec<String>,
@@ -559,12 +559,22 @@ pub struct DiscoveryWorld {
     files: FileStore<DiscoveryLoader>,
     fonts: FontStore,
     time: Time,
+    #[cfg(test)]
+    source_request_hook: Option<Arc<dyn Fn(FileId) + Send + Sync>>,
 }
 
 impl DiscoveryWorld {
     /// The canonicalized project root.
     pub fn root(&self) -> &Path {
         &self.root
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_source_request_hook(
+        &mut self,
+        hook: impl Fn(FileId) + Send + Sync + 'static,
+    ) {
+        self.source_request_hook = Some(Arc::new(hook));
     }
 }
 
@@ -596,6 +606,10 @@ impl World for DiscoveryWorld {
                 id.vpath().get_without_slash(),
             )));
         }
+        #[cfg(test)]
+        if let Some(hook) = &self.source_request_hook {
+            hook(id);
+        }
         self.sources.source(id)
     }
 
@@ -614,7 +628,7 @@ impl World for DiscoveryWorld {
 
 struct PrimaryLoader {
     system: SystemFiles,
-    cache: Mutex<HashMap<FileId, FileResult<Bytes>>>,
+    cache: Mutex<HashMap<FileId, Arc<OnceLock<FileResult<Bytes>>>>>,
 }
 
 impl PrimaryLoader {
@@ -625,13 +639,11 @@ impl PrimaryLoader {
 
 impl FileLoader for PrimaryLoader {
     fn load(&self, id: FileId) -> FileResult<Bytes> {
-        let mut cache = self.cache.lock().expect("primary file cache lock poisoned");
-        if let Some(result) = cache.get(&id) {
-            return result.clone();
-        }
-        let result = self.system.load(id);
-        cache.insert(id, result.clone());
-        result
+        let entry = {
+            let mut cache = self.cache.lock().expect("primary file cache lock poisoned");
+            Arc::clone(cache.entry(id).or_default())
+        };
+        entry.get_or_init(|| self.system.load(id)).clone()
     }
 }
 
@@ -688,7 +700,7 @@ impl FileLoader for DiscoveryLoader {
             }
             Err(FileError::NotFound(_))
                 if matches!(id.root(), VirtualRoot::Project)
-                    && self.policy == ProjectResourcePolicy::AllowExternalProjectResources =>
+                    && self.policy == ProjectResourcePolicy::AllowExternalFallback =>
             {
                 let data = load_external_resource(&self.external_loaders, id)?;
                 self.external_resources

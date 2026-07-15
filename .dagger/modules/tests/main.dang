@@ -19,6 +19,7 @@ type Tests {
 
     assert { pack.name == "project.typk" }
     assert { output.contains("entrypoint: main.typ") }
+    assert { output.contains("packed project files:") }
     assert { output.contains("main.typ") }
     assert { output.contains("chapters/intro.typ") }
     assert { output.contains("data.csv") }

@@ -83,8 +83,8 @@ whose bytes are supplied externally instead of being stored in the reusable
 pack. This lets one invoice pack use the stable path `assets/logo.png` while a
 different resource root supplies that path for each customer.
 
-Discovery is strict by default: every requested project resource must exist in
-the source project and is packed. Each `--resource-path <DIR>` enables external
+Discovery does not fall back by default: missing project files are not loaded
+from external resource loaders. Each `--resource-path <DIR>` enables external
 resource discovery and acts as another virtual project root. The source project
 is checked first, then resource roots are checked in command-line order. A file
 loaded from a resource root is recorded under `[project].external-resources`
@@ -188,10 +188,10 @@ let world = PackWorld::builder(pack)
 ```
 
 For filesystem discovery, configure
-`ProjectResourcePolicy::AllowExternalProjectResources` and add one or more
-`Packer::external_resource_loader` implementations. Source-project resources
-remain authoritative; successful fallback loads are inferred as External
-Project Resources.
+`ProjectResourcePolicy::AllowExternalFallback` and add one or more
+`Packer::external_resource_loader` implementations. Source-project files are
+checked first; successful fallback loads are inferred as External Project
+Resources.
 
 ### Feature flags
 
