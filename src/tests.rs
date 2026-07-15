@@ -714,6 +714,24 @@ mod fs {
     use std::fs;
     use std::path::Path;
 
+    #[test]
+    fn system_package_loader_rejects_project_requests() {
+        use typst_kit::packages::{FsPackages, SystemPackages, UniversePackages};
+
+        let dir = tempfile::tempdir().unwrap();
+        let packages = SystemPackages::from_parts(
+            Some(FsPackages::new(dir.path().join("packages"))),
+            None,
+            UniversePackages::new(OfflineDownloader),
+        );
+        let loader = SystemPackageLoader(packages);
+
+        assert_eq!(
+            loader.load(project_file_id("project.typ")),
+            Err(FileError::NotFound(PathBuf::from("project.typ")))
+        );
+    }
+
     /// Creates a project directory with an image, a data file, an included
     /// chapter, and an import from a local package, plus the package itself
     /// in a separate directory laid out like a package path.
