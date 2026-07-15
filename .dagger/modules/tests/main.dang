@@ -89,4 +89,35 @@ type Tests {
 
     null
   }
+
+  """
+  Create and compile a pack with ordered External Project Resource roots.
+  """
+  externalProjectResources: Void @check {
+    let source = Dagger.currentModule.source.directory("fixtures/resource-project")
+    let resources = Dagger.currentModule.source.directory("fixtures/resources")
+    let resourcePaths = ["/work/resources/first", "/work/resources/second"]
+    let pack = Dagger.typstPack.create(
+      source: source,
+      resourceDir: resources,
+      resourcePaths: resourcePaths,
+      externalResources: ["branding/conditional.txt"],
+    )
+    let output = Dagger.typstPack.inspect(pack)
+
+    assert { output.contains("external project resources:") }
+    assert { output.contains("branding/name.txt") }
+    assert { output.contains("branding/first-only.txt") }
+    assert { output.contains("branding/conditional.txt") }
+    assert { !output.contains("branding/second-only.txt") }
+
+    let pdf = Dagger.typstPack.compile(
+      pack: pack,
+      resourceDir: resources,
+      resourcePaths: resourcePaths,
+    )
+    assert { pdf.size > 0 }
+
+    null
+  }
 }

@@ -1,7 +1,7 @@
 [package]
 name = "typst-pack"
 version = "0.2.0"
-description = "Portable single-file packs of Typst projects: sources, assets, packages, and fonts"
+description = "Portable single-file packs of Typst projects: sources, resources, packages, and fonts"
 edition = "2024"
 rust-version = "1.92"
 license = "MIT OR Apache-2.0"

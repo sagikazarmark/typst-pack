@@ -7,10 +7,12 @@
 
 **Portable single-file packs of [Typst](https://typst.app) projects.**
 
-A *pack* (`.typk`) contains everything needed to compile one Typst project:
+A *pack* (`.typk`) captures the compilation contract of one Typst project:
 
-- the project files: the entrypoint, other Typst sources, images, and data
-  files,
+- the packed project files: the entrypoint, other Typst sources, images, and
+  data files,
+- optionally External Project Resource paths whose bytes are supplied when
+  requested instead of being stored in the reusable pack,
 - optionally the files of the [Typst Universe](https://typst.app/universe)
   packages the project imports, so compiling needs no network access,
 - optionally the fonts the document uses, so compiling produces identical
@@ -38,6 +40,10 @@ typst-pack inspect project.typk
 
 # Compile a pack without network access:
 typst-pack compile project.typk output.pdf
+
+# Discover a resource outside the source project, then supply it when compiling:
+typst-pack create invoice/ --resource-path representative-branding/ -o invoice.typk
+typst-pack compile invoice.typk customer.pdf --resource-path customer-branding/
 
 # PNG or SVG output, page selection, reproducible builds:
 typst-pack compile project.typk "page-{0p}.png" --ppi 300 --pages 1-3
@@ -68,6 +74,37 @@ manifest, not to be confused with the pack's `typst-pack.toml`) is always
 packed as a regular project file, even though compiles don't read it. That
 way template and package metadata survives the round trip through
 `create` and `extract`.
+
+### External Project Resources
+
+An **External Project Resource** is a non-source resource addressed through
+Typst's project root whose path belongs to a pack's compilation contract, but
+whose bytes are supplied externally instead of being stored in the reusable
+pack. This lets one invoice pack use the stable path `assets/logo.png` while a
+different resource root supplies that path for each customer.
+
+Discovery is strict by default: every requested project resource must exist in
+the source project and is packed. Each `--resource-path <DIR>` enables external
+resource discovery and acts as another virtual project root. The source project
+is checked first, then resource roots are checked in command-line order. A file
+loaded from a resource root is recorded under `[project].external-resources`
+and its bytes are omitted from the archive.
+
+Use `--external-resource <PATH>` during creation when a representative file is
+present in the source project but should be omitted, or when a conditional
+resource is not read by the representative discovery compile. Explicitly
+declared paths are recorded even when discovery does not request them.
+
+At compilation time, repeat `--resource-path` to provide the declared paths.
+Packed project files always win, and undeclared missing paths never fall
+through to these roots. External Project Resource loaders cannot supply Typst
+imports/includes or package files. Loading is lazy: a requested resource that
+is unavailable produces Typst's normal file diagnostic.
+
+Typst 0.15 cannot check whether a path exists, so this version does not provide
+optional-resource detection. Document code that requests an External Project
+Resource must be compiled with that resource available. Inspection shows these
+paths, but extraction does not create files for them.
 
 ### Packages
 
@@ -136,6 +173,26 @@ let pack = Pack::builder("main.typ")
 let bytes = pack.to_bytes()?;
 ```
 
+External Project Resources can also be declared and supplied in memory. The
+loader uses typst-kit's standard synchronous `FileLoader` interface, so callers
+can adapt memory, object storage, or prefetched application data:
+
+```rust,ignore
+let pack = Pack::builder("main.typ")
+    .file("main.typ", source_text.as_bytes().to_vec())?
+    .external_resource("assets/logo.png")?
+    .build()?;
+let world = PackWorld::builder(pack)
+    .external_resource_loader(resource_loader)
+    .build()?;
+```
+
+For filesystem discovery, configure
+`ProjectResourcePolicy::AllowExternalProjectResources` and add one or more
+`Packer::external_resource_loader` implementations. Source-project resources
+remain authoritative; successful fallback loads are inferred as External
+Project Resources.
+
 ### Feature flags
 
 - `fs` *(default)*: [`Packer`], [`extract`], package download and caching,
@@ -163,6 +220,7 @@ format-version = 1
 
 [project]
 entrypoint = "main.typ"
+external-resources = ["assets/logo.png"]
 
 [packages]
 vendored = ["@preview/cetz:0.3.4"]
@@ -181,6 +239,15 @@ Readers ignore unknown top-level archive entries and reject manifests with a
 `format-version` greater than they support. Paths inside the archive are
 validated, root-relative virtual paths, so a pack can never read or write
 outside its own tree.
+
+`external-resources` is an ordered, deduplicated allowlist. Its entries have no
+corresponding `project/` archive entry, and readers reject a path that is both
+packed and declared external. Existing format-version-1 manifests that omit the
+field remain valid and are read as having no External Project Resources.
+
+The format version remains 1. Released older readers reject manifests that use
+`external-resources` because they reject unknown fields; this intentional
+compatibility break does not affect old packs read by newer versions.
 
 ## License
 

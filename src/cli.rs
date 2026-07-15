@@ -9,18 +9,19 @@ use std::process::ExitCode;
 
 use chrono::{Datelike, Timelike};
 use clap::{Args, Parser, Subcommand};
-use typst::diag::SourceDiagnostic;
-use typst::foundations::{Datetime, Dict, IntoValue};
+use typst::diag::{FileError, FileResult, SourceDiagnostic};
+use typst::foundations::{Bytes, Datetime, Dict, IntoValue};
 use typst::syntax::{FileId, VirtualRoot};
 use typst_kit::diagnostics::termcolor::{ColorChoice, StandardStream, WriteColor};
 use typst_kit::diagnostics::{DiagnosticFormat, DiagnosticWorld};
+use typst_kit::files::{FileLoader, FsRoot};
 use typst_pdf::{PdfStandard, PdfStandards, Timestamp};
 
 use crate::compile::{CompileError, CompileOptions, OutputFormat, compile, parse_pages};
 use crate::extract::{ExtractOptions, extract};
 use crate::manifest::Metadata;
 use crate::pack::{FILE_EXTENSION, Pack};
-use crate::packer::{DiscoveryWorld, Packer, PackerError};
+use crate::packer::{DiscoveryWorld, Packer, PackerError, ProjectResourcePolicy};
 use crate::world::{PackWorld, PackWorldError, SystemPackageLoader};
 
 /// Pack, inspect, extract, and compile portable Typst project packs.
@@ -78,6 +79,14 @@ struct CreateArgs {
     /// beyond what the discovery compile finds.
     #[arg(long = "include", value_name = "PATH")]
     include: Vec<PathBuf>,
+
+    /// Directories that act as roots for External Project Resources during discovery.
+    #[arg(long = "resource-path", value_name = "DIR")]
+    resource_paths: Vec<PathBuf>,
+
+    /// Root-relative resource paths to declare as external even if discovery does not load them.
+    #[arg(long = "external-resource", value_name = "PATH")]
+    external_resources: Vec<String>,
 
     /// String key-value pairs visible through `sys.inputs` during the
     /// discovery compile.
@@ -191,6 +200,10 @@ struct CompileArgs {
     #[arg(long = "input", value_name = "KEY=VALUE")]
     inputs: Vec<String>,
 
+    /// Directories that act as roots for External Project Resources.
+    #[arg(long = "resource-path", value_name = "DIR")]
+    resource_paths: Vec<PathBuf>,
+
     /// Additional directories to search for fonts.
     #[arg(long = "font-path", value_name = "DIR")]
     font_paths: Vec<PathBuf>,
@@ -295,6 +308,16 @@ fn create(args: CreateArgs) -> Result<(), String> {
     for path in &args.include {
         packer = packer.include(path);
     }
+    if !args.resource_paths.is_empty() {
+        packer =
+            packer.project_resource_policy(ProjectResourcePolicy::AllowExternalProjectResources);
+    }
+    for path in &args.resource_paths {
+        packer = packer.external_resource_loader(ProjectResourceRoot::new(path.clone()));
+    }
+    for path in args.external_resources {
+        packer = packer.external_resource(path);
+    }
     for path in &args.font_paths {
         packer = packer.font_path(path);
     }
@@ -339,8 +362,8 @@ fn create(args: CreateArgs) -> Result<(), String> {
 
     let report = &outcome.report;
     println!(
-        "packed {} file(s), {} package(s), {} font(s) into `{}`",
-        report.files.len(),
+        "packed {} project resource(s), {} package(s), {} font(s) into `{}`",
+        report.packed_resources().len(),
         report.packages_vendored.len(),
         report.fonts.len(),
         output.display(),
@@ -352,6 +375,15 @@ fn create(args: CreateArgs) -> Result<(), String> {
         );
         for spec in &report.packages_external {
             println!("  {spec}");
+        }
+    }
+    if !report.external_resources.is_empty() {
+        println!(
+            "note: {} External Project Resource path(s) are declared and must be supplied if requested:",
+            report.external_resources.len()
+        );
+        for path in &report.external_resources {
+            println!("  {path}");
         }
     }
     Ok(())
@@ -376,9 +408,16 @@ fn inspect(args: InspectArgs) -> Result<(), String> {
         }
     }
 
-    println!("\nproject files:");
+    println!("\npacked project resources:");
     for (path, data) in pack.files() {
         println!("  {path} ({})", human_size(data.len()));
+    }
+
+    if !manifest.project.external_resources.is_empty() {
+        println!("\nexternal project resources:");
+        for path in &manifest.project.external_resources {
+            println!("  {path}");
+        }
     }
 
     let vendored: Vec<_> = pack.packages().collect();
@@ -491,6 +530,9 @@ fn compile_command(args: CompileArgs) -> Result<(), String> {
         ));
     if args.features.iter().any(|feature| feature == "html") {
         builder = builder.feature(typst::Feature::Html);
+    }
+    for path in &args.resource_paths {
+        builder = builder.external_resource_loader(ProjectResourceRoot::new(path.clone()));
     }
     builder = match creation_timestamp {
         Some(datetime) => builder.fixed_date(datetime),
@@ -653,6 +695,25 @@ fn system_package_loader(
         )))
     };
     SystemPackageLoader(SystemPackages::from_parts(data, cache, universe))
+}
+
+struct ProjectResourceRoot(FsRoot);
+
+impl ProjectResourceRoot {
+    fn new(root: PathBuf) -> Self {
+        Self(FsRoot::new(root))
+    }
+}
+
+impl FileLoader for ProjectResourceRoot {
+    fn load(&self, id: FileId) -> FileResult<Bytes> {
+        match id.root() {
+            VirtualRoot::Project => self.0.load(id.vpath()),
+            VirtualRoot::Package(_) => Err(FileError::NotFound(PathBuf::from(
+                id.vpath().get_without_slash(),
+            ))),
+        }
+    }
 }
 
 fn parse_pdf_standard(name: &str) -> Result<PdfStandard, String> {
