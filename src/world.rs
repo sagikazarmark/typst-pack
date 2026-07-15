@@ -240,7 +240,7 @@ impl PackWorldBuilder {
 
     /// Adds fonts on top of the ones embedded in the pack.
     ///
-    /// These rank behind pack fonts but before embedded default fonts, so use
+    /// These rank behind pack fonts but before Typst's embedded fonts, so use
     /// this for system fonts or other host-provided fonts. Accepts the same
     /// `(source, info)` entries yielded by the `typst_kit::fonts` providers,
     /// so fonts are only loaded into memory when actually used.

@@ -78,6 +78,11 @@ typst-pack compile project.typk out.html --features html
 typst-pack extract project.typk -o project/
 ```
 
+For Page Formats, `{p}` and `{0p}` expand from the original one-based Source
+Page Number, while `{t}` is the number of emitted artifacts. All target paths
+are expanded and checked for duplicates before writing, so one artifact cannot
+overwrite another from the same compilation.
+
 ### How files are discovered
 
 `create` runs a *discovery compile* of the project and records every file
@@ -128,8 +133,8 @@ paths, but extraction does not create files for them.
 ### Packages
 
 All observed package dependencies are vendored into the pack by default.
-With `--no-packages`, they are instead recorded as *external* dependencies in
-the manifest; compiling such a pack resolves them from the local package
+With `--no-packages`, they are instead recorded as *unvendored* dependencies in
+the Pack Manifest; compiling such a pack resolves them from the local package
 directories or downloads them from Typst Universe, like the Typst CLI would.
 
 `--offline` (on both `create` and `compile`) disables the download step
@@ -141,33 +146,41 @@ self-contained.
 ### Fonts
 
 Fonts are *not* embedded by default. With `--embed-fonts`, the fonts used by
-the rendered document are stored in the pack, except fonts identical to
-Typst's embedded defaults (Libertinus Serif, New Computer Modern, Deja Vu
-Sans Mono). Consumers need the `embedded-fonts` feature to supply omitted
-defaults; pass `--include-default-fonts` to make the pack independent of that
-feature. Mind font licenses when redistributing packs with embedded fonts.
+the rendered document are stored in the pack, except fonts identical to Typst's
+embedded fonts (Libertinus Serif, New Computer Modern, Deja Vu Sans Mono).
+Consumers need the `embedded-fonts` feature to supply omitted fonts; pass
+`--include-typst-embedded-fonts` to make the pack independent of that feature.
+Mind font licenses when redistributing packs with embedded fonts.
 
 When compiling a pack, fonts are used in this order of preference:
-pack fonts, `--font-path` fonts, system fonts, and embedded default fonts
+pack fonts, `--font-path` fonts, system fonts, and Typst's embedded fonts
 (disable system fonts with `--ignore-system-fonts`).
 
 ### Output formats
 
-`compile` produces PDF (default), PNG, and SVG. HTML export is also
-supported but experimental in Typst itself; like the Typst CLI, it must be
-enabled explicitly with `--features html` (or `TYPST_FEATURES=html`), and
-Typst emits a warning that its behavior may change. In the library, enable
-it with `PackWorldBuilder::feature(typst::Feature::Html)` and compile with
+PDF and HTML are Document Formats and produce one Compilation Output Artifact
+without a Source Page Number. PNG and SVG are Page Formats and produce one
+artifact per selected source page. Page artifacts retain their original Source
+Page Number and are emitted once each in source-document order.
+
+HTML export is experimental in Typst itself; like the Typst CLI, it must be
+enabled explicitly with `--features html` (or `TYPST_FEATURES=html`), and Typst
+emits a warning that its behavior may change. In the library, enable it with
+`PackWorldBuilder::feature(typst::Feature::Html)` and compile with
 `OutputFormat::Html`.
+
+The Dagger `compile` function returns a directory for every format. Document
+Formats use `output.pdf` or `output.html`; Page Formats use deterministic names
+such as `page-2.png`, derived from Source Page Numbers.
 
 ## Library
 
-Add the crate with filesystem-backed packing support and Typst's default
+Add the crate with filesystem-backed packing support and Typst's embedded
 fonts:
 
 ```toml
 [dependencies]
-typst-pack = { version = "0.3", features = ["embedded-fonts", "fs"] }
+typst-pack = { version = "0.4", features = ["embedded-fonts", "fs"] }
 ```
 
 The core in-memory packing and compilation APIs require no crate features.
@@ -184,10 +197,16 @@ let bytes = outcome.pack.to_bytes()?;
 // ... ship the bytes somewhere, then compile without a file system:
 let pack = Pack::from_bytes(bytes)?;
 let world = PackWorld::builder(pack).build()?;
-let pdf = compile(&world, OutputFormat::Pdf, &CompileOptions::default())?
-    .outputs
-    .remove(0);
+let output = compile(&world, OutputFormat::Pdf, &CompileOptions::default())?;
+let artifact = output.artifacts.into_iter().next().expect("PDF artifact");
+assert_eq!(artifact.format(), OutputFormat::Pdf);
+assert_eq!(artifact.source_page_number(), None);
+let pdf = artifact.into_bytes();
 ```
+
+For PNG and SVG, `source_page_number()` identifies each artifact independently
+of its collection position. `bytes()` borrows the artifact bytes and
+`into_bytes()` extracts them without cloning.
 
 Packs can also be assembled fully in memory, with no file system involved, which
 is what a web editor wants:
@@ -228,7 +247,7 @@ Resources.
   system font scanning. Requires a file system, so disable this (and `cli`)
   for wasm targets.
 - `cli`: the `typst-pack` binary.
-- `embedded-fonts`: compile packs against Typst's default fonts.
+- `embedded-fonts`: compile packs against Typst's embedded fonts.
 
 All crate features are opt-in.
 
@@ -279,6 +298,8 @@ field remain valid and are read as having no External Project Resources.
 The format version remains 1. Released older readers reject manifests that use
 `external-resources` because they reject unknown fields; this intentional
 compatibility break does not affect old packs read by newer versions.
+Unvendored package specs retain the historical `[packages].external` key for
+format compatibility.
 
 ## Development
 

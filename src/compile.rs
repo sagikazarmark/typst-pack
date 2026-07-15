@@ -1,15 +1,16 @@
-//! Compiling a pack into output documents.
+//! Compiling a pack into Compilation Output Artifacts.
 
 use std::num::NonZeroUsize;
 
 use ecow::EcoVec;
 use typst::World;
 use typst::diag::{SourceDiagnostic, Warned};
+use typst::syntax::Span;
 use typst_html::HtmlDocument;
 use typst_layout::PagedDocument;
 use typst_pdf::{PdfOptions, PdfStandards, Timestamp};
 
-/// The output formats a pack can be compiled to.
+/// The Document Formats and Page Formats a pack can be compiled to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum OutputFormat {
     Pdf,
@@ -37,11 +38,8 @@ impl OutputFormat {
 /// Options for [`compile`].
 #[derive(Debug, Clone, Default)]
 pub struct CompileOptions {
-    /// Which pages to export. All pages if empty.
-    ///
-    /// Ranges are one-indexed and inclusive, with open ends allowed, matching
-    /// `typst compile --pages`.
-    pub pages: Vec<PageRange>,
+    /// Which source pages to export.
+    pub page_selection: PageSelection,
     /// Pixels per inch for PNG output. Defaults to 144.
     pub ppi: Option<f32>,
     /// PDF standards to enforce.
@@ -54,8 +52,40 @@ pub struct CompileOptions {
 /// A one-indexed, inclusive page range with optional open ends.
 pub type PageRange = std::ops::RangeInclusive<Option<NonZeroUsize>>;
 
-/// Parses a `--pages`-style page selection like `1,3-5,9-`.
-pub fn parse_pages(text: &str) -> Result<Vec<PageRange>, String> {
+/// A selection of one-indexed source page ranges.
+///
+/// An empty range collection selects all source pages. Ranges are inclusive
+/// and may have open ends.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PageSelection {
+    ranges: Vec<PageRange>,
+}
+
+impl PageSelection {
+    /// Selects all source pages.
+    pub fn all() -> Self {
+        Self::default()
+    }
+
+    /// Selects the union of the given source page ranges.
+    ///
+    /// An empty collection selects all source pages.
+    pub fn new(ranges: Vec<PageRange>) -> Self {
+        Self { ranges }
+    }
+
+    /// The selected source page ranges.
+    pub fn ranges(&self) -> &[PageRange] {
+        &self.ranges
+    }
+
+    fn typst_page_ranges(&self) -> Option<typst::layout::PageRanges> {
+        (!self.ranges.is_empty()).then(|| typst::layout::PageRanges::new(self.ranges.clone()))
+    }
+}
+
+/// Parses a textual page selection like `1,3-5,9-`.
+pub fn parse_page_selection(text: &str) -> Result<PageSelection, String> {
     text.split(',')
         .map(|part| {
             let part = part.trim();
@@ -75,17 +105,47 @@ pub fn parse_pages(text: &str) -> Result<Vec<PageRange>, String> {
                 }
             }
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()
+        .map(PageSelection::new)
+}
+
+/// One file produced by compiling a pack.
+#[derive(Debug, Clone)]
+pub struct CompilationArtifact {
+    format: OutputFormat,
+    bytes: Vec<u8>,
+    source_page_number: Option<NonZeroUsize>,
+}
+
+impl CompilationArtifact {
+    /// The format of this artifact.
+    pub fn format(&self) -> OutputFormat {
+        self.format
+    }
+
+    /// The one-based physical source page for a Page Format artifact.
+    ///
+    /// Document Format artifacts have no single Source Page Number.
+    pub fn source_page_number(&self) -> Option<NonZeroUsize> {
+        self.source_page_number
+    }
+
+    /// Borrows the artifact bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// Extracts the owned artifact bytes.
+    pub fn into_bytes(self) -> Vec<u8> {
+        self.bytes
+    }
 }
 
 /// The result of compiling a pack.
 #[derive(Debug, Clone)]
-pub struct CompileOutput {
-    /// The produced format.
-    pub format: OutputFormat,
-    /// The output documents: exactly one buffer for PDF, one buffer per
-    /// exported page for PNG and SVG.
-    pub outputs: Vec<Vec<u8>>,
+pub struct CompilationOutput {
+    /// The produced Compilation Output Artifacts.
+    pub artifacts: Vec<CompilationArtifact>,
     /// Warnings emitted during compilation.
     pub warnings: EcoVec<SourceDiagnostic>,
 }
@@ -100,8 +160,19 @@ pub enum CompileError {
         errors: EcoVec<SourceDiagnostic>,
         warnings: EcoVec<SourceDiagnostic>,
     },
-    #[error("PNG encoding failed: {0}")]
-    PngEncoding(String),
+    /// A paged compilation selected no source pages.
+    #[error("page selection matched no source pages")]
+    NoMatchingSourcePages {
+        /// Warnings emitted before page selection was validated.
+        warnings: EcoVec<SourceDiagnostic>,
+    },
+    /// PNG export failed after compilation completed.
+    #[error("PNG export failed: {message}")]
+    PngExport {
+        message: String,
+        /// Warnings emitted before PNG export failed.
+        warnings: EcoVec<SourceDiagnostic>,
+    },
 }
 
 /// Compiles the world's document and exports it in the requested format.
@@ -112,7 +183,7 @@ pub fn compile(
     world: &dyn World,
     format: OutputFormat,
     options: &CompileOptions,
-) -> Result<CompileOutput, CompileError> {
+) -> Result<CompilationOutput, CompileError> {
     if format == OutputFormat::Html {
         let Warned { output, warnings } = typst::compile::<HtmlDocument>(world);
         let document = output.map_err(|errors| CompileError::Diagnostics {
@@ -126,28 +197,44 @@ pub fn compile(
                     warnings: warnings.clone(),
                 }
             })?;
-        return Ok(CompileOutput {
-            format,
-            outputs: vec![html.into_bytes()],
+        return Ok(CompilationOutput {
+            artifacts: vec![CompilationArtifact {
+                format,
+                bytes: html.into_bytes(),
+                source_page_number: None,
+            }],
             warnings,
         });
     }
 
-    let Warned { output, warnings } = typst::compile::<PagedDocument>(world);
+    let Warned {
+        output,
+        mut warnings,
+    } = typst::compile::<PagedDocument>(world);
     let document = output.map_err(|errors| CompileError::Diagnostics {
         errors,
         warnings: warnings.clone(),
     })?;
+    if format == OutputFormat::Pdf && !options.page_selection.ranges().is_empty() {
+        warnings.push(SourceDiagnostic::warning(
+            Span::detached(),
+            "using page selection disables PDF tags",
+        ));
+    }
+    if selected_pages(&document, options).next().is_none() {
+        return Err(CompileError::NoMatchingSourcePages { warnings });
+    }
 
-    let outputs = match format {
+    let artifacts = match format {
         OutputFormat::Pdf => {
             let timestamp = options
                 .creation_timestamp
                 .or_else(|| world.today(None).map(Timestamp::new_utc));
             let pdf_options = PdfOptions {
                 timestamp,
-                page_ranges: page_ranges(options),
+                page_ranges: options.page_selection.typst_page_ranges(),
                 standards: options.pdf_standards.clone(),
+                tagged: options.page_selection.ranges().is_empty(),
                 ..Default::default()
             };
             let pdf = typst_pdf::pdf(&document, &pdf_options).map_err(|errors| {
@@ -156,7 +243,11 @@ pub fn compile(
                     warnings: warnings.clone(),
                 }
             })?;
-            vec![pdf]
+            vec![CompilationArtifact {
+                format,
+                bytes: pdf,
+                source_page_number: None,
+            }]
         }
         OutputFormat::Png => {
             let ppi = options.ppi.unwrap_or(144.0);
@@ -165,38 +256,45 @@ pub fn compile(
                 ..Default::default()
             };
             selected_pages(&document, options)
-                .map(|page| {
-                    typst_render::render(page, &render_options)
+                .map(|(source_page_number, page)| {
+                    let bytes = typst_render::render(page, &render_options)
                         .encode_png()
-                        .map_err(|err| CompileError::PngEncoding(err.to_string()))
+                        .map_err(|err| CompileError::PngExport {
+                            message: err.to_string(),
+                            warnings: warnings.clone(),
+                        })?;
+                    Ok(CompilationArtifact {
+                        format,
+                        bytes,
+                        source_page_number: Some(source_page_number),
+                    })
                 })
                 .collect::<Result<Vec<_>, _>>()?
         }
         OutputFormat::Svg => {
             let svg_options = typst_svg::SvgOptions::default();
             selected_pages(&document, options)
-                .map(|page| typst_svg::svg(page, &svg_options).into_bytes())
+                .map(|(source_page_number, page)| CompilationArtifact {
+                    format,
+                    bytes: typst_svg::svg(page, &svg_options).into_bytes(),
+                    source_page_number: Some(source_page_number),
+                })
                 .collect()
         }
         OutputFormat::Html => unreachable!("handled above"),
     };
 
-    Ok(CompileOutput {
-        format,
-        outputs,
+    Ok(CompilationOutput {
+        artifacts,
         warnings,
     })
-}
-
-fn page_ranges(options: &CompileOptions) -> Option<typst::layout::PageRanges> {
-    (!options.pages.is_empty()).then(|| typst::layout::PageRanges::new(options.pages.clone()))
 }
 
 fn selected_pages<'a>(
     document: &'a PagedDocument,
     options: &'a CompileOptions,
-) -> impl Iterator<Item = &'a typst_layout::Page> {
-    let ranges = page_ranges(options);
+) -> impl Iterator<Item = (NonZeroUsize, &'a typst_layout::Page)> {
+    let ranges = options.page_selection.typst_page_ranges();
     document
         .pages()
         .iter()
@@ -206,5 +304,5 @@ fn selected_pages<'a>(
                 NonZeroUsize::new(index + 1).is_some_and(|number| ranges.includes_page(number))
             })
         })
-        .map(|(_, page)| page)
+        .map(|(index, page)| (NonZeroUsize::new(index + 1).unwrap(), page))
 }

@@ -17,9 +17,12 @@ use typst_kit::diagnostics::{DiagnosticFormat, DiagnosticWorld};
 use typst_kit::files::{FileLoader, FsRoot};
 use typst_pdf::{PdfStandard, PdfStandards, Timestamp};
 
-use crate::compile::{CompileError, CompileOptions, OutputFormat, compile, parse_pages};
+use crate::compile::{
+    CompilationArtifact, CompileError, CompileOptions, OutputFormat, PageSelection, compile,
+    parse_page_selection,
+};
 use crate::extract::{ExtractOptions, extract};
-use crate::manifest::Metadata;
+use crate::manifest::PackMetadata;
 use crate::pack::{FILE_EXTENSION, Pack};
 use crate::packer::{DiscoveryWorld, Packer, PackerError, ProjectResourcePolicy};
 use crate::world::{PackWorld, PackWorldError, SystemPackageLoader};
@@ -40,7 +43,7 @@ enum Command {
     Inspect(InspectArgs),
     /// Extracts a pack into a directory.
     Extract(ExtractArgs),
-    /// Compiles a pack to PDF, PNG, or SVG.
+    /// Compiles a pack to PDF, PNG, SVG, or HTML.
     Compile(CompileArgs),
 }
 
@@ -61,7 +64,7 @@ struct CreateArgs {
     #[arg(long)]
     root: Option<PathBuf>,
 
-    /// Do not store package files in the pack; record them as external
+    /// Do not store package files in the pack; record them as unvendored
     /// dependencies instead.
     #[arg(long)]
     no_packages: bool,
@@ -70,10 +73,10 @@ struct CreateArgs {
     #[arg(long)]
     embed_fonts: bool,
 
-    /// When embedding fonts, also embed fonts identical to Typst's default
-    /// embedded fonts.
+    /// When embedding fonts, also embed fonts identical to Typst's embedded
+    /// fonts.
     #[arg(long, requires = "embed_fonts")]
-    include_default_fonts: bool,
+    include_typst_embedded_fonts: bool,
 
     /// Additional files or directories (inside the project root) to pack
     /// beyond what the discovery compile finds.
@@ -168,7 +171,8 @@ struct CompileArgs {
 
     /// Path to the output file. For PNG and SVG output of multi-page
     /// documents, the filename must contain `{p}`, `{0p}`, or `{t}`
-    /// placeholders (page number, zero-padded page number, total pages)
+    /// placeholders (Source Page Number, zero-padded Source Page Number,
+    /// emitted artifact count)
     /// [default: <pack name>.<format extension>].
     output: Option<PathBuf>,
 
@@ -188,7 +192,7 @@ struct CompileArgs {
     )]
     features: Vec<String>,
 
-    /// Which pages to export, e.g. `1,3-5,9-`.
+    /// Which source pages to export, e.g. `1,3-5,9-`.
     #[arg(long)]
     pages: Option<String>,
 
@@ -212,7 +216,7 @@ struct CompileArgs {
     #[arg(long)]
     ignore_system_fonts: bool,
 
-    /// Do not use Typst's embedded default fonts.
+    /// Do not use Typst's embedded fonts.
     #[arg(long)]
     ignore_embedded_fonts: bool,
 
@@ -243,7 +247,8 @@ struct CompileArgs {
     #[arg(long, default_value = "human", value_parser = ["human", "short"])]
     diagnostic_format: String,
 
-    /// Opens the output file with the default viewer after compilation.
+    /// Opens the first Compilation Output Artifact with the default viewer
+    /// after compilation.
     #[arg(long)]
     open: bool,
 }
@@ -301,7 +306,7 @@ fn create(args: CreateArgs) -> Result<(), String> {
     let mut packer = Packer::new(&root, &entrypoint)
         .vendor_packages(!args.no_packages)
         .embed_fonts(args.embed_fonts)
-        .include_default_fonts(args.include_default_fonts)
+        .include_typst_embedded_fonts(args.include_typst_embedded_fonts)
         .system_fonts(!args.ignore_system_fonts)
         .offline(args.offline)
         .inputs(parse_inputs(&args.inputs)?);
@@ -327,7 +332,7 @@ fn create(args: CreateArgs) -> Result<(), String> {
         packer = packer.package_cache_path(path);
     }
     if args.name.is_some() || args.description.is_some() || !args.authors.is_empty() {
-        packer = packer.metadata(Metadata {
+        packer = packer.metadata(PackMetadata {
             name: args.name,
             description: args.description,
             authors: args.authors,
@@ -367,12 +372,12 @@ fn create(args: CreateArgs) -> Result<(), String> {
         report.fonts.len(),
         output.display(),
     );
-    if !report.packages_external.is_empty() {
+    if !report.packages_unvendored.is_empty() {
         println!(
             "note: {} package(s) were not vendored and must be available when compiling:",
-            report.packages_external.len()
+            report.packages_unvendored.len()
         );
-        for spec in &report.packages_external {
+        for spec in &report.packages_unvendored {
             println!("  {spec}");
         }
     }
@@ -429,9 +434,9 @@ fn inspect(args: InspectArgs) -> Result<(), String> {
             println!("  {spec} ({count} files, {})", human_size(size));
         }
     }
-    if !manifest.packages.external.is_empty() {
-        println!("\nexternal packages (not vendored):");
-        for spec in &manifest.packages.external {
+    if !manifest.packages.unvendored.is_empty() {
+        println!("\nunvendored packages:");
+        for spec in &manifest.packages.unvendored {
             println!("  {spec}");
         }
     }
@@ -548,16 +553,31 @@ fn compile_command(args: CompileArgs) -> Result<(), String> {
         .build()
         .map_err(|err: PackWorldError| err.to_string())?;
 
+    let page_selection = match &args.pages {
+        Some(text) => parse_page_selection(text)?,
+        None => PageSelection::all(),
+    };
     let mut standards = Vec::new();
     for name in &args.pdf_standards {
         standards.push(parse_pdf_standard(name)?);
     }
+    if format == OutputFormat::Pdf
+        && !page_selection.ranges().is_empty()
+        && standards.iter().any(|standard| {
+            matches!(
+                standard,
+                PdfStandard::A_1a | PdfStandard::A_2a | PdfStandard::A_3a | PdfStandard::Ua_1
+            )
+        })
+    {
+        return Err(
+            "page selection cannot be combined with a PDF standard that requires accessibility tags"
+                .to_owned(),
+        );
+    }
 
     let options = CompileOptions {
-        pages: match &args.pages {
-            Some(text) => parse_pages(text)?,
-            None => Vec::new(),
-        },
+        page_selection,
         ppi: Some(args.ppi),
         pdf_standards: PdfStandards::new(&standards).map_err(|err| err.message().to_string())?,
         creation_timestamp: creation_timestamp.map(Timestamp::new_utc),
@@ -577,7 +597,14 @@ fn compile_command(args: CompileArgs) -> Result<(), String> {
             emit_diagnostics_with(&world, errors.iter().chain(&warnings), diagnostic_format);
             return Err("compilation failed".into());
         }
-        Err(err) => return Err(err.to_string()),
+        Err(CompileError::NoMatchingSourcePages { warnings }) => {
+            emit_diagnostics_with(&world, warnings.iter(), diagnostic_format);
+            return Err("page selection matched no source pages".into());
+        }
+        Err(CompileError::PngExport { message, warnings }) => {
+            emit_diagnostics_with(&world, warnings.iter(), diagnostic_format);
+            return Err(format!("PNG export failed: {message}"));
+        }
     };
 
     let stem = args
@@ -588,18 +615,27 @@ fn compile_command(args: CompileArgs) -> Result<(), String> {
     let extension = format.extension();
 
     let targets: Vec<PathBuf> = match &args.output {
-        Some(path) => expand_output_template(path, output.outputs.len())?,
-        None if output.outputs.len() == 1 => {
+        Some(path) => expand_output_template(path, &output.artifacts)?,
+        None if output.artifacts.len() == 1 => {
             vec![PathBuf::from(format!("{stem}.{extension}"))]
         }
         None => {
             let template = PathBuf::from(format!("{stem}-{{0p}}.{extension}"));
-            expand_output_template(&template, output.outputs.len())?
+            expand_output_template(&template, &output.artifacts)?
         }
     };
+    let mut unique_targets = std::collections::HashSet::with_capacity(targets.len());
+    for target in &targets {
+        if !unique_targets.insert(normalize_output_path(target)) {
+            return Err(format!(
+                "multiple artifacts expand to the same output path `{}`",
+                target.display()
+            ));
+        }
+    }
 
-    for (target, data) in targets.iter().zip(&output.outputs) {
-        std::fs::write(target, data)
+    for (target, artifact) in targets.iter().zip(&output.artifacts) {
+        std::fs::write(target, artifact.bytes())
             .map_err(|err| format!("cannot write `{}`: {err}", target.display()))?;
     }
     println!(
@@ -620,22 +656,41 @@ fn compile_command(args: CompileArgs) -> Result<(), String> {
     Ok(())
 }
 
-/// Expands `{p}`, `{0p}`, and `{t}` placeholders into one path per page.
-fn expand_output_template(template: &Path, count: usize) -> Result<Vec<PathBuf>, String> {
+/// Expands `{p}`, `{0p}`, and `{t}` placeholders into one path per artifact.
+fn expand_output_template(
+    template: &Path,
+    artifacts: &[CompilationArtifact],
+) -> Result<Vec<PathBuf>, String> {
     let text = template.to_string_lossy();
-    let has_placeholder = text.contains("{p}") || text.contains("{0p}") || text.contains("{t}");
+    let has_page_placeholder = text.contains("{p}") || text.contains("{0p}");
+    let has_placeholder = has_page_placeholder || text.contains("{t}");
+    let count = artifacts.len();
     if !has_placeholder {
         if count > 1 {
             return Err(format!(
-                "the document has {count} pages; the output filename must contain \
-                 `{{p}}`, `{{0p}}`, or `{{t}}` placeholders"
+                "the compilation produced {count} artifacts; the output filename must contain \
+                 `{{p}}` or `{{0p}}` placeholders"
             ));
         }
         return Ok(vec![template.to_path_buf()]);
     }
+    if has_page_placeholder
+        && artifacts
+            .iter()
+            .any(|artifact| artifact.source_page_number().is_none())
+    {
+        return Err(
+            "Source Page Number placeholders cannot be used with a Document Format".to_owned(),
+        );
+    }
     let width = count.to_string().len();
-    Ok((1..=count)
-        .map(|page| {
+    Ok(artifacts
+        .iter()
+        .enumerate()
+        .map(|(index, artifact)| {
+            let page = artifact
+                .source_page_number()
+                .map_or(index + 1, |number| number.get());
             PathBuf::from(
                 text.replace("{p}", &page.to_string())
                     .replace("{0p}", &format!("{page:0width$}"))
@@ -643,6 +698,27 @@ fn expand_output_template(template: &Path, count: usize) -> Result<Vec<PathBuf>,
             )
         })
         .collect())
+}
+
+fn normalize_output_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::CurDir => {}
+            std::path::Component::ParentDir => {
+                if matches!(
+                    normalized.components().next_back(),
+                    Some(std::path::Component::Normal(_))
+                ) {
+                    normalized.pop();
+                } else if !normalized.has_root() {
+                    normalized.push(component.as_os_str());
+                }
+            }
+            _ => normalized.push(component.as_os_str()),
+        }
+    }
+    normalized
 }
 
 fn read_pack(path: &Path) -> Result<Pack, String> {
