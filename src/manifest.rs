@@ -331,7 +331,11 @@ impl PackManifest {
 
     /// Parses and validates a manifest from TOML text.
     pub fn from_toml(text: &str) -> Result<Self, PackManifestError> {
-        parse_manifest_value(toml::from_str(text)?)
+        Self::from_toml_value(toml::from_str(text)?)
+    }
+
+    pub(crate) fn from_toml_value(value: toml::Value) -> Result<Self, PackManifestError> {
+        parse_manifest_value(value)
     }
 
     /// Serializes the manifest to TOML text.

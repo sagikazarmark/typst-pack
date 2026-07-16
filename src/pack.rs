@@ -19,6 +19,7 @@ pub const FILE_EXTENSION: &str = "typk";
 
 const PROJECT_PREFIX: &str = "project/";
 const PACKAGES_PREFIX: &str = "packages/";
+const MAX_ZIP_ENTRY_NAME_LEN: usize = u16::MAX as usize;
 
 /// A portable pack of a Typst project.
 ///
@@ -147,11 +148,28 @@ impl Pack {
             .cloned()
             .map(|spec| (spec.to_string(), spec))
             .collect::<BTreeMap<_, _>>();
-        if let Some(spec) = vendored_packages
-            .keys()
-            .find(|spec| external_packages.contains_key(*spec))
-        {
-            return Err(PackInvariantError::PackageRoleConflict(spec.clone()));
+        for path in canonical_files.keys() {
+            validate_archive_entry_name(
+                PackPathRole::ProjectFile,
+                path,
+                PROJECT_PREFIX.len() + path.as_str().len(),
+            )?;
+        }
+        for package in packages.values() {
+            let spec = &package.spec;
+            let version = spec.version.to_string();
+            let package_prefix_len =
+                PACKAGES_PREFIX.len() + spec.namespace.len() + spec.name.len() + version.len() + 3;
+            for path in package.files.keys() {
+                validate_archive_entry_name(
+                    PackPathRole::PackageFile,
+                    path,
+                    package_prefix_len + path.as_str().len(),
+                )?;
+            }
+        }
+        for (path, _) in &font_entries {
+            validate_archive_entry_name(PackPathRole::FontData, path, path.as_str().len())?;
         }
 
         validate_project_declarations(canonical_files.keys().cloned(), &external_resources)?;
@@ -197,6 +215,12 @@ impl Pack {
                 descendant_role: conflict.descendant_role,
             });
         }
+        if let Some(spec) = vendored_packages
+            .keys()
+            .find(|spec| external_packages.contains_key(*spec))
+        {
+            return Err(PackInvariantError::PackageRoleConflict(spec.clone()));
+        }
 
         if external_resources.contains(&entrypoint) {
             return Err(PackInvariantError::EntrypointIsExternalResource(
@@ -207,6 +231,15 @@ impl Pack {
             return Err(PackInvariantError::MissingEntrypoint(
                 entrypoint.to_string(),
             ));
+        }
+
+        for spec in manifest
+            .vendored_packages()
+            .iter()
+            .chain(manifest.unvendored_packages())
+            .chain(packages.values().map(|package| &package.spec))
+        {
+            validate_package_spec(spec)?;
         }
 
         let mut canonical_packages = BTreeMap::new();
@@ -347,18 +380,6 @@ impl Pack {
         let central_directory_start = archive.central_directory_start();
         let mut reader = archive.into_inner();
         let raw_entries = raw_central_entries(&mut reader, central_directory_start)?;
-        let mut raw_names = BTreeSet::new();
-        for entry in &raw_entries {
-            if !raw_names.insert(entry.name.clone()) {
-                if entry.name == MANIFEST_PATH.as_bytes() {
-                    return Err(PackReadError::DuplicateManifest);
-                }
-                return Err(PackReadError::DuplicateArchiveEntry(entry.name.clone()));
-            }
-        }
-        if raw_entries.len() != retained_entry_count {
-            return Err(PackReadError::AmbiguousArchiveEntries);
-        }
         let mut archive = ZipArchive::new(reader)?;
         const FILE_TYPE_MASK: u32 = 0o170000;
         const REGULAR_FILE: u32 = 0o100000;
@@ -366,7 +387,11 @@ impl Pack {
         let mut manifest_entry = None;
         for index in 0..archive.len() {
             let entry = archive.by_index_raw(index)?;
-            if strip_current_directory_prefix(entry.name()) == MANIFEST_PATH {
+            let prefix_normalized_name = strip_current_directory_prefix(entry.name());
+            let canonical_manifest_alias = !prefix_normalized_name.starts_with(PROJECT_PREFIX)
+                && !prefix_normalized_name.starts_with(PACKAGES_PREFIX)
+                && canonical_archive_name(entry.name()).is_ok_and(|name| name == MANIFEST_PATH);
+            if prefix_normalized_name == MANIFEST_PATH || canonical_manifest_alias {
                 let regular_file = entry.is_file()
                     && entry
                         .unix_mode()
@@ -380,15 +405,29 @@ impl Pack {
         if !manifest_is_file {
             return Err(PackReadError::ManifestNotFile);
         }
-        let manifest = {
+        let manifest_value = {
             let mut entry = archive.by_index(manifest_index)?;
             let mut bytes = Vec::new();
             entry
                 .read_to_end(&mut bytes)
                 .map_err(PackReadError::ManifestUnreadable)?;
             let text = std::str::from_utf8(&bytes).map_err(PackReadError::ManifestNotUtf8)?;
-            PackManifest::from_toml(text)?
+            toml::from_str::<toml::Value>(text).map_err(PackManifestError::from)?
         };
+
+        let mut raw_names = BTreeSet::new();
+        for entry in &raw_entries {
+            if !raw_names.insert(entry.name.clone()) {
+                if entry.name == MANIFEST_PATH.as_bytes() {
+                    return Err(PackReadError::DuplicateManifest);
+                }
+                return Err(PackReadError::DuplicateArchiveEntry(entry.name.clone()));
+            }
+        }
+        if raw_entries.len() != retained_entry_count {
+            return Err(PackReadError::AmbiguousArchiveEntries);
+        }
+        let manifest = PackManifest::from_toml_value(manifest_value)?;
 
         struct ProjectEntry {
             index: usize,
@@ -416,22 +455,7 @@ impl Pack {
             let archive_name = entry.name().to_owned();
             let raw_name = raw_entry.name.clone();
             let prefix_normalized_name = strip_current_directory_prefix(&archive_name);
-            if archive_name.is_empty()
-                || archive_name.starts_with('/')
-                || archive_name.starts_with('\\')
-                || archive_name.contains('\\')
-                || archive_name.contains('\0')
-                || has_windows_drive_prefix(prefix_normalized_name)
-            {
-                return Err(PackReadError::UnsafeEntry(archive_name));
-            }
-            let canonical_name = VirtualPath::new(&archive_name)
-                .map_err(|_| PackReadError::UnsafeEntry(archive_name.clone()))?
-                .get_without_slash()
-                .to_owned();
-            if has_windows_drive_prefix(&canonical_name) {
-                return Err(PackReadError::UnsafeEntry(archive_name));
-            }
+            let canonical_name = canonical_archive_name(&archive_name)?;
             register_archive_identity(
                 &mut canonical_archive_entries,
                 canonical_name.clone(),
@@ -463,7 +487,7 @@ impl Pack {
                 if !regular_file {
                     return Err(PackReadError::UnsupportedEntryType(archive_name));
                 }
-                let path = canonical_path(PackPathRole::ProjectFile, path)?;
+                let path = canonical_path(PackPathRole::ProjectFile, path.trim_start_matches('/'))?;
                 register_archive_identity(
                     &mut canonical_archive_entries,
                     format!("{PROJECT_PREFIX}{path}"),
@@ -552,14 +576,16 @@ impl Pack {
     /// Writes the pack archive to a seekable writer.
     pub fn write<W: Write + Seek>(&self, writer: W) -> Result<(), PackWriteError> {
         let mut zip = ZipWriter::new(writer);
-        let options =
-            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let manifest = self.manifest.to_toml();
 
-        zip.start_file(MANIFEST_PATH, options)?;
-        zip.write_all(self.manifest.to_toml().as_bytes())?;
+        zip.start_file(MANIFEST_PATH, zip_file_options(manifest.len()))?;
+        zip.write_all(manifest.as_bytes())?;
 
         for (path, data) in &self.files {
-            zip.start_file(format!("{PROJECT_PREFIX}{path}"), options)?;
+            zip.start_file(
+                format!("{PROJECT_PREFIX}{path}"),
+                zip_file_options(data.len()),
+            )?;
             zip.write_all(data)?;
         }
 
@@ -571,7 +597,7 @@ impl Pack {
                         "{PACKAGES_PREFIX}{}/{}/{}/{path}",
                         spec.namespace, spec.name, spec.version
                     ),
-                    options,
+                    zip_file_options(data.len()),
                 )?;
                 zip.write_all(data)?;
             }
@@ -580,7 +606,7 @@ impl Pack {
         let mut written = std::collections::BTreeSet::new();
         for font in &self.fonts {
             if written.insert(font.manifest().path()) {
-                zip.start_file(font.manifest().path(), options)?;
+                zip.start_file(font.manifest().path(), zip_file_options(font.data().len()))?;
                 zip.write_all(font.data())?;
             }
         }
@@ -595,6 +621,16 @@ impl Pack {
         self.write(&mut buffer)?;
         Ok(buffer.into_inner())
     }
+}
+
+fn zip_file_options(size: usize) -> SimpleFileOptions {
+    // Deflate may expand incompressible input. Nine bits per input byte plus
+    // framing is a conservative bound for the configured encoder.
+    let compressed_bound = size.saturating_add(size.div_ceil(8)).saturating_add(16);
+    let compressed_bound = u64::try_from(compressed_bound).unwrap_or(u64::MAX);
+    SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .large_file(compressed_bound > zip::ZIP64_BYTES_THR)
 }
 
 struct RawCentralEntry {
@@ -649,7 +685,7 @@ fn split_package_entry(
             message: err.to_string(),
         }
     })?;
-    let path = canonical_path(PackPathRole::PackageFile, path)?;
+    let path = canonical_path(PackPathRole::PackageFile, path.trim_start_matches('/'))?;
     Ok((spec, path))
 }
 
@@ -917,6 +953,58 @@ fn canonical_path(role: PackPathRole, path: &str) -> Result<CanonicalPath, PackI
     Ok(CanonicalPath(canonical.to_owned()))
 }
 
+fn canonical_archive_name(path: &str) -> Result<String, PackReadError> {
+    let prefix_normalized_path = strip_current_directory_prefix(path);
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.starts_with('\\')
+        || path.contains('\\')
+        || path.contains('\0')
+        || has_windows_drive_prefix(prefix_normalized_path)
+    {
+        return Err(PackReadError::UnsafeEntry(path.to_owned()));
+    }
+    let canonical = VirtualPath::new(path)
+        .map_err(|_| PackReadError::UnsafeEntry(path.to_owned()))?
+        .get_without_slash()
+        .to_owned();
+    if has_windows_drive_prefix(&canonical) {
+        return Err(PackReadError::UnsafeEntry(path.to_owned()));
+    }
+    Ok(canonical)
+}
+
+fn validate_package_spec(spec: &PackageSpec) -> Result<(), PackInvariantError> {
+    let serialized = spec.to_string();
+    let parsed = PackageSpec::from_str(&serialized).map_err(|message| {
+        PackInvariantError::InvalidPackageSpec {
+            spec: serialized.clone(),
+            message: message.to_string(),
+        }
+    })?;
+    if parsed != *spec {
+        return Err(PackInvariantError::InvalidPackageSpec {
+            spec: serialized,
+            message: "package specification does not round-trip canonically".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+fn validate_archive_entry_name(
+    role: PackPathRole,
+    path: &CanonicalPath,
+    archive_name_len: usize,
+) -> Result<(), PackInvariantError> {
+    if archive_name_len > MAX_ZIP_ENTRY_NAME_LEN {
+        return Err(PackInvariantError::ArchiveEntryNameTooLong {
+            role,
+            path: path.to_string(),
+        });
+    }
+    Ok(())
+}
+
 fn has_windows_drive_prefix(path: &str) -> bool {
     let bytes = path.as_bytes();
     bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
@@ -1049,6 +1137,12 @@ pub enum PackInvariantError {
         path: String,
         message: String,
     },
+    /// A package value cannot be represented as a canonical package specification.
+    #[error("invalid package spec `{spec}`: {message}")]
+    InvalidPackageSpec { spec: String, message: String },
+    /// A contained path cannot fit in ZIP's filename field after adding its role prefix.
+    #[error("the {role} path `{path}` exceeds ZIP's filename length limit")]
+    ArchiveEntryNameTooLong { role: PackPathRole, path: String },
     /// Distinct archive entries identify one canonical contained file.
     #[error("archive entries `{first_entry}` and `{second_entry}` both identify `{canonical}`")]
     CanonicalArchiveEntryCollision {

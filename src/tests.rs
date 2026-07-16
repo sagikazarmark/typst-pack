@@ -232,6 +232,13 @@ fn with_first_zip_entry_unix_mode(mut archive: Vec<u8>, mode: u32) -> Vec<u8> {
     archive
 }
 
+fn with_first_zip_entry_corrupt_data(mut archive: Vec<u8>) -> Vec<u8> {
+    let name_len = u16::from_le_bytes(archive[26..28].try_into().unwrap()) as usize;
+    let extra_len = u16::from_le_bytes(archive[28..30].try_into().unwrap()) as usize;
+    archive[30 + name_len + extra_len] ^= 1;
+    archive
+}
+
 #[test]
 fn manifest_roundtrip() {
     let manifest = PackManifest::from_toml(
@@ -568,6 +575,110 @@ fn pack_construction_rejects_package_declaration_data_disagreement() {
         Err(PackReadError::Invariant(
             PackInvariantError::UndeclaredPackageData(ref spec)
         )) if spec == "@local/example:1.0.0"
+    ));
+}
+
+#[test]
+fn pack_construction_rejects_package_specs_that_do_not_roundtrip() {
+    let mut invalid = "@local/example:1.0.0"
+        .parse::<typst::syntax::package::PackageSpec>()
+        .unwrap();
+    invalid.name = "bad/name".into();
+
+    let vendored = Pack::builder("main.typ")
+        .file("main.typ", b"Hello".to_vec())
+        .unwrap()
+        .package_file(invalid.clone(), "lib.typ", b"Hello".to_vec())
+        .unwrap()
+        .build();
+    let unvendored = Pack::builder("main.typ")
+        .file("main.typ", b"Hello".to_vec())
+        .unwrap()
+        .unvendored_package(invalid)
+        .build();
+
+    assert!(matches!(
+        vendored,
+        Err(PackBuildError::Invariant(
+            PackInvariantError::InvalidPackageSpec { .. }
+        ))
+    ));
+    assert!(matches!(
+        unvendored,
+        Err(PackBuildError::Invariant(
+            PackInvariantError::InvalidPackageSpec { .. }
+        ))
+    ));
+}
+
+#[test]
+fn pack_construction_rejects_archive_entry_names_too_long_for_zip() {
+    let maximum_path = "a".repeat(65_535 - "project/".len());
+    let pack = Pack::builder(&maximum_path)
+        .file(&maximum_path, b"Hello".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    assert!(pack.to_bytes().is_ok());
+
+    let path = format!("{maximum_path}a");
+    let project = Pack::builder(&path)
+        .file(&path, b"Hello".to_vec())
+        .unwrap()
+        .build();
+    assert!(matches!(
+        project,
+        Err(PackBuildError::Invariant(
+            PackInvariantError::ArchiveEntryNameTooLong {
+                role: PackPathRole::ProjectFile,
+                ..
+            }
+        ))
+    ));
+
+    let spec = "@local/example:1.0.0"
+        .parse::<typst::syntax::package::PackageSpec>()
+        .unwrap();
+    let package_path = "a".repeat(65_535);
+    let package = Pack::builder("main.typ")
+        .file("main.typ", b"Hello".to_vec())
+        .unwrap()
+        .package_file(spec, package_path, b"Package".to_vec())
+        .unwrap()
+        .build();
+    assert!(matches!(
+        package,
+        Err(PackBuildError::Invariant(
+            PackInvariantError::ArchiveEntryNameTooLong {
+                role: PackPathRole::PackageFile,
+                ..
+            }
+        ))
+    ));
+}
+
+#[test]
+fn archive_path_failures_precede_package_role_failures() {
+    let path = "a".repeat(65_535 - "project/".len() + 1);
+    let spec = "@local/example:1.0.0"
+        .parse::<typst::syntax::package::PackageSpec>()
+        .unwrap();
+    let pack = Pack::builder(&path)
+        .file(&path, b"Hello".to_vec())
+        .unwrap()
+        .package_file(spec.clone(), "lib.typ", b"Package".to_vec())
+        .unwrap()
+        .unvendored_package(spec)
+        .build();
+
+    assert!(matches!(
+        pack,
+        Err(PackBuildError::Invariant(
+            PackInvariantError::ArchiveEntryNameTooLong {
+                role: PackPathRole::ProjectFile,
+                ..
+            }
+        ))
     ));
 }
 
@@ -1045,6 +1156,20 @@ fn read_reports_a_non_utf8_manifest_specifically() {
 }
 
 #[test]
+fn read_reports_an_unreadable_manifest_payload_specifically() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
+    let bytes = with_first_zip_entry_corrupt_data(raw_stored_zip(&[
+        (MANIFEST_PATH, manifest),
+        ("project/main.typ", b"Hello"),
+    ]));
+
+    assert!(matches!(
+        Pack::from_bytes(bytes),
+        Err(PackReadError::ManifestUnreadable(_))
+    ));
+}
+
+#[test]
 fn manifest_decoding_failures_precede_archive_path_failures() {
     let non_utf8 = raw_stored_zip(&[(MANIFEST_PATH, &[0xff]), ("project/../bad.typ", b"bad")]);
     assert!(matches!(
@@ -1059,6 +1184,39 @@ fn manifest_decoding_failures_precede_archive_path_failures() {
     assert!(matches!(
         Pack::from_bytes(malformed),
         Err(PackReadError::Manifest(_))
+    ));
+
+    let duplicate_with_non_utf8_manifest = raw_stored_zip(&[
+        (MANIFEST_PATH, &[0xff]),
+        ("future/data", b"first"),
+        ("future/data", b"second"),
+    ]);
+    assert!(matches!(
+        Pack::from_bytes(duplicate_with_non_utf8_manifest),
+        Err(PackReadError::ManifestNotUtf8(_))
+    ));
+
+    let duplicate_with_malformed_manifest = raw_stored_zip(&[
+        (MANIFEST_PATH, b"not valid TOML = ["),
+        ("future/data", b"first"),
+        ("future/data", b"second"),
+    ]);
+    assert!(matches!(
+        Pack::from_bytes(duplicate_with_malformed_manifest),
+        Err(PackReadError::Manifest(_))
+    ));
+
+    let duplicate_with_unsupported_manifest = raw_stored_zip(&[
+        (
+            MANIFEST_PATH,
+            b"format-version = 99\n[project]\nentrypoint = \"main.typ\"\n",
+        ),
+        ("future/data", b"first"),
+        ("future/data", b"second"),
+    ]);
+    assert!(matches!(
+        Pack::from_bytes(duplicate_with_unsupported_manifest),
+        Err(PackReadError::DuplicateArchiveEntry(ref name)) if name == b"future/data"
     ));
 }
 
@@ -1325,6 +1483,54 @@ fn read_classifies_safe_archive_prefix_aliases_by_their_canonical_role() {
 }
 
 #[test]
+fn read_accepts_safe_aliases_at_archive_role_boundaries() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
+    let project = Pack::from_bytes(raw_stored_zip(&[
+        (MANIFEST_PATH, manifest),
+        ("project//main.typ", b"Hello"),
+    ]))
+    .unwrap();
+    assert_eq!(project.file("main.typ").unwrap().as_slice(), b"Hello");
+
+    let package_manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[packages]\nvendored = [\"@local/example:1.0.0\"]\n";
+    let package = Pack::from_bytes(raw_stored_zip(&[
+        (MANIFEST_PATH, package_manifest),
+        ("project/main.typ", b"Hello"),
+        ("packages/local/example/1.0.0//lib.typ", b"Package"),
+    ]))
+    .unwrap();
+    let spec = "@local/example:1.0.0"
+        .parse::<typst::syntax::package::PackageSpec>()
+        .unwrap();
+    assert_eq!(
+        package.package_file(&spec, "lib.typ").unwrap().as_slice(),
+        b"Package"
+    );
+
+    let aliased_manifest = Pack::from_bytes(raw_stored_zip(&[
+        ("alias/../typst-pack.toml", manifest),
+        ("project/main.typ", b"Hello"),
+    ]))
+    .unwrap();
+    assert_eq!(
+        aliased_manifest.file("main.typ").unwrap().as_slice(),
+        b"Hello"
+    );
+
+    let colliding_manifest = raw_stored_zip(&[
+        (MANIFEST_PATH, manifest),
+        ("alias/../typst-pack.toml", manifest),
+        ("project/main.typ", b"Hello"),
+    ]);
+    assert!(matches!(
+        Pack::from_bytes(colliding_manifest),
+        Err(PackReadError::Invariant(
+            PackInvariantError::CanonicalArchiveEntryCollision { ref canonical, .. }
+        )) if canonical == MANIFEST_PATH
+    ));
+}
+
+#[test]
 fn read_rejects_external_project_resource_file_conflicts() {
     use std::io::Write;
 
@@ -1570,12 +1776,23 @@ fn external_resource_references_follow_registration_order() {
 
     let (denied, denied_calls) = ErrorProjectLoader::tracked(FileError::AccessDenied);
     let (masked, masked_calls) = MemoryProjectFile::tracked("resource.bin", b"masked".to_vec());
-    let world = PackWorld::builder(pack)
+    let world = PackWorld::builder(pack.clone())
         .external_resource_reference(denied)
         .external_resource_reference(masked)
         .build();
     assert_eq!(world.file(id), Err(FileError::AccessDenied));
     assert_eq!(denied_calls.load(Ordering::Relaxed), 1);
+    assert_eq!(masked_calls.load(Ordering::Relaxed), 0);
+
+    let integrity_error = FileError::Other(Some("checksum mismatch".into()));
+    let (corrupt, corrupt_calls) = ErrorProjectLoader::tracked(integrity_error.clone());
+    let (masked, masked_calls) = MemoryProjectFile::tracked("resource.bin", b"masked".to_vec());
+    let world = PackWorld::builder(pack)
+        .external_resource_reference(corrupt)
+        .external_resource_reference(masked)
+        .build();
+    assert_eq!(world.file(id), Err(integrity_error));
+    assert_eq!(corrupt_calls.load(Ordering::Relaxed), 1);
     assert_eq!(masked_calls.load(Ordering::Relaxed), 0);
 }
 
@@ -2285,6 +2502,59 @@ Rows: #csv("data.csv").len()
         assert_eq!(fallback_calls.load(Ordering::Relaxed), 1);
         assert_eq!(outcome.report.external_resources, ["resource.bin"]);
         assert!(outcome.pack.file("resource.bin").is_none());
+    }
+
+    #[test]
+    fn discovery_all_missing_providers_report_the_requested_project_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("main.typ"), "#read(\"requested.bin\")").unwrap();
+
+        let (provider, calls) = ErrorProjectLoader::tracked(FileError::NotFound(PathBuf::from(
+            "/host-specific/missing.bin",
+        )));
+        let result = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .project_resource_policy(ProjectResourcePolicy::AllowExternalFallback)
+            .external_resource_reference(provider)
+            .pack();
+        let Err(PackerError::Compile { world, .. }) = result else {
+            panic!("missing provider unexpectedly satisfied discovery")
+        };
+
+        assert_eq!(
+            world.file(project_file_id("requested.bin")),
+            Err(FileError::NotFound(PathBuf::from("requested.bin")))
+        );
+        assert_eq!(calls.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn discovery_propagates_provider_errors_without_falling_through() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("main.typ"), "#read(\"resource.bin\")").unwrap();
+
+        let (denied, denied_calls) = ErrorProjectLoader::tracked(FileError::AccessDenied);
+        let (masked, masked_calls) = MemoryProjectFile::tracked("resource.bin", b"masked".to_vec());
+        let result = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .project_resource_policy(ProjectResourcePolicy::AllowExternalFallback)
+            .external_resource_reference(denied)
+            .external_resource_reference(masked)
+            .pack();
+        let Err(PackerError::Compile { world, .. }) = result else {
+            panic!("provider error was unexpectedly masked")
+        };
+
+        assert_eq!(
+            world.file(project_file_id("resource.bin")),
+            Err(FileError::AccessDenied)
+        );
+        assert_eq!(denied_calls.load(Ordering::Relaxed), 1);
+        assert_eq!(masked_calls.load(Ordering::Relaxed), 0);
     }
 
     #[test]
