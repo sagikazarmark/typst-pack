@@ -1,11 +1,11 @@
 #![doc = include_str!("../README.md")]
 
 mod compile;
-mod external_resource;
 mod extract;
 mod manifest;
 mod pack;
 mod packer;
+mod resource;
 mod world;
 
 #[cfg(feature = "cli")]
@@ -28,9 +28,7 @@ pub use world::{PackWorld, PackWorldBuilder};
 #[cfg(feature = "fs")]
 pub use extract::{ExtractError, ExtractOptions, ExtractReport, extract};
 #[cfg(feature = "fs")]
-pub use packer::{
-    DiscoveryWorld, PackOutcome, PackReport, Packer, PackerError, ProjectResourcePolicy,
-};
+pub use packer::{DiscoveryTarget, DiscoveryWorld, PackOutcome, PackReport, Packer, PackerError};
 #[cfg(feature = "fs")]
 pub use world::{OfflineDownloader, SystemPackageLoader};
 

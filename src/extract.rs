@@ -22,6 +22,8 @@ pub struct ExtractOptions {
 pub struct ExtractReport {
     /// Paths written, relative to the target directory.
     pub written: Vec<PathBuf>,
+    /// Resource Slot paths omitted from the extracted project.
+    pub resource_slots: Vec<PathBuf>,
 }
 
 /// A failure while extracting a pack.
@@ -49,7 +51,10 @@ pub fn extract(
     dir: &Path,
     options: &ExtractOptions,
 ) -> Result<ExtractReport, ExtractError> {
-    let mut report = ExtractReport::default();
+    let mut report = ExtractReport {
+        resource_slots: pack.resource_slots().map(PathBuf::from).collect(),
+        ..ExtractReport::default()
+    };
 
     for (path, data) in pack.files() {
         write_file(dir, Path::new(path), data, options, &mut report)?;

@@ -74,9 +74,9 @@ impl<'de> Deserialize<'de> for PackManifest {
 pub struct ProjectManifest {
     /// The root-relative path of the entrypoint file, e.g. `main.typ`.
     entrypoint: String,
-    /// Non-source project resources supplied externally at compilation time.
+    /// Non-source project locations supplied at compilation time.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
-    external_resources: BTreeSet<String>,
+    resource_slots: BTreeSet<String>,
 }
 
 /// The `[packages]` section.
@@ -95,7 +95,6 @@ pub struct PackagesManifest {
     /// when compiling.
     #[serde(
         default,
-        rename = "external",
         skip_serializing_if = "Vec::is_empty",
         serialize_with = "serialize_package_specs"
     )]
@@ -107,7 +106,7 @@ pub struct PackagesManifest {
 struct Version1PackagesManifest {
     #[serde(default)]
     vendored: Vec<String>,
-    #[serde(default, rename = "external")]
+    #[serde(default)]
     unvendored: Vec<String>,
 }
 
@@ -176,13 +175,13 @@ impl ProjectManifest {
         &self.entrypoint
     }
 
-    /// The declared External Project Resource paths in deterministic order.
-    pub fn external_resources(&self) -> impl Iterator<Item = &str> {
-        self.external_resources.iter().map(String::as_str)
+    /// The declared Resource Slot paths in deterministic order.
+    pub fn resource_slots(&self) -> impl Iterator<Item = &str> {
+        self.resource_slots.iter().map(String::as_str)
     }
 
-    pub(crate) fn contains_external_resource(&self, path: &str) -> bool {
-        self.external_resources.contains(path)
+    pub(crate) fn contains_resource_slot(&self, path: &str) -> bool {
+        self.resource_slots.contains(path)
     }
 }
 
@@ -283,9 +282,9 @@ pub enum PackManifestError {
 impl PackManifest {
     pub(crate) fn new(
         entrypoint: String,
-        external_resources: BTreeSet<String>,
+        resource_slots: BTreeSet<String>,
         vendored_packages: Vec<PackageSpec>,
-        external_packages: Vec<PackageSpec>,
+        unvendored_packages: Vec<PackageSpec>,
         fonts: Vec<FontManifest>,
         metadata: Option<PackMetadata>,
     ) -> Self {
@@ -293,11 +292,11 @@ impl PackManifest {
             format_version: FORMAT_VERSION,
             project: ProjectManifest {
                 entrypoint,
-                external_resources,
+                resource_slots,
             },
             packages: PackagesManifest {
                 vendored: canonical_specs(vendored_packages),
-                unvendored: canonical_specs(external_packages),
+                unvendored: canonical_specs(unvendored_packages),
             },
             fonts,
             metadata,

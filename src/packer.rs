@@ -15,54 +15,49 @@ use typst::syntax::package::PackageSpec;
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
-use typst::{Library, LibraryExt, World};
+use typst::{Feature, Library, LibraryExt, World};
+use typst_html::{HtmlDocument, HtmlNode};
 use typst_kit::datetime::Time;
 use typst_kit::files::{FileLoader, FileStore, FsRoot, SystemFiles};
 use typst_kit::fonts::FontStore;
 use typst_layout::PagedDocument;
 
-use crate::external_resource::{Discovery as ExternalResources, Reference};
 use crate::manifest::PackMetadata;
 use crate::pack::{Pack, PackBuildError};
+use crate::resource::{DiscoveryResources, Provider};
 use crate::world::system_packages;
-
-/// Controls whether discovery may fall back to External Resource References.
-#[derive(Debug, Clone, Copy, Default, Eq, PartialEq)]
-pub enum ProjectResourcePolicy {
-    /// Missing project files cannot fall back to External Resource References.
-    #[default]
-    DisallowExternalFallback,
-    /// Missing non-source resources may come from configured External Resource References.
-    AllowExternalFallback,
-}
 
 /// Packs a Typst project directory into a [`Pack`].
 ///
 /// The packer performs a discovery compile of the project and records every
 /// file Typst actually reads. Source-project files are packed by default.
-/// When [`AllowExternalFallback`](ProjectResourcePolicy::AllowExternalFallback)
-/// is selected, non-source resources resolved by configured External Resource
-/// References are declared in the manifest instead of storing their bytes. Files that a
-/// compile with different inputs or a different date would read are not
-/// discovered; add packed files with [`include`](Self::include) or declare an
-/// External Project Resource with [`external_resource`](Self::external_resource).
+/// Non-source resources resolved by configured Resource Providers are declared
+/// as Resource Slots instead of storing their bytes. Files that a compile with
+/// different inputs or a different date would read are not discovered; add
+/// packed files with [`include`](Self::include) or declare a Resource Slot with
+/// [`resource_slot`](Self::resource_slot).
 pub struct Packer {
     root: PathBuf,
     entrypoint: PathBuf,
     vendor_packages: bool,
     embed_fonts: bool,
     include_typst_embedded_fonts: bool,
+    typst_embedded_fonts: bool,
     include: Vec<PathBuf>,
     font_paths: Vec<PathBuf>,
     system_fonts: bool,
     inputs: Dict,
+    features: Vec<Feature>,
+    targets: BTreeSet<DiscoveryTarget>,
     package_path: Option<PathBuf>,
     package_cache_path: Option<PathBuf>,
     offline: bool,
+    certificate: Option<PathBuf>,
+    creation_timestamp: Option<i64>,
+    timings: Option<PathBuf>,
     metadata: Option<PackMetadata>,
-    project_resource_policy: ProjectResourcePolicy,
-    external_resources: BTreeSet<String>,
-    external_resource_references: Vec<Reference>,
+    resource_slots: BTreeSet<String>,
+    resource_providers: Vec<Provider>,
 }
 
 impl Packer {
@@ -75,17 +70,22 @@ impl Packer {
             vendor_packages: true,
             embed_fonts: false,
             include_typst_embedded_fonts: false,
+            typst_embedded_fonts: true,
             include: Vec::new(),
             font_paths: Vec::new(),
             system_fonts: true,
             inputs: Dict::new(),
+            features: Vec::new(),
+            targets: BTreeSet::new(),
             package_path: None,
             package_cache_path: None,
             offline: false,
+            certificate: None,
+            creation_timestamp: None,
+            timings: None,
             metadata: None,
-            project_resource_policy: ProjectResourcePolicy::default(),
-            external_resources: BTreeSet::new(),
-            external_resource_references: Vec::new(),
+            resource_slots: BTreeSet::new(),
+            resource_providers: Vec::new(),
         }
     }
 
@@ -111,6 +111,12 @@ impl Packer {
     /// `embedded-fonts` feature or another source for those fonts.
     pub fn include_typst_embedded_fonts(mut self, include: bool) -> Self {
         self.include_typst_embedded_fonts = include;
+        self
+    }
+
+    /// Whether discovery may use fonts embedded into Typst. Defaults to `true`.
+    pub fn typst_embedded_fonts(mut self, include: bool) -> Self {
+        self.typst_embedded_fonts = include;
         self
     }
 
@@ -142,6 +148,20 @@ impl Packer {
         self
     }
 
+    /// Enables an experimental Typst language feature during discovery.
+    pub fn feature(mut self, feature: Feature) -> Self {
+        self.features.push(feature);
+        self
+    }
+
+    /// Adds a compilation target whose dependencies should be discovered.
+    ///
+    /// If no target is added, discovery defaults to [`DiscoveryTarget::Paged`].
+    pub fn target(mut self, target: DiscoveryTarget) -> Self {
+        self.targets.insert(target);
+        self
+    }
+
     /// Overrides the directory in which locally installed packages are
     /// searched (namespace/name/version layout).
     pub fn package_path(mut self, path: impl Into<PathBuf>) -> Self {
@@ -166,34 +186,39 @@ impl Packer {
         self
     }
 
+    /// Configures a custom CA certificate for package downloads.
+    pub fn certificate(mut self, path: Option<PathBuf>) -> Self {
+        self.certificate = path;
+        self
+    }
+
+    /// Uses a fixed UNIX timestamp during discovery.
+    pub fn creation_timestamp(mut self, timestamp: Option<i64>) -> Self {
+        self.creation_timestamp = timestamp;
+        self
+    }
+
+    /// Writes discovery performance timings to a Perfetto-compatible JSON file.
+    pub fn timings(mut self, path: Option<PathBuf>) -> Self {
+        self.timings = path;
+        self
+    }
+
     /// Sets descriptive metadata recorded in the pack manifest.
     pub fn metadata(mut self, metadata: PackMetadata) -> Self {
         self.metadata = Some(metadata);
         self
     }
 
-    /// Controls whether discovery may use configured External Resource References.
-    pub fn project_resource_policy(mut self, policy: ProjectResourcePolicy) -> Self {
-        self.project_resource_policy = policy;
+    /// Declares a Resource Slot whose representative bytes should be omitted from the Pack.
+    pub fn resource_slot(mut self, path: impl Into<String>) -> Self {
+        self.resource_slots.insert(path.into());
         self
     }
 
-    /// Declares a non-source project resource whose bytes should be omitted from the pack.
-    pub fn external_resource(mut self, path: impl Into<String>) -> Self {
-        self.external_resources.insert(path.into());
-        self
-    }
-
-    /// Adds an External Resource Reference used during discovery.
-    ///
-    /// References are only consulted under
-    /// [`AllowExternalFallback`](ProjectResourcePolicy::AllowExternalFallback);
-    /// registering one does not change the default strict policy.
-    pub fn external_resource_reference(
-        mut self,
-        reference: impl FileLoader + Send + Sync + 'static,
-    ) -> Self {
-        self.external_resource_references.push(Box::new(reference));
+    /// Adds a Resource Provider used during discovery.
+    pub fn resource_provider(mut self, provider: impl FileLoader + Send + Sync + 'static) -> Self {
+        self.resource_providers.push(Box::new(provider));
         self
     }
 
@@ -214,17 +239,18 @@ impl Packer {
         let entrypoint = VirtualPath::virtualize(&root, &entrypoint_abs)
             .map_err(|_| PackerError::OutsideRoot(entrypoint_abs.clone()))?;
         let mut builder = Pack::builder(entrypoint.get_without_slash());
-        for path in &self.external_resources {
-            builder = builder.external_resource(path)?;
+        for path in &self.resource_slots {
+            builder = builder.resource_slot(path)?;
         }
         builder.validate_declarations()?;
-        let explicit_external_resources = builder.external_resource_paths();
+        let explicit_resource_slots = builder.resource_slot_paths();
 
         // Build the discovery world.
         let packages = system_packages(
             self.package_path.as_deref(),
             self.package_cache_path.as_deref(),
             self.offline,
+            self.certificate.as_deref(),
         );
 
         let mut fonts = FontStore::new();
@@ -232,7 +258,9 @@ impl Packer {
             fonts.extend(typst_kit::fonts::scan(path));
         }
         #[cfg(feature = "embedded-fonts")]
-        fonts.extend(typst_kit::fonts::embedded());
+        if self.typst_embedded_fonts {
+            fonts.extend(typst_kit::fonts::embedded());
+        }
         if self.system_fonts {
             fonts.extend(typst_kit::fonts::system());
         }
@@ -241,46 +269,99 @@ impl Packer {
             system: SystemFiles::new(FsRoot::new(root.clone()), packages),
             cache: Mutex::new(HashMap::new()),
         });
+        let time = match self.creation_timestamp {
+            Some(timestamp) => {
+                Time::fixed_timestamp(timestamp).map_err(|_| PackerError::InvalidTimestamp)?
+            }
+            None => Time::system(),
+        };
         let mut world = DiscoveryWorld {
             root: root.clone(),
-            library: LazyHash::new(Library::builder().with_inputs(self.inputs.clone()).build()),
+            library: LazyHash::new(
+                Library::builder()
+                    .with_inputs(self.inputs.clone())
+                    .with_features(self.features.iter().copied().collect())
+                    .build(),
+            ),
             main: RootedPath::new(VirtualRoot::Project, entrypoint.clone()).intern(),
             sources: FileStore::new(Arc::clone(&primary)),
             files: FileStore::new(DiscoveryLoader {
                 primary,
-                external_resources: ExternalResources::new(
-                    self.external_resource_references,
-                    self.project_resource_policy == ProjectResourcePolicy::AllowExternalFallback,
-                    explicit_external_resources,
+                resources: DiscoveryResources::new(
+                    self.resource_providers,
+                    explicit_resource_slots,
                 ),
             }),
             fonts,
-            time: Time::system(),
+            time,
             #[cfg(test)]
             source_request_hook: None,
         };
 
-        // Discovery compile.
-        let Warned { output, warnings } = typst::compile::<PagedDocument>(&world);
-        let document = match output {
-            Ok(document) => document,
-            Err(errors) => {
-                return Err(PackerError::Compile {
-                    world: Box::new(world),
-                    errors,
-                    warnings,
-                });
+        // Discovery compile. File stores and Resource Slot provenance accumulate
+        // dependencies across targets.
+        let targets = if self.targets.is_empty() {
+            vec![DiscoveryTarget::Paged]
+        } else {
+            self.targets.iter().copied().collect()
+        };
+        let mut timer = typst_kit::timer::Timer::new_or_placeholder(self.timings);
+        let mut discovery = None;
+        let timings = timer.record(&mut world, |world| {
+            let mut paged_documents = Vec::new();
+            let mut html_documents = Vec::new();
+            let mut compile_warnings = EcoVec::new();
+            for target in targets {
+                match target {
+                    DiscoveryTarget::Paged => {
+                        let Warned { output, warnings } = typst::compile::<PagedDocument>(world);
+                        compile_warnings.extend(warnings);
+                        match output {
+                            Ok(document) => paged_documents.push(document),
+                            Err(errors) => {
+                                discovery = Some(Err((errors, compile_warnings)));
+                                return;
+                            }
+                        }
+                    }
+                    DiscoveryTarget::Html => {
+                        let Warned { output, warnings } = typst::compile::<HtmlDocument>(world);
+                        compile_warnings.extend(warnings);
+                        match output {
+                            Ok(document) => html_documents.push(document),
+                            Err(errors) => {
+                                discovery = Some(Err((errors, compile_warnings)));
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
+            discovery = Some(Ok((paged_documents, html_documents, compile_warnings)));
+        });
+        let Some(discovery) = discovery else {
+            return Err(PackerError::Timings(
+                timings
+                    .expect_err("timer did not execute discovery")
+                    .to_string(),
+            ));
+        };
+        let (paged_documents, html_documents, compile_warnings) = match discovery {
+            Ok(discovery) => discovery,
+            Err((errors, warnings)) => {
+                return discovery_compile_error(world, errors, warnings);
             }
         };
+        timings.map_err(|error| PackerError::Timings(error.to_string()))?;
 
         let mut report = PackReport {
             files: Vec::new(),
-            external_resources: Vec::new(),
+            resource_slots: Vec::new(),
             packages_vendored: Vec::new(),
             packages_unvendored: Vec::new(),
             fonts: Vec::new(),
             warnings: Vec::new(),
-            compile_warnings: warnings,
+            compile_warnings,
         };
 
         // Partition the observed dependencies.
@@ -310,7 +391,7 @@ impl Packer {
         }
         for id in file_dependencies {
             match id.root() {
-                VirtualRoot::Project if world.files.loader().is_external(id) => {}
+                VirtualRoot::Project if world.files.loader().is_resource_slot(id) => {}
                 VirtualRoot::Project if project_files.iter().any(|(source, _)| *source == id) => {}
                 VirtualRoot::Project => project_files.push((id, ProjectFileOrigin::File)),
                 VirtualRoot::Package(spec) => {
@@ -321,9 +402,9 @@ impl Packer {
             }
         }
 
-        for path in world.files.loader().external_resources() {
-            report.external_resources.push(path.clone());
-            builder = builder.external_resource(path)?;
+        for path in world.files.loader().resource_slots() {
+            report.resource_slots.push(path.clone());
+            builder = builder.resource_slot(path)?;
         }
 
         // Project files, from the compile's own cache.
@@ -350,7 +431,7 @@ impl Packer {
         // template/package metadata that tooling may want after extraction.
         if !report.files.iter().any(|path| path == "typst.toml")
             && !report
-                .external_resources
+                .resource_slots
                 .iter()
                 .any(|path| path == "typst.toml")
             && let Ok(data) = std::fs::read(root.join("typst.toml"))
@@ -443,8 +524,13 @@ impl Packer {
         // Fonts actually used by the rendered document.
         if self.embed_fonts {
             let mut used: Vec<Font> = Vec::new();
-            for page in document.pages() {
-                collect_fonts(&page.frame, &mut used);
+            for document in &paged_documents {
+                for page in document.pages() {
+                    collect_fonts(&page.frame, &mut used);
+                }
+            }
+            for document in &html_documents {
+                collect_html_fonts(document.root_node(), &mut used);
             }
             for font in used {
                 if !self.include_typst_embedded_fonts && is_typst_embedded_font(&font) {
@@ -473,11 +559,35 @@ impl Packer {
     }
 }
 
+fn discovery_compile_error(
+    world: DiscoveryWorld,
+    errors: EcoVec<SourceDiagnostic>,
+    warnings: EcoVec<SourceDiagnostic>,
+) -> Result<PackOutcome, PackerError> {
+    if let Some(path) = world.unavailable_resource_slots().into_iter().next() {
+        return Err(PackerError::ResourceSlotUnavailable { path });
+    }
+    Err(PackerError::Compile {
+        world: Box::new(world),
+        errors,
+        warnings,
+    })
+}
+
+/// A document target used to discover a Pack's compilation dependencies.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
+pub enum DiscoveryTarget {
+    /// PDF and image formats.
+    Paged,
+    /// HTML.
+    Html,
+}
+
 /// The result of a successful [`Packer::pack`] run.
 pub struct PackOutcome {
     /// The assembled pack.
     pub pack: Pack,
-    /// The packed and externally supplied parts of the compilation contract.
+    /// The contained and supplied parts of the compilation contract.
     pub report: PackReport,
     /// The world used for the discovery compile. Kept so that the compile
     /// warnings in the report can be rendered with source context.
@@ -489,8 +599,8 @@ pub struct PackOutcome {
 pub struct PackReport {
     /// Root-relative paths of the packed project files.
     pub files: Vec<String>,
-    /// Root-relative paths of observed or explicitly declared External Project Resources.
-    pub external_resources: Vec<String>,
+    /// Root-relative paths of observed or explicitly declared Resource Slots.
+    pub resource_slots: Vec<String>,
     /// Packages stored inside the pack.
     pub packages_vendored: Vec<PackageSpec>,
     /// Observed dependencies that were not vendored.
@@ -521,6 +631,14 @@ pub enum PackerError {
         errors: EcoVec<SourceDiagnostic>,
         warnings: EcoVec<SourceDiagnostic>,
     },
+    #[error(
+        "requested Resource Slot `{path}` is unavailable for discovery; place representative bytes at `{path}` in the source project or supply them via `--resource-path`; representative bytes are not stored in the Pack"
+    )]
+    ResourceSlotUnavailable { path: String },
+    #[error("invalid creation timestamp")]
+    InvalidTimestamp,
+    #[error("failed to write discovery timings: {0}")]
+    Timings(String),
     #[error("failed to load package {spec}: {message}")]
     Package { spec: PackageSpec, message: String },
     #[error("failed to walk directory: {0}")]
@@ -560,6 +678,10 @@ impl DiscoveryWorld {
         &self.root
     }
 
+    fn unavailable_resource_slots(&self) -> Vec<String> {
+        self.files.loader().resources.unavailable_resource_slots()
+    }
+
     #[cfg(test)]
     pub(crate) fn set_source_request_hook(
         &mut self,
@@ -591,7 +713,7 @@ impl World for DiscoveryWorld {
     }
 
     fn source(&self, id: FileId) -> FileResult<Source> {
-        self.files.loader().external_resources.source(id, || {
+        self.files.loader().resources.source(id, || {
             #[cfg(test)]
             if let Some(hook) = &self.source_request_hook {
                 hook(id);
@@ -636,7 +758,7 @@ impl FileLoader for PrimaryLoader {
 
 struct DiscoveryLoader {
     primary: Arc<PrimaryLoader>,
-    external_resources: ExternalResources,
+    resources: DiscoveryResources,
 }
 
 impl DiscoveryLoader {
@@ -644,18 +766,18 @@ impl DiscoveryLoader {
         self.primary.root(id)
     }
 
-    fn is_external(&self, id: FileId) -> bool {
-        self.external_resources.is_external(id)
+    fn is_resource_slot(&self, id: FileId) -> bool {
+        self.resources.is_resource_slot(id)
     }
 
-    fn external_resources(&self) -> Vec<String> {
-        self.external_resources.external_resources()
+    fn resource_slots(&self) -> Vec<String> {
+        self.resources.resource_slots()
     }
 }
 
 impl FileLoader for DiscoveryLoader {
     fn load(&self, id: FileId) -> FileResult<Bytes> {
-        self.external_resources.file(id, || self.primary.load(id))
+        self.resources.file(id, || self.primary.load(id))
     }
 }
 
@@ -672,6 +794,19 @@ fn collect_fonts(frame: &Frame, used: &mut Vec<Font>) {
             }
             _ => {}
         }
+    }
+}
+
+/// Collects fonts from frames embedded anywhere in an HTML document.
+fn collect_html_fonts(node: &HtmlNode, used: &mut Vec<Font>) {
+    match node {
+        HtmlNode::Element(element) => {
+            for child in &element.children {
+                collect_html_fonts(child, used);
+            }
+        }
+        HtmlNode::Frame(frame) => collect_fonts(&frame.inner, used),
+        _ => {}
     }
 }
 

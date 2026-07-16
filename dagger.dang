@@ -59,26 +59,26 @@ type TypstPack {
       .withExec(["apt-get", "update"])
       .withExec(["apt-get", "install", "-y", "--no-install-recommends", "ca-certificates"])
       .withFile("/usr/local/bin/typst-pack", self.build)
-      .withEnvVariable("TYPST_PACK_PACKAGE_CACHE_PATH", "/work/package-cache")
+      .withEnvVariable("TYPST_PACKAGE_CACHE_PATH", "/work/package-cache")
       .withMountedCache("/work/package-cache", self.packageCache)
   }
 
   """
-  Pack a Typst project directory into a typst-pack archive.
+  Pack a Typst project into a typst-pack archive.
   """
   create(
     """
-    Typst project directory to pack. It is mounted at /work/src.
+    Typst project directory. It is mounted at /work/project.
     """
-    source: Directory!,
+    project: Directory!,
     """
-    Entrypoint relative to the project root.
+    Input Typst source file relative to the project root.
     """
-    entrypoint: String,
+    input: String! = "main.typ",
     """
     Do not vendor Typst packages into the pack.
     """
-    noPackages: Boolean! = false,
+    noVendorPackages: Boolean! = false,
     """
     Embed fonts used by the document.
     """
@@ -92,29 +92,53 @@ type TypstPack {
     """
     include: [String!]! = [],
     """
-    Optional filesystem External Resource Reference directory mounted at /work/references.
+    Ordered project-shaped directories that provide Resource Slot bytes.
     """
-    sourceReferenceDir: Directory,
+    resourceDirs: [Directory!]! = [],
     """
-    Filesystem External Resource References. Relative paths resolve from /work/src; absolute paths can reference other mounts.
+    Root-relative Resource Slot paths to declare.
     """
-    sourceReferences: [String!]! = [],
-    """
-    Root-relative paths to declare as External Project Resources.
-    """
-    externalResources: [String!]! = [],
+    resourceSlots: [String!]! = [],
     """
     KEY=VALUE pairs visible through sys.inputs during discovery.
     """
-    inputs: [String!]! = [],
+    sysInputs: [String!]! = [],
+    """
+    Discovery targets.
+    """
+    targets: [DiscoveryTarget!]! = [],
+    """
+    Experimental Typst features to enable during discovery.
+    """
+    features: [Feature!]! = [],
+    """
+    UNIX timestamp used during discovery.
+    """
+    creationTimestamp: Int,
+    """
+    Number of parallel jobs.
+    """
+    jobs: Int,
+    """
+    Diagnostic format.
+    """
+    diagnosticFormat: DiagnosticFormat! = DiagnosticFormat.HUMAN,
     """
     Optional font directory mounted at /work/fonts and added to the font search path.
     """
     fontDir: Directory,
     """
-    Additional font directories. Relative paths resolve from /work/src; absolute paths can reference other mounts.
+    Additional font directories. Relative paths resolve from /work/project; absolute paths can reference other mounts.
     """
     fontPaths: [String!]! = [],
+    """
+    Do not use system fonts during discovery.
+    """
+    ignoreSystemFonts: Boolean! = false,
+    """
+    Do not use fonts embedded into Typst during discovery.
+    """
+    ignoreEmbeddedFonts: Boolean! = false,
     """
     Optional Typst package directory mounted at /work/packages.
     """
@@ -135,27 +159,39 @@ type TypstPack {
     Pack metadata authors.
     """
     authors: [String!]! = [],
+    """
+    Custom CA certificate used for package downloads.
+    """
+    certificate: File,
   ): File! {
-    let args = [
-      "typst-pack", "create", ".",
-      "--output", "/work/out/project.typk",
-      "--ignore-system-fonts",
+    let args = ["typst-pack"]
+    if (certificate != null) {
+      args += ["--cert", "/work/certificate.pem"]
+    }
+    args += [
+      "create", input, "/work/out/project.typk",
+      "--root", ".",
+      "--diagnostic-format", diagnosticFormatName(diagnosticFormat),
     ]
 
     if (fontDir != null) {
       args += ["--font-path", "/work/fonts"]
     }
-    if (entrypoint != null and entrypoint != "") {
-      args += ["--entrypoint", entrypoint]
-    }
-    if (noPackages) { args += ["--no-packages"] }
+    if (noVendorPackages) { args += ["--no-vendor-packages"] }
     if (embedFonts) { args += ["--embed-fonts"] }
     if (includeTypstEmbeddedFonts) { args += ["--include-typst-embedded-fonts"] }
     include.each { path => args += ["--include", path] }
-    sourceReferences.each { reference => args += ["--source-reference", reference] }
-    externalResources.each { path => args += ["--external-resource", path] }
-    inputs.each { input => args += ["--input", input] }
+    resourceSlots.each { path => args += ["--resource-slot", path] }
+    sysInputs.each { input => args += ["--input", input] }
+    targets.each { target => args += ["--target", discoveryTargetName(target)] }
+    features.each { feature => args += ["--features", featureName(feature)] }
+    if (creationTimestamp != null) {
+      args += ["--creation-timestamp", toString(creationTimestamp)]
+    }
+    if (jobs != null) { args += ["--jobs", toString(jobs)] }
     fontPaths.each { path => args += ["--font-path", path] }
+    if (ignoreSystemFonts) { args += ["--ignore-system-fonts"] }
+    if (ignoreEmbeddedFonts) { args += ["--ignore-embedded-fonts"] }
     if (packageDir != null) {
       args += ["--package-path", "/work/packages"]
     }
@@ -170,17 +206,24 @@ type TypstPack {
 
     let container = self
       .container
-      .withWorkdir("/work/src")
-      .withMountedDirectory(".", source)
+      .withWorkdir("/work/project")
+      .withMountedDirectory(".", project)
 
     if (fontDir != null) {
       container = container.withMountedDirectory("/work/fonts", fontDir)
     }
-    if (sourceReferenceDir != null) {
-      container = container.withMountedDirectory("/work/references", sourceReferenceDir)
+    let resourceIndex = 0
+    resourceDirs.each { resourceDir =>
+      let resourcePath = "/work/resources/" + toString(resourceIndex)
+      container = container.withMountedDirectory(resourcePath, resourceDir)
+      args += ["--resource-path", resourcePath]
+      resourceIndex += 1
     }
     if (packageDir != null) {
       container = container.withMountedDirectory("/work/packages", packageDir)
+    }
+    if (certificate != null) {
+      container = container.withMountedFile("/work/certificate.pem", certificate)
     }
 
     container
@@ -194,7 +237,7 @@ type TypstPack {
   """
   inspect(
     """
-    Pack file to inspect. It is mounted at /work/src/<name>.
+    Pack file to inspect. It is mounted at /work/src/project.typk.
     """
     pack: File!,
   ): String! {
@@ -211,7 +254,7 @@ type TypstPack {
   """
   extract(
     """
-    Pack file to extract. It is mounted at /work/src/<name>.
+    Pack file to extract. It is mounted at /work/src/project.typk.
     """
     pack: File!,
     """
@@ -247,7 +290,7 @@ type TypstPack {
   """
   compile(
     """
-    Pack file to compile. It is mounted at /work/src/<name>.
+    Pack file to compile. It is mounted at /work/src/project.typk.
     """
     pack: File!,
     """
@@ -257,11 +300,14 @@ type TypstPack {
     """
     Experimental Typst features to enable.
     """
-    features: [String!]! = [],
+    features: [Feature!]! = [],
     """
     Source pages to export, for example 1,3-5,9-.
     """
     pages: String,
+
+    # Dagger module APIs do not expose a Float scalar, so preserve Typst's
+    # floating-point precision as a validated CLI string.
     """
     PPI for PNG export.
     """
@@ -269,15 +315,11 @@ type TypstPack {
     """
     KEY=VALUE pairs visible through sys.inputs.
     """
-    inputs: [String!]! = [],
+    sysInputs: [String!]! = [],
     """
-    Optional filesystem External Resource Reference directory mounted at /work/references.
+    Ordered project-shaped directories that provide Resource Slot bytes.
     """
-    sourceReferenceDir: Directory,
-    """
-    Filesystem External Resource References. Relative paths resolve from /work/src; absolute paths can reference other mounts.
-    """
-    sourceReferences: [String!]! = [],
+    resourceDirs: [Directory!]! = [],
     """
     Optional font directory mounted at /work/fonts and added to the font search path.
     """
@@ -287,17 +329,33 @@ type TypstPack {
     """
     fontPaths: [String!]! = [],
     """
+    Do not use system fonts.
+    """
+    ignoreSystemFonts: Boolean! = false,
+    """
     Do not use Typst's embedded fonts.
     """
     ignoreEmbeddedFonts: Boolean! = false,
     """
+    Whether to pretty-print HTML, SVG, and PDF output.
+    """
+    pretty: Boolean! = false,
+    """
     PDF standards to enforce.
     """
-    pdfStandards: [String!]! = [],
+    pdfStandards: [PdfStandard!]! = [],
     """
-    SOURCE_DATE_EPOCH value used as the document creation date when --creation-timestamp is absent.
+    Disable PDF accessibility tags.
     """
-    sourceDateEpoch: String,
+    noPdfTags: Boolean! = false,
+    """
+    UNIX timestamp used as the document creation date.
+    """
+    creationTimestamp: Int,
+    """
+    Number of parallel jobs.
+    """
+    jobs: Int,
     """
     Optional Typst package directory mounted at /work/packages.
     """
@@ -310,33 +368,46 @@ type TypstPack {
     Diagnostic format: human or short.
     """
     diagnosticFormat: DiagnosticFormat! = DiagnosticFormat.HUMAN,
+    """
+    Custom CA certificate used for package downloads.
+    """
+    certificate: File,
   ): Directory! {
     let outputPath = "/work/out/output." + outputFormatName(format)
     if (format == OutputFormat.PNG or format == OutputFormat.SVG) {
       outputPath = "/work/out/page-{0p}." + outputFormatName(format)
     }
-    let args = [
-      "typst-pack", "compile", "project.typk", outputPath,
+    let args = ["typst-pack"]
+    if (certificate != null) {
+      args += ["--cert", "/work/certificate.pem"]
+    }
+    args += [
+      "compile", "project.typk", outputPath,
       "--format", outputFormatName(format),
-      "--ignore-system-fonts",
       "--diagnostic-format", diagnosticFormatName(diagnosticFormat),
     ]
 
     if (fontDir != null) {
       args += ["--font-path", "/work/fonts"]
     }
-    features.each { feature => args += ["--features", feature] }
+    features.each { feature => args += ["--features", featureName(feature)] }
     if (pages != null) {
       args += ["--pages", pages]
     }
     if (ppi != null and ppi != "") {
       args += ["--ppi", ppi]
     }
-    inputs.each { input => args += ["--input", input] }
-    sourceReferences.each { reference => args += ["--source-reference", reference] }
+    sysInputs.each { input => args += ["--input", input] }
     fontPaths.each { path => args += ["--font-path", path] }
+    if (ignoreSystemFonts) { args += ["--ignore-system-fonts"] }
     if (ignoreEmbeddedFonts) { args += ["--ignore-embedded-fonts"] }
-    pdfStandards.each { standard => args += ["--pdf-standard", standard] }
+    if (pretty) { args += ["--pretty"] }
+    pdfStandards.each { standard => args += ["--pdf-standard", pdfStandardName(standard)] }
+    if (noPdfTags) { args += ["--no-pdf-tags"] }
+    if (creationTimestamp != null) {
+      args += ["--creation-timestamp", toString(creationTimestamp)]
+    }
+    if (jobs != null) { args += ["--jobs", toString(jobs)] }
     if (packageDir != null) {
       args += ["--package-path", "/work/packages"]
     }
@@ -350,15 +421,18 @@ type TypstPack {
     if (fontDir != null) {
       container = container.withMountedDirectory("/work/fonts", fontDir)
     }
-    if (sourceReferenceDir != null) {
-      container = container.withMountedDirectory("/work/references", sourceReferenceDir)
+    let resourceIndex = 0
+    resourceDirs.each { resourceDir =>
+      let resourcePath = "/work/resources/" + toString(resourceIndex)
+      container = container.withMountedDirectory(resourcePath, resourceDir)
+      args += ["--resource-path", resourcePath]
+      resourceIndex += 1
     }
     if (packageDir != null) {
       container = container.withMountedDirectory("/work/packages", packageDir)
     }
-
-    if (sourceDateEpoch != null and sourceDateEpoch != "") {
-      container = container.withEnvVariable("SOURCE_DATE_EPOCH", sourceDateEpoch)
+    if (certificate != null) {
+      container = container.withMountedFile("/work/certificate.pem", certificate)
     }
 
     container
@@ -380,10 +454,73 @@ enum DiagnosticFormat {
   SHORT
 }
 
+enum DiscoveryTarget {
+  PAGED
+  HTML
+}
+
+enum Feature {
+  HTML
+  A11Y_EXTRAS
+}
+
+enum PdfStandard {
+  V1_4
+  V1_5
+  V1_6
+  V1_7
+  V2_0
+  A_1B
+  A_1A
+  A_2B
+  A_2U
+  A_2A
+  A_3B
+  A_3U
+  A_3A
+  A_4
+  A_4F
+  A_4E
+  UA_1
+}
+
 let outputFormatName(format: OutputFormat!): String! {
   toString(format).toLower
 }
 
 let diagnosticFormatName(format: DiagnosticFormat!): String! {
   toString(format).toLower
+}
+
+let discoveryTargetName(target: DiscoveryTarget!): String! {
+  toString(target).toLower
+}
+
+let featureName(feature: Feature!): String! {
+  let name = "html"
+  if (feature == Feature.A11Y_EXTRAS) { name = "a11y-extras" }
+
+  name
+}
+
+let pdfStandardName(standard: PdfStandard!): String! {
+  let name = "ua-1"
+  if (standard == PdfStandard.V1_4) { name = "1.4" }
+  if (standard == PdfStandard.V1_5) { name = "1.5" }
+  if (standard == PdfStandard.V1_6) { name = "1.6" }
+  if (standard == PdfStandard.V1_7) { name = "1.7" }
+  if (standard == PdfStandard.V2_0) { name = "2.0" }
+  if (standard == PdfStandard.A_1B) { name = "a-1b" }
+  if (standard == PdfStandard.A_1A) { name = "a-1a" }
+  if (standard == PdfStandard.A_2B) { name = "a-2b" }
+  if (standard == PdfStandard.A_2U) { name = "a-2u" }
+  if (standard == PdfStandard.A_2A) { name = "a-2a" }
+  if (standard == PdfStandard.A_3B) { name = "a-3b" }
+  if (standard == PdfStandard.A_3U) { name = "a-3u" }
+  if (standard == PdfStandard.A_3A) { name = "a-3a" }
+  if (standard == PdfStandard.A_4) { name = "a-4" }
+  if (standard == PdfStandard.A_4F) { name = "a-4f" }
+  if (standard == PdfStandard.A_4E) { name = "a-4e" }
+
+  name
 }

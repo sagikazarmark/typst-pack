@@ -2,37 +2,149 @@
 
 #![cfg(feature = "cli")]
 
+use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::sync::{Arc, Mutex};
 
 use chrono::{Datelike, Timelike};
-use clap::{Args, Parser, Subcommand};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use typst::diag::{FileError, FileResult, SourceDiagnostic};
 use typst::foundations::{Bytes, Datetime, Dict, IntoValue};
 use typst::syntax::{FileId, VirtualRoot};
-use typst_kit::diagnostics::termcolor::{ColorChoice, StandardStream, WriteColor};
+use typst_kit::diagnostics::termcolor::{
+    Color, ColorChoice, ColorSpec, StandardStream, WriteColor,
+};
 use typst_kit::diagnostics::{DiagnosticFormat, DiagnosticWorld};
 use typst_kit::files::{FileLoader, FsRoot};
 use typst_pdf::{PdfStandard, PdfStandards, Timestamp};
 
 use crate::compile::{
-    CompilationArtifact, CompileError, CompileOptions, OutputFormat, PageSelection, compile,
-    parse_page_selection,
+    CompilationArtifact, CompileError, CompileOptions, OutputFormat, PageRange, PageSelection,
+    compile, parse_page_selection,
 };
 use crate::extract::{ExtractOptions, extract};
 use crate::manifest::PackMetadata;
 use crate::pack::{FILE_EXTENSION, Pack};
-use crate::packer::{DiscoveryWorld, Packer, PackerError, ProjectResourcePolicy};
-use crate::world::{PackWorld, SystemPackageLoader};
+use crate::packer::{DiscoveryTarget, DiscoveryWorld, Packer, PackerError};
+use crate::world::PackWorld;
+
+const DIAGNOSTICS_EMITTED: &str = "\0typst diagnostics emitted";
+const ENV_PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
 
 /// Pack, inspect, extract, and compile portable Typst project packs.
 #[derive(Debug, Parser)]
-#[command(name = "typst-pack", version, about)]
+#[command(
+    name = "typst-pack",
+    version = concat!(env!("CARGO_PKG_VERSION"), " (Typst 0.15.0)"),
+    about
+)]
 pub struct Cli {
+    /// Whether to use color in diagnostics.
+    #[arg(
+        long,
+        default_value = "auto",
+        default_missing_value = "always",
+        num_args = 0..=1,
+        value_parser = ["auto", "always", "never"]
+    )]
+    color: String,
+
+    /// Path to a custom CA certificate used for package downloads.
+    #[arg(long, env = "TYPST_CERT", value_name = "PATH")]
+    cert: Option<PathBuf>,
+
     #[command(subcommand)]
     command: Command,
+}
+
+#[derive(Debug, Args)]
+struct SharedCompilationArgs {
+    /// Add a string key-value pair visible through `sys.inputs`.
+    #[arg(
+        long = "input",
+        value_name = "key=value",
+        value_parser = parse_input
+    )]
+    inputs: Vec<(String, String)>,
+
+    /// Enables in-development features that may be changed or removed at any
+    /// time.
+    #[arg(
+        long = "features",
+        value_name = "FEATURE",
+        value_delimiter = ',',
+        env = "TYPST_FEATURES"
+    )]
+    features: Vec<FeatureArg>,
+}
+
+#[derive(Debug, Args)]
+struct SharedFontArgs {
+    /// Adds additional directories that are recursively searched for fonts.
+    ///
+    /// If multiple paths are specified, they are separated by the system's path
+    /// separator (`:` on Unix-like systems and `;` on Windows).
+    #[arg(
+        long = "font-path",
+        env = "TYPST_FONT_PATHS",
+        value_name = "DIR",
+        value_delimiter = ENV_PATH_SEPARATOR
+    )]
+    font_paths: Vec<PathBuf>,
+
+    /// Ensures system fonts won't be searched, unless explicitly included via
+    /// `--font-path`.
+    #[arg(long, env = "TYPST_IGNORE_SYSTEM_FONTS")]
+    ignore_system_fonts: bool,
+
+    /// Ensures fonts embedded into Typst won't be considered.
+    #[arg(long, env = "TYPST_IGNORE_EMBEDDED_FONTS")]
+    ignore_embedded_fonts: bool,
+}
+
+#[derive(Debug, Args)]
+struct SharedPackageArgs {
+    /// Custom path to local packages, defaults to system-dependent location.
+    #[arg(long, env = "TYPST_PACKAGE_PATH", value_name = "DIR")]
+    package_path: Option<PathBuf>,
+
+    /// Custom path to package cache, defaults to system-dependent location.
+    #[arg(long, env = "TYPST_PACKAGE_CACHE_PATH", value_name = "DIR")]
+    package_cache_path: Option<PathBuf>,
+
+    /// Disallow network access; package dependencies must already be available
+    /// in the local package directories.
+    #[arg(long)]
+    offline: bool,
+}
+
+#[derive(Debug, Args)]
+struct SharedAutomationArgs {
+    /// Number of parallel jobs spawned during compilation. Defaults to number
+    /// of CPUs. Setting it to 1 disables parallelism.
+    #[arg(long, short)]
+    jobs: Option<usize>,
+
+    /// The document's creation date formatted as a UNIX timestamp.
+    ///
+    /// For more information, see <https://reproducible-builds.org/specs/source-date-epoch/>.
+    #[arg(long, env = "SOURCE_DATE_EPOCH", value_name = "UNIX_TIMESTAMP")]
+    creation_timestamp: Option<i64>,
+
+    /// The format to emit diagnostics in.
+    #[arg(long, default_value = "human")]
+    diagnostic_format: DiagnosticFormatArg,
+
+    /// Produces performance timings of the compilation process. (experimental)
+    ///
+    /// The resulting JSON file can be loaded into a tracing tool such as
+    /// https://ui.perfetto.dev. It does not contain any sensitive information
+    /// apart from file names and line numbers.
+    #[arg(long, value_name = "OUTPUT_JSON")]
+    timings: Option<PathBuf>,
 }
 
 #[derive(Debug, Subcommand)]
@@ -44,92 +156,91 @@ enum Command {
     /// Extracts a pack into a directory.
     Extract(ExtractArgs),
     /// Compiles a pack to PDF, PNG, SVG, or HTML.
+    #[command(visible_alias = "c")]
     Compile(CompileArgs),
 }
 
 #[derive(Debug, Args)]
 struct CreateArgs {
-    /// The project directory or the entrypoint .typ file.
-    project: PathBuf,
+    /// Path to the input Typst file.
+    #[arg(help_heading = "Project")]
+    input: PathBuf,
 
-    /// Path to write the pack to [default: <project name>.typk].
-    #[arg(short, long)]
+    /// Path to the output Pack [default: INPUT with its extension replaced by .typk].
+    #[arg(help_heading = "Pack Contents")]
     output: Option<PathBuf>,
 
-    /// The entrypoint, relative to the project root [default: main.typ].
-    #[arg(long)]
-    entrypoint: Option<PathBuf>,
-
-    /// The project root directory [default: the entrypoint's directory].
-    #[arg(long)]
+    /// Configures the project root (for absolute paths).
+    #[arg(long, env = "TYPST_ROOT", value_name = "DIR", help_heading = "Project")]
     root: Option<PathBuf>,
 
     /// Do not store package files in the pack; record them as unvendored
     /// dependencies instead.
-    #[arg(long)]
-    no_packages: bool,
+    #[arg(long = "no-vendor-packages", help_heading = "Packages")]
+    no_vendor_packages: bool,
 
     /// Embed the fonts used by the document into the pack.
-    #[arg(long)]
+    #[arg(long, help_heading = "Pack Contents")]
     embed_fonts: bool,
 
     /// When embedding fonts, also embed fonts identical to Typst's embedded
     /// fonts.
-    #[arg(long, requires = "embed_fonts")]
+    #[arg(long, requires = "embed_fonts", help_heading = "Pack Contents")]
     include_typst_embedded_fonts: bool,
 
     /// Additional files or directories (inside the project root) to pack
     /// beyond what the discovery compile finds.
-    #[arg(long = "include", value_name = "PATH")]
+    #[arg(long = "include", value_name = "PATH", help_heading = "Pack Contents")]
     include: Vec<PathBuf>,
 
-    /// Filesystem External Resource References used during discovery.
-    #[arg(long = "source-reference", value_name = "DIR")]
-    source_references: Vec<PathBuf>,
+    /// Project-shaped directories that provide Resource Slot bytes during discovery.
+    #[arg(
+        long = "resource-path",
+        value_name = "DIR",
+        help_heading = "Resource Slots"
+    )]
+    resource_paths: Vec<PathBuf>,
 
-    /// Root-relative resource paths to declare as external even if discovery does not load them.
-    #[arg(long = "external-resource", value_name = "PATH")]
-    external_resources: Vec<String>,
+    /// Root-relative Resource Slot paths to declare even if discovery does not request them.
+    #[arg(
+        long = "resource-slot",
+        value_name = "PATH",
+        help_heading = "Resource Slots"
+    )]
+    resource_slots: Vec<String>,
 
-    /// String key-value pairs visible through `sys.inputs` during the
-    /// discovery compile.
-    #[arg(long = "input", value_name = "KEY=VALUE")]
-    inputs: Vec<String>,
+    /// Compilation targets whose dependencies should be discovered.
+    #[arg(
+        long = "target",
+        value_name = "TARGET",
+        value_delimiter = ',',
+        help_heading = "Discovery"
+    )]
+    targets: Vec<DiscoveryTargetArg>,
 
-    /// Additional directories to search for fonts during the discovery
-    /// compile.
-    #[arg(long = "font-path", value_name = "DIR")]
-    font_paths: Vec<PathBuf>,
+    #[command(flatten, next_help_heading = "Discovery")]
+    compilation: SharedCompilationArgs,
 
-    /// Do not use system fonts during the discovery compile.
-    #[arg(long)]
-    ignore_system_fonts: bool,
+    #[command(flatten, next_help_heading = "Fonts")]
+    fonts: SharedFontArgs,
 
-    /// Custom path to local packages, defaults to system-dependent location.
-    #[arg(long, value_name = "DIR")]
-    package_path: Option<PathBuf>,
-
-    /// Custom path to the package cache, defaults to system-dependent
-    /// location.
-    #[arg(long, value_name = "DIR", env = "TYPST_PACK_PACKAGE_CACHE_PATH")]
-    package_cache_path: Option<PathBuf>,
-
-    /// Disallow network access; package dependencies must already exist in
-    /// the local package directories.
-    #[arg(long)]
-    offline: bool,
+    #[command(flatten, next_help_heading = "Packages")]
+    packages: SharedPackageArgs,
 
     /// A human-readable name recorded in the pack metadata.
-    #[arg(long)]
+    #[arg(long, help_heading = "Metadata")]
     name: Option<String>,
 
     /// A description recorded in the pack metadata.
-    #[arg(long)]
+    #[arg(long, help_heading = "Metadata")]
     description: Option<String>,
 
     /// Authors recorded in the pack metadata.
-    #[arg(long = "author", value_name = "AUTHOR")]
+    #[arg(long = "author", value_name = "AUTHOR", help_heading = "Metadata")]
     authors: Vec<String>,
+
+    #[command(flatten, next_help_heading = "Diagnostics & Automation")]
+    automation: SharedAutomationArgs,
 }
 
 #[derive(Debug, Args)]
@@ -167,168 +278,355 @@ struct ExtractArgs {
 #[derive(Debug, Args)]
 struct CompileArgs {
     /// The pack file to compile.
+    #[arg(help_heading = "Compilation")]
     pack: PathBuf,
 
-    /// Path to the output file. For PNG and SVG output of multi-page
-    /// documents, the filename must contain `{p}`, `{0p}`, or `{t}`
-    /// placeholders (Source Page Number, zero-padded Source Page Number,
-    /// emitted artifact count)
-    /// [default: <pack name>.<format extension>].
+    /// Path to output file (PDF, PNG, SVG, or HTML). Use `-` to write output to
+    /// stdout.
+    ///
+    /// For output formats emitting one file per page (PNG & SVG), a page number
+    /// template must be present if the source document renders to multiple
+    /// pages. Use `{p}` for page numbers, `{0p}` for zero padded page numbers
+    /// and `{t}` for page count. For example, `page-{0p}-of-{t}.png` creates
+    /// `page-01-of-10.png`, `page-02-of-10.png`, and so on.
+    #[arg(help_heading = "Output")]
     output: Option<PathBuf>,
 
-    /// The output format. `html` is experimental and additionally requires
-    /// `--features html` [default: inferred from the output extension, or
-    /// pdf].
-    #[arg(short, long, value_parser = ["pdf", "png", "svg", "html"])]
-    format: Option<String>,
+    /// The format of the output file, inferred from the extension by default.
+    /// HTML is experimental and additionally requires `--features html`.
+    #[arg(short, long, help_heading = "Output")]
+    format: Option<OutputFormatArg>,
 
-    /// Enables experimental Typst features.
+    /// Whether to pretty-print produced output.
+    ///
+    /// This formats the output in a more human-readable, but less
+    /// space-efficient way. Affects HTML, SVG, and PDF export, but not PNG
+    /// export.
+    #[arg(long, help_heading = "Output")]
+    pretty: bool,
+
+    #[command(flatten, next_help_heading = "Compilation")]
+    compilation: SharedCompilationArgs,
+
+    /// Which pages to export. When unspecified, all pages are exported.
+    ///
+    /// Pages to export are separated by commas, and can be either simple page
+    /// numbers (e.g. '2,5' to export only pages 2 and 5) or page ranges (e.g.
+    /// '2,3-6,8-' to export page 2, pages 3 to 6 (inclusive), page 8 and any
+    /// pages after it).
+    ///
+    /// Page numbers are one-indexed and correspond to physical page numbers in
+    /// the document (therefore not being affected by the document's page
+    /// counter).
+    #[arg(long, value_delimiter = ',', help_heading = "Output")]
+    pages: Vec<PageRangeArg>,
+
+    /// The PPI (pixels per inch) to use for PNG export.
+    #[arg(long, default_value_t = 144.0, help_heading = "Output")]
+    ppi: f64,
+
+    /// Project-shaped directories that provide Resource Slot bytes during compilation.
     #[arg(
-        long = "features",
-        value_name = "FEATURE",
-        value_delimiter = ',',
-        env = "TYPST_FEATURES",
-        value_parser = ["html"]
+        long = "resource-path",
+        value_name = "DIR",
+        help_heading = "Resource Slots"
     )]
-    features: Vec<String>,
+    resource_paths: Vec<PathBuf>,
 
-    /// Which source pages to export, e.g. `1,3-5,9-`.
-    #[arg(long)]
-    pages: Option<String>,
+    #[command(flatten, next_help_heading = "Fonts")]
+    fonts: SharedFontArgs,
 
-    /// The PPI (pixels per inch) for PNG export.
-    #[arg(long, default_value_t = 144.0)]
-    ppi: f32,
+    /// One (or multiple comma-separated) PDF standards that Typst will enforce
+    /// conformance with.
+    #[arg(
+        long = "pdf-standard",
+        value_name = "STANDARD",
+        value_delimiter = ',',
+        help_heading = "PDF"
+    )]
+    pdf_standards: Vec<PdfStandardArg>,
 
-    /// String key-value pairs visible through `sys.inputs`.
-    #[arg(long = "input", value_name = "KEY=VALUE")]
-    inputs: Vec<String>,
+    /// By default, even when not producing a `PDF/UA-1` document, a tagged PDF
+    /// document is written to provide a baseline of accessibility. In some
+    /// circumstances (for example when trying to reduce the size of a document)
+    /// it can be desirable to disable tagged PDF.
+    #[arg(long = "no-pdf-tags", help_heading = "PDF")]
+    no_pdf_tags: bool,
 
-    /// Filesystem External Resource References used during compilation.
-    #[arg(long = "source-reference", value_name = "DIR")]
-    source_references: Vec<PathBuf>,
+    #[command(flatten, next_help_heading = "Packages")]
+    packages: SharedPackageArgs,
 
-    /// Additional directories to search for fonts.
-    #[arg(long = "font-path", value_name = "DIR")]
-    font_paths: Vec<PathBuf>,
+    #[command(flatten, next_help_heading = "Diagnostics & Automation")]
+    automation: SharedAutomationArgs,
 
-    /// Do not use system fonts.
-    #[arg(long)]
-    ignore_system_fonts: bool,
+    /// File path to which a list of current compilation's dependencies will be
+    /// written. Use `-` to write to stdout.
+    #[arg(long, value_name = "PATH", help_heading = "Diagnostics & Automation")]
+    deps: Option<PathBuf>,
 
-    /// Do not use Typst's embedded fonts.
-    #[arg(long)]
-    ignore_embedded_fonts: bool,
+    /// File format to use for dependencies.
+    #[arg(
+        long,
+        default_value = "json",
+        value_enum,
+        help_heading = "Diagnostics & Automation"
+    )]
+    deps_format: DepsFormat,
 
-    /// One or more PDF standards that Typst will enforce conformance with.
-    #[arg(long = "pdf-standard", value_name = "STANDARD")]
-    pdf_standards: Vec<String>,
+    /// Opens the output file with the default viewer or a specific program
+    /// after compilation. Ignored if output is stdout.
+    #[arg(
+        long,
+        value_name = "VIEWER",
+        num_args = 0..=1,
+        help_heading = "Diagnostics & Automation"
+    )]
+    open: Option<Option<String>>,
+}
 
-    /// The document's creation date as a UNIX timestamp (for reproducible
-    /// builds). Falls back to the SOURCE_DATE_EPOCH environment variable.
-    #[arg(long, value_name = "UNIX_TIMESTAMP")]
-    creation_timestamp: Option<i64>,
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DepsFormat {
+    Json,
+    Zero,
+    Make,
+}
 
-    /// Custom path to local packages, defaults to system-dependent location.
-    #[arg(long, value_name = "DIR")]
-    package_path: Option<PathBuf>,
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DiagnosticFormatArg {
+    Human,
+    Short,
+}
 
-    /// Custom path to the package cache, defaults to system-dependent
-    /// location.
-    #[arg(long, value_name = "DIR", env = "TYPST_PACK_PACKAGE_CACHE_PATH")]
-    package_cache_path: Option<PathBuf>,
+impl From<DiagnosticFormatArg> for DiagnosticFormat {
+    fn from(value: DiagnosticFormatArg) -> Self {
+        match value {
+            DiagnosticFormatArg::Human => Self::Human,
+            DiagnosticFormatArg::Short => Self::Short,
+        }
+    }
+}
 
-    /// Disallow network access; packages that are not vendored in the pack
-    /// must already exist in the local package directories.
-    #[arg(long)]
-    offline: bool,
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum FeatureArg {
+    Html,
+    A11yExtras,
+}
 
-    /// The format to emit diagnostics in.
-    #[arg(long, default_value = "human", value_parser = ["human", "short"])]
-    diagnostic_format: String,
+impl From<FeatureArg> for typst::Feature {
+    fn from(value: FeatureArg) -> Self {
+        match value {
+            FeatureArg::Html => Self::Html,
+            FeatureArg::A11yExtras => Self::A11yExtras,
+        }
+    }
+}
 
-    /// Opens the first Compilation Output Artifact with the default viewer
-    /// after compilation.
-    #[arg(long)]
-    open: bool,
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum DiscoveryTargetArg {
+    Paged,
+    Html,
+}
+
+impl From<DiscoveryTargetArg> for DiscoveryTarget {
+    fn from(value: DiscoveryTargetArg) -> Self {
+        match value {
+            DiscoveryTargetArg::Paged => Self::Paged,
+            DiscoveryTargetArg::Html => Self::Html,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum OutputFormatArg {
+    Pdf,
+    Png,
+    Svg,
+    Html,
+}
+
+impl From<OutputFormatArg> for OutputFormat {
+    fn from(value: OutputFormatArg) -> Self {
+        match value {
+            OutputFormatArg::Pdf => Self::Pdf,
+            OutputFormatArg::Png => Self::Png,
+            OutputFormatArg::Svg => Self::Svg,
+            OutputFormatArg::Html => Self::Html,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+struct PageRangeArg(PageRange);
+
+impl std::str::FromStr for PageRangeArg {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        let selection = parse_page_selection(value)?;
+        Ok(Self(
+            selection
+                .ranges()
+                .first()
+                .expect("one range is parsed from one CLI value")
+                .clone(),
+        ))
+    }
+}
+
+#[allow(non_camel_case_types)]
+#[derive(Debug, Clone, Copy, ValueEnum)]
+enum PdfStandardArg {
+    #[value(name = "1.4")]
+    V_1_4,
+    #[value(name = "1.5")]
+    V_1_5,
+    #[value(name = "1.6")]
+    V_1_6,
+    #[value(name = "1.7")]
+    V_1_7,
+    #[value(name = "2.0")]
+    V_2_0,
+    #[value(name = "a-1b")]
+    A_1b,
+    #[value(name = "a-1a")]
+    A_1a,
+    #[value(name = "a-2b")]
+    A_2b,
+    #[value(name = "a-2u")]
+    A_2u,
+    #[value(name = "a-2a")]
+    A_2a,
+    #[value(name = "a-3b")]
+    A_3b,
+    #[value(name = "a-3u")]
+    A_3u,
+    #[value(name = "a-3a")]
+    A_3a,
+    #[value(name = "a-4")]
+    A_4,
+    #[value(name = "a-4f")]
+    A_4f,
+    #[value(name = "a-4e")]
+    A_4e,
+    #[value(name = "ua-1")]
+    Ua_1,
+}
+
+impl From<PdfStandardArg> for PdfStandard {
+    fn from(value: PdfStandardArg) -> Self {
+        match value {
+            PdfStandardArg::V_1_4 => Self::V_1_4,
+            PdfStandardArg::V_1_5 => Self::V_1_5,
+            PdfStandardArg::V_1_6 => Self::V_1_6,
+            PdfStandardArg::V_1_7 => Self::V_1_7,
+            PdfStandardArg::V_2_0 => Self::V_2_0,
+            PdfStandardArg::A_1b => Self::A_1b,
+            PdfStandardArg::A_1a => Self::A_1a,
+            PdfStandardArg::A_2b => Self::A_2b,
+            PdfStandardArg::A_2u => Self::A_2u,
+            PdfStandardArg::A_2a => Self::A_2a,
+            PdfStandardArg::A_3b => Self::A_3b,
+            PdfStandardArg::A_3u => Self::A_3u,
+            PdfStandardArg::A_3a => Self::A_3a,
+            PdfStandardArg::A_4 => Self::A_4,
+            PdfStandardArg::A_4f => Self::A_4f,
+            PdfStandardArg::A_4e => Self::A_4e,
+            PdfStandardArg::Ua_1 => Self::Ua_1,
+        }
+    }
 }
 
 /// Runs the CLI and returns the process exit code.
 pub fn run() -> ExitCode {
-    let cli = Cli::parse();
-    let result = match cli.command {
-        Command::Create(args) => create(args),
+    let Cli {
+        color,
+        cert,
+        command,
+    } = Cli::parse();
+    let color = match color.as_str() {
+        "always" => ColorChoice::Always,
+        "never" => ColorChoice::Never,
+        _ => ColorChoice::Auto,
+    };
+    let result = match command {
+        Command::Create(args) => create(args, color, cert.as_deref()),
         Command::Inspect(args) => inspect(args),
         Command::Extract(args) => extract_command(args),
-        Command::Compile(args) => compile_command(args),
+        Command::Compile(args) => compile_command(args, color, cert.as_deref()),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
-            eprintln!("error: {error}");
+            if error != DIAGNOSTICS_EMITTED {
+                emit_owned_error(&error, color);
+            }
             ExitCode::FAILURE
         }
     }
 }
 
-fn create(args: CreateArgs) -> Result<(), String> {
-    let project = args
-        .project
+fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> Result<(), String> {
+    initialize_jobs(args.automation.jobs);
+    let diagnostic_format = args.automation.diagnostic_format.into();
+    if args.input == Path::new("-") {
+        return Err("create input must be a named Typst source file, not stdin".to_owned());
+    }
+
+    let input = args
+        .input
         .canonicalize()
-        .map_err(|err| format!("cannot access `{}`: {err}", args.project.display()))?;
+        .map_err(|err| format!("cannot access `{}`: {err}", args.input.display()))?;
+    if !input.is_file() {
+        return Err(format!(
+            "create input must be a Typst source file: `{}`",
+            args.input.display()
+        ));
+    }
 
-    let (root, entrypoint) = if project.is_dir() {
-        let root = args.root.unwrap_or_else(|| project.clone());
-        let entrypoint = args.entrypoint.unwrap_or_else(|| PathBuf::from("main.typ"));
-        (root, entrypoint)
-    } else {
-        if args.entrypoint.is_some() {
-            return Err("--entrypoint only applies when PROJECT is a directory".into());
-        }
-        let root = match args.root {
-            Some(root) => root,
-            None => project
-                .parent()
-                .ok_or("cannot determine project root")?
-                .to_path_buf(),
-        };
-        (root, project.clone())
+    let root = match args.root {
+        Some(root) => root,
+        None => input
+            .parent()
+            .ok_or("cannot determine project root")?
+            .to_path_buf(),
     };
+    let output = args
+        .output
+        .unwrap_or_else(|| args.input.with_extension(FILE_EXTENSION));
 
-    let output = args.output.unwrap_or_else(|| {
-        let stem = root
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "project".to_owned());
-        PathBuf::from(format!("{stem}.{FILE_EXTENSION}"))
-    });
-
-    let mut packer = Packer::new(&root, &entrypoint)
-        .vendor_packages(!args.no_packages)
+    let mut packer = Packer::new(&root, &input)
+        .vendor_packages(!args.no_vendor_packages)
         .embed_fonts(args.embed_fonts)
         .include_typst_embedded_fonts(args.include_typst_embedded_fonts)
-        .system_fonts(!args.ignore_system_fonts)
-        .offline(args.offline)
-        .inputs(parse_inputs(&args.inputs)?);
+        .typst_embedded_fonts(!args.fonts.ignore_embedded_fonts)
+        .system_fonts(!args.fonts.ignore_system_fonts)
+        .offline(args.packages.offline)
+        .certificate(cert.map(Path::to_path_buf))
+        .creation_timestamp(args.automation.creation_timestamp)
+        .timings(args.automation.timings.clone())
+        .inputs(parse_inputs(&args.compilation.inputs));
     for path in &args.include {
         packer = packer.include(path);
     }
-    if !args.source_references.is_empty() {
-        packer = packer.project_resource_policy(ProjectResourcePolicy::AllowExternalFallback);
+    for path in &args.resource_paths {
+        packer = packer.resource_provider(FilesystemResourceProvider::new(path.clone()));
     }
-    for path in &args.source_references {
-        packer = packer.external_resource_reference(FilesystemReference::new(path.clone()));
+    for path in args.resource_slots {
+        packer = packer.resource_slot(path);
     }
-    for path in args.external_resources {
-        packer = packer.external_resource(path);
+    for target in args.targets {
+        packer = packer.target(target.into());
     }
-    for path in &args.font_paths {
+    for feature in args.compilation.features {
+        packer = packer.feature(feature.into());
+    }
+    for path in &args.fonts.font_paths {
         packer = packer.font_path(path);
     }
-    if let Some(path) = &args.package_path {
+    if let Some(path) = &args.packages.package_path {
         packer = packer.package_path(path);
     }
-    if let Some(path) = &args.package_cache_path {
+    if let Some(path) = &args.packages.package_cache_path {
         packer = packer.package_cache_path(path);
     }
     if args.name.is_some() || args.description.is_some() || !args.authors.is_empty() {
@@ -352,15 +650,34 @@ fn create(args: CreateArgs) -> Result<(), String> {
             errors,
             warnings,
         }) => {
-            emit_diagnostics(world.as_ref(), errors.iter().chain(&warnings));
-            return Err("the discovery compile failed".into());
+            emit_diagnostics_with(
+                world.as_ref(),
+                errors.iter().chain(&warnings),
+                diagnostic_format,
+                color,
+            );
+            return Err(DIAGNOSTICS_EMITTED.into());
         }
         Err(err) => return Err(err.to_string()),
     };
 
-    emit_diagnostics(&outcome.world, outcome.report.compile_warnings.iter());
+    emit_diagnostics_with(
+        &outcome.world,
+        outcome.report.compile_warnings.iter(),
+        diagnostic_format,
+        color,
+    );
     for warning in &outcome.report.warnings {
-        eprintln!("warning: {warning}");
+        emit_owned_warning(warning, color);
+    }
+
+    if output == Path::new("-") {
+        let bytes = outcome.pack.to_bytes().map_err(|err| err.to_string())?;
+        std::io::stdout()
+            .lock()
+            .write_all(&bytes)
+            .map_err(|err| format!("cannot write Pack to stdout: {err}"))?;
+        return Ok(());
     }
 
     let file = File::create(&output)
@@ -387,12 +704,12 @@ fn create(args: CreateArgs) -> Result<(), String> {
             println!("  {spec}");
         }
     }
-    if !report.external_resources.is_empty() {
+    if !report.resource_slots.is_empty() {
         println!(
-            "note: {} External Project Resource path(s) are declared and must be supplied if requested:",
-            report.external_resources.len()
+            "note: {} Resource Slot path(s) are declared and must be supplied if requested:",
+            report.resource_slots.len()
         );
-        for path in &report.external_resources {
+        for path in &report.resource_slots {
             println!("  {path}");
         }
     }
@@ -423,9 +740,9 @@ fn inspect(args: InspectArgs) -> Result<(), String> {
         println!("  {path} ({})", human_size(data.len()));
     }
 
-    if manifest.project().external_resources().next().is_some() {
-        println!("\nexternal project resources:");
-        for path in manifest.project().external_resources() {
+    if manifest.project().resource_slots().next().is_some() {
+        println!("\nResource Slots:");
+        for path in manifest.project().resource_slots() {
             println!("  {path}");
         }
     }
@@ -488,159 +805,261 @@ fn extract_command(args: ExtractArgs) -> Result<(), String> {
         report.written.len(),
         output.display()
     );
+    if !report.resource_slots.is_empty() {
+        println!("\nResource Slots (not extracted):");
+        for path in &report.resource_slots {
+            println!("  {}", path.display());
+        }
+    }
     Ok(())
 }
 
-fn compile_command(args: CompileArgs) -> Result<(), String> {
-    let pack = read_pack(&args.pack)?;
+fn compile_command(
+    args: CompileArgs,
+    color: ColorChoice,
+    cert: Option<&Path>,
+) -> Result<(), String> {
+    initialize_jobs(args.automation.jobs);
+    if args.pack == Path::new("-") && args.output.is_none() {
+        return Err("an explicit output is required when the Pack is read from stdin".to_owned());
+    }
+    if args.output.as_deref() == Some(Path::new("-"))
+        && args.deps.as_deref() == Some(Path::new("-"))
+    {
+        return Err("cannot write both output and dependencies to stdout".to_owned());
+    }
+    let pack = read_pack_input(&args.pack)?;
 
-    let format = match &args.format {
-        Some(name) => match name.as_str() {
-            "pdf" => OutputFormat::Pdf,
-            "png" => OutputFormat::Png,
-            "svg" => OutputFormat::Svg,
-            "html" => OutputFormat::Html,
-            other => return Err(format!("unknown format `{other}`")),
-        },
-        None => match args.output.as_ref().and_then(|path| path.extension()) {
-            Some(ext) if ext == "png" => OutputFormat::Png,
-            Some(ext) if ext == "svg" => OutputFormat::Svg,
-            Some(ext) if ext == "pdf" => OutputFormat::Pdf,
-            Some(ext) if ext == "html" || ext == "htm" => OutputFormat::Html,
-            Some(other) => {
-                return Err(format!(
-                    "cannot infer output format from extension `{}`; pass --format",
-                    other.to_string_lossy()
-                ));
+    let format = match args.format {
+        Some(format) => format.into(),
+        None => match args.output.as_deref() {
+            Some(path) if path != Path::new("-") => {
+                match path.extension().and_then(|extension| extension.to_str()) {
+                    Some(ext) if ext.eq_ignore_ascii_case("png") => OutputFormat::Png,
+                    Some(ext) if ext.eq_ignore_ascii_case("svg") => OutputFormat::Svg,
+                    Some(ext) if ext.eq_ignore_ascii_case("pdf") => OutputFormat::Pdf,
+                    Some(ext) if ext.eq_ignore_ascii_case("html") => OutputFormat::Html,
+                    Some(other) => {
+                        return Err(format!(
+                            "cannot infer output format from extension `{}`; pass --format",
+                            other
+                        ));
+                    }
+                    None => {
+                        return Err("cannot infer output format; pass --format".to_owned());
+                    }
+                }
             }
-            None => OutputFormat::Pdf,
+            _ => OutputFormat::Pdf,
         },
     };
 
     let creation_timestamp = args
+        .automation
         .creation_timestamp
-        .or_else(|| {
-            std::env::var("SOURCE_DATE_EPOCH")
-                .ok()
-                .and_then(|value| value.parse().ok())
-        })
         .map(|seconds| {
             datetime_from_timestamp(seconds)
                 .ok_or_else(|| format!("timestamp {seconds} is out of range"))
         })
         .transpose()?;
 
+    let host_dependencies = Arc::new(Mutex::new(BTreeSet::new()));
     let mut builder = PackWorld::builder(pack)
-        .embedded_fonts(!args.ignore_embedded_fonts)
-        .inputs(parse_inputs(&args.inputs)?)
-        .package_loader(SystemPackageLoader(crate::world::system_packages(
-            args.package_path.as_deref(),
-            args.package_cache_path.as_deref(),
-            args.offline,
-        )));
-    if args.features.iter().any(|feature| feature == "html") {
-        builder = builder.feature(typst::Feature::Html);
+        .embedded_fonts(!args.fonts.ignore_embedded_fonts)
+        .inputs(parse_inputs(&args.compilation.inputs))
+        .package_loader(FilesystemPackageLoader {
+            packages: crate::world::system_packages(
+                args.packages.package_path.as_deref(),
+                args.packages.package_cache_path.as_deref(),
+                args.packages.offline,
+                cert,
+            ),
+            dependencies: Arc::clone(&host_dependencies),
+        });
+    for feature in &args.compilation.features {
+        builder = builder.feature((*feature).into());
     }
-    for path in &args.source_references {
-        builder = builder.external_resource_reference(FilesystemReference::new(path.clone()));
+    for path in &args.resource_paths {
+        builder = builder.resource_provider(FilesystemResourceProvider::tracked(
+            path.clone(),
+            Arc::clone(&host_dependencies),
+        ));
     }
     builder = match creation_timestamp {
         Some(datetime) => builder.fixed_date(datetime),
         None => builder.system_date(),
     };
-    for path in &args.font_paths {
+    for path in &args.fonts.font_paths {
         builder = builder.extra_fonts(typst_kit::fonts::scan(path));
     }
-    if !args.ignore_system_fonts {
+    if !args.fonts.ignore_system_fonts {
         builder = builder.extra_fonts(typst_kit::fonts::system());
     }
 
-    let world = builder.build();
+    let mut world = builder.build();
 
-    let page_selection = match &args.pages {
-        Some(text) => parse_page_selection(text)?,
-        None => PageSelection::all(),
-    };
-    let mut standards = Vec::new();
-    for name in &args.pdf_standards {
-        standards.push(parse_pdf_standard(name)?);
-    }
-    if format == OutputFormat::Pdf
-        && !page_selection.ranges().is_empty()
-        && standards.iter().any(|standard| {
-            matches!(
-                standard,
-                PdfStandard::A_1a | PdfStandard::A_2a | PdfStandard::A_3a | PdfStandard::Ua_1
-            )
-        })
-    {
-        return Err(
-            "page selection cannot be combined with a PDF standard that requires accessibility tags"
-                .to_owned(),
-        );
+    let page_selection =
+        PageSelection::new(args.pages.iter().map(|range| range.0.clone()).collect());
+    let standards = args
+        .pdf_standards
+        .iter()
+        .copied()
+        .map(PdfStandard::from)
+        .collect::<Vec<_>>();
+    if args.no_pdf_tags || !page_selection.ranges().is_empty() {
+        let accessible_standard = [
+            (PdfStandard::A_1a, "PDF/A-1a"),
+            (PdfStandard::A_2a, "PDF/A-2a"),
+            (PdfStandard::A_3a, "PDF/A-3a"),
+            (PdfStandard::Ua_1, "PDF/UA-1"),
+        ]
+        .into_iter()
+        .find_map(|(standard, name)| standards.contains(&standard).then_some(name));
+        if let Some(name) = accessible_standard {
+            let message = format!("cannot disable PDF tags when exporting a {name} document");
+            return if args.no_pdf_tags {
+                Err(message)
+            } else {
+                Err(format!(
+                    "{message}\nhint: using --pages implies --no-pdf-tags"
+                ))
+            };
+        }
     }
 
     let options = CompileOptions {
         page_selection,
         ppi: Some(args.ppi),
+        pretty: args.pretty,
         pdf_standards: PdfStandards::new(&standards).map_err(|err| err.message().to_string())?,
-        creation_timestamp: creation_timestamp.map(Timestamp::new_utc),
+        pdf_tags: !args.no_pdf_tags,
+        creation_timestamp: creation_timestamp
+            .map(Timestamp::new_utc)
+            .or_else(local_timestamp),
     };
 
-    let diagnostic_format = match args.diagnostic_format.as_str() {
-        "short" => DiagnosticFormat::Short,
-        _ => DiagnosticFormat::Human,
+    let diagnostic_format = args.automation.diagnostic_format.into();
+    let write_requested_dependencies = |outputs: Option<&[PathBuf]>| {
+        let Some(destination) = &args.deps else {
+            return Ok(());
+        };
+        let mut inputs = host_dependencies
+            .lock()
+            .expect("host dependency lock poisoned")
+            .clone();
+        if args.pack != Path::new("-") {
+            inputs.insert(args.pack.clone());
+        }
+        write_dependencies(destination, args.deps_format, &inputs, outputs)
     };
 
-    let output = match compile(&world, format, &options) {
+    let mut timer = typst_kit::timer::Timer::new_or_placeholder(args.automation.timings.clone());
+    let mut compilation = None;
+    let timings = timer.record(&mut world, |world| {
+        compilation = Some(compile(world, format, &options));
+    });
+    let Some(compilation) = compilation else {
+        return Err(timings
+            .expect_err("timer did not execute compilation")
+            .to_string());
+    };
+    let output = match compilation {
         Ok(output) => {
-            emit_diagnostics_with(&world, output.warnings.iter(), diagnostic_format);
+            emit_diagnostics_with(&world, output.warnings.iter(), diagnostic_format, color);
             output
         }
         Err(CompileError::Diagnostics { errors, warnings }) => {
-            emit_diagnostics_with(&world, errors.iter().chain(&warnings), diagnostic_format);
-            return Err("compilation failed".into());
-        }
-        Err(CompileError::NoMatchingSourcePages { warnings }) => {
-            emit_diagnostics_with(&world, warnings.iter(), diagnostic_format);
-            return Err("page selection matched no source pages".into());
+            emit_diagnostics_with(
+                &world,
+                errors.iter().chain(&warnings),
+                diagnostic_format,
+                color,
+            );
+            write_requested_dependencies(None)?;
+            return Err(DIAGNOSTICS_EMITTED.into());
         }
         Err(CompileError::PngExport { message, warnings }) => {
-            emit_diagnostics_with(&world, warnings.iter(), diagnostic_format);
+            emit_diagnostics_with(&world, warnings.iter(), diagnostic_format, color);
+            write_requested_dependencies(None)?;
             return Err(format!("PNG export failed: {message}"));
         }
     };
+    timings.map_err(|error| error.to_string())?;
 
-    let stem = args
-        .pack
-        .file_stem()
-        .map(|stem| stem.to_string_lossy().into_owned())
-        .unwrap_or_else(|| "output".to_owned());
     let extension = format.extension();
-
-    let targets: Vec<PathBuf> = match &args.output {
-        Some(path) => expand_output_template(path, &output.artifacts)?,
-        None if output.artifacts.len() == 1 => {
-            vec![PathBuf::from(format!("{stem}.{extension}"))]
+    let default_output = args.pack.with_extension(extension);
+    let export_result = (|| {
+        let targets: Vec<PathBuf> = match &args.output {
+            Some(path) if matches!(format, OutputFormat::Pdf | OutputFormat::Html) => {
+                vec![path.clone()]
+            }
+            Some(path) => expand_output_template(
+                path,
+                &output.artifacts,
+                output.source_page_count().unwrap_or(output.artifacts.len()),
+            )?,
+            None if output.artifacts.len() == 1 => vec![default_output],
+            None => expand_output_template(
+                &default_output,
+                &output.artifacts,
+                output.source_page_count().unwrap_or(output.artifacts.len()),
+            )?,
+        };
+        let mut unique_targets = std::collections::HashSet::with_capacity(targets.len());
+        for target in &targets {
+            if !unique_targets.insert(normalize_output_path(target)) {
+                return Err(format!(
+                    "multiple artifacts expand to the same output path `{}`",
+                    target.display()
+                ));
+            }
         }
-        None => {
-            let template = PathBuf::from(format!("{stem}-{{0p}}.{extension}"));
-            expand_output_template(&template, &output.artifacts)?
+
+        let output_is_stdout = targets.iter().any(|target| target == Path::new("-"));
+        if output_is_stdout {
+            if output.artifacts.len() != 1 {
+                return Err(
+                    "cannot write multiple Compilation Output Artifacts to stdout".to_owned(),
+                );
+            }
+            std::io::stdout()
+                .lock()
+                .write_all(output.artifacts[0].bytes())
+                .map_err(|err| format!("cannot write output to stdout: {err}"))?;
+        } else {
+            for (target, artifact) in targets.iter().zip(&output.artifacts) {
+                std::fs::write(target, artifact.bytes())
+                    .map_err(|err| format!("cannot write `{}`: {err}", target.display()))?;
+            }
+        }
+        Ok::<_, String>((targets, output_is_stdout))
+    })();
+    let (targets, output_is_stdout) = match export_result {
+        Ok(exported) => exported,
+        Err(error) => {
+            write_requested_dependencies(None)?;
+            return Err(error);
         }
     };
-    let mut unique_targets = std::collections::HashSet::with_capacity(targets.len());
-    for target in &targets {
-        if !unique_targets.insert(normalize_output_path(target)) {
-            return Err(format!(
-                "multiple artifacts expand to the same output path `{}`",
-                target.display()
-            ));
+
+    if !output_is_stdout
+        && let Some(viewer) = args.open.as_ref()
+        && let Some(first) = targets.first()
+    {
+        let first = first
+            .canonicalize()
+            .map_err(|err| format!("failed to canonicalize path ({err})"))?;
+        match viewer.as_deref() {
+            Some(viewer) => open::with_detached(&first, viewer),
+            None => open::that_detached(&first),
         }
+        .map_err(|err| err.to_string())?;
     }
 
-    for (target, artifact) in targets.iter().zip(&output.artifacts) {
-        std::fs::write(target, artifact.bytes())
-            .map_err(|err| format!("cannot write `{}`: {err}", target.display()))?;
+    write_requested_dependencies(Some(&targets))?;
+
+    if output_is_stdout || args.deps.as_deref() == Some(Path::new("-")) {
+        return Ok(());
     }
     println!(
         "compiled `{}` to {}",
@@ -651,43 +1070,41 @@ fn compile_command(args: CompileArgs) -> Result<(), String> {
         }
     );
 
-    if args.open
-        && let Some(first) = targets.first()
-    {
-        open::that_detached(first).map_err(|err| err.to_string())?;
-    }
-
     Ok(())
 }
 
-/// Expands `{p}`, `{0p}`, and `{t}` placeholders into one path per artifact.
+/// Expands Typst page templates into one path per Page Format artifact.
 fn expand_output_template(
     template: &Path,
     artifacts: &[CompilationArtifact],
+    total_source_pages: usize,
 ) -> Result<Vec<PathBuf>, String> {
-    let text = template.to_string_lossy();
-    let has_page_placeholder = text.contains("{p}") || text.contains("{0p}");
-    let has_placeholder = has_page_placeholder || text.contains("{t}");
-    let count = artifacts.len();
-    if !has_placeholder {
-        if count > 1 {
-            return Err(format!(
-                "the compilation produced {count} artifacts; the output filename must contain \
-                 `{{p}}` or `{{0p}}` placeholders"
-            ));
-        }
-        return Ok(vec![template.to_path_buf()]);
+    if artifacts.is_empty() {
+        return Ok(Vec::new());
     }
-    if has_page_placeholder
-        && artifacts
-            .iter()
-            .any(|artifact| artifact.source_page_number().is_none())
-    {
+    let Some(text) = template.to_str() else {
+        return if artifacts.len() > 1 {
+            Err(
+                "cannot export multiple images without a page number template ({p}, {0p}) in the output path"
+                    .to_owned(),
+            )
+        } else {
+            Ok(vec![template.to_path_buf()])
+        };
+    };
+    let has_page_placeholder =
+        text.contains("{p}") || text.contains("{0p}") || text.contains("{n}");
+    let count = artifacts.len();
+    if count > 1 && !has_page_placeholder {
         return Err(
-            "Source Page Number placeholders cannot be used with a Document Format".to_owned(),
+            "cannot export multiple images without a page number template ({p}, {0p}) in the output path"
+                .to_owned(),
         );
     }
-    let width = count.to_string().len();
+    if !has_page_placeholder {
+        return Ok(vec![template.to_path_buf()]);
+    }
+    let width = total_source_pages.to_string().len();
     Ok(artifacts
         .iter()
         .enumerate()
@@ -698,7 +1115,8 @@ fn expand_output_template(
             PathBuf::from(
                 text.replace("{p}", &page.to_string())
                     .replace("{0p}", &format!("{page:0width$}"))
-                    .replace("{t}", &count.to_string()),
+                    .replace("{n}", &format!("{page:0width$}"))
+                    .replace("{t}", &total_source_pages.to_string()),
             )
         })
         .collect())
@@ -731,6 +1149,18 @@ fn read_pack(path: &Path) -> Result<Pack, String> {
     Pack::read(BufReader::new(file)).map_err(|err| err.to_string())
 }
 
+fn read_pack_input(path: &Path) -> Result<Pack, String> {
+    if path == Path::new("-") {
+        let mut bytes = Vec::new();
+        std::io::stdin()
+            .lock()
+            .read_to_end(&mut bytes)
+            .map_err(|err| format!("cannot read Pack from stdin: {err}"))?;
+        return Pack::from_bytes(bytes).map_err(|err| err.to_string());
+    }
+    read_pack(path)
+}
+
 fn default_output_dir(pack: &Path) -> PathBuf {
     match pack.file_stem() {
         Some(stem) => PathBuf::from(stem),
@@ -738,29 +1168,68 @@ fn default_output_dir(pack: &Path) -> PathBuf {
     }
 }
 
-fn parse_inputs(pairs: &[String]) -> Result<Dict, String> {
+fn parse_input(pair: &str) -> Result<(String, String), String> {
+    let (key, value) = pair
+        .split_once('=')
+        .ok_or_else(|| "input must be a key and a value separated by an equal sign".to_owned())?;
+    let key = key.trim();
+    if key.is_empty() {
+        return Err("the key was missing or empty".to_owned());
+    }
+    Ok((key.to_owned(), value.trim().to_owned()))
+}
+
+fn parse_inputs(pairs: &[(String, String)]) -> Dict {
     let mut dict = Dict::new();
-    for pair in pairs {
-        let (key, value) = pair
-            .split_once('=')
-            .ok_or_else(|| format!("expected KEY=VALUE, got `{pair}`"))?;
-        dict.insert(key.into(), value.into_value());
+    for (key, value) in pairs {
+        dict.insert(key.as_str().into(), value.as_str().into_value());
     }
-    Ok(dict)
+    dict
 }
 
-struct FilesystemReference(FsRoot);
+fn initialize_jobs(jobs: Option<usize>) {
+    if let Some(jobs) = jobs {
+        rayon::ThreadPoolBuilder::new()
+            .num_threads(jobs)
+            .use_current_thread()
+            .build_global()
+            .ok();
+    }
+}
 
-impl FilesystemReference {
+struct FilesystemResourceProvider {
+    root: FsRoot,
+    path: PathBuf,
+    dependencies: Arc<Mutex<BTreeSet<PathBuf>>>,
+}
+
+impl FilesystemResourceProvider {
     fn new(root: PathBuf) -> Self {
-        Self(FsRoot::new(root))
+        Self::tracked(root, Arc::new(Mutex::new(BTreeSet::new())))
+    }
+
+    fn tracked(root: PathBuf, dependencies: Arc<Mutex<BTreeSet<PathBuf>>>) -> Self {
+        Self {
+            root: FsRoot::new(root.clone()),
+            path: root,
+            dependencies,
+        }
     }
 }
 
-impl FileLoader for FilesystemReference {
+impl FileLoader for FilesystemResourceProvider {
     fn load(&self, id: FileId) -> FileResult<Bytes> {
         match id.root() {
-            VirtualRoot::Project => self.0.load(id.vpath()),
+            VirtualRoot::Project => {
+                let result = self.root.load(id.vpath());
+                if result.is_ok() {
+                    self.dependencies
+                        .lock()
+                        .expect("host dependency lock poisoned")
+                        .insert(self.path.join(id.vpath().get_without_slash()));
+                }
+                result
+            }
             VirtualRoot::Package(_) => Err(FileError::NotFound(PathBuf::from(
                 id.vpath().get_without_slash(),
             ))),
@@ -768,27 +1237,148 @@ impl FileLoader for FilesystemReference {
     }
 }
 
-fn parse_pdf_standard(name: &str) -> Result<PdfStandard, String> {
-    Ok(match name {
-        "1.4" => PdfStandard::V_1_4,
-        "1.5" => PdfStandard::V_1_5,
-        "1.6" => PdfStandard::V_1_6,
-        "1.7" => PdfStandard::V_1_7,
-        "2.0" => PdfStandard::V_2_0,
-        "a-1b" => PdfStandard::A_1b,
-        "a-1a" => PdfStandard::A_1a,
-        "a-2b" => PdfStandard::A_2b,
-        "a-2u" => PdfStandard::A_2u,
-        "a-2a" => PdfStandard::A_2a,
-        "a-3b" => PdfStandard::A_3b,
-        "a-3u" => PdfStandard::A_3u,
-        "a-3a" => PdfStandard::A_3a,
-        "a-4" => PdfStandard::A_4,
-        "a-4f" => PdfStandard::A_4f,
-        "a-4e" => PdfStandard::A_4e,
-        "ua-1" => PdfStandard::Ua_1,
-        other => return Err(format!("unknown PDF standard `{other}`")),
-    })
+struct FilesystemPackageLoader {
+    packages: typst_kit::packages::SystemPackages,
+    dependencies: Arc<Mutex<BTreeSet<PathBuf>>>,
+}
+
+impl FileLoader for FilesystemPackageLoader {
+    fn load(&self, id: FileId) -> FileResult<Bytes> {
+        match id.root() {
+            VirtualRoot::Project => Err(FileError::NotFound(PathBuf::from(
+                id.vpath().get_without_slash(),
+            ))),
+            VirtualRoot::Package(spec) => {
+                let root = self.packages.obtain(spec)?;
+                let result = root.load(id.vpath());
+                if result.is_ok() {
+                    self.dependencies
+                        .lock()
+                        .expect("host dependency lock poisoned")
+                        .insert(root.path().join(id.vpath().get_without_slash()));
+                }
+                result
+            }
+        }
+    }
+}
+
+fn write_dependencies(
+    destination: &Path,
+    format: DepsFormat,
+    inputs: &BTreeSet<PathBuf>,
+    outputs: Option<&[PathBuf]>,
+) -> Result<(), String> {
+    let mut bytes = Vec::new();
+    match format {
+        DepsFormat::Json => {
+            let inputs = inputs
+                .iter()
+                .map(|path| {
+                    path.to_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| format!("input {path:?} is not valid UTF-8"))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            let outputs = outputs
+                .map(|outputs| {
+                    outputs
+                        .iter()
+                        .filter(|path| path.as_path() != Path::new("-"))
+                        .map(|path| {
+                            path.to_str()
+                                .map(str::to_owned)
+                                .ok_or_else(|| format!("output {path:?} is not valid UTF-8"))
+                        })
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .transpose()?;
+            bytes = serde_json::to_vec(&serde_json::json!({
+                "inputs": inputs,
+                "outputs": outputs,
+            }))
+            .map_err(|error| error.to_string())?;
+        }
+        DepsFormat::Zero => {
+            for input in inputs {
+                bytes.extend_from_slice(input.as_os_str().as_encoded_bytes());
+                bytes.push(0);
+            }
+        }
+        DepsFormat::Make => {
+            let Some(outputs) = outputs else {
+                return Ok(());
+            };
+            for (index, output) in outputs.iter().enumerate() {
+                if output == Path::new("-") {
+                    return Err(
+                        "make dependencies contain the output path, but the output was stdout"
+                            .to_owned(),
+                    );
+                }
+                let Some(output) = output.to_str() else {
+                    continue;
+                };
+                if index != 0 {
+                    bytes.push(b' ');
+                }
+                bytes.extend_from_slice(munge_make_path(output).as_bytes());
+            }
+            bytes.push(b':');
+            for input in inputs {
+                if let Some(input) = input.to_str() {
+                    bytes.push(b' ');
+                    bytes.extend_from_slice(munge_make_path(input).as_bytes());
+                }
+            }
+            bytes.push(b'\n');
+        }
+    }
+
+    if destination == Path::new("-") {
+        std::io::stdout()
+            .lock()
+            .write_all(&bytes)
+            .map_err(|error| format!("cannot write dependencies to stdout: {error}"))
+    } else {
+        std::fs::write(destination, bytes).map_err(|error| {
+            format!(
+                "cannot write dependencies to `{}`: {error}",
+                destination.display()
+            )
+        })
+    }
+}
+
+fn munge_make_path(path: &str) -> String {
+    let mut result = String::with_capacity(path.len());
+    let mut slashes = 0;
+    for character in path.chars() {
+        match character {
+            '\\' => slashes += 1,
+            '$' => {
+                result.push('$');
+                slashes = 0;
+            }
+            ':' => {
+                result.push('\\');
+                slashes = 0;
+            }
+            ' ' | '\t' => {
+                for _ in 0..slashes + 1 {
+                    result.push('\\');
+                }
+                slashes = 0;
+            }
+            '#' => {
+                result.push('\\');
+                slashes = 0;
+            }
+            _ => slashes = 0,
+        }
+        result.push(character);
+    }
+    result
 }
 
 /// Converts a UNIX timestamp to a Typst datetime.
@@ -804,25 +1394,52 @@ fn datetime_from_timestamp(seconds: i64) -> Option<Datetime> {
     )
 }
 
-fn emit_diagnostics<'a>(
-    world: &dyn DiagnosticWorld,
-    diagnostics: impl IntoIterator<Item = &'a SourceDiagnostic>,
-) {
-    emit_diagnostics_with(world, diagnostics, DiagnosticFormat::Human);
+fn local_timestamp() -> Option<Timestamp> {
+    let local = chrono::Local::now();
+    let datetime = Datetime::from_ymd_hms(
+        local.year(),
+        local.month().try_into().ok()?,
+        local.day().try_into().ok()?,
+        local.hour().try_into().ok()?,
+        local.minute().try_into().ok()?,
+        local.second().try_into().ok()?,
+    )?;
+    Timestamp::new_local(datetime, local.offset().local_minus_utc() / 60)
 }
 
 fn emit_diagnostics_with<'a>(
     world: &dyn DiagnosticWorld,
     diagnostics: impl IntoIterator<Item = &'a SourceDiagnostic>,
     format: DiagnosticFormat,
+    color: ColorChoice,
 ) {
     let mut diagnostics = diagnostics.into_iter().peekable();
     if diagnostics.peek().is_none() {
         return;
     }
-    let mut stream = StandardStream::stderr(ColorChoice::Auto);
+    let mut stream = StandardStream::stderr(color);
     let _ = typst_kit::diagnostics::emit(&mut stream, world, diagnostics, format);
     let _ = stream.reset();
+}
+
+fn emit_owned_error(message: &str, color: ColorChoice) {
+    let mut stream = StandardStream::stderr(color);
+    let mut spec = ColorSpec::new();
+    spec.set_fg(Some(Color::Red)).set_bold(true);
+    let _ = stream.set_color(&spec);
+    let _ = write!(stream, "error");
+    let _ = stream.reset();
+    let _ = writeln!(stream, ": {message}");
+}
+
+fn emit_owned_warning(message: &str, color: ColorChoice) {
+    let mut stream = StandardStream::stderr(color);
+    let mut spec = ColorSpec::new();
+    spec.set_fg(Some(Color::Yellow)).set_bold(true);
+    let _ = stream.set_color(&spec);
+    let _ = write!(stream, "warning");
+    let _ = stream.reset();
+    let _ = writeln!(stream, ": {message}");
 }
 
 /// Formats a file ID with its package prefix, if any.
@@ -859,5 +1476,31 @@ fn human_size(bytes: usize) -> String {
         format!("{bytes} {}", UNITS[0])
     } else {
         format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::ffi::OsString;
+    use std::os::unix::ffi::OsStringExt as _;
+
+    use super::*;
+
+    #[test]
+    fn make_dependencies_omit_non_unicode_outputs_with_typst_spacing() {
+        let directory = tempfile::tempdir().unwrap();
+        let destination = directory.path().join("deps.mk");
+        let inputs = BTreeSet::from([PathBuf::from("input.typ")]);
+        let outputs = [
+            PathBuf::from(OsString::from_vec(b"invalid-\xff.pdf".to_vec())),
+            PathBuf::from("valid.pdf"),
+        ];
+
+        write_dependencies(&destination, DepsFormat::Make, &inputs, Some(&outputs)).unwrap();
+
+        assert_eq!(
+            std::fs::read(destination).unwrap(),
+            b" valid.pdf: input.typ\n"
+        );
     }
 }

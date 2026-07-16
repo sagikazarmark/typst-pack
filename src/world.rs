@@ -13,8 +13,8 @@ use typst::{Feature, Library, LibraryExt, World};
 use typst_kit::files::{FileLoader, FileStore};
 use typst_kit::fonts::{FontSource, FontStore};
 
-use crate::external_resource::{Compilation as ExternalResources, Reference};
 use crate::pack::Pack;
+use crate::resource::{CompilationResources, Provider};
 
 #[cfg(feature = "fs")]
 const USER_AGENT: &str = concat!("typst-pack/", env!("CARGO_PKG_VERSION"));
@@ -24,6 +24,7 @@ pub(crate) fn system_packages(
     package_path: Option<&std::path::Path>,
     package_cache_path: Option<&std::path::Path>,
     offline: bool,
+    certificate: Option<&std::path::Path>,
 ) -> typst_kit::packages::SystemPackages {
     use typst_kit::downloader::SystemDownloader;
     use typst_kit::packages::{FsPackages, SystemPackages, UniversePackages};
@@ -39,7 +40,11 @@ pub(crate) fn system_packages(
     let universe = if offline {
         UniversePackages::new(OfflineDownloader)
     } else {
-        UniversePackages::new(SystemDownloader::new(USER_AGENT))
+        let downloader = match certificate {
+            Some(path) => SystemDownloader::with_cert_path(USER_AGENT, path.to_path_buf()),
+            None => SystemDownloader::new(USER_AGENT),
+        };
+        UniversePackages::new(downloader)
     };
 
     SystemPackages::from_parts(data, cache, universe)
@@ -50,9 +55,8 @@ pub(crate) fn system_packages(
 /// Project files and vendored package files come from the pack. Fonts come
 /// from the pack, plus any fonts configured on the builder. Files of packages
 /// that are not vendored are only available if a package loader is configured.
-/// Declared External Project Resources may come from External Resource
-/// References; these references cannot replace packed files or supply Typst
-/// source or package files.
+/// Declared Resource Slots may come from Resource Providers; providers cannot
+/// replace packed files or supply Typst source or package files.
 pub struct PackWorld {
     library: LazyHash<Library>,
     main: FileId,
@@ -94,7 +98,7 @@ impl World for PackWorld {
     fn source(&self, id: FileId) -> FileResult<Source> {
         let loader = self.store.loader();
         loader
-            .external_resources
+            .resources
             .source(&loader.pack, id, || self.store.source(id))
     }
 
@@ -133,18 +137,19 @@ enum Clock {
 /// that are not vendored.
 struct PackLoader {
     pack: Arc<Pack>,
-    external_resources: ExternalResources,
+    resources: CompilationResources,
     package_loader: Option<Box<dyn FileLoader + Send + Sync>>,
 }
 
 impl FileLoader for PackLoader {
     fn load(&self, id: FileId) -> FileResult<Bytes> {
+        let _timing = typst_timing::TimingScope::new("Pack");
         let path = id.vpath().get_without_slash();
         match id.root() {
             VirtualRoot::Project => self
-                .external_resources
+                .resources
                 .file(&self.pack, id)
-                .expect("project requests are handled by External Project Resource resolution"),
+                .expect("project requests are handled by Resource Slot resolution"),
             VirtualRoot::Package(spec) => {
                 if self.pack.has_package(spec) {
                     self.pack
@@ -176,7 +181,7 @@ pub struct PackWorldBuilder {
     #[cfg_attr(not(feature = "embedded-fonts"), allow(dead_code))]
     embedded_fonts: bool,
     extra_fonts: Vec<(BoxedFontSource, FontInfo)>,
-    external_resource_references: Vec<Reference>,
+    resource_providers: Vec<Provider>,
     package_loader: Option<Box<dyn FileLoader + Send + Sync>>,
 }
 
@@ -198,7 +203,7 @@ impl PackWorldBuilder {
             clock: Clock::None,
             embedded_fonts: cfg!(feature = "embedded-fonts"),
             extra_fonts: Vec::new(),
-            external_resource_references: Vec::new(),
+            resource_providers: Vec::new(),
             package_loader: None,
         }
     }
@@ -264,14 +269,11 @@ impl PackWorldBuilder {
         self
     }
 
-    /// Adds an External Resource Reference for declared External Project Resources.
+    /// Adds a Resource Provider for declared Resource Slots.
     ///
-    /// References are tried in registration order after packed project files.
-    pub fn external_resource_reference(
-        mut self,
-        reference: impl FileLoader + Send + Sync + 'static,
-    ) -> Self {
-        self.external_resource_references.push(Box::new(reference));
+    /// Providers are tried in registration order after packed project files.
+    pub fn resource_provider(mut self, provider: impl FileLoader + Send + Sync + 'static) -> Self {
+        self.resource_providers.push(Box::new(provider));
         self
     }
 
@@ -303,7 +305,7 @@ impl PackWorldBuilder {
             main,
             store: FileStore::new(PackLoader {
                 pack: Arc::new(self.pack),
-                external_resources: ExternalResources::new(self.external_resource_references),
+                resources: CompilationResources::new(self.resource_providers),
                 package_loader: self.package_loader,
             }),
             fonts,
@@ -324,13 +326,13 @@ impl SystemPackageLoader {
     /// Creates a loader using the standard package directories and the
     /// official Typst Universe registry.
     pub fn system() -> Self {
-        Self(system_packages(None, None, false))
+        Self(system_packages(None, None, false, None))
     }
 
     /// Creates a loader that only uses the standard local package
     /// directories and never accesses the network.
     pub fn offline() -> Self {
-        Self(system_packages(None, None, true))
+        Self(system_packages(None, None, true, None))
     }
 }
 

@@ -2956,7 +2956,9 @@ dependencies = [
  "ecow",
  "hayro-syntax",
  "open",
+ "rayon",
  "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tiny-skia",
@@ -2968,6 +2970,7 @@ dependencies = [
  "typst-pdf",
  "typst-render",
  "typst-svg",
+ "typst-timing",
  "walkdir",
  "zip",
 ]

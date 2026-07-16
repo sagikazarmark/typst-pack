@@ -22,6 +22,8 @@ cli = [
     "dep:chrono",
     "dep:clap",
     "dep:open",
+    "dep:rayon",
+    "dep:serde_json",
     "embedded-fonts",
     "fs",
     "typst-kit/emit-diagnostics",
@@ -37,6 +39,7 @@ fs = [
     "typst-kit/scan-fonts",
     "typst-kit/system-downloader",
     "typst-kit/system-files",
+    "typst-kit/timer",
 ]
 
 [dependencies]
@@ -44,7 +47,9 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 clap = { version = "4", features = ["derive", "env"], optional = true }
 ecow = "0.2"
 open = { version = "5", optional = true }
+rayon = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"] }
+serde_json = { version = "1", optional = true }
 thiserror = "2"
 toml = "1.1"
 # Typst crates share internal types and must resolve to the same exact release.
@@ -55,6 +60,7 @@ typst-layout = "=0.15.0"
 typst-pdf = "=0.15.0"
 typst-render = "=0.15.0"
 typst-svg = "=0.15.0"
+typst-timing = "=0.15.0"
 walkdir = { version = "2", optional = true }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 

@@ -10,9 +10,11 @@ type Tests {
 
   let pack: File! {
     Dagger.typstPack.create(
-      source: self.project,
+      project: self.project,
+      input: "main.typ",
       packageDir: self.packages,
       include: ["notes.txt"],
+      certificate: self.project.file("notes.txt"),
     )
   }
 
@@ -85,7 +87,9 @@ type Tests {
   compilePdf: Void @check {
     let output = Dagger.typstPack.compile(
       pack: self.pack,
-      sourceDateEpoch: "1700000000",
+      creationTimestamp: 1700000000,
+      pdfStandards: [TypstPackPdfStandard.V1_7],
+      certificate: self.project.file("notes.txt"),
     )
     let pdf = output.file("output.pdf")
 
@@ -119,11 +123,20 @@ type Tests {
       .currentModule
       .source
       .directory("fixtures/multi-page")
-    let pack = Dagger.typstPack.create(source: source)
+    let pack = Dagger.typstPack.create(
+      project: source,
+      input: "main.typ",
+      features: [TypstPackFeature.A11Y_EXTRAS],
+      ignoreSystemFonts: true,
+      ignoreEmbeddedFonts: true,
+    )
     let output = Dagger.typstPack.compile(
       pack: pack,
       format: TypstPackOutputFormat.PNG,
       pages: "5,2",
+      ppi: "144.5",
+      ignoreSystemFonts: true,
+      ignoreEmbeddedFonts: true,
     )
     let entries = output.entries
 
@@ -143,7 +156,7 @@ type Tests {
     let output = Dagger.typstPack.compile(
       pack: self.pack,
       format: TypstPackOutputFormat.HTML,
-      features: ["html"],
+      features: [TypstPackFeature.HTML],
     )
     let html = output.file("output.html")
 
@@ -154,10 +167,10 @@ type Tests {
   }
 
   """
-  Create and compile a pack with ordered External Resource References.
+  Create and compile a pack with ordered Resource Providers.
   """
-  externalProjectResources: Void @check {
-    let source = Dagger
+  resourceSlots: Void @check {
+    let project = Dagger
       .currentModule
       .source
       .directory("fixtures/resource-project")
@@ -165,16 +178,15 @@ type Tests {
       .currentModule
       .source
       .directory("fixtures/resources")
-    let sourceReferences = ["/work/references/first", "/work/references/second"]
     let pack = Dagger.typstPack.create(
-      source: source,
-      sourceReferenceDir: resources,
-      sourceReferences: sourceReferences,
-      externalResources: ["branding/conditional.txt"],
+      project: project,
+      input: "main.typ",
+      resourceDirs: [resources.directory("first"), resources.directory("second")],
+      resourceSlots: ["branding/conditional.txt"],
     )
     let output = Dagger.typstPack.inspect(pack)
 
-    assert { output.contains("external project resources:") }
+    assert { output.contains("Resource Slots:") }
     assert { output.contains("branding/name.txt") }
     assert { output.contains("branding/first-only.txt") }
     assert { output.contains("branding/from-second-root.txt") }
@@ -185,8 +197,7 @@ type Tests {
       .typstPack
       .compile(
         pack: pack,
-        sourceReferenceDir: resources,
-        sourceReferences: sourceReferences,
+        resourceDirs: [resources.directory("first"), resources.directory("second")],
       )
       .file("output.pdf")
     assert { pdf.size > 0 }

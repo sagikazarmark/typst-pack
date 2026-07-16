@@ -42,7 +42,7 @@ fn pdf_is_one_document_format_artifact() {
 }
 
 #[test]
-fn page_format_selection_matching_no_source_page_fails() {
+fn page_format_selection_matching_no_source_page_produces_no_artifacts() {
     let pack = Pack::builder("main.typ")
         .file(
             "main.typ",
@@ -53,18 +53,16 @@ fn page_format_selection_matching_no_source_page_fails() {
         .build()
         .unwrap();
     let world = PackWorld::builder(pack).build();
-    for expression in ["2-1", "9", "9-"] {
+    for expression in ["9", "9-"] {
         let options = CompileOptions {
             page_selection: typst_pack::parse_page_selection(expression).unwrap(),
             ..CompileOptions::default()
         };
 
-        let error = compile(&world, OutputFormat::Svg, &options).unwrap_err();
-
-        assert!(matches!(
-            error,
-            typst_pack::CompileError::NoMatchingSourcePages { .. }
-        ));
+        for format in [OutputFormat::Png, OutputFormat::Svg] {
+            let output = compile(&world, format, &options).unwrap();
+            assert!(output.artifacts.is_empty());
+        }
     }
 }
 
@@ -136,9 +134,8 @@ fn page_range_membership_preserves_typst_selection_semantics() {
         (None, vec![1, 2, 3, 4, 5]),
         (Some("-3"), vec![1, 2, 3]),
         (Some("4-"), vec![4, 5]),
-        (Some("-"), vec![1, 2, 3, 4, 5]),
         (Some("4-9"), vec![4, 5]),
-        (Some("5-3,2"), vec![2]),
+        (Some("5,2"), vec![2, 5]),
     ];
 
     for (expression, expected) in cases {
@@ -163,7 +160,7 @@ fn page_range_membership_preserves_typst_selection_semantics() {
 
 #[test]
 fn invalid_textual_page_expressions_fail_parsing() {
-    for expression in ["", "0", "1,", "1--2", "nope"] {
+    for expression in ["", "0", "-", "5-3", "1,", ",1", "1--2", "nope"] {
         assert!(
             typst_pack::parse_page_selection(expression).is_err(),
             "expression {expression:?} parsed successfully"
@@ -195,19 +192,17 @@ fn pdf_page_selection_produces_one_document_format_artifact() {
 }
 
 #[test]
-fn pdf_page_selection_matching_no_source_page_fails() {
+fn pdf_page_selection_matching_no_source_page_still_produces_a_pdf() {
     let world = five_page_world();
     let options = CompileOptions {
         page_selection: typst_pack::parse_page_selection("9-").unwrap(),
         ..CompileOptions::default()
     };
 
-    let error = compile(&world, OutputFormat::Pdf, &options).unwrap_err();
+    let output = compile(&world, OutputFormat::Pdf, &options).unwrap();
 
-    assert!(matches!(
-        error,
-        typst_pack::CompileError::NoMatchingSourcePages { .. }
-    ));
+    assert_eq!(output.artifacts.len(), 1);
+    assert!(output.artifacts[0].bytes().starts_with(b"%PDF"));
 }
 
 #[test]
@@ -224,7 +219,20 @@ fn pdf_page_selection_warns_that_accessibility_tags_are_disabled() {
         output
             .warnings
             .iter()
-            .any(|warning| warning.message.contains("PDF tags"))
+            .any(|warning| warning.message.contains("--pages implies --no-pdf-tags"))
+    );
+
+    let options = CompileOptions {
+        page_selection: typst_pack::parse_page_selection("2,5").unwrap(),
+        pdf_tags: false,
+        ..CompileOptions::default()
+    };
+    let output = compile(&world, OutputFormat::Pdf, &options).unwrap();
+    assert!(
+        output
+            .warnings
+            .iter()
+            .all(|warning| !warning.message.contains("--pages implies --no-pdf-tags"))
     );
 }
 
@@ -255,7 +263,35 @@ fn html_is_one_document_format_artifact() {
 
 #[cfg(feature = "embedded-fonts")]
 #[test]
-fn no_matching_source_pages_error_retains_compilation_warnings() {
+fn pretty_affects_html_svg_and_pdf_but_not_png() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"Hello".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let world = PackWorld::builder(pack)
+        .feature(typst::Feature::Html)
+        .build();
+    let compact = CompileOptions::default();
+    let pretty = CompileOptions {
+        pretty: true,
+        ..CompileOptions::default()
+    };
+
+    for format in [OutputFormat::Html, OutputFormat::Svg, OutputFormat::Pdf] {
+        let compact = compile(&world, format, &compact).unwrap();
+        let pretty = compile(&world, format, &pretty).unwrap();
+        assert_ne!(compact.artifacts[0].bytes(), pretty.artifacts[0].bytes());
+    }
+
+    let compact = compile(&world, OutputFormat::Png, &compact).unwrap();
+    let pretty = compile(&world, OutputFormat::Png, &pretty).unwrap();
+    assert_eq!(compact.artifacts[0].bytes(), pretty.artifacts[0].bytes());
+}
+
+#[cfg(feature = "embedded-fonts")]
+#[test]
+fn empty_page_format_output_retains_compilation_warnings() {
     let pack = Pack::builder("main.typ")
         .file(
             "main.typ",
@@ -270,12 +306,8 @@ fn no_matching_source_pages_error_retains_compilation_warnings() {
         ..CompileOptions::default()
     };
 
-    let error = compile(&world, OutputFormat::Svg, &options).unwrap_err();
+    let output = compile(&world, OutputFormat::Svg, &options).unwrap();
 
-    match error {
-        typst_pack::CompileError::NoMatchingSourcePages { warnings } => {
-            assert!(!warnings.is_empty());
-        }
-        other => panic!("unexpected compilation error: {other}"),
-    }
+    assert!(output.artifacts.is_empty());
+    assert!(!output.warnings.is_empty());
 }
