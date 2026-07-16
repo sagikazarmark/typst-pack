@@ -349,6 +349,10 @@ impl Packer {
         // A typst.toml next to the entrypoint travels along: it carries
         // template/package metadata that tooling may want after extraction.
         if !report.files.iter().any(|path| path == "typst.toml")
+            && !report
+                .external_resources
+                .iter()
+                .any(|path| path == "typst.toml")
             && let Ok(data) = std::fs::read(root.join("typst.toml"))
         {
             report.files.push("typst.toml".to_owned());

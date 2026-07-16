@@ -366,6 +366,20 @@ fn manifest_rejects_future_version() {
 }
 
 #[test]
+fn manifest_rejects_version_zero_and_unknown_version_one_fields() {
+    assert!(matches!(
+        PackManifest::from_toml("format-version = 0\n[project]\nentrypoint = \"main.typ\"\n"),
+        Err(PackManifestError::UnsupportedVersion(0))
+    ));
+    assert!(matches!(
+        PackManifest::from_toml(
+            "format-version = 1\nunknown = true\n[project]\nentrypoint = \"main.typ\"\n"
+        ),
+        Err(PackManifestError::Parse(_))
+    ));
+}
+
+#[test]
 fn manifest_dispatches_version_before_interpreting_version_specific_fields() {
     let text = "format-version = 99\nfuture-field = true\n[project]\nentrypoint = \"main.typ\"\n";
 
@@ -597,6 +611,53 @@ fn pack_construction_rejects_invalid_contained_font_data() {
             ref path,
             index: 3,
         })) if path == "custom-font.bin"
+    ));
+}
+
+#[test]
+fn pack_construction_rejects_missing_font_data() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"fonts/vendor/font.ttf\"\n";
+    let bytes = raw_stored_zip(&[(MANIFEST_PATH, manifest), ("project/main.typ", b"Hello")]);
+
+    assert!(matches!(
+        Pack::from_bytes(bytes),
+        Err(PackReadError::Invariant(PackInvariantError::MissingFontData(ref path)))
+            if path == "fonts/vendor/font.ttf"
+    ));
+}
+
+#[cfg(feature = "embedded-fonts")]
+#[test]
+fn read_preserves_nested_portable_font_paths() {
+    let font = embedded_font_data();
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"fonts/vendor/font.ttf\"\n";
+    let pack = Pack::from_bytes(raw_stored_zip(&[
+        (MANIFEST_PATH, manifest),
+        ("project/main.typ", b"Hello"),
+        ("fonts/vendor/font.ttf", &font),
+    ]))
+    .unwrap();
+
+    assert_eq!(pack.fonts()[0].manifest().path(), "fonts/vendor/font.ttf");
+}
+
+#[cfg(feature = "embedded-fonts")]
+#[test]
+fn pack_construction_rejects_a_missing_face_in_valid_font_data() {
+    let font = embedded_font_data();
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"fonts/vendor/font.ttf\"\nindex = 99\n";
+    let bytes = raw_stored_zip(&[
+        (MANIFEST_PATH, manifest),
+        ("project/main.typ", b"Hello"),
+        ("fonts/vendor/font.ttf", &font),
+    ]);
+
+    assert!(matches!(
+        Pack::from_bytes(bytes),
+        Err(PackReadError::Invariant(PackInvariantError::InvalidFontData {
+            ref path,
+            index: 99,
+        })) if path == "fonts/vendor/font.ttf"
     ));
 }
 
@@ -909,6 +970,38 @@ fn pack_builder_rejects_external_project_resource_file_conflicts() {
 }
 
 #[test]
+fn repeated_builder_calls_replace_data_within_the_same_role() {
+    let spec = "@local/example:1.0.0"
+        .parse::<typst::syntax::package::PackageSpec>()
+        .unwrap();
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"first".to_vec())
+        .unwrap()
+        .file("main.typ", b"second".to_vec())
+        .unwrap()
+        .package_file(spec.clone(), "lib.typ", b"first".to_vec())
+        .unwrap()
+        .package_file(spec.clone(), "lib.typ", b"second".to_vec())
+        .unwrap()
+        .external_resource("optional.bin")
+        .unwrap()
+        .external_resource("optional.bin")
+        .unwrap()
+        .build()
+        .unwrap();
+
+    assert_eq!(pack.file("main.typ").unwrap().as_slice(), b"second");
+    assert_eq!(
+        pack.package_file(&spec, "lib.typ").unwrap().as_slice(),
+        b"second"
+    );
+    assert_eq!(
+        pack.external_resources().collect::<Vec<_>>(),
+        ["optional.bin"]
+    );
+}
+
+#[test]
 fn read_rejects_archives_without_manifest() {
     use std::io::Write;
     let mut buffer = std::io::Cursor::new(Vec::new());
@@ -919,6 +1012,14 @@ fn read_rejects_archives_without_manifest() {
     zip.finish().unwrap();
     let result = Pack::from_bytes(buffer.into_inner());
     assert!(matches!(result, Err(PackReadError::MissingManifest)));
+}
+
+#[test]
+fn read_reports_corrupt_zip_data_as_an_archive_error() {
+    assert!(matches!(
+        Pack::from_bytes(b"not a zip archive".to_vec()),
+        Err(PackReadError::Zip(_))
+    ));
 }
 
 #[test]
@@ -1013,6 +1114,26 @@ fn read_accepts_safe_unknown_entries_and_rewrite_drops_them() {
 }
 
 #[test]
+fn read_accepts_safe_directory_entries() {
+    use std::io::Write as _;
+
+    let mut buffer = std::io::Cursor::new(Vec::new());
+    let mut zip = zip::ZipWriter::new(&mut buffer);
+    let options = zip::write::SimpleFileOptions::default();
+    zip.add_directory("project/", options).unwrap();
+    zip.add_directory("future/nested/", options).unwrap();
+    zip.start_file(MANIFEST_PATH, options).unwrap();
+    zip.write_all(b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n")
+        .unwrap();
+    zip.start_file("project/main.typ", options).unwrap();
+    zip.write_all(b"Hello").unwrap();
+    zip.finish().unwrap();
+
+    let pack = Pack::from_bytes(buffer.into_inner()).unwrap();
+    assert_eq!(pack.file("main.typ").unwrap().as_slice(), b"Hello");
+}
+
+#[test]
 fn read_rejects_a_windows_prefix_hidden_by_a_current_directory_alias() {
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
     let bytes = raw_stored_zip(&[
@@ -1075,6 +1196,53 @@ fn read_rejects_distinct_archive_entries_with_one_canonical_identity() {
                 ..
             }
         )) if canonical == "project/main.typ"
+    ));
+}
+
+#[test]
+fn read_rejects_canonical_collisions_for_package_and_font_entries() {
+    let package_manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[packages]\nvendored = [\"@local/example:1.0.0\"]\n";
+    let package = raw_stored_zip(&[
+        (MANIFEST_PATH, package_manifest),
+        ("project/main.typ", b"Hello"),
+        ("packages/local/example/1.0.0/lib.typ", b"first"),
+        ("packages/local/example/1.0.0/./lib.typ", b"second"),
+    ]);
+    assert!(matches!(
+        Pack::from_bytes(package),
+        Err(PackReadError::Invariant(
+            PackInvariantError::CanonicalArchiveEntryCollision { ref canonical, .. }
+        )) if canonical == "packages/local/example/1.0.0/lib.typ"
+    ));
+
+    let font_manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"fonts/vendor/font.ttf\"\n";
+    let font = raw_stored_zip(&[
+        (MANIFEST_PATH, font_manifest),
+        ("project/main.typ", b"Hello"),
+        ("fonts/vendor/font.ttf", b"first"),
+        ("fonts/vendor/./font.ttf", b"second"),
+    ]);
+    assert!(matches!(
+        Pack::from_bytes(font),
+        Err(PackReadError::Invariant(
+            PackInvariantError::CanonicalArchiveEntryCollision { ref canonical, .. }
+        )) if canonical == "fonts/vendor/font.ttf"
+    ));
+}
+
+#[test]
+fn read_rejects_malformed_package_entry_layouts() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
+    let bytes = raw_stored_zip(&[
+        (MANIFEST_PATH, manifest),
+        ("project/main.typ", b"Hello"),
+        ("packages/local/example/1.0.0", b"missing file path"),
+    ]);
+
+    assert!(matches!(
+        Pack::from_bytes(bytes),
+        Err(PackReadError::InvalidEntry { ref entry, .. })
+            if entry == "packages/local/example/1.0.0"
     ));
 }
 
@@ -1466,9 +1634,9 @@ fn packed_and_undeclared_project_paths_do_not_consult_external_resource_referenc
         .unwrap()
         .build()
         .unwrap();
-    let (loader, calls) = MemoryProjectFile::tracked("resource.bin", b"external".to_vec());
+    let (provider, calls) = MemoryProjectFile::tracked("resource.bin", b"external".to_vec());
     let world = PackWorld::builder(packed)
-        .external_resource_reference(loader)
+        .external_resource_reference(provider)
         .build();
     assert_eq!(
         world
@@ -1484,9 +1652,9 @@ fn packed_and_undeclared_project_paths_do_not_consult_external_resource_referenc
         .unwrap()
         .build()
         .unwrap();
-    let (loader, calls) = MemoryProjectFile::tracked("missing.bin", b"external".to_vec());
+    let (provider, calls) = MemoryProjectFile::tracked("missing.bin", b"external".to_vec());
     let world = PackWorld::builder(undeclared)
-        .external_resource_reference(loader)
+        .external_resource_reference(provider)
         .build();
     assert!(matches!(
         world.file(project_file_id("missing.bin")),
@@ -1506,9 +1674,9 @@ fn package_requests_do_not_consult_external_resource_references() {
         .unwrap()
         .build()
         .unwrap();
-    let (loader, calls) = MemoryProjectFile::tracked("lib.typ", b"external".to_vec());
+    let (provider, calls) = MemoryProjectFile::tracked("lib.typ", b"external".to_vec());
     let world = PackWorld::builder(pack)
-        .external_resource_reference(loader)
+        .external_resource_reference(provider)
         .build();
     let spec = typst::syntax::package::PackageSpec::from_str("@local/example:1.0.0").unwrap();
     let id = RootedPath::new(
@@ -1904,6 +2072,33 @@ Rows: #csv("data.csv").len()
     }
 
     #[test]
+    fn explicit_typst_manifest_resource_remains_a_slot_after_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("main.typ"), "#read(\"typst.toml\")").unwrap();
+        fs::write(
+            project.join("typst.toml"),
+            "[package]\nname = \"representative\"\nversion = \"1.0.0\"\nentrypoint = \"main.typ\"\n",
+        )
+        .unwrap();
+
+        let outcome = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .external_resource("typst.toml")
+            .pack()
+            .unwrap();
+
+        assert_eq!(outcome.report.external_resources, ["typst.toml"]);
+        assert!(!outcome.report.files.iter().any(|path| path == "typst.toml"));
+        assert!(outcome.pack.file("typst.toml").is_none());
+        assert_eq!(
+            outcome.pack.external_resources().collect::<Vec<_>>(),
+            ["typst.toml"]
+        );
+    }
+
+    #[test]
     fn unrequested_external_project_resource_is_still_declared() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
@@ -2045,11 +2240,11 @@ Rows: #csv("data.csv").len()
         )
         .unwrap();
 
-        let (strict_loader, strict_calls) =
+        let (strict_provider, strict_calls) =
             MemoryProjectFile::tracked("assets/logo.png", tiny_png());
         let strict = Packer::new(&project, "main.typ")
             .system_fonts(false)
-            .external_resource_reference(strict_loader)
+            .external_resource_reference(strict_provider)
             .pack();
         assert!(matches!(strict, Err(PackerError::Compile { .. })));
         assert_eq!(strict_calls.load(Ordering::Relaxed), 0);
@@ -2164,14 +2359,14 @@ Rows: #csv("data.csv").len()
             }
         });
 
-        let (loader, calls) = MemoryProjectFile::tracked(
+        let (provider, calls) = MemoryProjectFile::tracked(
             "chapter.typ",
             b"#let chapter = rect(width: 2pt, height: 2pt)".to_vec(),
         );
         let outcome = Packer::new(&project, "main.typ")
             .system_fonts(false)
             .project_resource_policy(ProjectResourcePolicy::AllowExternalFallback)
-            .external_resource_reference(loader)
+            .external_resource_reference(provider)
             .pack()
             .unwrap();
         writer.join().unwrap();

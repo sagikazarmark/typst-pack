@@ -44,6 +44,14 @@ struct PackageFiles {
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
 struct CanonicalPath(String);
 
+#[derive(Debug)]
+struct PathTreeConflict {
+    ancestor: CanonicalPath,
+    ancestor_role: PackPathRole,
+    descendant: CanonicalPath,
+    descendant_role: PackPathRole,
+}
+
 impl CanonicalPath {
     fn as_str(&self) -> &str {
         &self.0
@@ -155,15 +163,13 @@ impl Pack {
                 .cloned()
                 .map(|path| (path, PackPathRole::PackageFile))
                 .collect();
-            if let Some((ancestor, ancestor_role, descendant, descendant_role)) =
-                find_path_tree_conflict(paths)
-            {
+            if let Some(conflict) = find_path_tree_conflict(paths) {
                 return Err(PackInvariantError::PackagePathTreeConflict {
                     package: package.spec.to_string(),
-                    ancestor: ancestor.to_string(),
-                    ancestor_role,
-                    descendant: descendant.to_string(),
-                    descendant_role,
+                    ancestor: conflict.ancestor.to_string(),
+                    ancestor_role: conflict.ancestor_role,
+                    descendant: conflict.descendant.to_string(),
+                    descendant_role: conflict.descendant_role,
                 });
             }
         }
@@ -183,14 +189,12 @@ impl Pack {
             .into_iter()
             .map(|path| (path, PackPathRole::FontData))
             .collect();
-        if let Some((ancestor, ancestor_role, descendant, descendant_role)) =
-            find_path_tree_conflict(font_paths)
-        {
+        if let Some(conflict) = find_path_tree_conflict(font_paths) {
             return Err(PackInvariantError::PathTreeConflict {
-                ancestor: ancestor.to_string(),
-                ancestor_role,
-                descendant: descendant.to_string(),
-                descendant_role,
+                ancestor: conflict.ancestor.to_string(),
+                ancestor_role: conflict.ancestor_role,
+                descendant: conflict.descendant.to_string(),
+                descendant_role: conflict.descendant_role,
             });
         }
 
@@ -416,16 +420,14 @@ impl Pack {
                 || archive_name.starts_with('/')
                 || archive_name.starts_with('\\')
                 || archive_name.contains('\\')
+                || archive_name.contains('\0')
                 || has_windows_drive_prefix(prefix_normalized_name)
             {
                 return Err(PackReadError::UnsafeEntry(archive_name));
             }
-            let enclosed_name = entry
-                .enclosed_name()
-                .ok_or_else(|| PackReadError::UnsafeEntry(archive_name.clone()))?;
-            let canonical_name = enclosed_name
-                .to_str()
-                .ok_or_else(|| PackReadError::UnsafeEntry(archive_name.clone()))?
+            let canonical_name = VirtualPath::new(&archive_name)
+                .map_err(|_| PackReadError::UnsafeEntry(archive_name.clone()))?
+                .get_without_slash()
                 .to_owned();
             if has_windows_drive_prefix(&canonical_name) {
                 return Err(PackReadError::UnsafeEntry(archive_name));
@@ -929,7 +931,7 @@ fn strip_current_directory_prefix(mut path: &str) -> &str {
 
 fn find_path_tree_conflict(
     mut paths: Vec<(CanonicalPath, PackPathRole)>,
-) -> Option<(CanonicalPath, PackPathRole, CanonicalPath, PackPathRole)> {
+) -> Option<PathTreeConflict> {
     paths.sort_by(|(left, _), (right, _)| left.cmp(right));
     for (ancestor, ancestor_role) in &paths {
         let prefix = format!("{ancestor}/");
@@ -937,12 +939,12 @@ fn find_path_tree_conflict(
         if let Some((descendant, descendant_role)) = paths.get(candidate)
             && descendant.as_str().starts_with(&prefix)
         {
-            return Some((
-                ancestor.clone(),
-                *ancestor_role,
-                descendant.clone(),
-                *descendant_role,
-            ));
+            return Some(PathTreeConflict {
+                ancestor: ancestor.clone(),
+                ancestor_role: *ancestor_role,
+                descendant: descendant.clone(),
+                descendant_role: *descendant_role,
+            });
         }
     }
     None
@@ -969,14 +971,12 @@ fn validate_project_declarations(
             .cloned()
             .map(|path| (path, PackPathRole::ExternalProjectResource)),
     );
-    if let Some((ancestor, ancestor_role, descendant, descendant_role)) =
-        find_path_tree_conflict(project_paths)
-    {
+    if let Some(conflict) = find_path_tree_conflict(project_paths) {
         return Err(PackInvariantError::PathTreeConflict {
-            ancestor: ancestor.to_string(),
-            ancestor_role,
-            descendant: descendant.to_string(),
-            descendant_role,
+            ancestor: conflict.ancestor.to_string(),
+            ancestor_role: conflict.ancestor_role,
+            descendant: conflict.descendant.to_string(),
+            descendant_role: conflict.descendant_role,
         });
     }
     Ok(())
