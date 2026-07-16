@@ -436,6 +436,20 @@ fn pack_builder_rejects_paths_that_cannot_name_root_relative_files() {
             }))
         ));
     }
+    assert!(matches!(
+        Pack::builder("main\0.typ").build(),
+        Err(PackBuildError::Invariant(PackInvariantError::InvalidPath {
+            role: PackPathRole::Entrypoint,
+            ..
+        }))
+    ));
+    assert!(matches!(
+        Pack::builder("main.typ").file("main\0.typ", Vec::new()),
+        Err(PackBuildError::Invariant(PackInvariantError::InvalidPath {
+            role: PackPathRole::ProjectFile,
+            ..
+        }))
+    ));
 }
 
 #[test]
@@ -587,12 +601,10 @@ fn pack_construction_rejects_invalid_contained_font_data() {
 }
 
 #[test]
-fn pack_builder_reports_invalid_font_data_as_a_shared_invariant() {
+fn pack_builder_reports_invalid_font_data_as_an_ingestion_error() {
     assert!(matches!(
         Pack::builder("main.typ").font(b"not a font".to_vec(), 2),
-        Err(PackBuildError::Invariant(
-            PackInvariantError::InvalidFontInput { index: 2 }
-        ))
+        Err(PackBuildError::InvalidFontInput { index: 2 })
     ));
 }
 
@@ -653,6 +665,20 @@ fn pack_construction_rejects_font_paths_reserved_for_project_files() {
             ref path,
             conflicting_role: PackPathRole::ProjectFile,
         })) if path == "project/main.typ"
+    ));
+}
+
+#[test]
+fn pack_construction_rejects_font_path_at_the_manifest() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"typst-pack.toml\"\nfamilies = [\"Informational\"]\n";
+    let bytes = raw_stored_zip(&[(MANIFEST_PATH, manifest), ("project/main.typ", b"Hello")]);
+
+    assert!(matches!(
+        Pack::from_bytes(bytes),
+        Err(PackReadError::Invariant(PackInvariantError::ReservedFontPath {
+            ref path,
+            conflicting_role: PackPathRole::PackManifest,
+        })) if path == MANIFEST_PATH
     ));
 }
 
@@ -730,7 +756,7 @@ fn invariant_diagnostics_do_not_expose_optional_field_formatting() {
         "project file path `assets` conflicts with External Project Resource descendant `assets/logo.png`"
     );
 
-    let font = PackInvariantError::InvalidFontInput { index: 2 };
+    let font = PackBuildError::InvalidFontInput { index: 2 };
     assert_eq!(
         font.to_string(),
         "font input does not contain a valid face at index 2"
@@ -792,6 +818,45 @@ fn pack_roundtrip_in_memory() {
         reread.file("note.typ").unwrap().as_slice(),
         "Hello".as_bytes()
     );
+}
+
+#[cfg(feature = "embedded-fonts")]
+#[test]
+fn full_unicode_pack_roundtrip_is_equivalent_and_idempotent() {
+    let vendored = "@local/example:1.0.0"
+        .parse::<typst::syntax::package::PackageSpec>()
+        .unwrap();
+    let unvendored = "@local/remote:2.0.0"
+        .parse::<typst::syntax::package::PackageSpec>()
+        .unwrap();
+    let pack = Pack::builder("文档.typ")
+        .file("文档.typ", b"Hello".to_vec())
+        .unwrap()
+        .file("资料/说明.txt", b"Notes".to_vec())
+        .unwrap()
+        .external_resource("品牌/图.png")
+        .unwrap()
+        .package_file(vendored, "章节.typ", b"Package".to_vec())
+        .unwrap()
+        .unvendored_package(unvendored)
+        .font(embedded_font_data(), 0)
+        .unwrap()
+        .metadata(PackMetadata::new().with_name("完整 Pack"))
+        .build()
+        .unwrap();
+
+    let bytes = pack.to_bytes().unwrap();
+    let reread = Pack::from_bytes(bytes.clone()).unwrap();
+
+    assert_eq!(reread.manifest(), pack.manifest());
+    assert_eq!(reread.file("资料/说明.txt").unwrap().as_slice(), b"Notes");
+    assert_eq!(
+        reread.external_resources().collect::<Vec<_>>(),
+        ["品牌/图.png"]
+    );
+    assert_eq!(reread.packages().count(), 1);
+    assert_eq!(reread.fonts().len(), 1);
+    assert_eq!(reread.to_bytes().unwrap(), bytes);
 }
 
 #[test]
@@ -857,12 +922,42 @@ fn read_rejects_archives_without_manifest() {
 }
 
 #[test]
+fn read_accepts_a_manifest_that_is_not_the_first_entry() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
+    let pack = Pack::from_bytes(raw_stored_zip(&[
+        ("project/main.typ", b"Hello"),
+        (MANIFEST_PATH, manifest),
+    ]))
+    .unwrap();
+
+    assert_eq!(pack.file("main.typ").unwrap().as_slice(), b"Hello");
+}
+
+#[test]
 fn read_reports_a_non_utf8_manifest_specifically() {
     let bytes = raw_stored_zip(&[(MANIFEST_PATH, &[0xff]), ("project/main.typ", b"Hello")]);
 
     assert!(matches!(
         Pack::from_bytes(bytes),
         Err(PackReadError::ManifestNotUtf8(_))
+    ));
+}
+
+#[test]
+fn manifest_decoding_failures_precede_archive_path_failures() {
+    let non_utf8 = raw_stored_zip(&[(MANIFEST_PATH, &[0xff]), ("project/../bad.typ", b"bad")]);
+    assert!(matches!(
+        Pack::from_bytes(non_utf8),
+        Err(PackReadError::ManifestNotUtf8(_))
+    ));
+
+    let malformed = raw_stored_zip(&[
+        (MANIFEST_PATH, b"not valid TOML = ["),
+        ("project/../bad.typ", b"bad"),
+    ]);
+    assert!(matches!(
+        Pack::from_bytes(malformed),
+        Err(PackReadError::Manifest(_))
     ));
 }
 
@@ -944,6 +1039,22 @@ fn read_rejects_duplicate_manifest_entries() {
     assert!(matches!(
         Pack::from_bytes(bytes),
         Err(PackReadError::DuplicateManifest)
+    ));
+}
+
+#[test]
+fn read_rejects_exact_duplicate_unknown_entries() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
+    let bytes = raw_stored_zip(&[
+        (MANIFEST_PATH, manifest),
+        ("project/main.typ", b"Hello"),
+        ("future/data", b"first"),
+        ("future/data", b"second"),
+    ]);
+
+    assert!(matches!(
+        Pack::from_bytes(bytes),
+        Err(PackReadError::DuplicateArchiveEntry(ref name)) if name == b"future/data"
     ));
 }
 
@@ -1597,6 +1708,24 @@ Rows: #csv("data.csv").len()
     }
 
     #[test]
+    fn package_discovery_does_not_consult_external_resource_providers() {
+        let dir = tempfile::tempdir().unwrap();
+        let (project, packages) = fixture(dir.path());
+        let (provider, calls) = MemoryProjectFile::tracked("lib.typ", b"injected".to_vec());
+
+        let outcome = Packer::new(&project, "main.typ")
+            .package_path(&packages)
+            .system_fonts(false)
+            .project_resource_policy(ProjectResourcePolicy::AllowExternalFallback)
+            .external_resource_reference(provider)
+            .pack()
+            .unwrap();
+
+        assert_eq!(calls.load(Ordering::Relaxed), 0);
+        assert_eq!(outcome.report.packages_vendored.len(), 1);
+    }
+
+    #[test]
     fn package_data_precedes_package_cache_during_discovery() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
@@ -1838,6 +1967,29 @@ Rows: #csv("data.csv").len()
                     second: PackPathRole::ExternalProjectResource,
                 }
             ))) if path == "main.typ"
+        ));
+    }
+
+    #[test]
+    fn invalid_explicit_resource_slot_fails_before_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("main.typ"), "#panic(\"discovery ran\")").unwrap();
+
+        let result = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .external_resource("../outside.bin")
+            .pack();
+
+        assert!(matches!(
+            result,
+            Err(PackerError::Build(PackBuildError::Invariant(
+                PackInvariantError::InvalidPath {
+                    role: PackPathRole::ExternalProjectResource,
+                    ..
+                }
+            )))
         ));
     }
 

@@ -356,6 +356,35 @@ impl Pack {
             return Err(PackReadError::AmbiguousArchiveEntries);
         }
         let mut archive = ZipArchive::new(reader)?;
+        const FILE_TYPE_MASK: u32 = 0o170000;
+        const REGULAR_FILE: u32 = 0o100000;
+
+        let mut manifest_entry = None;
+        for index in 0..archive.len() {
+            let entry = archive.by_index_raw(index)?;
+            if strip_current_directory_prefix(entry.name()) == MANIFEST_PATH {
+                let regular_file = entry.is_file()
+                    && entry
+                        .unix_mode()
+                        .is_none_or(|mode| matches!(mode & FILE_TYPE_MASK, 0 | REGULAR_FILE));
+                manifest_entry = Some((index, regular_file));
+                break;
+            }
+        }
+        let (manifest_index, manifest_is_file) =
+            manifest_entry.ok_or(PackReadError::MissingManifest)?;
+        if !manifest_is_file {
+            return Err(PackReadError::ManifestNotFile);
+        }
+        let manifest = {
+            let mut entry = archive.by_index(manifest_index)?;
+            let mut bytes = Vec::new();
+            entry
+                .read_to_end(&mut bytes)
+                .map_err(PackReadError::ManifestUnreadable)?;
+            let text = std::str::from_utf8(&bytes).map_err(PackReadError::ManifestNotUtf8)?;
+            PackManifest::from_toml(text)?
+        };
 
         struct ProjectEntry {
             index: usize,
@@ -374,7 +403,6 @@ impl Pack {
             regular_file: bool,
         }
 
-        let mut manifest_entry = None;
         let mut project_entries = Vec::new();
         let mut package_entries = Vec::new();
         let mut unknown_entries = Vec::new();
@@ -410,8 +438,6 @@ impl Pack {
             if entry.is_dir() {
                 continue;
             }
-            const FILE_TYPE_MASK: u32 = 0o170000;
-            const REGULAR_FILE: u32 = 0o100000;
             let regular_file = entry.is_file()
                 && entry
                     .unix_mode()
@@ -431,7 +457,6 @@ impl Pack {
                     MANIFEST_PATH.to_owned(),
                     &raw_name,
                 )?;
-                manifest_entry = Some((index, regular_file));
             } else if let Some(path) = role_name.strip_prefix(PROJECT_PREFIX) {
                 if !regular_file {
                     return Err(PackReadError::UnsupportedEntryType(archive_name));
@@ -467,21 +492,6 @@ impl Pack {
                 });
             }
         }
-
-        let (manifest_index, manifest_is_file) =
-            manifest_entry.ok_or(PackReadError::MissingManifest)?;
-        if !manifest_is_file {
-            return Err(PackReadError::ManifestNotFile);
-        }
-        let manifest = {
-            let mut entry = archive.by_index(manifest_index)?;
-            let mut bytes = Vec::new();
-            entry
-                .read_to_end(&mut bytes)
-                .map_err(PackReadError::ManifestUnreadable)?;
-            let text = std::str::from_utf8(&bytes).map_err(PackReadError::ManifestNotUtf8)?;
-            PackManifest::from_toml(text)?
-        };
 
         let font_paths = manifest
             .fonts()
@@ -781,8 +791,7 @@ impl PackBuilder {
     /// entry name and family list are derived from the font data.
     pub fn font(mut self, data: impl Into<Vec<u8>>, index: u32) -> Result<Self, PackBuildError> {
         let data = data.into();
-        let info =
-            FontInfo::new(&data, index).ok_or(PackInvariantError::InvalidFontInput { index })?;
+        let info = FontInfo::new(&data, index).ok_or(PackBuildError::InvalidFontInput { index })?;
         let family = info.family.to_string();
         let path = self.font_path(&family, &data);
         self.fonts.push(PackFontInput {
@@ -884,6 +893,9 @@ fn canonical_path(role: PackPathRole, path: &str) -> Result<CanonicalPath, PackI
         return Err(invalid(
             "backslashes are not portable path separators".to_owned(),
         ));
+    }
+    if path.contains('\0') {
+        return Err(invalid("path must not contain NUL bytes".to_owned()));
     }
     if has_windows_drive_prefix(path) {
         return Err(invalid(
@@ -1020,6 +1032,9 @@ fn display_archive_name(raw_name: &[u8]) -> String {
 /// A failure while building a pack in memory.
 #[derive(Debug, thiserror::Error)]
 pub enum PackBuildError {
+    /// Builder-provided font bytes do not contain the requested face.
+    #[error("font input does not contain a valid face at index {index}")]
+    InvalidFontInput { index: u32 },
     #[error(transparent)]
     Invariant(#[from] PackInvariantError),
 }
@@ -1090,9 +1105,6 @@ pub enum PackInvariantError {
     /// A font declaration has no contained bytes.
     #[error("font data `{0}` is missing")]
     MissingFontData(String),
-    /// Builder-provided font bytes do not contain the requested face.
-    #[error("font input does not contain a valid face at index {index}")]
-    InvalidFontInput { index: u32 },
     /// Contained font bytes do not contain the declared face.
     #[error("font data `{path}` does not contain a valid face at index {index}")]
     InvalidFontData { path: String, index: u32 },
