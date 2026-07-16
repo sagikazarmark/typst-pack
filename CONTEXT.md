@@ -5,18 +5,18 @@ This context describes portable Typst projects and the values that vary between 
 ## Language
 
 **Pack**:
-A portable, reusable Typst project whose compilation contract consists of contained project files and may also include vendored packages, embedded fonts, and declared External Project Resources.
+A portable, reusable Typst project whose compilation contract consists of contained project files and may also include vendored packages, embedded fonts, and declared Resource Slots.
 
 **Pack Manifest**:
 The versioned declarative description carried by a Pack. It describes intended contents and metadata, while agreement between those declarations and contained files is a Pack invariant.
 
-**External Project Resource**:
-A non-source resource addressed through Typst's project root whose path belongs to a pack's compilation contract, but whose bytes are supplied externally instead of being stored in the reusable pack. It may be required or conditional for a particular compilation.
-_Avoid_: Render Asset, asset, external input, customer file, dynamic pack file
+**Resource Slot**:
+A project-root-relative location declared by a Pack for non-source bytes supplied to a compilation rather than stored in the Pack. A slot may remain unfilled when a compilation does not request it.
+_Avoid_: External Project Resource, placeholder, Render Asset, asset, external input, customer file, dynamic pack file
 
-**External Resource Reference**:
-An opaque compilation input identifying a path-addressable source that may supply bytes for one or more External Project Resources. Source references form an ordered fallback chain in which only a missing resource falls through to the next source.
-_Avoid_: Resource Path, resource directory, resource loader
+**Resource Provider**:
+An opaque, path-addressable provider that may supply bytes for one or more Resource Slots. Providers form an ordered fallback chain in which only a missing resource falls through to the next provider.
+_Avoid_: External Resource Provider, External Resource Reference, Source Reference, resource loader
 
 **Document Format**:
 A compilation format that produces one Compilation Output Artifact for a selected or unpaged document. PDF and HTML are Document Formats.
@@ -32,5 +32,5 @@ One file produced by compiling a Pack. It carries its Document Format or Page Fo
 _Avoid_: Output buffer, result file
 
 **Pack Override**:
-A compilation-scoped replacement for a file contained in a pack. Unlike an External Project Resource, it deliberately changes reusable pack content for one compilation.
-_Avoid_: External Project Resource, replacement asset
+A compilation-scoped replacement for a project file contained in a Pack. Unlike a Resource Slot, it deliberately changes reusable project content for one compilation; vendored package files and embedded fonts are not eligible.
+_Avoid_: Resource Slot, replacement asset

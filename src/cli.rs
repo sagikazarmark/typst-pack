@@ -25,7 +25,7 @@ use crate::extract::{ExtractOptions, extract};
 use crate::manifest::PackMetadata;
 use crate::pack::{FILE_EXTENSION, Pack};
 use crate::packer::{DiscoveryWorld, Packer, PackerError, ProjectResourcePolicy};
-use crate::world::{PackWorld, PackWorldError, SystemPackageLoader};
+use crate::world::{PackWorld, SystemPackageLoader};
 
 /// Pack, inspect, extract, and compile portable Typst project packs.
 #[derive(Debug, Parser)]
@@ -83,9 +83,9 @@ struct CreateArgs {
     #[arg(long = "include", value_name = "PATH")]
     include: Vec<PathBuf>,
 
-    /// Directories that act as roots for External Project Resources during discovery.
-    #[arg(long = "resource-path", value_name = "DIR")]
-    resource_paths: Vec<PathBuf>,
+    /// Filesystem External Resource References used during discovery.
+    #[arg(long = "source-reference", value_name = "DIR")]
+    source_references: Vec<PathBuf>,
 
     /// Root-relative resource paths to declare as external even if discovery does not load them.
     #[arg(long = "external-resource", value_name = "PATH")]
@@ -204,9 +204,9 @@ struct CompileArgs {
     #[arg(long = "input", value_name = "KEY=VALUE")]
     inputs: Vec<String>,
 
-    /// Directories that act as roots for External Project Resources.
-    #[arg(long = "resource-path", value_name = "DIR")]
-    resource_paths: Vec<PathBuf>,
+    /// Filesystem External Resource References used during compilation.
+    #[arg(long = "source-reference", value_name = "DIR")]
+    source_references: Vec<PathBuf>,
 
     /// Additional directories to search for fonts.
     #[arg(long = "font-path", value_name = "DIR")]
@@ -313,11 +313,11 @@ fn create(args: CreateArgs) -> Result<(), String> {
     for path in &args.include {
         packer = packer.include(path);
     }
-    if !args.resource_paths.is_empty() {
+    if !args.source_references.is_empty() {
         packer = packer.project_resource_policy(ProjectResourcePolicy::AllowExternalFallback);
     }
-    for path in &args.resource_paths {
-        packer = packer.external_resource_loader(ProjectResourceRoot::new(path.clone()));
+    for path in &args.source_references {
+        packer = packer.external_resource_reference(FilesystemReference::new(path.clone()));
     }
     for path in args.external_resources {
         packer = packer.external_resource(path);
@@ -332,11 +332,17 @@ fn create(args: CreateArgs) -> Result<(), String> {
         packer = packer.package_cache_path(path);
     }
     if args.name.is_some() || args.description.is_some() || !args.authors.is_empty() {
-        packer = packer.metadata(PackMetadata {
-            name: args.name,
-            description: args.description,
-            authors: args.authors,
-        });
+        let mut metadata = PackMetadata::new();
+        if let Some(name) = args.name {
+            metadata = metadata.with_name(name);
+        }
+        if let Some(description) = args.description {
+            metadata = metadata.with_description(description);
+        }
+        for author in args.authors {
+            metadata = metadata.with_author(author);
+        }
+        packer = packer.metadata(metadata);
     }
 
     let outcome = match packer.pack() {
@@ -398,17 +404,17 @@ fn inspect(args: InspectArgs) -> Result<(), String> {
     let manifest = pack.manifest();
 
     println!("pack: {}", args.pack.display());
-    println!("format version: {}", manifest.format_version);
+    println!("format version: {}", manifest.format_version());
     println!("entrypoint: {}", pack.entrypoint());
-    if let Some(metadata) = &manifest.metadata {
-        if let Some(name) = &metadata.name {
+    if let Some(metadata) = manifest.metadata() {
+        if let Some(name) = metadata.name() {
             println!("name: {name}");
         }
-        if let Some(description) = &metadata.description {
+        if let Some(description) = metadata.description() {
             println!("description: {description}");
         }
-        if !metadata.authors.is_empty() {
-            println!("authors: {}", metadata.authors.join(", "));
+        if !metadata.authors().is_empty() {
+            println!("authors: {}", metadata.authors().join(", "));
         }
     }
 
@@ -417,9 +423,9 @@ fn inspect(args: InspectArgs) -> Result<(), String> {
         println!("  {path} ({})", human_size(data.len()));
     }
 
-    if !manifest.project.external_resources.is_empty() {
+    if manifest.project().external_resources().next().is_some() {
         println!("\nexternal project resources:");
-        for path in &manifest.project.external_resources {
+        for path in manifest.project().external_resources() {
             println!("  {path}");
         }
     }
@@ -434,9 +440,9 @@ fn inspect(args: InspectArgs) -> Result<(), String> {
             println!("  {spec} ({count} files, {})", human_size(size));
         }
     }
-    if !manifest.packages.unvendored.is_empty() {
+    if !manifest.packages().unvendored().is_empty() {
         println!("\nunvendored packages:");
-        for spec in &manifest.packages.unvendored {
+        for spec in manifest.packages().unvendored() {
             println!("  {spec}");
         }
     }
@@ -446,12 +452,12 @@ fn inspect(args: InspectArgs) -> Result<(), String> {
         for font in pack.fonts() {
             println!(
                 "  {} ({}){}",
-                font.entry.path,
-                human_size(font.data.len()),
-                if font.entry.families.is_empty() {
+                font.manifest().path(),
+                human_size(font.data().len()),
+                if font.manifest().families().is_empty() {
                     String::new()
                 } else {
-                    format!(" - {}", font.entry.families.join(", "))
+                    format!(" - {}", font.manifest().families().join(", "))
                 }
             );
         }
@@ -535,8 +541,8 @@ fn compile_command(args: CompileArgs) -> Result<(), String> {
     if args.features.iter().any(|feature| feature == "html") {
         builder = builder.feature(typst::Feature::Html);
     }
-    for path in &args.resource_paths {
-        builder = builder.external_resource_loader(ProjectResourceRoot::new(path.clone()));
+    for path in &args.source_references {
+        builder = builder.external_resource_reference(FilesystemReference::new(path.clone()));
     }
     builder = match creation_timestamp {
         Some(datetime) => builder.fixed_date(datetime),
@@ -549,9 +555,7 @@ fn compile_command(args: CompileArgs) -> Result<(), String> {
         builder = builder.extra_fonts(typst_kit::fonts::system());
     }
 
-    let world = builder
-        .build()
-        .map_err(|err: PackWorldError| err.to_string())?;
+    let world = builder.build();
 
     let page_selection = match &args.pages {
         Some(text) => parse_page_selection(text)?,
@@ -745,15 +749,15 @@ fn parse_inputs(pairs: &[String]) -> Result<Dict, String> {
     Ok(dict)
 }
 
-struct ProjectResourceRoot(FsRoot);
+struct FilesystemReference(FsRoot);
 
-impl ProjectResourceRoot {
+impl FilesystemReference {
     fn new(root: PathBuf) -> Self {
         Self(FsRoot::new(root))
     }
 }
 
-impl FileLoader for ProjectResourceRoot {
+impl FileLoader for FilesystemReference {
     fn load(&self, id: FileId) -> FileResult<Bytes> {
         match id.root() {
             VirtualRoot::Project => self.0.load(id.vpath()),

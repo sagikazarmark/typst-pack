@@ -92,13 +92,13 @@ type TypstPack {
     """
     include: [String!]! = [],
     """
-    Optional External Project Resource directory mounted at /work/resources.
+    Optional filesystem External Resource Reference directory mounted at /work/references.
     """
-    resourceDir: Directory,
+    sourceReferenceDir: Directory,
     """
-    External Project Resource roots. Relative paths resolve from /work/src; absolute paths can reference other mounts.
+    Filesystem External Resource References. Relative paths resolve from /work/src; absolute paths can reference other mounts.
     """
-    resourcePaths: [String!]! = [],
+    sourceReferences: [String!]! = [],
     """
     Root-relative paths to declare as External Project Resources.
     """
@@ -152,7 +152,7 @@ type TypstPack {
     if (embedFonts) { args += ["--embed-fonts"] }
     if (includeTypstEmbeddedFonts) { args += ["--include-typst-embedded-fonts"] }
     include.each { path => args += ["--include", path] }
-    resourcePaths.each { path => args += ["--resource-path", path] }
+    sourceReferences.each { reference => args += ["--source-reference", reference] }
     externalResources.each { path => args += ["--external-resource", path] }
     inputs.each { input => args += ["--input", input] }
     fontPaths.each { path => args += ["--font-path", path] }
@@ -176,8 +176,8 @@ type TypstPack {
     if (fontDir != null) {
       container = container.withMountedDirectory("/work/fonts", fontDir)
     }
-    if (resourceDir != null) {
-      container = container.withMountedDirectory("/work/resources", resourceDir)
+    if (sourceReferenceDir != null) {
+      container = container.withMountedDirectory("/work/references", sourceReferenceDir)
     }
     if (packageDir != null) {
       container = container.withMountedDirectory("/work/packages", packageDir)
@@ -271,13 +271,13 @@ type TypstPack {
     """
     inputs: [String!]! = [],
     """
-    Optional External Project Resource directory mounted at /work/resources.
+    Optional filesystem External Resource Reference directory mounted at /work/references.
     """
-    resourceDir: Directory,
+    sourceReferenceDir: Directory,
     """
-    External Project Resource roots. Relative paths resolve from /work/src; absolute paths can reference other mounts.
+    Filesystem External Resource References. Relative paths resolve from /work/src; absolute paths can reference other mounts.
     """
-    resourcePaths: [String!]! = [],
+    sourceReferences: [String!]! = [],
     """
     Optional font directory mounted at /work/fonts and added to the font search path.
     """
@@ -333,7 +333,7 @@ type TypstPack {
       args += ["--ppi", ppi]
     }
     inputs.each { input => args += ["--input", input] }
-    resourcePaths.each { path => args += ["--resource-path", path] }
+    sourceReferences.each { reference => args += ["--source-reference", reference] }
     fontPaths.each { path => args += ["--font-path", path] }
     if (ignoreEmbeddedFonts) { args += ["--ignore-embedded-fonts"] }
     pdfStandards.each { standard => args += ["--pdf-standard", standard] }
@@ -350,8 +350,8 @@ type TypstPack {
     if (fontDir != null) {
       container = container.withMountedDirectory("/work/fonts", fontDir)
     }
-    if (resourceDir != null) {
-      container = container.withMountedDirectory("/work/resources", resourceDir)
+    if (sourceReferenceDir != null) {
+      container = container.withMountedDirectory("/work/references", sourceReferenceDir)
     }
     if (packageDir != null) {
       container = container.withMountedDirectory("/work/packages", packageDir)

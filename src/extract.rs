@@ -69,11 +69,11 @@ pub fn extract(
 
     if options.fonts {
         for font in pack.fonts() {
-            let path = Path::new(&font.entry.path);
+            let path = Path::new(font.manifest().path());
             if report.written.iter().any(|written| written == path) {
                 continue;
             }
-            write_file(dir, path, &font.data, options, &mut report)?;
+            write_file(dir, path, font.data(), options, &mut report)?;
         }
     }
 

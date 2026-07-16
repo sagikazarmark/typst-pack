@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 mod compile;
+mod external_resource;
 mod extract;
 mod manifest;
 mod pack;
@@ -19,9 +20,10 @@ pub use manifest::{
     PackagesManifest, ProjectManifest,
 };
 pub use pack::{
-    FILE_EXTENSION, Pack, PackBuildError, PackBuilder, PackFont, PackReadError, PackWriteError,
+    FILE_EXTENSION, Pack, PackBuildError, PackBuilder, PackFont, PackInvariantError, PackPathRole,
+    PackReadError, PackWriteError,
 };
-pub use world::{PackWorld, PackWorldBuilder, PackWorldError};
+pub use world::{PackWorld, PackWorldBuilder};
 
 #[cfg(feature = "fs")]
 pub use extract::{ExtractError, ExtractOptions, ExtractReport, extract};

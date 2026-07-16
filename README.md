@@ -61,8 +61,8 @@ typst-pack inspect project.typk
 typst-pack compile project.typk output.pdf
 
 # Discover a resource outside the source project, then supply it when compiling:
-typst-pack create invoice/ --resource-path representative-branding/ -o invoice.typk
-typst-pack compile invoice.typk customer.pdf --resource-path customer-branding/
+typst-pack create invoice/ --source-reference representative-branding/ -o invoice.typk
+typst-pack compile invoice.typk customer.pdf --source-reference customer-branding/
 
 # PNG or SVG output, page selection, reproducible builds:
 typst-pack compile project.typk "page-{0p}.png" --ppi 300 --pages 1-3
@@ -105,25 +105,25 @@ An **External Project Resource** is a non-source resource addressed through
 Typst's project root whose path belongs to a pack's compilation contract, but
 whose bytes are supplied externally instead of being stored in the reusable
 pack. This lets one invoice pack use the stable path `assets/logo.png` while a
-different resource root supplies that path for each customer.
+different External Resource Reference supplies that path for each customer.
 
 Discovery does not fall back by default: missing project files are not loaded
-from external resource loaders. Each `--resource-path <DIR>` enables external
-resource discovery and acts as another virtual project root. The source project
-is checked first, then resource roots are checked in command-line order. A file
-loaded from a resource root is recorded under `[project].external-resources`
-and its bytes are omitted from the archive.
+from External Resource References. Each `--source-reference <DIR>` enables
+fallback for creation and registers a filesystem External Resource Reference.
+The source project is checked first, then references are checked in command-line
+order. A file supplied by a reference is recorded under
+`[project].external-resources` and its bytes are omitted from the archive.
 
 Use `--external-resource <PATH>` during creation when a representative file is
 present in the source project but should be omitted, or when a conditional
 resource is not read by the representative discovery compile. Explicitly
 declared paths are recorded even when discovery does not request them.
 
-At compilation time, repeat `--resource-path` to provide the declared paths.
-Packed project files always win, and undeclared missing paths never fall
-through to these roots. External Project Resource loaders cannot supply Typst
-imports/includes or package files. Loading is lazy: a requested resource that
-is unavailable produces Typst's normal file diagnostic.
+At compilation time, repeat `--source-reference` to provide the declared paths.
+Packed project files always win, and undeclared missing paths never consult
+these references. External Resource References cannot supply Typst
+imports/includes or package files. Resolution is lazy: a requested resource
+that is unavailable produces Typst's normal file diagnostic.
 
 Typst 0.15 cannot check whether a path exists, so this version does not provide
 optional-resource detection. Document code that requests an External Project
@@ -196,7 +196,7 @@ let bytes = outcome.pack.to_bytes()?;
 
 // ... ship the bytes somewhere, then compile without a file system:
 let pack = Pack::from_bytes(bytes)?;
-let world = PackWorld::builder(pack).build()?;
+let world = PackWorld::builder(pack).build();
 let output = compile(&world, OutputFormat::Pdf, &CompileOptions::default())?;
 let artifact = output.artifacts.into_iter().next().expect("PDF artifact");
 assert_eq!(artifact.format(), OutputFormat::Pdf);
@@ -221,9 +221,10 @@ let pack = Pack::builder("main.typ")
 let bytes = pack.to_bytes()?;
 ```
 
-External Project Resources can also be declared and supplied in memory. The
-loader uses typst-kit's standard synchronous `FileLoader` interface, so callers
-can adapt memory, object storage, or prefetched application data:
+External Project Resources can also be declared and supplied in memory. An
+External Resource Reference uses typst-kit's standard synchronous `FileLoader`
+interface, so callers can adapt memory, object storage, or prefetched
+application data:
 
 ```rust,ignore
 let pack = Pack::builder("main.typ")
@@ -231,15 +232,36 @@ let pack = Pack::builder("main.typ")
     .external_resource("assets/logo.png")?
     .build()?;
 let world = PackWorld::builder(pack)
-    .external_resource_loader(resource_loader)
-    .build()?;
+    .external_resource_reference(resource_reference)
+    .build();
 ```
 
 For filesystem discovery, configure
 `ProjectResourcePolicy::AllowExternalFallback` and add one or more
-`Packer::external_resource_loader` implementations. Source-project files are
+`Packer::external_resource_reference` implementations. Source-project files are
 checked first; successful fallback loads are inferred as External Project
 Resources.
+
+### Migrating to 0.4
+
+Version 0.4 makes clean naming and invariant-boundary breaks without retaining
+compatibility aliases:
+
+- Replace `PackWorldBuilder::external_resource_loader` and
+  `Packer::external_resource_loader` with `external_resource_reference`.
+- Replace CLI `--resource-path <DIR>` with `--source-reference <DIR>`.
+- `PackWorld::new` and `PackWorldBuilder::build` now return `PackWorld`
+  directly. A successfully constructed Pack already guarantees a contained
+  entrypoint and valid contained fonts.
+- Pack Manifest fields and `PackFont` fields are read-only. Use accessors such
+  as `manifest.project()`, `project.entrypoint()`, `font.manifest()`, and
+  `font.data()`.
+- Shared Pack consistency failures are available as `PackInvariantError`,
+  wrapped by `PackBuildError::Invariant` or `PackReadError::Invariant`.
+
+The Pack format remains version 1. External Project Resource declarations are
+unchanged, and External Resource References remain compilation inputs rather
+than serialized Pack content.
 
 ### Feature flags
 
