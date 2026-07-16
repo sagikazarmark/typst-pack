@@ -64,19 +64,7 @@ impl<'de> Deserialize<'de> for PackManifest {
         D: Deserializer<'de>,
     {
         let value = toml::Value::deserialize(deserializer)?;
-        let version = value
-            .get("format-version")
-            .and_then(toml::Value::as_integer)
-            .ok_or_else(|| serde::de::Error::custom("missing or invalid `format-version`"))?;
-        if version != i64::from(FORMAT_VERSION) {
-            return Err(serde::de::Error::custom(format!(
-                "unsupported pack format version {version}"
-            )));
-        }
-        let wire: Version1Manifest = value.try_into().map_err(serde::de::Error::custom)?;
-        let manifest = Self::try_from(wire).map_err(serde::de::Error::custom)?;
-        manifest.validate().map_err(serde::de::Error::custom)?;
-        Ok(manifest)
+        parse_manifest_value(value).map_err(serde::de::Error::custom)
     }
 }
 
@@ -284,6 +272,8 @@ impl PackMetadata {
 pub enum PackManifestError {
     #[error("failed to parse manifest: {0}")]
     Parse(#[from] toml::de::Error),
+    #[error("missing or invalid `format-version`")]
+    InvalidFormatVersion,
     #[error("unsupported pack format version {0} (this reader supports version {FORMAT_VERSION})")]
     UnsupportedVersion(u32),
     #[error("invalid package spec `{spec}`: {message}")]
@@ -341,20 +331,7 @@ impl PackManifest {
 
     /// Parses and validates a manifest from TOML text.
     pub fn from_toml(text: &str) -> Result<Self, PackManifestError> {
-        #[derive(Deserialize)]
-        #[serde(rename_all = "kebab-case")]
-        struct VersionProbe {
-            format_version: u32,
-        }
-
-        let probe: VersionProbe = toml::from_str(text)?;
-        if probe.format_version != FORMAT_VERSION {
-            return Err(PackManifestError::UnsupportedVersion(probe.format_version));
-        }
-        let wire: Version1Manifest = toml::from_str(text)?;
-        let manifest = Self::try_from(wire)?;
-        manifest.validate()?;
-        Ok(manifest)
+        parse_manifest_value(toml::from_str(text)?)
     }
 
     /// Serializes the manifest to TOML text.
@@ -379,6 +356,21 @@ impl PackManifest {
     pub fn unvendored_packages(&self) -> &[PackageSpec] {
         &self.packages.unvendored
     }
+}
+
+fn parse_manifest_value(value: toml::Value) -> Result<PackManifest, PackManifestError> {
+    let version = value
+        .get("format-version")
+        .and_then(toml::Value::as_integer)
+        .ok_or(PackManifestError::InvalidFormatVersion)?;
+    let version = u32::try_from(version).map_err(|_| PackManifestError::InvalidFormatVersion)?;
+    if version != FORMAT_VERSION {
+        return Err(PackManifestError::UnsupportedVersion(version));
+    }
+    let wire: Version1Manifest = value.try_into()?;
+    let manifest = PackManifest::try_from(wire)?;
+    manifest.validate()?;
+    Ok(manifest)
 }
 
 fn parse_specs(specs: Vec<String>) -> Result<Vec<PackageSpec>, PackManifestError> {

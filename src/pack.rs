@@ -120,51 +120,12 @@ impl Pack {
             .external_resources()
             .map(|path| canonical_path(PackPathRole::ExternalProjectResource, path))
             .collect::<Result<BTreeSet<_>, _>>()?;
-
-        if let Some(path) = external_resources
+        let font_entries = manifest
+            .fonts()
             .iter()
-            .find(|path| canonical_files.contains_key(path.as_str()))
-        {
-            return Err(PackInvariantError::PathRoleConflict {
-                path: path.to_string(),
-                first: PackPathRole::ProjectFile,
-                second: PackPathRole::ExternalProjectResource,
-            });
-        }
-
-        let mut project_paths = canonical_files
-            .keys()
             .cloned()
-            .map(|path| (path, PackPathRole::ProjectFile))
-            .collect::<Vec<_>>();
-        project_paths.extend(
-            external_resources
-                .iter()
-                .cloned()
-                .map(|path| (path, PackPathRole::ExternalProjectResource)),
-        );
-        if let Some((ancestor, ancestor_role, descendant, descendant_role)) =
-            find_path_tree_conflict(project_paths)
-        {
-            return Err(PackInvariantError::PathTreeConflict {
-                ancestor: ancestor.to_string(),
-                ancestor_role,
-                descendant: descendant.to_string(),
-                descendant_role,
-                package: None,
-            });
-        }
-
-        if external_resources.contains(&entrypoint) {
-            return Err(PackInvariantError::EntrypointIsExternalResource(
-                entrypoint.to_string(),
-            ));
-        }
-        if !canonical_files.contains_key(&entrypoint) {
-            return Err(PackInvariantError::MissingEntrypoint(
-                entrypoint.to_string(),
-            ));
-        }
+            .map(|entry| Ok((canonical_path(PackPathRole::FontData, entry.path())?, entry)))
+            .collect::<Result<Vec<_>, PackInvariantError>>()?;
 
         let vendored_packages = manifest
             .vendored_packages()
@@ -185,14 +146,11 @@ impl Pack {
             return Err(PackInvariantError::PackageRoleConflict(spec.clone()));
         }
 
-        let mut canonical_packages = BTreeMap::new();
-        for (_, package) in packages {
-            let key = package.spec.to_string();
-            if !vendored_packages.contains_key(&key) {
-                return Err(PackInvariantError::UndeclaredPackageData(key));
-            }
-            let package_files = package.files;
-            let paths = package_files
+        validate_project_declarations(canonical_files.keys().cloned(), &external_resources)?;
+
+        for package in packages.values() {
+            let paths = package
+                .files
                 .keys()
                 .cloned()
                 .map(|path| (path, PackPathRole::PackageFile))
@@ -200,14 +158,60 @@ impl Pack {
             if let Some((ancestor, ancestor_role, descendant, descendant_role)) =
                 find_path_tree_conflict(paths)
             {
-                return Err(PackInvariantError::PathTreeConflict {
+                return Err(PackInvariantError::PackagePathTreeConflict {
+                    package: package.spec.to_string(),
                     ancestor: ancestor.to_string(),
                     ancestor_role,
                     descendant: descendant.to_string(),
                     descendant_role,
-                    package: Some(key),
                 });
             }
+        }
+
+        for (path, _) in &font_entries {
+            if let Some(conflicting_role) = reserved_font_path_role(path) {
+                return Err(PackInvariantError::ReservedFontPath {
+                    path: path.to_string(),
+                    conflicting_role,
+                });
+            }
+        }
+        let font_paths = font_entries
+            .iter()
+            .map(|(path, _)| path.clone())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|path| (path, PackPathRole::FontData))
+            .collect();
+        if let Some((ancestor, ancestor_role, descendant, descendant_role)) =
+            find_path_tree_conflict(font_paths)
+        {
+            return Err(PackInvariantError::PathTreeConflict {
+                ancestor: ancestor.to_string(),
+                ancestor_role,
+                descendant: descendant.to_string(),
+                descendant_role,
+            });
+        }
+
+        if external_resources.contains(&entrypoint) {
+            return Err(PackInvariantError::EntrypointIsExternalResource(
+                entrypoint.to_string(),
+            ));
+        }
+        if !canonical_files.contains_key(&entrypoint) {
+            return Err(PackInvariantError::MissingEntrypoint(
+                entrypoint.to_string(),
+            ));
+        }
+
+        let mut canonical_packages = BTreeMap::new();
+        for (_, package) in packages {
+            let key = package.spec.to_string();
+            if !vendored_packages.contains_key(&key) {
+                return Err(PackInvariantError::UndeclaredPackageData(key));
+            }
+            let package_files = package.files;
             canonical_packages.insert(
                 key,
                 PackageFiles {
@@ -223,30 +227,9 @@ impl Pack {
             return Err(PackInvariantError::MissingVendoredPackageData(spec.clone()));
         }
 
-        let canonical_font_data = font_data;
         let mut canonical_fonts = Vec::new();
         let mut font_faces = BTreeSet::new();
-        for entry in manifest.fonts() {
-            let path = canonical_path(PackPathRole::FontData, entry.path())?;
-            let conflicting_role = if path.as_str() == MANIFEST_PATH {
-                Some(PackPathRole::PackManifest)
-            } else if path.as_str() == PROJECT_PREFIX.trim_end_matches('/')
-                || path.as_str().starts_with(PROJECT_PREFIX)
-            {
-                Some(PackPathRole::ProjectFile)
-            } else if path.as_str() == PACKAGES_PREFIX.trim_end_matches('/')
-                || path.as_str().starts_with(PACKAGES_PREFIX)
-            {
-                Some(PackPathRole::PackageFile)
-            } else {
-                None
-            };
-            if let Some(conflicting_role) = conflicting_role {
-                return Err(PackInvariantError::ReservedFontPath {
-                    path: path.to_string(),
-                    conflicting_role,
-                });
-            }
+        for (path, entry) in font_entries {
             let index = entry.index();
             if !font_faces.insert((path.clone(), index)) {
                 return Err(PackInvariantError::DuplicateFontFace {
@@ -254,15 +237,16 @@ impl Pack {
                     index,
                 });
             }
-            let data = canonical_font_data
+            let data = font_data
                 .get(&path)
                 .cloned()
                 .ok_or_else(|| PackInvariantError::MissingFontData(path.to_string()))?;
-            let parsed =
-                Font::new(data.clone(), index).ok_or_else(|| PackInvariantError::InvalidFont {
-                    path: Some(path.to_string()),
+            let parsed = Font::new(data.clone(), index).ok_or_else(|| {
+                PackInvariantError::InvalidFontData {
+                    path: path.to_string(),
                     index,
-                })?;
+                }
+            })?;
             canonical_fonts.push(PackFont {
                 entry: FontManifest::new(path.into_string(), index, entry.families().to_vec()),
                 data,
@@ -760,33 +744,7 @@ impl PackBuilder {
     #[cfg(feature = "fs")]
     pub(crate) fn validate_declarations(&self) -> Result<(), PackBuildError> {
         let entrypoint = canonical_path(PackPathRole::Entrypoint, &self.entrypoint)?;
-        if self.external_resources.contains(&entrypoint) {
-            return Err(PackInvariantError::PathRoleConflict {
-                path: entrypoint.to_string(),
-                first: PackPathRole::ProjectFile,
-                second: PackPathRole::ExternalProjectResource,
-            }
-            .into());
-        }
-        let mut project_paths = vec![(entrypoint, PackPathRole::ProjectFile)];
-        project_paths.extend(
-            self.external_resources
-                .iter()
-                .cloned()
-                .map(|path| (path, PackPathRole::ExternalProjectResource)),
-        );
-        if let Some((ancestor, ancestor_role, descendant, descendant_role)) =
-            find_path_tree_conflict(project_paths)
-        {
-            return Err(PackInvariantError::PathTreeConflict {
-                ancestor: ancestor.to_string(),
-                ancestor_role,
-                descendant: descendant.to_string(),
-                descendant_role,
-                package: None,
-            }
-            .into());
-        }
+        validate_project_declarations(std::iter::once(entrypoint), &self.external_resources)?;
         Ok(())
     }
 
@@ -823,8 +781,8 @@ impl PackBuilder {
     /// entry name and family list are derived from the font data.
     pub fn font(mut self, data: impl Into<Vec<u8>>, index: u32) -> Result<Self, PackBuildError> {
         let data = data.into();
-        let info = FontInfo::new(&data, index)
-            .ok_or(PackInvariantError::InvalidFont { path: None, index })?;
+        let info =
+            FontInfo::new(&data, index).ok_or(PackInvariantError::InvalidFontInput { index })?;
         let family = info.family.to_string();
         let path = self.font_path(&family, &data);
         self.fonts.push(PackFontInput {
@@ -978,6 +936,59 @@ fn find_path_tree_conflict(
     None
 }
 
+fn validate_project_declarations(
+    project_files: impl IntoIterator<Item = CanonicalPath>,
+    external_resources: &BTreeSet<CanonicalPath>,
+) -> Result<(), PackInvariantError> {
+    let mut project_paths = Vec::new();
+    for path in project_files {
+        if external_resources.contains(&path) {
+            return Err(PackInvariantError::PathRoleConflict {
+                path: path.to_string(),
+                first: PackPathRole::ProjectFile,
+                second: PackPathRole::ExternalProjectResource,
+            });
+        }
+        project_paths.push((path, PackPathRole::ProjectFile));
+    }
+    project_paths.extend(
+        external_resources
+            .iter()
+            .cloned()
+            .map(|path| (path, PackPathRole::ExternalProjectResource)),
+    );
+    if let Some((ancestor, ancestor_role, descendant, descendant_role)) =
+        find_path_tree_conflict(project_paths)
+    {
+        return Err(PackInvariantError::PathTreeConflict {
+            ancestor: ancestor.to_string(),
+            ancestor_role,
+            descendant: descendant.to_string(),
+            descendant_role,
+        });
+    }
+    Ok(())
+}
+
+fn reserved_font_path_role(path: &CanonicalPath) -> Option<PackPathRole> {
+    if is_same_or_descendant(path.as_str(), MANIFEST_PATH) {
+        Some(PackPathRole::PackManifest)
+    } else if is_same_or_descendant(path.as_str(), PROJECT_PREFIX.trim_end_matches('/')) {
+        Some(PackPathRole::ProjectFile)
+    } else if is_same_or_descendant(path.as_str(), PACKAGES_PREFIX.trim_end_matches('/')) {
+        Some(PackPathRole::PackageFile)
+    } else {
+        None
+    }
+}
+
+fn is_same_or_descendant(path: &str, ancestor: &str) -> bool {
+    path == ancestor
+        || path
+            .strip_prefix(ancestor)
+            .is_some_and(|suffix| suffix.starts_with('/'))
+}
+
 fn register_archive_identity(
     entries: &mut BTreeMap<String, Vec<u8>>,
     canonical: String,
@@ -1039,14 +1050,24 @@ pub enum PackInvariantError {
     },
     /// One file path is an ancestor of another file path in the same tree.
     #[error(
-        "{ancestor_role} path `{ancestor}` conflicts with {descendant_role} descendant `{descendant}` (package: {package:?})"
+        "{ancestor_role} path `{ancestor}` conflicts with {descendant_role} descendant `{descendant}`"
     )]
     PathTreeConflict {
         ancestor: String,
         ancestor_role: PackPathRole,
         descendant: String,
         descendant_role: PackPathRole,
-        package: Option<String>,
+    },
+    /// One package file path is an ancestor of another file path in that package.
+    #[error(
+        "package `{package}` {ancestor_role} path `{ancestor}` conflicts with {descendant_role} descendant `{descendant}`"
+    )]
+    PackagePathTreeConflict {
+        package: String,
+        ancestor: String,
+        ancestor_role: PackPathRole,
+        descendant: String,
+        descendant_role: PackPathRole,
     },
     /// The entrypoint was declared as a non-source External Project Resource.
     #[error("entrypoint `{0}` cannot be an External Project Resource")]
@@ -1069,9 +1090,12 @@ pub enum PackInvariantError {
     /// A font declaration has no contained bytes.
     #[error("font data `{0}` is missing")]
     MissingFontData(String),
+    /// Builder-provided font bytes do not contain the requested face.
+    #[error("font input does not contain a valid face at index {index}")]
+    InvalidFontInput { index: u32 },
     /// Contained font bytes do not contain the declared face.
-    #[error("font data {path:?} does not contain a valid face at index {index}")]
-    InvalidFont { path: Option<String>, index: u32 },
+    #[error("font data `{path}` does not contain a valid face at index {index}")]
+    InvalidFontData { path: String, index: u32 },
     /// The same contained font face was declared more than once.
     #[error("font `{path}` declares face index {index} more than once")]
     DuplicateFontFace { path: String, index: u32 },

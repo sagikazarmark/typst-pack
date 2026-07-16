@@ -16,6 +16,44 @@ fn tiny_png() -> Vec<u8> {
     tiny_skia::Pixmap::new(4, 4).unwrap().encode_png().unwrap()
 }
 
+#[cfg(feature = "embedded-fonts")]
+fn embedded_font_data() -> Vec<u8> {
+    typst_kit::fonts::embedded()
+        .next()
+        .expect("Typst embedded fonts are available")
+        .0
+        .data()
+        .to_vec()
+}
+
+#[cfg(feature = "embedded-fonts")]
+fn two_face_collection(font: &[u8]) -> Vec<u8> {
+    fn adjusted_font(font: &[u8], base: usize) -> Vec<u8> {
+        let mut adjusted = font.to_vec();
+        let table_count = usize::from(u16::from_be_bytes([font[4], font[5]]));
+        for table in 0..table_count {
+            let offset = 12 + table * 16 + 8;
+            let original = u32::from_be_bytes(font[offset..offset + 4].try_into().unwrap());
+            let adjusted_offset = original + u32::try_from(base).unwrap();
+            adjusted[offset..offset + 4].copy_from_slice(&adjusted_offset.to_be_bytes());
+        }
+        adjusted
+    }
+
+    let first_offset = 20;
+    let second_offset = (first_offset + font.len() + 3) & !3;
+    let mut collection = Vec::with_capacity(second_offset + font.len());
+    collection.extend_from_slice(b"ttcf");
+    collection.extend_from_slice(&0x0001_0000u32.to_be_bytes());
+    collection.extend_from_slice(&2u32.to_be_bytes());
+    collection.extend_from_slice(&u32::try_from(first_offset).unwrap().to_be_bytes());
+    collection.extend_from_slice(&u32::try_from(second_offset).unwrap().to_be_bytes());
+    collection.extend_from_slice(&adjusted_font(font, first_offset));
+    collection.resize(second_offset, 0);
+    collection.extend_from_slice(&adjusted_font(font, second_offset));
+    collection
+}
+
 struct MemoryProjectFile {
     path: String,
     data: Bytes,
@@ -420,7 +458,6 @@ fn pack_construction_rejects_conflicting_project_tree_roles() {
                 ref descendant,
                 ancestor_role: PackPathRole::ProjectFile,
                 descendant_role: PackPathRole::ExternalProjectResource,
-                package: None,
             }
         )) if ancestor == "assets" && descendant == "assets/logo.png"
     ));
@@ -440,7 +477,6 @@ fn pack_construction_rejects_conflicting_project_tree_roles() {
                 ref descendant,
                 ancestor_role: PackPathRole::ProjectFile,
                 descendant_role: PackPathRole::ExternalProjectResource,
-                package: None,
             }
         )) if ancestor == "assets" && descendant == "assets/logo.png"
     ));
@@ -480,6 +516,59 @@ fn pack_construction_rejects_conflicting_package_roles() {
 }
 
 #[test]
+fn pack_construction_rejects_package_declaration_data_disagreement() {
+    let missing_manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[packages]\nvendored = [\"@local/example:1.0.0\"]\n";
+    let missing = raw_stored_zip(&[
+        (MANIFEST_PATH, missing_manifest),
+        ("project/main.typ", b"Hello"),
+    ]);
+    assert!(matches!(
+        Pack::from_bytes(missing),
+        Err(PackReadError::Invariant(
+            PackInvariantError::MissingVendoredPackageData(ref spec)
+        )) if spec == "@local/example:1.0.0"
+    ));
+
+    let undeclared_manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
+    let undeclared = raw_stored_zip(&[
+        (MANIFEST_PATH, undeclared_manifest),
+        ("project/main.typ", b"Hello"),
+        ("packages/local/example/1.0.0/lib.typ", b"Hello"),
+    ]);
+    assert!(matches!(
+        Pack::from_bytes(undeclared),
+        Err(PackReadError::Invariant(
+            PackInvariantError::UndeclaredPackageData(ref spec)
+        )) if spec == "@local/example:1.0.0"
+    ));
+}
+
+#[test]
+fn pack_construction_rejects_conflicting_package_file_tree_paths() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[packages]\nvendored = [\"@local/example:1.0.0\"]\n";
+    let bytes = raw_stored_zip(&[
+        (MANIFEST_PATH, manifest),
+        ("project/main.typ", b"Hello"),
+        ("packages/local/example/1.0.0/lib", b"file"),
+        ("packages/local/example/1.0.0/lib/child.typ", b"child"),
+    ]);
+
+    assert!(matches!(
+        Pack::from_bytes(bytes),
+        Err(PackReadError::Invariant(
+            PackInvariantError::PackagePathTreeConflict {
+                ref package,
+                ref ancestor,
+                ref descendant,
+                ..
+            }
+        )) if package == "@local/example:1.0.0"
+            && ancestor == "lib"
+            && descendant == "lib/child.typ"
+    ));
+}
+
+#[test]
 fn pack_construction_rejects_invalid_contained_font_data() {
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"custom-font.bin\"\nindex = 3\nfamilies = [\"Informational\"]\n";
     let bytes = raw_stored_zip(&[
@@ -490,8 +579,8 @@ fn pack_construction_rejects_invalid_contained_font_data() {
 
     assert!(matches!(
         Pack::from_bytes(bytes),
-        Err(PackReadError::Invariant(PackInvariantError::InvalidFont {
-            path: Some(ref path),
+        Err(PackReadError::Invariant(PackInvariantError::InvalidFontData {
+            ref path,
             index: 3,
         })) if path == "custom-font.bin"
     ));
@@ -501,10 +590,55 @@ fn pack_construction_rejects_invalid_contained_font_data() {
 fn pack_builder_reports_invalid_font_data_as_a_shared_invariant() {
     assert!(matches!(
         Pack::builder("main.typ").font(b"not a font".to_vec(), 2),
-        Err(PackBuildError::Invariant(PackInvariantError::InvalidFont {
-            path: None,
-            index: 2,
-        }))
+        Err(PackBuildError::Invariant(
+            PackInvariantError::InvalidFontInput { index: 2 }
+        ))
+    ));
+}
+
+#[cfg(feature = "embedded-fonts")]
+#[test]
+fn pack_accepts_shared_multi_face_custom_font_data_and_informational_families() {
+    let collection = two_face_collection(&embedded_font_data());
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"custom-font.data\"\nindex = 0\nfamilies = [\"Not the parsed family\"]\n[[fonts]]\npath = \"custom-font.data\"\nindex = 1\nfamilies = [\"Also informational\"]\n";
+    let pack = Pack::from_bytes(raw_stored_zip(&[
+        (MANIFEST_PATH, manifest),
+        ("project/main.typ", b"Hello"),
+        ("custom-font.data", &collection),
+    ]))
+    .unwrap();
+
+    assert_eq!(pack.fonts().len(), 2);
+    assert_eq!(pack.fonts()[0].manifest().path(), "custom-font.data");
+    assert_eq!(
+        pack.fonts()[0].manifest().families(),
+        ["Not the parsed family"]
+    );
+    assert_eq!(pack.fonts()[1].manifest().index(), 1);
+    assert_eq!(
+        pack.fonts()[1].manifest().families(),
+        ["Also informational"]
+    );
+}
+
+#[cfg(feature = "embedded-fonts")]
+#[test]
+fn pack_rejects_duplicate_font_faces() {
+    let font = embedded_font_data();
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"font.data\"\nfamilies = [\"A\"]\n[[fonts]]\npath = \"font.data\"\nfamilies = [\"B\"]\n";
+
+    assert!(matches!(
+        Pack::from_bytes(raw_stored_zip(&[
+            (MANIFEST_PATH, manifest),
+            ("project/main.typ", b"Hello"),
+            ("font.data", &font),
+        ])),
+        Err(PackReadError::Invariant(
+            PackInvariantError::DuplicateFontFace {
+                ref path,
+                index: 0,
+            }
+        )) if path == "font.data"
     ));
 }
 
@@ -545,6 +679,62 @@ fn pack_construction_rejects_font_paths_at_reserved_namespace_roots() {
             })) if actual == path && actual_role == conflicting_role
         ));
     }
+}
+
+#[test]
+fn pack_construction_rejects_conflicting_font_data_tree_paths() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"fonts/a\"\nfamilies = [\"A\"]\n[[fonts]]\npath = \"fonts/a/face.ttf\"\nfamilies = [\"B\"]\n";
+    let bytes = raw_stored_zip(&[
+        (MANIFEST_PATH, manifest),
+        ("project/main.typ", b"Hello"),
+        ("fonts/a", b"not a font"),
+        ("fonts/a/face.ttf", b"not a font"),
+    ]);
+
+    assert!(matches!(
+        Pack::from_bytes(bytes),
+        Err(PackReadError::Invariant(
+            PackInvariantError::PathTreeConflict {
+                ref ancestor,
+                ancestor_role: PackPathRole::FontData,
+                ref descendant,
+                descendant_role: PackPathRole::FontData,
+            }
+        )) if ancestor == "fonts/a" && descendant == "fonts/a/face.ttf"
+    ));
+}
+
+#[test]
+fn font_path_failures_precede_entrypoint_failures() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"missing.typ\"\n[[fonts]]\npath = \"../font.ttf\"\nfamilies = [\"Invalid\"]\n";
+
+    assert!(matches!(
+        Pack::from_bytes(raw_stored_zip(&[(MANIFEST_PATH, manifest)])),
+        Err(PackReadError::Invariant(PackInvariantError::InvalidPath {
+            role: PackPathRole::FontData,
+            ..
+        }))
+    ));
+}
+
+#[test]
+fn invariant_diagnostics_do_not_expose_optional_field_formatting() {
+    let tree = PackInvariantError::PathTreeConflict {
+        ancestor: "assets".to_owned(),
+        ancestor_role: PackPathRole::ProjectFile,
+        descendant: "assets/logo.png".to_owned(),
+        descendant_role: PackPathRole::ExternalProjectResource,
+    };
+    assert_eq!(
+        tree.to_string(),
+        "project file path `assets` conflicts with External Project Resource descendant `assets/logo.png`"
+    );
+
+    let font = PackInvariantError::InvalidFontInput { index: 2 };
+    assert_eq!(
+        font.to_string(),
+        "font input does not contain a valid face at index 2"
+    );
 }
 
 #[test]
@@ -709,6 +899,22 @@ fn read_rejects_unsafe_unknown_directories_before_ignoring_them() {
         Pack::from_bytes(buffer.into_inner()),
         Err(PackReadError::UnsafeEntry(_))
     ));
+}
+
+#[test]
+fn read_accepts_safe_unknown_entries_and_rewrite_drops_them() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
+    let pack = Pack::from_bytes(raw_stored_zip(&[
+        (MANIFEST_PATH, manifest),
+        ("project/main.typ", b"Hello"),
+        ("future/data.bin", b"ignored"),
+    ]))
+    .unwrap();
+
+    let mut rewritten =
+        zip::ZipArchive::new(std::io::Cursor::new(pack.to_bytes().unwrap())).unwrap();
+    assert!(rewritten.by_name("future/data.bin").is_err());
+    assert_eq!(rewritten.by_name("project/main.typ").unwrap().size(), 5);
 }
 
 #[test]
@@ -1654,7 +1860,6 @@ Rows: #csv("data.csv").len()
                 PackInvariantError::PathTreeConflict {
                     ancestor_role: PackPathRole::ExternalProjectResource,
                     descendant_role: PackPathRole::ExternalProjectResource,
-                    package: None,
                     ..
                 }
             )))
@@ -1671,7 +1876,6 @@ Rows: #csv("data.csv").len()
                 PackInvariantError::PathTreeConflict {
                     ancestor_role: PackPathRole::ProjectFile,
                     descendant_role: PackPathRole::ExternalProjectResource,
-                    package: None,
                     ..
                 }
             )))
