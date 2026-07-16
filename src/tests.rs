@@ -2576,6 +2576,31 @@ Rows: #csv("data.csv").len()
     }
 
     #[test]
+    fn tolerated_missing_resource_slot_request_still_fails_discovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("main.typ"), "#image(\"outer.svg\")").unwrap();
+        fs::write(
+            project.join("outer.svg"),
+            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+<image href="missing.png" width="10" height="10"/>
+</svg>"#,
+        )
+        .unwrap();
+
+        let result = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .resource_slot("missing.png")
+            .pack();
+
+        assert!(matches!(
+            result,
+            Err(PackerError::ResourceSlotUnavailable { ref path }) if path == "missing.png"
+        ));
+    }
+
+    #[test]
     fn discovery_errors_take_precedence_over_timing_export_errors() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");

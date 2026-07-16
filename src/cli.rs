@@ -31,8 +31,26 @@ use crate::pack::{FILE_EXTENSION, Pack};
 use crate::packer::{DiscoveryTarget, DiscoveryWorld, Packer, PackerError};
 use crate::world::PackWorld;
 
-const DIAGNOSTICS_EMITTED: &str = "\0typst diagnostics emitted";
 const ENV_PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
+
+enum CliError {
+    Reported,
+    Message(String),
+}
+
+impl From<String> for CliError {
+    fn from(message: String) -> Self {
+        Self::Message(message)
+    }
+}
+
+impl From<&str> for CliError {
+    fn from(message: &str) -> Self {
+        Self::Message(message.to_owned())
+    }
+}
+
+type CliResult = Result<(), CliError>;
 
 /// Pack, inspect, extract, and compile portable Typst project packs.
 #[derive(Debug, Parser)]
@@ -556,20 +574,19 @@ pub fn run() -> ExitCode {
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(error) => {
-            if error != DIAGNOSTICS_EMITTED {
-                emit_owned_error(&error, color);
-            }
+        Err(CliError::Reported) => ExitCode::FAILURE,
+        Err(CliError::Message(error)) => {
+            emit_owned_error(&error, color);
             ExitCode::FAILURE
         }
     }
 }
 
-fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> Result<(), String> {
+fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResult {
     initialize_jobs(args.automation.jobs);
     let diagnostic_format = args.automation.diagnostic_format.into();
     if args.input == Path::new("-") {
-        return Err("create input must be a named Typst source file, not stdin".to_owned());
+        return Err("create input must be a named Typst source file, not stdin".into());
     }
 
     let input = args
@@ -580,7 +597,8 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> Result<(
         return Err(format!(
             "create input must be a Typst source file: `{}`",
             args.input.display()
-        ));
+        )
+        .into());
     }
 
     let root = match args.root {
@@ -656,9 +674,9 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> Result<(
                 diagnostic_format,
                 color,
             );
-            return Err(DIAGNOSTICS_EMITTED.into());
+            return Err(CliError::Reported);
         }
-        Err(err) => return Err(err.to_string()),
+        Err(err) => return Err(err.to_string().into()),
     };
 
     emit_diagnostics_with(
@@ -716,7 +734,7 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> Result<(
     Ok(())
 }
 
-fn inspect(args: InspectArgs) -> Result<(), String> {
+fn inspect(args: InspectArgs) -> CliResult {
     let pack = read_pack(&args.pack)?;
     let manifest = pack.manifest();
 
@@ -783,7 +801,7 @@ fn inspect(args: InspectArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn extract_command(args: ExtractArgs) -> Result<(), String> {
+fn extract_command(args: ExtractArgs) -> CliResult {
     let pack = read_pack(&args.pack)?;
     let output = args
         .output
@@ -814,19 +832,15 @@ fn extract_command(args: ExtractArgs) -> Result<(), String> {
     Ok(())
 }
 
-fn compile_command(
-    args: CompileArgs,
-    color: ColorChoice,
-    cert: Option<&Path>,
-) -> Result<(), String> {
+fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -> CliResult {
     initialize_jobs(args.automation.jobs);
     if args.pack == Path::new("-") && args.output.is_none() {
-        return Err("an explicit output is required when the Pack is read from stdin".to_owned());
+        return Err("an explicit output is required when the Pack is read from stdin".into());
     }
     if args.output.as_deref() == Some(Path::new("-"))
         && args.deps.as_deref() == Some(Path::new("-"))
     {
-        return Err("cannot write both output and dependencies to stdout".to_owned());
+        return Err("cannot write both output and dependencies to stdout".into());
     }
     let pack = read_pack_input(&args.pack)?;
 
@@ -843,10 +857,11 @@ fn compile_command(
                         return Err(format!(
                             "cannot infer output format from extension `{}`; pass --format",
                             other
-                        ));
+                        )
+                        .into());
                     }
                     None => {
-                        return Err("cannot infer output format; pass --format".to_owned());
+                        return Err("cannot infer output format; pass --format".into());
                     }
                 }
             }
@@ -854,9 +869,8 @@ fn compile_command(
         },
     };
 
-    let creation_timestamp = args
-        .automation
-        .creation_timestamp
+    let creation_timestamp_seconds = args.automation.creation_timestamp;
+    let creation_timestamp = creation_timestamp_seconds
         .map(|seconds| {
             datetime_from_timestamp(seconds)
                 .ok_or_else(|| format!("timestamp {seconds} is out of range"))
@@ -865,7 +879,7 @@ fn compile_command(
 
     let host_dependencies = Arc::new(Mutex::new(BTreeSet::new()));
     let mut builder = PackWorld::builder(pack)
-        .embedded_fonts(!args.fonts.ignore_embedded_fonts)
+        .embedded_fonts(false)
         .inputs(parse_inputs(&args.compilation.inputs))
         .package_loader(FilesystemPackageLoader {
             packages: crate::world::system_packages(
@@ -885,15 +899,20 @@ fn compile_command(
             Arc::clone(&host_dependencies),
         ));
     }
-    builder = match creation_timestamp {
-        Some(datetime) => builder.fixed_date(datetime),
+    builder = match creation_timestamp_seconds {
+        Some(timestamp) => builder
+            .fixed_timestamp(timestamp)
+            .map_err(|error| error.to_string())?,
         None => builder.system_date(),
     };
-    for path in &args.fonts.font_paths {
-        builder = builder.extra_fonts(typst_kit::fonts::scan(path));
-    }
     if !args.fonts.ignore_system_fonts {
         builder = builder.extra_fonts(typst_kit::fonts::system());
+    }
+    if !args.fonts.ignore_embedded_fonts {
+        builder = builder.extra_fonts(typst_kit::fonts::embedded());
+    }
+    for path in &args.fonts.font_paths {
+        builder = builder.extra_fonts(typst_kit::fonts::scan(path));
     }
 
     let mut world = builder.build();
@@ -918,11 +937,9 @@ fn compile_command(
         if let Some(name) = accessible_standard {
             let message = format!("cannot disable PDF tags when exporting a {name} document");
             return if args.no_pdf_tags {
-                Err(message)
+                Err(message.into())
             } else {
-                Err(format!(
-                    "{message}\nhint: using --pages implies --no-pdf-tags"
-                ))
+                Err(format!("{message}\nhint: using --pages implies --no-pdf-tags").into())
             };
         }
     }
@@ -954,122 +971,128 @@ fn compile_command(
     };
 
     let mut timer = typst_kit::timer::Timer::new_or_placeholder(args.automation.timings.clone());
-    let mut compilation = None;
+    let mut command_result = None;
     let timings = timer.record(&mut world, |world| {
-        compilation = Some(compile(world, format, &options));
+        command_result = Some((|| -> CliResult {
+            let output = match compile(world, format, &options) {
+                Ok(output) => {
+                    emit_diagnostics_with(world, output.warnings.iter(), diagnostic_format, color);
+                    output
+                }
+                Err(CompileError::Diagnostics { errors, warnings }) => {
+                    emit_diagnostics_with(
+                        world,
+                        errors.iter().chain(&warnings),
+                        diagnostic_format,
+                        color,
+                    );
+                    write_requested_dependencies(None)?;
+                    return Err(CliError::Reported);
+                }
+                Err(CompileError::PngExport { message, warnings }) => {
+                    emit_diagnostics_with(world, warnings.iter(), diagnostic_format, color);
+                    write_requested_dependencies(None)?;
+                    return Err(format!("PNG export failed: {message}").into());
+                }
+            };
+
+            let extension = format.extension();
+            let default_output = args.pack.with_extension(extension);
+            let export_result = (|| {
+                let targets: Vec<PathBuf> = match &args.output {
+                    Some(path) if path == Path::new("-") => vec![path.clone()],
+                    Some(path) if matches!(format, OutputFormat::Pdf | OutputFormat::Html) => {
+                        vec![path.clone()]
+                    }
+                    Some(path) => expand_output_template(
+                        path,
+                        &output.artifacts,
+                        output.source_page_count().unwrap_or(output.artifacts.len()),
+                    )?,
+                    None if output.artifacts.len() == 1 => vec![default_output],
+                    None => expand_output_template(
+                        &default_output,
+                        &output.artifacts,
+                        output.source_page_count().unwrap_or(output.artifacts.len()),
+                    )?,
+                };
+                let mut unique_targets = std::collections::HashSet::with_capacity(targets.len());
+                for target in &targets {
+                    if !unique_targets.insert(normalize_output_path(target)) {
+                        return Err(format!(
+                            "multiple artifacts expand to the same output path `{}`",
+                            target.display()
+                        ));
+                    }
+                }
+
+                let output_is_stdout = targets.iter().any(|target| target == Path::new("-"));
+                if output_is_stdout {
+                    if output.artifacts.len() != 1 {
+                        return Err(
+                            "cannot write output to stdout unless exactly one file is emitted"
+                                .to_owned(),
+                        );
+                    }
+                    std::io::stdout()
+                        .lock()
+                        .write_all(output.artifacts[0].bytes())
+                        .map_err(|err| format!("cannot write output to stdout: {err}"))?;
+                } else {
+                    for (target, artifact) in targets.iter().zip(&output.artifacts) {
+                        std::fs::write(target, artifact.bytes())
+                            .map_err(|err| format!("cannot write `{}`: {err}", target.display()))?;
+                    }
+                }
+                Ok::<_, String>((targets, output_is_stdout))
+            })();
+            let (targets, output_is_stdout) = match export_result {
+                Ok(exported) => exported,
+                Err(error) => {
+                    write_requested_dependencies(None)?;
+                    return Err(error.into());
+                }
+            };
+
+            if !output_is_stdout
+                && let Some(viewer) = args.open.as_ref()
+                && let Some(first) = targets.first()
+            {
+                let first = first
+                    .canonicalize()
+                    .map_err(|err| format!("failed to canonicalize path ({err})"))?;
+                match viewer.as_deref() {
+                    Some(viewer) => open::with_detached(&first, viewer),
+                    None => open::that_detached(&first),
+                }
+                .map_err(|err| err.to_string())?;
+            }
+
+            write_requested_dependencies(Some(&targets))?;
+
+            if output_is_stdout || args.deps.as_deref() == Some(Path::new("-")) {
+                return Ok(());
+            }
+            println!(
+                "compiled `{}` to {}",
+                args.pack.display(),
+                match targets.as_slice() {
+                    [single] => format!("`{}`", single.display()),
+                    many => format!("{} files", many.len()),
+                }
+            );
+
+            Ok(())
+        })());
     });
-    let Some(compilation) = compilation else {
+    let Some(command_result) = command_result else {
         return Err(timings
             .expect_err("timer did not execute compilation")
-            .to_string());
+            .to_string()
+            .into());
     };
-    let output = match compilation {
-        Ok(output) => {
-            emit_diagnostics_with(&world, output.warnings.iter(), diagnostic_format, color);
-            output
-        }
-        Err(CompileError::Diagnostics { errors, warnings }) => {
-            emit_diagnostics_with(
-                &world,
-                errors.iter().chain(&warnings),
-                diagnostic_format,
-                color,
-            );
-            write_requested_dependencies(None)?;
-            return Err(DIAGNOSTICS_EMITTED.into());
-        }
-        Err(CompileError::PngExport { message, warnings }) => {
-            emit_diagnostics_with(&world, warnings.iter(), diagnostic_format, color);
-            write_requested_dependencies(None)?;
-            return Err(format!("PNG export failed: {message}"));
-        }
-    };
+    command_result?;
     timings.map_err(|error| error.to_string())?;
-
-    let extension = format.extension();
-    let default_output = args.pack.with_extension(extension);
-    let export_result = (|| {
-        let targets: Vec<PathBuf> = match &args.output {
-            Some(path) if matches!(format, OutputFormat::Pdf | OutputFormat::Html) => {
-                vec![path.clone()]
-            }
-            Some(path) => expand_output_template(
-                path,
-                &output.artifacts,
-                output.source_page_count().unwrap_or(output.artifacts.len()),
-            )?,
-            None if output.artifacts.len() == 1 => vec![default_output],
-            None => expand_output_template(
-                &default_output,
-                &output.artifacts,
-                output.source_page_count().unwrap_or(output.artifacts.len()),
-            )?,
-        };
-        let mut unique_targets = std::collections::HashSet::with_capacity(targets.len());
-        for target in &targets {
-            if !unique_targets.insert(normalize_output_path(target)) {
-                return Err(format!(
-                    "multiple artifacts expand to the same output path `{}`",
-                    target.display()
-                ));
-            }
-        }
-
-        let output_is_stdout = targets.iter().any(|target| target == Path::new("-"));
-        if output_is_stdout {
-            if output.artifacts.len() != 1 {
-                return Err(
-                    "cannot write multiple Compilation Output Artifacts to stdout".to_owned(),
-                );
-            }
-            std::io::stdout()
-                .lock()
-                .write_all(output.artifacts[0].bytes())
-                .map_err(|err| format!("cannot write output to stdout: {err}"))?;
-        } else {
-            for (target, artifact) in targets.iter().zip(&output.artifacts) {
-                std::fs::write(target, artifact.bytes())
-                    .map_err(|err| format!("cannot write `{}`: {err}", target.display()))?;
-            }
-        }
-        Ok::<_, String>((targets, output_is_stdout))
-    })();
-    let (targets, output_is_stdout) = match export_result {
-        Ok(exported) => exported,
-        Err(error) => {
-            write_requested_dependencies(None)?;
-            return Err(error);
-        }
-    };
-
-    if !output_is_stdout
-        && let Some(viewer) = args.open.as_ref()
-        && let Some(first) = targets.first()
-    {
-        let first = first
-            .canonicalize()
-            .map_err(|err| format!("failed to canonicalize path ({err})"))?;
-        match viewer.as_deref() {
-            Some(viewer) => open::with_detached(&first, viewer),
-            None => open::that_detached(&first),
-        }
-        .map_err(|err| err.to_string())?;
-    }
-
-    write_requested_dependencies(Some(&targets))?;
-
-    if output_is_stdout || args.deps.as_deref() == Some(Path::new("-")) {
-        return Ok(());
-    }
-    println!(
-        "compiled `{}` to {}",
-        args.pack.display(),
-        match targets.as_slice() {
-            [single] => format!("`{}`", single.display()),
-            many => format!("{} files", many.len()),
-        }
-    );
-
     Ok(())
 }
 

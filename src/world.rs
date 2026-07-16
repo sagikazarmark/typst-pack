@@ -27,6 +27,31 @@ pub(crate) fn system_packages(
     certificate: Option<&std::path::Path>,
 ) -> typst_kit::packages::SystemPackages {
     use typst_kit::downloader::SystemDownloader;
+    use typst_kit::packages::UniversePackages;
+
+    system_packages_with_online(
+        package_path,
+        package_cache_path,
+        offline,
+        certificate,
+        |certificate| {
+            let downloader = match certificate {
+                Some(path) => SystemDownloader::with_cert_path(USER_AGENT, path.to_path_buf()),
+                None => SystemDownloader::new(USER_AGENT),
+            };
+            UniversePackages::new(downloader)
+        },
+    )
+}
+
+#[cfg(feature = "fs")]
+fn system_packages_with_online(
+    package_path: Option<&std::path::Path>,
+    package_cache_path: Option<&std::path::Path>,
+    offline: bool,
+    certificate: Option<&std::path::Path>,
+    online: impl FnOnce(Option<&std::path::Path>) -> typst_kit::packages::UniversePackages,
+) -> typst_kit::packages::SystemPackages {
     use typst_kit::packages::{FsPackages, SystemPackages, UniversePackages};
 
     let data = match package_path {
@@ -40,11 +65,7 @@ pub(crate) fn system_packages(
     let universe = if offline {
         UniversePackages::new(OfflineDownloader)
     } else {
-        let downloader = match certificate {
-            Some(path) => SystemDownloader::with_cert_path(USER_AGENT, path.to_path_buf()),
-            None => SystemDownloader::new(USER_AGENT),
-        };
-        UniversePackages::new(downloader)
+        online(certificate)
     };
 
     SystemPackages::from_parts(data, cache, universe)
@@ -115,7 +136,9 @@ impl World for PackWorld {
             Clock::None => None,
             // A fixed date is used as-is; the offset only matters relative to
             // an instant, which a plain date does not carry.
-            Clock::Fixed(datetime) => Some(*datetime),
+            Clock::FixedDate(datetime) => Some(*datetime),
+            #[cfg(feature = "fs")]
+            Clock::FixedTimestamp(time) => time.today(offset),
             #[cfg(feature = "fs")]
             Clock::System(time) => time.today(offset),
         }
@@ -127,7 +150,10 @@ enum Clock {
     /// `datetime.today()` errors in document code.
     None,
     /// A fixed date, for reproducible output.
-    Fixed(Datetime),
+    FixedDate(Datetime),
+    /// A fixed timestamp whose date respects requested timezone offsets.
+    #[cfg(feature = "fs")]
+    FixedTimestamp(typst_kit::datetime::Time),
     /// The system clock.
     #[cfg(feature = "fs")]
     System(typst_kit::datetime::Time),
@@ -225,8 +251,15 @@ impl PackWorldBuilder {
 
     /// Uses a fixed date for `datetime.today()`, for reproducible output.
     pub fn fixed_date(mut self, datetime: Datetime) -> Self {
-        self.clock = Clock::Fixed(datetime);
+        self.clock = Clock::FixedDate(datetime);
         self
+    }
+
+    /// Uses a fixed UNIX timestamp for `datetime.today()`, for reproducible output.
+    #[cfg(feature = "fs")]
+    pub fn fixed_timestamp(mut self, timestamp: i64) -> typst::diag::StrResult<Self> {
+        self.clock = Clock::FixedTimestamp(typst_kit::datetime::Time::fixed_timestamp(timestamp)?);
+        Ok(self)
     }
 
     /// Uses the system clock for `datetime.today()`.
@@ -368,5 +401,32 @@ impl FileLoader for SystemPackageLoader {
             ))),
             VirtualRoot::Package(spec) => Ok(self.0.obtain(spec)?.load(id.vpath())?),
         }
+    }
+}
+
+#[cfg(all(test, feature = "fs"))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn certificate_path_is_forwarded_to_the_online_downloader_factory() {
+        use typst_kit::packages::UniversePackages;
+
+        let directory = tempfile::tempdir().unwrap();
+        let certificate = directory.path().join("certificate.pem");
+        let mut seen = None;
+
+        let _packages = system_packages_with_online(
+            Some(directory.path()),
+            Some(directory.path()),
+            false,
+            Some(&certificate),
+            |path| {
+                seen = path.map(PathBuf::from);
+                UniversePackages::new(OfflineDownloader)
+            },
+        );
+
+        assert_eq!(seen.as_deref(), Some(certificate.as_path()));
     }
 }

@@ -440,6 +440,29 @@ fn compile_rejects_ambiguous_stdin_and_stdout_destinations() {
         .unwrap();
     assert!(!multiple_pages.status.success());
     assert!(multiple_pages.stdout.is_empty());
+
+    let no_pages = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
+        .current_dir(directory.path())
+        .args([
+            "compile",
+            pack.to_str().unwrap(),
+            "-",
+            "--format",
+            "svg",
+            "--pages",
+            "9",
+            "--ignore-system-fonts",
+            "--ignore-embedded-fonts",
+        ])
+        .output()
+        .unwrap();
+    assert!(!no_pages.status.success());
+    assert!(no_pages.stdout.is_empty());
+    assert!(
+        String::from_utf8_lossy(&no_pages.stderr).contains("exactly one file"),
+        "{}",
+        String::from_utf8_lossy(&no_pages.stderr)
+    );
 }
 
 #[test]
@@ -776,6 +799,48 @@ fn malformed_source_date_epoch_is_rejected() {
 }
 
 #[test]
+fn creation_timestamp_respects_datetime_today_timezone_offsets() {
+    let directory = tempfile::tempdir().unwrap();
+    let pack = Pack::builder("main.typ")
+        .file(
+            "main.typ",
+            br#"#let date = datetime.today(offset: 2)
+#assert(date.year() == 2000)
+#assert(date.month() == 1)
+#assert(date.day() == 1)
+#rect(width: 1pt, height: 1pt)"#
+                .to_vec(),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+    let pack_path = directory.path().join("timestamp.typk");
+    let output = directory.path().join("timestamp.svg");
+    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+
+    let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
+        .current_dir(directory.path())
+        .args([
+            "compile",
+            pack_path.to_str().unwrap(),
+            output.to_str().unwrap(),
+            "--creation-timestamp",
+            "946684799",
+            "--ignore-system-fonts",
+            "--ignore-embedded-fonts",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(output.is_file());
+}
+
+#[test]
 fn compile_alias_and_version_report_typst_parity_baseline() {
     let directory = tempfile::tempdir().unwrap();
     let pack = write_five_page_pack(directory.path());
@@ -1030,6 +1095,36 @@ fn compilation_errors_take_precedence_over_timing_export_errors() {
     assert!(!result.status.success());
     assert!(stderr.contains("unknown-function"), "{stderr}");
     assert!(!stderr.contains("failed to create file"), "{stderr}");
+}
+
+#[test]
+fn timing_export_errors_happen_after_output_and_dependencies_are_written() {
+    let directory = tempfile::tempdir().unwrap();
+    let pack = write_five_page_pack(directory.path());
+    let output = directory.path().join("timed.pdf");
+    let dependencies = directory.path().join("timed.json");
+
+    let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
+        .current_dir(directory.path())
+        .args([
+            "compile",
+            pack.to_str().unwrap(),
+            output.to_str().unwrap(),
+            "--deps",
+            dependencies.to_str().unwrap(),
+            "--timings",
+            directory.path().to_str().unwrap(),
+            "--ignore-system-fonts",
+            "--ignore-embedded-fonts",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&result.stderr);
+
+    assert!(!result.status.success());
+    assert!(stderr.contains("failed to create file"), "{stderr}");
+    assert!(output.is_file());
+    assert!(dependencies.is_file());
 }
 
 #[test]
@@ -1450,42 +1545,6 @@ fn global_certificate_accepts_argument_and_typst_cert_environment() {
             String::from_utf8_lossy(&result.stderr)
         );
     }
-
-    let package = "@preview/cert-probe:99.99.99".parse().unwrap();
-    let pack = Pack::builder("main.typ")
-        .file(
-            "main.typ",
-            b"#import \"@preview/cert-probe:99.99.99\": *".to_vec(),
-        )
-        .unwrap()
-        .unvendored_package(package)
-        .build()
-        .unwrap();
-    let pack_path = directory.path().join("cert-probe.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
-    let package_cache = directory.path().join("empty-cache");
-    std::fs::create_dir(&package_cache).unwrap();
-
-    let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-        .current_dir(directory.path())
-        .env("TYPST_PACKAGE_CACHE_PATH", package_cache)
-        .args([
-            "--cert",
-            certificate.to_str().unwrap(),
-            "compile",
-            pack_path.to_str().unwrap(),
-            "cert-probe.pdf",
-            "--ignore-system-fonts",
-            "--ignore-embedded-fonts",
-        ])
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&result.stderr);
-    assert!(!result.status.success());
-    assert!(
-        stderr.contains("Unknown format in import") || stderr.contains("PEM routines"),
-        "{stderr}"
-    );
 }
 
 #[test]

@@ -82,19 +82,81 @@ type Tests {
   }
 
   """
-  Compile a pack to PDF using SOURCE_DATE_EPOCH for reproducible metadata.
+  Compile PDFs with observable standard and timestamp controls.
   """
   compilePdf: Void @check {
-    let output = Dagger.typstPack.compile(
-      pack: self.pack,
-      creationTimestamp: 1700000000,
-      pdfStandards: [TypstPackPdfStandard.V1_7],
-      certificate: self.project.file("notes.txt"),
-    )
-    let pdf = output.file("output.pdf")
+    let baseline = Dagger
+      .typstPack
+      .compile(
+        pack: self.pack,
+        creationTimestamp: 1700000000,
+      )
+      .file("output.pdf")
+    let standard = Dagger
+      .typstPack
+      .compile(
+        pack: self.pack,
+        creationTimestamp: 1700000000,
+        pdfStandards: [TypstPackPdfStandard.V2_0],
+        diagnosticFormat: TypstPackDiagnosticFormat.SHORT,
+        certificate: self.project.file("notes.txt"),
+      )
+      .file("output.pdf")
+    let later = Dagger
+      .typstPack
+      .compile(
+        pack: self.pack,
+        creationTimestamp: 1700000001,
+      )
+      .file("output.pdf")
 
-    assert { pdf.name == "output.pdf" }
-    assert { pdf.size > 0 }
+    assert { standard.name == "output.pdf" }
+    assert { standard.size > 0 }
+    assert { baseline.digest != standard.digest }
+    assert { baseline.digest != later.digest }
+
+    null
+  }
+
+  """
+  Discover and union dependencies from paged and HTML targets.
+  """
+  discoveryTargets: Void @check {
+    let source = Dagger
+      .currentModule
+      .source
+      .directory("fixtures/targets")
+    let pack = Dagger.typstPack.create(
+      project: source,
+      input: "main.typ",
+      targets: [TypstPackDiscoveryTarget.PAGED, TypstPackDiscoveryTarget.HTML],
+      features: [TypstPackFeature.HTML],
+      diagnosticFormat: TypstPackDiagnosticFormat.SHORT,
+      ignoreSystemFonts: true,
+    )
+    let output = Dagger.typstPack.inspect(pack)
+
+    assert { output.contains("paged.txt") }
+    assert { output.contains("html.txt") }
+
+    null
+  }
+
+  """
+  Embed the fonts used during discovery when requested.
+  """
+  fontControls: Void @check {
+    let pack = Dagger.typstPack.create(
+      project: self.project,
+      input: "main.typ",
+      packageDir: self.packages,
+      embedFonts: true,
+      includeTypstEmbeddedFonts: true,
+      ignoreSystemFonts: true,
+    )
+    let output = Dagger.typstPack.inspect(pack)
+
+    assert { output.contains("embedded fonts:") }
 
     null
   }

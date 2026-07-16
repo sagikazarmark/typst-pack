@@ -254,15 +254,15 @@ impl Packer {
         );
 
         let mut fonts = FontStore::new();
-        for path in &self.font_paths {
-            fonts.extend(typst_kit::fonts::scan(path));
+        if self.system_fonts {
+            fonts.extend(typst_kit::fonts::system());
         }
         #[cfg(feature = "embedded-fonts")]
         if self.typst_embedded_fonts {
             fonts.extend(typst_kit::fonts::embedded());
         }
-        if self.system_fonts {
-            fonts.extend(typst_kit::fonts::system());
+        for path in &self.font_paths {
+            fonts.extend(typst_kit::fonts::scan(path));
         }
 
         let primary = Arc::new(PrimaryLoader {
@@ -352,6 +352,9 @@ impl Packer {
                 return discovery_compile_error(world, errors, warnings);
             }
         };
+        if let Some(path) = world.unavailable_resource_slots().into_iter().next() {
+            return Err(PackerError::ResourceSlotUnavailable { path });
+        }
         timings.map_err(|error| PackerError::Timings(error.to_string()))?;
 
         let mut report = PackReport {
