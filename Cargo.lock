@@ -294,9 +294,9 @@ dependencies = [
 
 [[package]]
 name = "clap"
-version = "4.6.1"
+version = "4.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1ddb117e43bbf7dacf0a4190fef4d345b9bad68dfc649cb349e7d17d28428e51"
+checksum = "dd059f9da4f5c36b3787f65d38ccaab1cc315f07b01f89abc8359ee6a8205011"
 dependencies = [
  "clap_builder",
  "clap_derive",
@@ -304,9 +304,9 @@ dependencies = [
 
 [[package]]
 name = "clap_builder"
-version = "4.6.0"
+version = "4.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "714a53001bf66416adb0e2ef5ac857140e7dc3a0c48fb28b2f10762fc4b5069f"
+checksum = "f09628afdcc538b57f3c6341e9c8e9970f18e4a481690a64974d7023bd33548b"
 dependencies = [
  "anstream",
  "anstyle",
@@ -543,6 +543,12 @@ checksum = "78e4f79b296fbaab6ce2e22d52cb4c7f010fe0ebe7a32e34fa25885fd797bd02"
 dependencies = [
  "serde",
 ]
+
+[[package]]
+name = "ecow"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "62bac48c16a993694c703f2991527d422d9efb8ec5625756004ba30e97683720"
 
 [[package]]
 name = "either"
@@ -2736,7 +2742,7 @@ checksum = "3c8bf2a5a9d58cc542764a88dd43c8a679b683db4ae23e36267219339ab36b01"
 dependencies = [
  "arrayvec",
  "comemo",
- "ecow",
+ "ecow 0.2.6",
  "rustc-hash",
  "typst-eval",
  "typst-html",
@@ -2765,7 +2771,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4d064876305073ab75d5af039ae5e8dcb32c4cac4aa9f43d0f5aae347baef7c3"
 dependencies = [
  "comemo",
- "ecow",
+ "ecow 0.2.6",
  "indexmap",
  "rustc-hash",
  "stacker",
@@ -2787,7 +2793,7 @@ dependencies = [
  "az",
  "bumpalo",
  "comemo",
- "ecow",
+ "ecow 0.2.6",
  "palette",
  "rustc-hash",
  "time",
@@ -2810,7 +2816,7 @@ dependencies = [
  "chrono",
  "codespan-reporting",
  "dirs",
- "ecow",
+ "ecow 0.2.6",
  "env_proxy",
  "fastrand",
  "flate2",
@@ -2842,7 +2848,7 @@ dependencies = [
  "bumpalo",
  "codex",
  "comemo",
- "ecow",
+ "ecow 0.2.6",
  "either",
  "hypher",
  "icu_properties",
@@ -2882,7 +2888,7 @@ dependencies = [
  "codex",
  "comemo",
  "csv",
- "ecow",
+ "ecow 0.2.6",
  "either",
  "flate2",
  "fontdb",
@@ -2953,7 +2959,7 @@ version = "0.3.1"
 dependencies = [
  "chrono",
  "clap",
- "ecow",
+ "ecow 0.3.0",
  "hayro-syntax",
  "open",
  "serde",
@@ -2982,7 +2988,7 @@ dependencies = [
  "bytemuck",
  "codex",
  "comemo",
- "ecow",
+ "ecow 0.2.6",
  "flate2",
  "image",
  "indexmap",
@@ -3010,7 +3016,7 @@ dependencies = [
  "arrayvec",
  "bumpalo",
  "comemo",
- "ecow",
+ "ecow 0.2.6",
  "regex",
  "typst-html",
  "typst-library",
@@ -3051,7 +3057,7 @@ checksum = "878b6e1293c2bea77a8be50670d1cbca4e676af96480313a105cba539da51d1c"
 dependencies = [
  "base64",
  "comemo",
- "ecow",
+ "ecow 0.2.6",
  "flate2",
  "hayro",
  "hayro-svg",
@@ -3076,7 +3082,7 @@ version = "0.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "22bf7f87450e5841debd4986b0f912b0f7a2251e600c08aca406305ff52c67b4"
 dependencies = [
- "ecow",
+ "ecow 0.2.6",
  "rustc-hash",
  "serde",
  "toml 0.8.23",
