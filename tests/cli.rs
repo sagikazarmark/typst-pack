@@ -180,6 +180,46 @@ fn create_rejects_stdin_input() {
 }
 
 #[test]
+fn create_validates_creation_timestamp_before_input_and_root_io() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = write_minimal_project(directory.path());
+    let input = project.join("main.typ");
+    let missing_input = directory.path().join("missing.typ");
+    let missing_root = directory.path().join("missing-root");
+
+    for arguments in [
+        vec![
+            "create",
+            missing_input.to_str().unwrap(),
+            "missing-input.typk",
+            "--creation-timestamp",
+            "9223372036854775807",
+        ],
+        vec![
+            "create",
+            input.to_str().unwrap(),
+            "missing-root.typk",
+            "--root",
+            missing_root.to_str().unwrap(),
+            "--creation-timestamp",
+            "9223372036854775807",
+        ],
+    ] {
+        let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
+            .current_dir(directory.path())
+            .args(arguments)
+            .output()
+            .unwrap();
+
+        assert!(!result.status.success());
+        assert_eq!(
+            String::from_utf8_lossy(&result.stderr),
+            "error: creation timestamp is out of range\n"
+        );
+    }
+}
+
+#[test]
 fn standalone_html_create_requires_and_accepts_the_html_feature() {
     let directory = tempfile::tempdir().unwrap();
     let project = write_minimal_project(directory.path());
@@ -661,10 +701,12 @@ fn inspect_treats_a_dash_as_a_pack_file_path() {
 }
 
 #[test]
-fn extract_lists_resource_slots_without_materializing_them() {
+fn extract_preserves_prefilled_resource_slots_without_materializing_them() {
     let directory = tempfile::tempdir().unwrap();
     let pack = Pack::builder("main.typ")
-        .file("main.typ", Vec::new())
+        .file("main.typ", b"main".to_vec())
+        .unwrap()
+        .file("ordinary.txt", b"ordinary".to_vec())
         .unwrap()
         .resource_slot("assets/logo.png")
         .unwrap()
@@ -673,6 +715,8 @@ fn extract_lists_resource_slots_without_materializing_them() {
     let pack_path = directory.path().join("project.typk");
     let output = directory.path().join("extracted");
     std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::create_dir_all(output.join("assets")).unwrap();
+    std::fs::write(output.join("assets/logo.png"), b"prefilled").unwrap();
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
         .current_dir(directory.path())
@@ -686,12 +730,25 @@ fn extract_lists_resource_slots_without_materializing_them() {
         .unwrap();
     let stdout = String::from_utf8_lossy(&result.stdout);
 
-    assert!(result.status.success(), "{stdout}");
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(stdout.contains("extracted 2 file(s)"), "{stdout}");
     assert!(
         stdout.contains("\nResource Slots (not extracted):\n  assets/logo.png\n"),
         "{stdout}"
     );
-    assert!(!output.join("assets/logo.png").exists());
+    assert_eq!(std::fs::read(output.join("main.typ")).unwrap(), b"main");
+    assert_eq!(
+        std::fs::read(output.join("ordinary.txt")).unwrap(),
+        b"ordinary"
+    );
+    assert_eq!(
+        std::fs::read(output.join("assets/logo.png")).unwrap(),
+        b"prefilled"
+    );
 }
 
 fn write_five_page_pack(directory: &std::path::Path) -> std::path::PathBuf {
@@ -1708,7 +1765,7 @@ fn valid_source_date_epoch_is_available_to_typst_code() {
 #[test]
 fn out_of_range_creation_timestamp_is_rejected() {
     let directory = tempfile::tempdir().unwrap();
-    let pack = write_five_page_pack(directory.path());
+    let pack = directory.path().join("missing.typk");
     let output = directory.path().join("timestamp.pdf");
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
@@ -1727,9 +1784,76 @@ fn out_of_range_creation_timestamp_is_rejected() {
     let stderr = String::from_utf8_lossy(&result.stderr);
 
     assert!(!result.status.success());
-    assert!(stderr.contains("timestamp"), "{stderr}");
-    assert!(stderr.contains("out of range"), "{stderr}");
+    assert_eq!(stderr, "error: creation timestamp is out of range\n");
     assert!(!output.exists());
+}
+
+#[test]
+fn creation_timestamp_preserves_typst_year_boundary_metadata_states() {
+    let directory = tempfile::tempdir().unwrap();
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"Hello".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let pack_path = directory.path().join("timestamp.typk");
+    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+
+    for (name, timestamp, expected_year) in [
+        ("year-9999.pdf", "253402300799", Some(9999)),
+        ("year-10000.pdf", "253402300800", None),
+    ] {
+        let output = directory.path().join(name);
+        let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
+            .current_dir(directory.path())
+            .args([
+                "compile",
+                pack_path.to_str().unwrap(),
+                output.to_str().unwrap(),
+                "--creation-timestamp",
+                timestamp,
+                "--ignore-system-fonts",
+                "--ignore-embedded-fonts",
+            ])
+            .output()
+            .unwrap();
+
+        assert!(
+            result.status.success(),
+            "{name}: {}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let creation_date = hayro_syntax::Pdf::new(std::fs::read(output).unwrap())
+            .unwrap()
+            .metadata()
+            .creation_date;
+        assert_eq!(creation_date.map(|date| date.year), expected_year, "{name}");
+    }
+
+    let output = directory.path().join("automatic.pdf");
+    let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
+        .current_dir(directory.path())
+        .args([
+            "compile",
+            pack_path.to_str().unwrap(),
+            output.to_str().unwrap(),
+            "--ignore-system-fonts",
+            "--ignore-embedded-fonts",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(
+        hayro_syntax::Pdf::new(std::fs::read(output).unwrap())
+            .unwrap()
+            .metadata()
+            .creation_date
+            .is_some()
+    );
 }
 
 #[test]

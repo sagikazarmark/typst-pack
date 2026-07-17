@@ -1801,7 +1801,7 @@ fn pdf_default_timestamp_is_resolved_after_compilation() {
         &world,
         OutputFormat::Pdf,
         &CompileOptions {
-            creation_timestamp: Some(timestamp),
+            creation_timestamp: CreationTimestamp::Explicit(timestamp),
             ..CompileOptions::default()
         },
         || panic!("an explicit timestamp must not resolve the default"),
@@ -2227,6 +2227,25 @@ Rows: #csv("data.csv").len()
         assert!(outcome.pack.package_file(spec, "lib.typ").is_some());
         assert!(outcome.pack.package_file(spec, "typst.toml").is_some());
         assert!(outcome.pack.package_file(spec, "unused.txt").is_some());
+    }
+
+    #[test]
+    fn packer_preserves_the_timestamp_range_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir(&project).unwrap();
+        fs::write(project.join("main.typ"), "Hello").unwrap();
+
+        let result = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .creation_timestamp(Some(i64::MAX))
+            .pack();
+
+        assert!(matches!(
+            result,
+            Err(PackerError::InvalidTimestamp(ref message))
+                if message == "timestamp is out of range"
+        ));
     }
 
     #[test]
@@ -3137,6 +3156,217 @@ Rows: #csv("data.csv").len()
         // Refuses to overwrite without force.
         let result = extract(&outcome.pack, &target, &ExtractOptions::default());
         assert!(matches!(result, Err(ExtractError::Exists(_))));
+    }
+
+    #[test]
+    fn extraction_rejects_project_package_conflicts_before_writing() {
+        let spec: typst::syntax::package::PackageSpec = "@local/example:1.0.0".parse().unwrap();
+        let projected_package = "packages/local/example/1.0.0/lib.typ";
+        for project_path in [projected_package, "packages/local/example/1.0.0"] {
+            let pack = Pack::builder("main.typ")
+                .file("main.typ", b"main".to_vec())
+                .unwrap()
+                .file(project_path, b"project".to_vec())
+                .unwrap()
+                .package_file(spec.clone(), "lib.typ", b"package".to_vec())
+                .unwrap()
+                .build()
+                .unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let target = dir.path().join("extracted");
+
+            let result = extract(
+                &pack,
+                &target,
+                &ExtractOptions {
+                    packages: true,
+                    fonts: false,
+                    force: true,
+                },
+            );
+
+            assert!(matches!(
+                result,
+                Err(ExtractError::PlannedPathConflict { .. })
+            ));
+            assert!(!target.exists());
+        }
+    }
+
+    #[test]
+    fn extraction_reserves_resource_slot_paths_before_writing() {
+        let spec = "@local/example:1.0.0".parse().unwrap();
+        let slot = "packages/local/example/1.0.0/lib.typ";
+        let pack = Pack::builder("main.typ")
+            .file("main.typ", b"main".to_vec())
+            .unwrap()
+            .package_file(spec, "lib.typ", b"package".to_vec())
+            .unwrap()
+            .resource_slot(slot)
+            .unwrap()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("extracted");
+
+        let result = extract(
+            &pack,
+            &target,
+            &ExtractOptions {
+                packages: true,
+                fonts: false,
+                force: true,
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(ExtractError::PlannedPathConflict {
+                first_role: PackPathRole::PackageFile,
+                second_role: PackPathRole::ResourceSlot,
+                ..
+            }) | Err(ExtractError::PlannedPathConflict {
+                first_role: PackPathRole::ResourceSlot,
+                second_role: PackPathRole::PackageFile,
+                ..
+            })
+        ));
+        assert!(!target.exists());
+        assert!(!target.join(slot).exists());
+    }
+
+    #[test]
+    fn extraction_preflights_existing_destination_conflicts() {
+        let pack = Pack::builder("main.typ")
+            .file("main.typ", b"main".to_vec())
+            .unwrap()
+            .file("z.txt", b"packed".to_vec())
+            .unwrap()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("extracted");
+        fs::create_dir(&target).unwrap();
+        fs::write(target.join("z.txt"), b"external").unwrap();
+
+        let result = extract(&pack, &target, &ExtractOptions::default());
+
+        assert!(matches!(result, Err(ExtractError::Exists(_))));
+        assert!(!target.join("main.typ").exists());
+        assert_eq!(fs::read(target.join("z.txt")).unwrap(), b"external");
+
+        let report = extract(
+            &pack,
+            &target,
+            &ExtractOptions {
+                force: true,
+                ..ExtractOptions::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(report.written.len(), 2);
+        assert_eq!(fs::read(target.join("z.txt")).unwrap(), b"packed");
+
+        let blocked_target = dir.path().join("blocked");
+        fs::create_dir(&blocked_target).unwrap();
+        fs::write(blocked_target.join("tree"), b"external").unwrap();
+        let nested_pack = Pack::builder("main.typ")
+            .file("main.typ", b"main".to_vec())
+            .unwrap()
+            .file("tree/nested.txt", b"nested".to_vec())
+            .unwrap()
+            .build()
+            .unwrap();
+
+        let result = extract(
+            &nested_pack,
+            &blocked_target,
+            &ExtractOptions {
+                force: true,
+                ..ExtractOptions::default()
+            },
+        );
+
+        assert!(matches!(result, Err(ExtractError::DestinationConflict(_))));
+        assert!(!blocked_target.join("main.typ").exists());
+        assert_eq!(fs::read(blocked_target.join("tree")).unwrap(), b"external");
+    }
+
+    #[cfg(feature = "embedded-fonts")]
+    #[test]
+    fn extraction_rejects_project_font_conflicts_before_writing() {
+        let data = embedded_font_data();
+        let font_pack = Pack::builder("main.typ")
+            .file("main.typ", Vec::new())
+            .unwrap()
+            .font(data.clone(), 0)
+            .unwrap()
+            .build()
+            .unwrap();
+        let font_path = font_pack.fonts()[0].manifest().path().to_owned();
+        let pack = Pack::builder("main.typ")
+            .file("main.typ", Vec::new())
+            .unwrap()
+            .file(&font_path, b"project".to_vec())
+            .unwrap()
+            .font(data, 0)
+            .unwrap()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("extracted");
+
+        let result = extract(
+            &pack,
+            &target,
+            &ExtractOptions {
+                packages: false,
+                fonts: true,
+                force: true,
+            },
+        );
+
+        assert!(matches!(
+            result,
+            Err(ExtractError::PlannedPathConflict { .. })
+        ));
+        assert!(!target.exists());
+    }
+
+    #[cfg(feature = "embedded-fonts")]
+    #[test]
+    fn extraction_coalesces_font_faces_sharing_one_data_path() {
+        let data = two_face_collection(&embedded_font_data());
+        let pack = Pack::builder("main.typ")
+            .file("main.typ", Vec::new())
+            .unwrap()
+            .font(data.clone(), 0)
+            .unwrap()
+            .font(data, 1)
+            .unwrap()
+            .build()
+            .unwrap();
+        assert_eq!(pack.fonts().len(), 2);
+        assert_eq!(
+            pack.fonts()[0].manifest().path(),
+            pack.fonts()[1].manifest().path()
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("extracted");
+
+        let report = extract(
+            &pack,
+            &target,
+            &ExtractOptions {
+                packages: false,
+                fonts: true,
+                force: false,
+            },
+        )
+        .unwrap();
+
+        assert_eq!(report.written.len(), 2);
+        assert!(target.join(pack.fonts()[0].manifest().path()).is_file());
     }
 
     #[test]

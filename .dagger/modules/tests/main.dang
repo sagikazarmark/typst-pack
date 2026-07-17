@@ -239,6 +239,51 @@ type Tests {
   }
 
   """
+  Preserve omitted and fractional PPI values across the module boundary.
+  """
+  compilePpi: Void @check {
+    let default = Dagger
+      .typstPack
+      .compile(pack: self.pack, format: TypstPackOutputFormat.PNG)
+      .file("page-1.png")
+    let explicitDefault = Dagger
+      .typstPack
+      .compile(pack: self.pack, format: TypstPackOutputFormat.PNG, ppi: "144")
+      .file("page-1.png")
+    let fractional = Dagger
+      .typstPack
+      .compile(pack: self.pack, format: TypstPackOutputFormat.PNG, ppi: "72.5")
+      .file("page-1.png")
+    assert { default.digest == explicitDefault.digest }
+    assert { default.digest != fractional.digest }
+
+    null
+  }
+
+  """
+  Reject an explicitly empty PPI value through the public compile function.
+  """
+  compileRejectsEmptyPpi: Void @check {
+    #nofmt Dagger's embedded Dang still requires try/catch.
+    let rejected = try {
+      let count = Dagger
+        .typstPack
+        .compile(pack: self.pack, format: TypstPackOutputFormat.PNG, ppi: "")
+        .entries
+        .length
+      count < 0
+    } catch {
+      error: Error => {
+        assert { error.message.contains("cannot parse float from empty string") }
+        true
+      }
+    }
+    assert { rejected }
+
+    null
+  }
+
+  """
   Compile selected source pages to deterministically named page artifacts.
   """
   compileSelectedPages: Void @check {

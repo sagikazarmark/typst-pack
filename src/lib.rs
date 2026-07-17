@@ -12,8 +12,8 @@ mod world;
 pub mod cli;
 
 pub use compile::{
-    CompilationArtifact, CompilationOutput, CompileError, CompileOptions, OutputFormat, PageRange,
-    PageSelection, compile, parse_page_selection,
+    CompilationArtifact, CompilationOutput, CompileError, CompileOptions, CreationTimestamp,
+    OutputFormat, PageRange, PageSelection, compile, parse_page_selection,
 };
 pub use manifest::{
     FORMAT_VERSION, FontManifest, MANIFEST_PATH, PackManifest, PackManifestError, PackMetadata,

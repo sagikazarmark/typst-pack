@@ -22,8 +22,9 @@ use typst_kit::files::{FileLoader, FsRoot};
 use typst_pdf::{PdfStandard, PdfStandards, Timestamp};
 
 use crate::compile::{
-    CompilationArtifact, CompileError, CompileOptions, CompileWithPagePreflightError, OutputFormat,
-    PageRange, PageSelection, compile_with_page_preflight, parse_page_selection,
+    CompilationArtifact, CompileError, CompileOptions, CompileWithPagePreflightError,
+    CreationTimestamp, OutputFormat, PageRange, PageSelection, compile_with_page_preflight,
+    parse_page_selection,
 };
 use crate::extract::{ExtractOptions, extract};
 use crate::manifest::PackMetadata;
@@ -611,6 +612,7 @@ pub fn run() -> ExitCode {
 }
 
 fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResult {
+    validate_creation_timestamp(args.automation.creation_timestamp)?;
     initialize_jobs(args.automation.jobs);
     let diagnostic_format = args.automation.diagnostic_format.into();
     if args.input == Path::new("-") {
@@ -885,7 +887,6 @@ fn extract_command(args: ExtractArgs) -> CliResult {
 }
 
 fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -> CliResult {
-    initialize_jobs(args.automation.jobs);
     if args.pack == Path::new("-") && args.output.is_none() {
         return Err("an explicit output is required when the Pack is read from stdin".into());
     }
@@ -956,16 +957,12 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     }
 
     let creation_timestamp_seconds = args.automation.creation_timestamp;
-    let creation_timestamp = creation_timestamp_seconds
-        .map(|seconds| {
-            datetime_from_timestamp(seconds)
-                .ok_or_else(|| format!("timestamp {seconds} is out of range"))
-        })
-        .transpose()?;
-    let fixed_time = creation_timestamp
-        .map(typst_kit::datetime::Time::fixed)
+    let creation_timestamp = validate_creation_timestamp(creation_timestamp_seconds)?;
+    let fixed_time = creation_timestamp_seconds
+        .map(typst_kit::datetime::Time::fixed_timestamp)
         .transpose()
-        .map_err(|error| error.to_string())?;
+        .map_err(|_| "creation timestamp is out of range")?;
+    initialize_jobs(args.automation.jobs);
 
     let pack = read_pack_input(&args.pack)?;
 
@@ -1013,7 +1010,12 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         pretty: args.pretty,
         pdf_standards,
         pdf_tags: !args.no_pdf_tags,
-        creation_timestamp: creation_timestamp.map(Timestamp::new_utc),
+        creation_timestamp: match creation_timestamp {
+            Some(timestamp) => convert_datetime(timestamp)
+                .map(Timestamp::new_utc)
+                .map_or(CreationTimestamp::Omit, CreationTimestamp::Explicit),
+            None => CreationTimestamp::Automatic,
+        },
     };
 
     let diagnostic_format = args.automation.diagnostic_format.into();
@@ -1309,6 +1311,17 @@ fn parse_inputs(pairs: &[(String, String)]) -> Dict {
     dict
 }
 
+fn validate_creation_timestamp(
+    timestamp: Option<i64>,
+) -> Result<Option<chrono::DateTime<chrono::Utc>>, String> {
+    timestamp
+        .map(|seconds| {
+            chrono::DateTime::from_timestamp(seconds, 0)
+                .ok_or_else(|| "creation timestamp is out of range".to_owned())
+        })
+        .transpose()
+}
+
 fn initialize_jobs(jobs: Option<usize>) {
     if let Some(jobs) = jobs {
         rayon::ThreadPoolBuilder::new()
@@ -1503,16 +1516,15 @@ fn munge_make_path(path: &str) -> String {
     result
 }
 
-/// Converts a UNIX timestamp to a Typst datetime.
-fn datetime_from_timestamp(seconds: i64) -> Option<Datetime> {
-    let utc = chrono::DateTime::from_timestamp(seconds, 0)?;
+/// Converts a Chrono datetime to a Typst datetime.
+fn convert_datetime<Tz: chrono::TimeZone>(date_time: chrono::DateTime<Tz>) -> Option<Datetime> {
     Datetime::from_ymd_hms(
-        utc.year(),
-        utc.month().try_into().ok()?,
-        utc.day().try_into().ok()?,
-        utc.hour().try_into().ok()?,
-        utc.minute().try_into().ok()?,
-        utc.second().try_into().ok()?,
+        date_time.year(),
+        date_time.month().try_into().ok()?,
+        date_time.day().try_into().ok()?,
+        date_time.hour().try_into().ok()?,
+        date_time.minute().try_into().ok()?,
+        date_time.second().try_into().ok()?,
     )
 }
 

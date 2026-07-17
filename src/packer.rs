@@ -325,9 +325,8 @@ impl Packer {
             cache: Mutex::new(HashMap::new()),
         });
         let time = match self.creation_timestamp {
-            Some(timestamp) => {
-                Time::fixed_timestamp(timestamp).map_err(|_| PackerError::InvalidTimestamp)?
-            }
+            Some(timestamp) => Time::fixed_timestamp(timestamp)
+                .map_err(|error| PackerError::InvalidTimestamp(error.to_string()))?,
             None => Time::system(),
         };
         let mut world = DiscoveryWorld {
@@ -711,8 +710,8 @@ pub enum PackerError {
         "requested Resource Slot `{path}` is unavailable for discovery; place representative bytes at `{path}` in the source project or supply them through a Resource Provider; representative bytes are not stored in the Pack"
     )]
     ResourceSlotUnavailable { path: String },
-    #[error("invalid creation timestamp")]
-    InvalidTimestamp,
+    #[error("invalid creation timestamp: {0}")]
+    InvalidTimestamp(String),
     #[error("failed to write discovery timings: {0}")]
     Timings(String),
     #[error("failed to load package {spec}: {message}")]

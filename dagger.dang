@@ -96,6 +96,16 @@ type TypstPack {
   }
 
   """
+  Run the ordinary CLI test suite without internal test-only features.
+  """
+  testCli: String! @check {
+    self
+      .rust
+      .withEnvVariable("CARGO_TARGET_DIR", "/target/cli")
+      .test(feature: ["cli"], test: ["cli"])
+  }
+
+  """
   A Debian container with the typst-pack CLI installed.
   """
   container: Container! {
@@ -442,9 +452,7 @@ type TypstPack {
     if (pages != null) {
       args += ["--pages", pages]
     }
-    if (ppi != null and ppi != "") {
-      args += ["--ppi", ppi]
-    }
+    if (ppi != null) { args += ["--ppi", ppi] }
     sysInputs.each { input => args += ["--input", input] }
     fontPaths.each { path => args += ["--font-path", path] }
     if (ignoreSystemFonts) { args += ["--ignore-system-fonts"] }
@@ -483,9 +491,12 @@ type TypstPack {
       container = container.withMountedFile("/work/certificate.pem", certificate)
     }
 
-    container
+    let result = container
       .withExec(["mkdir", "-p", "/work/out"])
-      .withExec(args)
+      .withExec(args, expect: ReturnType.ANY)
+    if (result.exitCode != 0) { raise result.stderr }
+
+    result
       .directory("/work/out")
   }
 }

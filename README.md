@@ -260,6 +260,12 @@ compatibility aliases:
   `font.data()`.
 - Shared Pack consistency failures are available as `PackInvariantError`,
   wrapped by `PackBuildError::Invariant` or `PackReadError::Invariant`.
+- Migrate `CompileOptions::creation_timestamp` from `None` to
+  `CreationTimestamp::Automatic` and from `Some(timestamp)` to
+  `CreationTimestamp::Explicit(timestamp)`. Use `CreationTimestamp::Omit` to
+  suppress PDF creation datetime metadata.
+- `ExtractError` adds `PlannedPathConflict` and `DestinationConflict`; exhaustive
+  matches must handle both variants.
 
 The unstable Pack format remains version 1, but its fields change in place to
 `project.resource-slots` and `packages.unvendored`; old field aliases are not

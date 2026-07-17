@@ -51,9 +51,8 @@ pub struct CompileOptions {
     pub pdf_standards: PdfStandards,
     /// Whether PDF accessibility tags should be emitted when possible.
     pub pdf_tags: bool,
-    /// The document creation datetime recorded in PDF metadata. When `None`,
-    /// the date is derived from the world's `today`.
-    pub creation_timestamp: Option<Timestamp>,
+    /// How the document creation datetime is recorded in PDF metadata.
+    pub creation_timestamp: CreationTimestamp,
 }
 
 impl Default for CompileOptions {
@@ -64,9 +63,21 @@ impl Default for CompileOptions {
             pretty: false,
             pdf_standards: PdfStandards::default(),
             pdf_tags: true,
-            creation_timestamp: None,
+            creation_timestamp: CreationTimestamp::Automatic,
         }
     }
+}
+
+/// The source of the document creation datetime recorded in PDF metadata.
+#[derive(Debug, Clone, Copy, Default)]
+pub enum CreationTimestamp {
+    /// Derive the timestamp from the world's `today`.
+    #[default]
+    Automatic,
+    /// Record an explicit UTC timestamp.
+    Explicit(Timestamp),
+    /// Omit creation datetime metadata without falling back to the world.
+    Omit,
 }
 
 /// A one-indexed, inclusive page range with optional open ends.
@@ -316,7 +327,11 @@ pub(crate) fn compile_with_page_preflight<E>(
     let _export_timing = typst_timing::TimingScope::new("export");
     let artifacts = match format {
         OutputFormat::Pdf => {
-            let timestamp = options.creation_timestamp.or_else(default_pdf_timestamp);
+            let timestamp = match options.creation_timestamp {
+                CreationTimestamp::Automatic => default_pdf_timestamp(),
+                CreationTimestamp::Explicit(timestamp) => Some(timestamp),
+                CreationTimestamp::Omit => None,
+            };
             let pdf_options = PdfOptions {
                 timestamp,
                 page_ranges: options.page_selection.typst_page_ranges(),
