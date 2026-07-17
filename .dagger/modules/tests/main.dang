@@ -10,9 +10,11 @@ type Tests {
 
   let pack: File! {
     Dagger.typstPack.create(
-      source: self.project,
+      project: self.project,
+      input: "main.typ",
       packageDir: self.packages,
       include: ["notes.txt"],
+      certificate: self.project.file("notes.txt"),
     )
   }
 
@@ -31,6 +33,33 @@ type Tests {
     assert { output.contains("data.csv") }
     assert { output.contains("notes.txt") }
     assert { output.contains("@local/greet:0.1.0") }
+
+    null
+  }
+
+  """
+  Create, inspect, and compile a pack whose package dependency is not vendored.
+  """
+  noVendorPackagesLifecycle: Void @check {
+    let pack = Dagger.typstPack.create(
+      project: self.project,
+      input: "main.typ",
+      noVendorPackages: true,
+      packageDir: self.packages,
+      offline: true,
+    )
+    let inspection = Dagger.typstPack.inspect(pack)
+
+    assert { inspection.contains("unvendored packages:") }
+    assert { inspection.contains("@local/greet:0.1.0") }
+
+    let output = Dagger.typstPack.compile(
+      pack: pack,
+      format: TypstPackOutputFormat.SVG,
+      packageDir: self.packages,
+      offline: true,
+    )
+    assert { output.file("page-1.svg").size > 0 }
 
     null
   }
@@ -80,17 +109,115 @@ type Tests {
   }
 
   """
-  Compile a pack to PDF using SOURCE_DATE_EPOCH for reproducible metadata.
+  Compile PDFs with observable standard and timestamp controls.
   """
   compilePdf: Void @check {
-    let output = Dagger.typstPack.compile(
-      pack: self.pack,
-      sourceDateEpoch: "1700000000",
-    )
-    let pdf = output.file("output.pdf")
+    let baseline = Dagger
+      .typstPack
+      .compile(
+        pack: self.pack,
+        creationTimestamp: 1700000000,
+      )
+      .file("output.pdf")
+    let standard = Dagger
+      .typstPack
+      .compile(
+        pack: self.pack,
+        creationTimestamp: 1700000000,
+        pdfStandards: [TypstPackPdfStandard.V2_0],
+        diagnosticFormat: TypstPackDiagnosticFormat.SHORT,
+        certificate: self.project.file("notes.txt"),
+      )
+      .file("output.pdf")
+    let later = Dagger
+      .typstPack
+      .compile(
+        pack: self.pack,
+        creationTimestamp: 1700000001,
+      )
+      .file("output.pdf")
 
-    assert { pdf.name == "output.pdf" }
-    assert { pdf.size > 0 }
+    assert { standard.name == "output.pdf" }
+    assert { standard.size > 0 }
+    assert { baseline.digest != standard.digest }
+    assert { baseline.digest != later.digest }
+
+    null
+  }
+
+  """
+  Discover and union dependencies from paged and HTML targets.
+  """
+  discoveryTargets: Void @check {
+    let source = Dagger
+      .currentModule
+      .source
+      .directory("fixtures/targets")
+    let pack = Dagger.typstPack.create(
+      project: source,
+      input: "main.typ",
+      targets: [TypstPackDiscoveryTarget.PAGED, TypstPackDiscoveryTarget.HTML],
+      features: [TypstPackFeature.HTML],
+      diagnosticFormat: TypstPackDiagnosticFormat.SHORT,
+      ignoreSystemFonts: true,
+    )
+    let output = Dagger.typstPack.inspect(pack)
+
+    assert { output.contains("paged.txt") }
+    assert { output.contains("html.txt") }
+
+    null
+  }
+
+  """
+  Forward sys.inputs through Pack creation, inspection, and final compilation.
+  """
+  sysInputsLifecycle: Void @check {
+    let source = Dagger
+      .currentModule
+      .source
+      .directory("fixtures/sys-inputs")
+    let discoveryResources = source.directory("resources")
+    let pack = Dagger.typstPack.create(
+      project: source,
+      input: "main.typ",
+      sysInputs: ["phase=discovery"],
+      resourceDirs: [discoveryResources],
+      ignoreSystemFonts: true,
+      ignoreEmbeddedFonts: true,
+    )
+    let inspection = Dagger.typstPack.inspect(pack)
+
+    assert { inspection.contains("discovered.txt") }
+
+    let output = Dagger.typstPack.compile(
+      pack: pack,
+      format: TypstPackOutputFormat.SVG,
+      sysInputs: ["phase=compilation"],
+      ignoreSystemFonts: true,
+      ignoreEmbeddedFonts: true,
+    )
+
+    assert { output.file("page-1.svg").size > 0 }
+
+    null
+  }
+
+  """
+  Embed the fonts used during discovery when requested.
+  """
+  fontControls: Void @check {
+    let pack = Dagger.typstPack.create(
+      project: self.project,
+      input: "main.typ",
+      packageDir: self.packages,
+      embedFonts: true,
+      includeTypstEmbeddedFonts: true,
+      ignoreSystemFonts: true,
+    )
+    let output = Dagger.typstPack.inspect(pack)
+
+    assert { output.contains("embedded fonts:") }
 
     null
   }
@@ -112,6 +239,51 @@ type Tests {
   }
 
   """
+  Preserve omitted and fractional PPI values across the module boundary.
+  """
+  compilePpi: Void @check {
+    let default = Dagger
+      .typstPack
+      .compile(pack: self.pack, format: TypstPackOutputFormat.PNG)
+      .file("page-1.png")
+    let explicitDefault = Dagger
+      .typstPack
+      .compile(pack: self.pack, format: TypstPackOutputFormat.PNG, ppi: "144")
+      .file("page-1.png")
+    let fractional = Dagger
+      .typstPack
+      .compile(pack: self.pack, format: TypstPackOutputFormat.PNG, ppi: "72.5")
+      .file("page-1.png")
+    assert { default.digest == explicitDefault.digest }
+    assert { default.digest != fractional.digest }
+
+    null
+  }
+
+  """
+  Reject an explicitly empty PPI value through the public compile function.
+  """
+  compileRejectsEmptyPpi: Void @check {
+    #nofmt Dagger's embedded Dang still requires try/catch.
+    let rejected = try {
+      let count = Dagger
+        .typstPack
+        .compile(pack: self.pack, format: TypstPackOutputFormat.PNG, ppi: "")
+        .entries
+        .length
+      count < 0
+    } catch {
+      error: Error => {
+        assert { error.message.contains("cannot parse float from empty string") }
+        true
+      }
+    }
+    assert { rejected }
+
+    null
+  }
+
+  """
   Compile selected source pages to deterministically named page artifacts.
   """
   compileSelectedPages: Void @check {
@@ -119,11 +291,20 @@ type Tests {
       .currentModule
       .source
       .directory("fixtures/multi-page")
-    let pack = Dagger.typstPack.create(source: source)
+    let pack = Dagger.typstPack.create(
+      project: source,
+      input: "main.typ",
+      features: [TypstPackFeature.A11Y_EXTRAS],
+      ignoreSystemFonts: true,
+      ignoreEmbeddedFonts: true,
+    )
     let output = Dagger.typstPack.compile(
       pack: pack,
       format: TypstPackOutputFormat.PNG,
       pages: "5,2",
+      ppi: "144.5",
+      ignoreSystemFonts: true,
+      ignoreEmbeddedFonts: true,
     )
     let entries = output.entries
 
@@ -143,7 +324,7 @@ type Tests {
     let output = Dagger.typstPack.compile(
       pack: self.pack,
       format: TypstPackOutputFormat.HTML,
-      features: ["html"],
+      features: [TypstPackFeature.HTML],
     )
     let html = output.file("output.html")
 
@@ -154,10 +335,10 @@ type Tests {
   }
 
   """
-  Create and compile a pack with ordered External Resource References.
+  Create and compile a pack with ordered Resource Providers.
   """
-  externalProjectResources: Void @check {
-    let source = Dagger
+  resourceSlots: Void @check {
+    let project = Dagger
       .currentModule
       .source
       .directory("fixtures/resource-project")
@@ -165,16 +346,15 @@ type Tests {
       .currentModule
       .source
       .directory("fixtures/resources")
-    let sourceReferences = ["/work/references/first", "/work/references/second"]
     let pack = Dagger.typstPack.create(
-      source: source,
-      sourceReferenceDir: resources,
-      sourceReferences: sourceReferences,
-      externalResources: ["branding/conditional.txt"],
+      project: project,
+      input: "main.typ",
+      resourceDirs: [resources.directory("first"), resources.directory("second")],
+      resourceSlots: ["branding/conditional.txt"],
     )
     let output = Dagger.typstPack.inspect(pack)
 
-    assert { output.contains("external project resources:") }
+    assert { output.contains("Resource Slots:") }
     assert { output.contains("branding/name.txt") }
     assert { output.contains("branding/first-only.txt") }
     assert { output.contains("branding/from-second-root.txt") }
@@ -185,8 +365,7 @@ type Tests {
       .typstPack
       .compile(
         pack: pack,
-        sourceReferenceDir: resources,
-        sourceReferences: sourceReferences,
+        resourceDirs: [resources.directory("first"), resources.directory("second")],
       )
       .file("output.pdf")
     assert { pdf.size > 0 }

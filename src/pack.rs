@@ -24,9 +24,9 @@ const MAX_ZIP_ENTRY_NAME_LEN: usize = u16::MAX as usize;
 /// A portable pack of a Typst project.
 ///
 /// A pack holds project files (sources, images, and data files), optionally
-/// package files and fonts, and the declared paths of any External Project
-/// Resources whose bytes are supplied externally when requested. Its archive form is
-/// a Zip file with a `typst-pack.toml` manifest, conventionally named `*.typk`.
+/// package files and fonts, and declared Resource Slots whose bytes are supplied
+/// when requested. Its archive form is a Zip file with a `typst-pack.toml`
+/// manifest, conventionally named `*.typk`.
 #[derive(Debug, Clone)]
 pub struct Pack {
     manifest: PackManifest,
@@ -124,10 +124,10 @@ impl Pack {
     ) -> Result<Self, PackInvariantError> {
         let entrypoint = canonical_path(PackPathRole::Entrypoint, manifest.project().entrypoint())?;
         let canonical_files = files;
-        let external_resources = manifest
+        let resource_slots = manifest
             .project()
-            .external_resources()
-            .map(|path| canonical_path(PackPathRole::ExternalProjectResource, path))
+            .resource_slots()
+            .map(|path| canonical_path(PackPathRole::ResourceSlot, path))
             .collect::<Result<BTreeSet<_>, _>>()?;
         let font_entries = manifest
             .fonts()
@@ -142,7 +142,7 @@ impl Pack {
             .cloned()
             .map(|spec| (spec.to_string(), spec))
             .collect::<BTreeMap<_, _>>();
-        let external_packages = manifest
+        let unvendored_packages = manifest
             .unvendored_packages()
             .iter()
             .cloned()
@@ -172,7 +172,7 @@ impl Pack {
             validate_archive_entry_name(PackPathRole::FontData, path, path.as_str().len())?;
         }
 
-        validate_project_declarations(canonical_files.keys().cloned(), &external_resources)?;
+        validate_project_declarations(canonical_files.keys().cloned(), &resource_slots)?;
 
         for package in packages.values() {
             let paths = package
@@ -217,13 +217,13 @@ impl Pack {
         }
         if let Some(spec) = vendored_packages
             .keys()
-            .find(|spec| external_packages.contains_key(*spec))
+            .find(|spec| unvendored_packages.contains_key(*spec))
         {
             return Err(PackInvariantError::PackageRoleConflict(spec.clone()));
         }
 
-        if external_resources.contains(&entrypoint) {
-            return Err(PackInvariantError::EntrypointIsExternalResource(
+        if resource_slots.contains(&entrypoint) {
+            return Err(PackInvariantError::EntrypointIsResourceSlot(
                 entrypoint.to_string(),
             ));
         }
@@ -293,12 +293,12 @@ impl Pack {
 
         let manifest = PackManifest::new(
             entrypoint.into_string(),
-            external_resources
+            resource_slots
                 .into_iter()
                 .map(CanonicalPath::into_string)
                 .collect(),
             vendored_packages.into_values().collect(),
-            external_packages.into_values().collect(),
+            unvendored_packages.into_values().collect(),
             canonical_fonts
                 .iter()
                 .map(|font| font.entry.clone())
@@ -334,13 +334,13 @@ impl Pack {
         self.files.get(path)
     }
 
-    /// The root-relative paths of resources supplied externally at compilation time.
-    pub fn external_resources(&self) -> impl Iterator<Item = &str> {
-        self.manifest.project().external_resources()
+    /// The root-relative Resource Slot paths.
+    pub fn resource_slots(&self) -> impl Iterator<Item = &str> {
+        self.manifest.project().resource_slots()
     }
 
-    pub(crate) fn is_external_resource(&self, path: &str) -> bool {
-        self.manifest.project().contains_external_resource(path)
+    pub(crate) fn is_resource_slot(&self, path: &str) -> bool {
+        self.manifest.project().contains_resource_slot(path)
     }
 
     /// The vendored packages and their files.
@@ -740,7 +740,7 @@ pub enum PackWriteError {
 pub struct PackBuilder {
     entrypoint: String,
     files: BTreeMap<CanonicalPath, Bytes>,
-    external_resources: BTreeSet<CanonicalPath>,
+    resource_slots: BTreeSet<CanonicalPath>,
     packages: BTreeMap<String, PackageFiles>,
     unvendored_packages: Vec<PackageSpec>,
     fonts: Vec<PackFontInput>,
@@ -753,7 +753,7 @@ impl PackBuilder {
         Self {
             entrypoint: entrypoint.into(),
             files: BTreeMap::new(),
-            external_resources: BTreeSet::new(),
+            resource_slots: BTreeSet::new(),
             packages: BTreeMap::new(),
             unvendored_packages: Vec::new(),
             fonts: Vec::new(),
@@ -772,18 +772,22 @@ impl PackBuilder {
         Ok(self)
     }
 
-    /// Declares a non-source project resource whose bytes will be supplied externally.
-    pub fn external_resource(mut self, path: impl AsRef<str>) -> Result<Self, PackBuildError> {
-        self.external_resources.insert(canonical_path(
-            PackPathRole::ExternalProjectResource,
-            path.as_ref(),
-        )?);
+    /// Declares a Resource Slot whose bytes will be supplied at compilation time.
+    ///
+    /// ```compile_fail
+    /// use typst_pack::Pack;
+    ///
+    /// let _ = Pack::builder("main.typ").external_resource("assets/logo.png");
+    /// ```
+    pub fn resource_slot(mut self, path: impl AsRef<str>) -> Result<Self, PackBuildError> {
+        self.resource_slots
+            .insert(canonical_path(PackPathRole::ResourceSlot, path.as_ref())?);
         Ok(self)
     }
 
     #[cfg(feature = "fs")]
-    pub(crate) fn external_resource_paths(&self) -> BTreeSet<String> {
-        self.external_resources
+    pub(crate) fn resource_slot_paths(&self) -> BTreeSet<String> {
+        self.resource_slots
             .iter()
             .map(ToString::to_string)
             .collect()
@@ -792,7 +796,7 @@ impl PackBuilder {
     #[cfg(feature = "fs")]
     pub(crate) fn validate_declarations(&self) -> Result<(), PackBuildError> {
         let entrypoint = canonical_path(PackPathRole::Entrypoint, &self.entrypoint)?;
-        validate_project_declarations(std::iter::once(entrypoint), &self.external_resources)?;
+        validate_project_declarations(std::iter::once(entrypoint), &self.resource_slots)?;
         Ok(())
     }
 
@@ -860,7 +864,7 @@ impl PackBuilder {
             .collect::<Result<BTreeMap<_, _>, PackInvariantError>>()?;
         let manifest = PackManifest::new(
             entrypoint.into_string(),
-            self.external_resources
+            self.resource_slots
                 .into_iter()
                 .map(CanonicalPath::into_string)
                 .collect(),
@@ -1040,24 +1044,24 @@ fn find_path_tree_conflict(
 
 fn validate_project_declarations(
     project_files: impl IntoIterator<Item = CanonicalPath>,
-    external_resources: &BTreeSet<CanonicalPath>,
+    resource_slots: &BTreeSet<CanonicalPath>,
 ) -> Result<(), PackInvariantError> {
     let mut project_paths = Vec::new();
     for path in project_files {
-        if external_resources.contains(&path) {
+        if resource_slots.contains(&path) {
             return Err(PackInvariantError::PathRoleConflict {
                 path: path.to_string(),
                 first: PackPathRole::ProjectFile,
-                second: PackPathRole::ExternalProjectResource,
+                second: PackPathRole::ResourceSlot,
             });
         }
         project_paths.push((path, PackPathRole::ProjectFile));
     }
     project_paths.extend(
-        external_resources
+        resource_slots
             .iter()
             .cloned()
-            .map(|path| (path, PackPathRole::ExternalProjectResource)),
+            .map(|path| (path, PackPathRole::ResourceSlot)),
     );
     if let Some(conflict) = find_path_tree_conflict(project_paths) {
         return Err(PackInvariantError::PathTreeConflict {
@@ -1178,10 +1182,10 @@ pub enum PackInvariantError {
         descendant: String,
         descendant_role: PackPathRole,
     },
-    /// The entrypoint was declared as a non-source External Project Resource.
-    #[error("entrypoint `{0}` cannot be an External Project Resource")]
-    EntrypointIsExternalResource(String),
-    /// A package was declared both vendored and externally resolved.
+    /// The entrypoint was declared as a Resource Slot.
+    #[error("entrypoint `{0}` cannot be a Resource Slot")]
+    EntrypointIsResourceSlot(String),
+    /// A package was declared both vendored and unvendored.
     #[error("package `{0}` cannot be both vendored and unvendored")]
     PackageRoleConflict(String),
     /// Package bytes exist without a matching vendored declaration.
@@ -1216,7 +1220,7 @@ pub enum PackPathRole {
     PackManifest,
     Entrypoint,
     ProjectFile,
-    ExternalProjectResource,
+    ResourceSlot,
     PackageFile,
     FontData,
 }
@@ -1227,7 +1231,7 @@ impl std::fmt::Display for PackPathRole {
             Self::PackManifest => "Pack Manifest",
             Self::Entrypoint => "entrypoint",
             Self::ProjectFile => "project file",
-            Self::ExternalProjectResource => "External Project Resource",
+            Self::ResourceSlot => "Resource Slot",
             Self::PackageFile => "package file",
             Self::FontData => "font data",
         })

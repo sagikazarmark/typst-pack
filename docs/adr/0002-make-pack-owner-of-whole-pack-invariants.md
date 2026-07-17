@@ -27,8 +27,8 @@ The Pack module owns:
 
 - canonical, portable paths and coherent project and package file trees;
 - entrypoint presence;
-- disjoint packed-file and External Project Resource roles;
-- agreement between vendored/external package declarations and package bytes;
+- disjoint packed-file and Resource Slot roles;
+- agreement between vendored/unvendored package declarations and package bytes;
 - font path, byte, face-index, and declaration consistency;
 - immutable canonical Pack state; and
 - rejection of ambiguous archive identities before reconstruction.
@@ -51,12 +51,14 @@ Pack content.
 - Every Pack instance is canonical, immutable, writable, and usable by a
   Pack-backed World.
 - Writing performs no second invariant pass.
-- Archive compatibility and Pack format version 1 remain unchanged.
+- The numeric Pack format version remains 1, while its unstable manifest schema
+  intentionally changes incompatibly: old `external-resources` and
+  `packages.external` fields are rejected.
 - Safe unknown top-level archive entries remain ignorable, while unsafe or
   ambiguous entries are rejected before role interpretation.
 - Deleting the private construction seam would redistribute canonicalization
   and declaration/content agreement into both construction adapters.
 
 Pack Override remains a separate future concept: it is a compilation-scoped
-replacement for contained Pack content, not Pack mutation and not an External
-Project Resource.
+replacement for contained Pack content, not Pack mutation and not a Resource
+Slot.

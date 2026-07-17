@@ -11,7 +11,7 @@ A *pack* (`.typk`) captures the compilation contract of one Typst project:
 
 - the packed project files: the entrypoint, other Typst sources, images, and
   data files,
-- optionally External Project Resource paths whose bytes are supplied when
+- optionally Resource Slot paths whose bytes are supplied when
   requested instead of being stored in the reusable pack,
 - optionally the files of the [Typst Universe](https://typst.app/universe)
   packages the project imports, so compiling needs no network access,
@@ -34,7 +34,7 @@ archive: a portable form of a project's sources and resources.
   include additional conditional files explicitly.
 - **Reproducible compilation**: compile without network or system font access,
   with support for fixed timestamps and vendored packages.
-- **External Project Resources**: keep declared project resources outside a
+- **Resource Slots**: keep declared non-source project bytes outside a
   reusable pack and supply them for each compilation.
 - **Library and CLI APIs**: create, inspect, compile, and extract packs in memory
   or on the file system.
@@ -48,8 +48,8 @@ cargo install typst-pack --features cli
 ```
 
 ```console
-# Pack a project directory (entrypoint main.typ), vendoring all packages:
-typst-pack create path/to/project
+# Pack a named source file, vendoring all observed packages:
+typst-pack create path/to/project/main.typ
 
 # Pack a specific entrypoint, embedding the fonts the document uses:
 typst-pack create letter.typ --embed-fonts
@@ -61,12 +61,12 @@ typst-pack inspect project.typk
 typst-pack compile project.typk output.pdf
 
 # Discover a resource outside the source project, then supply it when compiling:
-typst-pack create invoice/ --source-reference representative-branding/ -o invoice.typk
-typst-pack compile invoice.typk customer.pdf --source-reference customer-branding/
+typst-pack create invoice/main.typ invoice.typk --resource-path representative-branding/
+typst-pack compile invoice.typk customer.pdf --resource-path customer-branding/
 
 # PNG or SVG output, page selection, reproducible builds:
 typst-pack compile project.typk "page-{0p}.png" --ppi 300 --pages 1-3
-typst-pack compile project.typk --creation-timestamp 1700000000
+typst-pack compile project.typk reproducible.pdf --creation-timestamp 1700000000
 
 # Guarantee no network access (fails instead of downloading packages):
 typst-pack compile project.typk --offline
@@ -78,15 +78,17 @@ typst-pack compile project.typk out.html --features html
 typst-pack extract project.typk -o project/
 ```
 
-For Page Formats, `{p}` and `{0p}` expand from the original one-based Source
-Page Number, while `{t}` is the number of emitted artifacts. All target paths
-are expanded and checked for duplicates before writing, so one artifact cannot
-overwrite another from the same compilation.
+For Page Formats, `{p}` expands to the one-based Source Page Number, `{0p}` and
+`{n}` are zero-padded aliases, and `{t}` is the total source-document page
+count before page selection. Multi-page output requires an explicit `{p}`,
+`{0p}`, or `{n}` template. All target paths are checked for duplicates before
+writing. Document Format output paths are literal.
 
 ### How files are discovered
 
-`create` runs a *discovery compile* of the project and records every file
-Typst actually reads, the same mechanism `typst compile --make-deps` uses.
+`create` runs a *discovery compile* of the project and records every file Typst
+actually reads. Select paged or HTML discovery with repeatable,
+comma-delimited `--target`; paged is the default.
 Sources, images, data files, and package files are picked up automatically,
 including files accessed dynamically. Because discovery observes one
 concrete compile, files that would only be read under different
@@ -99,41 +101,36 @@ packed as a regular project file, even though compiles don't read it. That
 way template and package metadata survives the round trip through
 `create` and `extract`.
 
-### External Project Resources
+### Resource Slots
 
-An **External Project Resource** is a non-source resource addressed through
-Typst's project root whose path belongs to a pack's compilation contract, but
-whose bytes are supplied externally instead of being stored in the reusable
-pack. This lets one invoice pack use the stable path `assets/logo.png` while a
-different External Resource Reference supplies that path for each customer.
+A **Resource Slot** is one exact normalized project-relative location whose
+non-source bytes are supplied to a compilation instead of stored in the Pack.
+For example, one invoice Pack can declare `assets/logo.png` while a Resource
+Provider supplies different valid bytes for each compilation.
 
-Discovery does not fall back by default: missing project files are not loaded
-from External Resource References. Each `--source-reference <DIR>` enables
-fallback for creation and registers a filesystem External Resource Reference.
-The source project is checked first, then references are checked in command-line
-order. A file supplied by a reference is recorded under
-`[project].external-resources` and its bytes are omitted from the archive.
+The filesystem CLI registers ordered Resource Providers with repeated
+`--resource-path <DIR>`. During creation, the source project is checked first;
+only a missing resource falls through to providers in command-line order. A
+successful provider load is inferred as a Resource Slot and serialized under
+`[project].resource-slots` without storing its representative bytes.
 
-Use `--external-resource <PATH>` during creation when a representative file is
-present in the source project but should be omitted, or when a conditional
-resource is not read by the representative discovery compile. Explicitly
-declared paths are recorded even when discovery does not request them.
+Use `create --resource-slot <PATH>` for an unexercised slot or for a present
+representative file whose bytes must be omitted. An unrequested slot may remain
+unfilled. If discovery requests an unavailable explicit slot, creation explains
+that representative bytes can be placed in the source project or supplied with
+`--resource-path`; those bytes are not stored in the Pack.
 
-At compilation time, repeat `--source-reference` to provide the declared paths.
-Packed project files always win, and undeclared missing paths never consult
-these references. External Resource References cannot supply Typst
-imports/includes or package files. Resolution is lazy: a requested resource
-that is unavailable produces Typst's normal file diagnostic.
-
-Typst 0.15 cannot check whether a path exists, so this version does not provide
-optional-resource detection. Document code that requests an External Project
-Resource must be compiled with that resource available. Inspection shows these
-paths, but extraction does not create files for them.
+During Pack compilation, providers are consulted only for declared Resource
+Slots. Contained project files remain authoritative, and providers cannot
+supply Typst source, packages, undeclared paths, or replacements. Only a missing
+provider result falls through; success and non-missing errors stop resolution.
+Inspection and extraction list Resource Slots, but extraction does not create
+empty files for them.
 
 ### Packages
 
 All observed package dependencies are vendored into the pack by default.
-With `--no-packages`, they are instead recorded as *unvendored* dependencies in
+With `--no-vendor-packages`, they are instead recorded as *unvendored* dependencies in
 the Pack Manifest; compiling such a pack resolves them from the local package
 directories or downloads them from Typst Universe, like the Typst CLI would.
 
@@ -153,7 +150,7 @@ Consumers need the `embedded-fonts` feature to supply omitted fonts; pass
 Mind font licenses when redistributing packs with embedded fonts.
 
 When compiling a pack, fonts are used in this order of preference:
-pack fonts, `--font-path` fonts, system fonts, and Typst's embedded fonts
+pack fonts, system fonts, Typst's embedded fonts, and `--font-path` fonts
 (disable system fonts with `--ignore-system-fonts`).
 
 ### Output formats
@@ -221,35 +218,40 @@ let pack = Pack::builder("main.typ")
 let bytes = pack.to_bytes()?;
 ```
 
-External Project Resources can also be declared and supplied in memory. An
-External Resource Reference uses typst-kit's standard synchronous `FileLoader`
-interface, so callers can adapt memory, object storage, or prefetched
-application data:
+Resource Slots can also be declared and supplied in memory. A Resource Provider
+uses typst-kit's standard synchronous `FileLoader` interface, so callers can
+adapt memory, object storage, or prefetched application data:
 
 ```rust,ignore
 let pack = Pack::builder("main.typ")
     .file("main.typ", source_text.as_bytes().to_vec())?
-    .external_resource("assets/logo.png")?
+    .resource_slot("assets/logo.png")?
     .build()?;
 let world = PackWorld::builder(pack)
-    .external_resource_reference(resource_reference)
+    .resource_provider(resource_provider)
     .build();
 ```
 
-For filesystem discovery, configure
-`ProjectResourcePolicy::AllowExternalFallback` and add one or more
-`Packer::external_resource_reference` implementations. Source-project files are
-checked first; successful fallback loads are inferred as External Project
-Resources.
+For filesystem discovery, add one or more `Packer::resource_provider`
+implementations. Registering a provider enables successful missing-resource
+loads to be inferred as Resource Slots; no separate fallback policy is needed.
 
 ### Migrating to 0.4
 
 Version 0.4 makes clean naming and invariant-boundary breaks without retaining
 compatibility aliases:
 
-- Replace `PackWorldBuilder::external_resource_loader` and
-  `Packer::external_resource_loader` with `external_resource_reference`.
-- Replace CLI `--resource-path <DIR>` with `--source-reference <DIR>`.
+- Replace Resource APIs using `external_resource` or
+  `external_resource_reference` with `resource_slot` and `resource_provider`.
+- Replace CLI `--source-reference <DIR>` with `--resource-path <DIR>` and
+  `--external-resource <PATH>` with `--resource-slot <PATH>`.
+- Rename Dagger arguments: `source` -> `project`, `entrypoint` -> `input`,
+  `inputs` -> `sysInputs`, `noPackages` -> `noVendorPackages`,
+  `sourceReferenceDir`/`sourceReferences` -> `resourceDirs`,
+  `externalResources` -> `resourceSlots`, and `sourceDateEpoch` ->
+  `creationTimestamp`.
+- Change creation from a directory plus `--entrypoint`/`--output` to
+  `create <INPUT> [OUTPUT]`.
 - `PackWorld::new` and `PackWorldBuilder::build` now return `PackWorld`
   directly. A successfully constructed Pack already guarantees a contained
   entrypoint and valid contained fonts.
@@ -258,10 +260,17 @@ compatibility aliases:
   `font.data()`.
 - Shared Pack consistency failures are available as `PackInvariantError`,
   wrapped by `PackBuildError::Invariant` or `PackReadError::Invariant`.
+- Migrate `CompileOptions::creation_timestamp` from `None` to
+  `CreationTimestamp::Automatic` and from `Some(timestamp)` to
+  `CreationTimestamp::Explicit(timestamp)`. Use `CreationTimestamp::Omit` to
+  suppress PDF creation datetime metadata.
+- `ExtractError` adds `PlannedPathConflict` and `DestinationConflict`; exhaustive
+  matches must handle both variants.
 
-The Pack format remains version 1. External Project Resource declarations are
-unchanged, and External Resource References remain compilation inputs rather
-than serialized Pack content.
+The unstable Pack format remains version 1, but its fields change in place to
+`project.resource-slots` and `packages.unvendored`; old field aliases are not
+accepted. Resource Providers remain compilation inputs rather than serialized
+Pack content.
 
 ### Feature flags
 
@@ -292,11 +301,11 @@ format-version = 1
 
 [project]
 entrypoint = "main.typ"
-external-resources = ["assets/logo.png"]
+resource-slots = ["assets/logo.png"]
 
 [packages]
 vendored = ["@preview/cetz:0.3.4"]
-external = ["@preview/tablex:0.0.9"]
+unvendored = ["@preview/tablex:0.0.9"]
 
 [[fonts]]
 path = "fonts/ibm-plex-sans.ttf"
@@ -312,16 +321,11 @@ Readers ignore unknown top-level archive entries and reject manifests with a
 validated, root-relative virtual paths, so a pack can never read or write
 outside its own tree.
 
-`external-resources` is an ordered, deduplicated allowlist. Its entries have no
+`resource-slots` is an ordered, deduplicated allowlist. Its entries have no
 corresponding `project/` archive entry, and readers reject a path that is both
-packed and declared external. Existing format-version-1 manifests that omit the
-field remain valid and are read as having no External Project Resources.
-
-The format version remains 1. Released older readers reject manifests that use
-`external-resources` because they reject unknown fields; this intentional
-compatibility break does not affect old packs read by newer versions.
-Unvendored package specs retain the historical `[packages].external` key for
-format compatibility.
+packed and declared as a Resource Slot. The format version remains 1 and is
+explicitly unstable: readers reject the old `external-resources` and
+`packages.external` version-1 fields rather than retaining aliases.
 
 ## Development
 
