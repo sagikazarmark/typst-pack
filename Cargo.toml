@@ -50,11 +50,11 @@ toml = "1.1"
 # Typst crates share internal types and must resolve to the same exact release.
 typst = "=0.15.0"
 typst-html = "=0.15.0"
-typst-kit = { version = "=0.15.0", default-features = false }
-typst-layout = "=0.15.0"
-typst-pdf = "=0.15.0"
-typst-render = "=0.15.0"
-typst-svg = "=0.15.0"
+typst-kit = { version = "=0.15.1", default-features = false }
+typst-layout = "=0.15.1"
+typst-pdf = "=0.15.1"
+typst-render = "=0.15.1"
+typst-svg = "=0.15.1"
 walkdir = { version = "2", optional = true }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
