@@ -4,7 +4,7 @@
 
 use std::collections::BTreeSet;
 use std::fs::File;
-use std::io::{BufReader, Read, Write};
+use std::io::{BufReader, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -22,8 +22,8 @@ use typst_kit::files::{FileLoader, FsRoot};
 use typst_pdf::{PdfStandard, PdfStandards, Timestamp};
 
 use crate::compile::{
-    CompilationArtifact, CompileError, CompileOptions, OutputFormat, PageRange, PageSelection,
-    compile, parse_page_selection,
+    CompilationArtifact, CompileError, CompileOptions, CompileWithPagePreflightError, OutputFormat,
+    PageRange, PageSelection, compile_with_page_preflight, parse_page_selection,
 };
 use crate::extract::{ExtractOptions, extract};
 use crate::manifest::PackMetadata;
@@ -36,6 +36,7 @@ const ENV_PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
 enum CliError {
     Reported,
     Message(String),
+    Hinted { message: String, hints: Vec<String> },
 }
 
 impl From<String> for CliError {
@@ -60,7 +61,7 @@ type CliResult = Result<(), CliError>;
     about
 )]
 pub struct Cli {
-    /// Whether to use color in diagnostics.
+    /// Whether to use color. When set to `auto` if the terminal to supports it.
     #[arg(
         long,
         default_value = "auto",
@@ -70,7 +71,7 @@ pub struct Cli {
     )]
     color: String,
 
-    /// Path to a custom CA certificate used for package downloads.
+    /// Path to a custom CA certificate to use when making network requests.
     #[arg(long, env = "TYPST_CERT", value_name = "PATH")]
     cert: Option<PathBuf>,
 
@@ -92,7 +93,7 @@ struct SharedCompilationArgs {
     /// time.
     #[arg(
         long = "features",
-        value_name = "FEATURE",
+        value_name = "FEATURES",
         value_delimiter = ',',
         env = "TYPST_FEATURES"
     )]
@@ -184,18 +185,25 @@ struct CreateArgs {
     #[arg(help_heading = "Project")]
     input: PathBuf,
 
-    /// Path to the output Pack [default: INPUT with its extension replaced by .typk].
-    #[arg(help_heading = "Pack Contents")]
-    output: Option<PathBuf>,
-
     /// Configures the project root (for absolute paths).
     #[arg(long, env = "TYPST_ROOT", value_name = "DIR", help_heading = "Project")]
     root: Option<PathBuf>,
 
-    /// Do not store package files in the pack; record them as unvendored
-    /// dependencies instead.
-    #[arg(long = "no-vendor-packages", help_heading = "Packages")]
-    no_vendor_packages: bool,
+    /// Compilation targets whose dependencies should be discovered.
+    #[arg(
+        long = "target",
+        value_name = "TARGET",
+        value_delimiter = ',',
+        help_heading = "Discovery"
+    )]
+    targets: Vec<DiscoveryTargetArg>,
+
+    #[command(flatten, next_help_heading = "Discovery")]
+    compilation: SharedCompilationArgs,
+
+    /// Path to the output Pack [default: INPUT with its extension replaced by .typk].
+    #[arg(help_heading = "Pack Contents")]
+    output: Option<PathBuf>,
 
     /// Embed the fonts used by the document into the pack.
     #[arg(long, help_heading = "Pack Contents")]
@@ -227,20 +235,13 @@ struct CreateArgs {
     )]
     resource_slots: Vec<String>,
 
-    /// Compilation targets whose dependencies should be discovered.
-    #[arg(
-        long = "target",
-        value_name = "TARGET",
-        value_delimiter = ',',
-        help_heading = "Discovery"
-    )]
-    targets: Vec<DiscoveryTargetArg>,
-
-    #[command(flatten, next_help_heading = "Discovery")]
-    compilation: SharedCompilationArgs,
-
     #[command(flatten, next_help_heading = "Fonts")]
     fonts: SharedFontArgs,
+
+    /// Do not store package files in the pack; record them as unvendored
+    /// dependencies instead.
+    #[arg(long = "no-vendor-packages", help_heading = "Packages")]
+    no_vendor_packages: bool,
 
     #[command(flatten, next_help_heading = "Packages")]
     packages: SharedPackageArgs,
@@ -311,7 +312,6 @@ struct CompileArgs {
     output: Option<PathBuf>,
 
     /// The format of the output file, inferred from the extension by default.
-    /// HTML is experimental and additionally requires `--features html`.
     #[arg(short, long, help_heading = "Output")]
     format: Option<OutputFormatArg>,
 
@@ -343,22 +343,11 @@ struct CompileArgs {
     #[arg(long, default_value_t = 144.0, help_heading = "Output")]
     ppi: f64,
 
-    /// Project-shaped directories that provide Resource Slot bytes during compilation.
-    #[arg(
-        long = "resource-path",
-        value_name = "DIR",
-        help_heading = "Resource Slots"
-    )]
-    resource_paths: Vec<PathBuf>,
-
-    #[command(flatten, next_help_heading = "Fonts")]
-    fonts: SharedFontArgs,
-
     /// One (or multiple comma-separated) PDF standards that Typst will enforce
     /// conformance with.
     #[arg(
         long = "pdf-standard",
-        value_name = "STANDARD",
+        value_name = "PDF_STANDARD",
         value_delimiter = ',',
         help_heading = "PDF"
     )]
@@ -370,6 +359,17 @@ struct CompileArgs {
     /// it can be desirable to disable tagged PDF.
     #[arg(long = "no-pdf-tags", help_heading = "PDF")]
     no_pdf_tags: bool,
+
+    /// Project-shaped directories that provide Resource Slot bytes during compilation.
+    #[arg(
+        long = "resource-path",
+        value_name = "DIR",
+        help_heading = "Resource Slots"
+    )]
+    resource_paths: Vec<PathBuf>,
+
+    #[command(flatten, next_help_heading = "Fonts")]
+    fonts: SharedFontArgs,
 
     #[command(flatten, next_help_heading = "Packages")]
     packages: SharedPackageArgs,
@@ -404,8 +404,11 @@ struct CompileArgs {
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum DepsFormat {
+    /// Encodes as JSON, failing for non-Unicode paths.
     Json,
+    /// Separates paths with NULL bytes and can express all paths.
     Zero,
+    /// Emits in Make format, omitting inexpressible paths.
     Make,
 }
 
@@ -494,38 +497,55 @@ impl std::str::FromStr for PageRangeArg {
 #[allow(non_camel_case_types)]
 #[derive(Debug, Clone, Copy, ValueEnum)]
 enum PdfStandardArg {
+    /// PDF 1.4.
     #[value(name = "1.4")]
     V_1_4,
+    /// PDF 1.5.
     #[value(name = "1.5")]
     V_1_5,
+    /// PDF 1.6.
     #[value(name = "1.6")]
     V_1_6,
+    /// PDF 1.7.
     #[value(name = "1.7")]
     V_1_7,
+    /// PDF 2.0.
     #[value(name = "2.0")]
     V_2_0,
+    /// PDF/A-1b.
     #[value(name = "a-1b")]
     A_1b,
+    /// PDF/A-1a.
     #[value(name = "a-1a")]
     A_1a,
+    /// PDF/A-2b.
     #[value(name = "a-2b")]
     A_2b,
+    /// PDF/A-2u.
     #[value(name = "a-2u")]
     A_2u,
+    /// PDF/A-2a.
     #[value(name = "a-2a")]
     A_2a,
+    /// PDF/A-3b.
     #[value(name = "a-3b")]
     A_3b,
+    /// PDF/A-3u.
     #[value(name = "a-3u")]
     A_3u,
+    /// PDF/A-3a.
     #[value(name = "a-3a")]
     A_3a,
+    /// PDF/A-4.
     #[value(name = "a-4")]
     A_4,
+    /// PDF/A-4f.
     #[value(name = "a-4f")]
     A_4f,
+    /// PDF/A-4e.
     #[value(name = "a-4e")]
     A_4e,
+    /// PDF/UA-1.
     #[value(name = "ua-1")]
     Ua_1,
 }
@@ -564,7 +584,8 @@ pub fn run() -> ExitCode {
     let color = match color.as_str() {
         "always" => ColorChoice::Always,
         "never" => ColorChoice::Never,
-        _ => ColorChoice::Auto,
+        _ if std::io::stderr().is_terminal() => ColorChoice::Auto,
+        _ => ColorChoice::Never,
     };
     let result = match command {
         Command::Create(args) => create(args, color, cert.as_deref()),
@@ -577,6 +598,13 @@ pub fn run() -> ExitCode {
         Err(CliError::Reported) => ExitCode::FAILURE,
         Err(CliError::Message(error)) => {
             emit_owned_error(&error, color);
+            ExitCode::FAILURE
+        }
+        Err(CliError::Hinted { message, hints }) => {
+            emit_owned_error(&message, color);
+            for hint in hints {
+                emit_owned_hint(&hint, color);
+            }
             ExitCode::FAILURE
         }
     }
@@ -661,7 +689,9 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
         packer = packer.metadata(metadata);
     }
 
-    let outcome = match packer.pack() {
+    let (outcome, timing_error) = packer.pack_with_timing();
+    let timing_error = timing_error.map(|error| error.to_string());
+    let outcome = match outcome {
         Ok(outcome) => outcome,
         Err(PackerError::Compile {
             world,
@@ -674,9 +704,28 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
                 diagnostic_format,
                 color,
             );
+            if let Some(error) = timing_error {
+                return Err(error.into());
+            }
             return Err(CliError::Reported);
         }
-        Err(err) => return Err(err.to_string().into()),
+        Err(PackerError::ResourceSlotUnavailable { path }) => {
+            let message = format!(
+                "requested Resource Slot `{path}` is unavailable for discovery; place representative bytes at `{path}` in the source project or supply them via `--resource-path`; representative bytes are not stored in the Pack"
+            );
+            if let Some(error) = timing_error {
+                emit_owned_error(&message, color);
+                return Err(error.into());
+            }
+            return Err(message.into());
+        }
+        Err(err) => {
+            if let Some(error) = timing_error {
+                emit_owned_error(&err.to_string(), color);
+                return Err(error.into());
+            }
+            return Err(err.to_string().into());
+        }
     };
 
     emit_diagnostics_with(
@@ -687,6 +736,9 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
     );
     for warning in &outcome.report.warnings {
         emit_owned_warning(warning, color);
+    }
+    if let Some(error) = timing_error {
+        return Err(error.into());
     }
 
     if output == Path::new("-") {
@@ -837,12 +889,6 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     if args.pack == Path::new("-") && args.output.is_none() {
         return Err("an explicit output is required when the Pack is read from stdin".into());
     }
-    if args.output.as_deref() == Some(Path::new("-"))
-        && args.deps.as_deref() == Some(Path::new("-"))
-    {
-        return Err("cannot write both output and dependencies to stdout".into());
-    }
-    let pack = read_pack_input(&args.pack)?;
 
     let format = match args.format {
         Some(format) => format.into(),
@@ -869,6 +915,46 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         },
     };
 
+    let page_selection =
+        PageSelection::new(args.pages.iter().map(|range| range.0.clone()).collect());
+    let standards = args
+        .pdf_standards
+        .iter()
+        .copied()
+        .map(PdfStandard::from)
+        .collect::<Vec<_>>();
+    if args.no_pdf_tags || !page_selection.ranges().is_empty() {
+        let accessible_standard = [
+            (PdfStandard::A_1a, "PDF/A-1a"),
+            (PdfStandard::A_2a, "PDF/A-2a"),
+            (PdfStandard::A_3a, "PDF/A-3a"),
+            (PdfStandard::Ua_1, "PDF/UA-1"),
+        ]
+        .into_iter()
+        .find_map(|(standard, name)| standards.contains(&standard).then_some(name));
+        if let Some(name) = accessible_standard {
+            let message = format!("cannot disable PDF tags when exporting a {name} document");
+            return if args.no_pdf_tags {
+                Err(message.into())
+            } else {
+                Err(CliError::Hinted {
+                    message,
+                    hints: vec!["using --pages implies --no-pdf-tags".to_owned()],
+                })
+            };
+        }
+    }
+    let pdf_standards = PdfStandards::new(&standards).map_err(|error| CliError::Hinted {
+        message: error.message().to_string(),
+        hints: error.hints().iter().map(ToString::to_string).collect(),
+    })?;
+
+    if args.output.as_deref() == Some(Path::new("-"))
+        && args.deps.as_deref() == Some(Path::new("-"))
+    {
+        return Err("cannot write both output and dependencies to stdout".into());
+    }
+
     let creation_timestamp_seconds = args.automation.creation_timestamp;
     let creation_timestamp = creation_timestamp_seconds
         .map(|seconds| {
@@ -876,6 +962,12 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
                 .ok_or_else(|| format!("timestamp {seconds} is out of range"))
         })
         .transpose()?;
+    let fixed_time = creation_timestamp
+        .map(typst_kit::datetime::Time::fixed)
+        .transpose()
+        .map_err(|error| error.to_string())?;
+
+    let pack = read_pack_input(&args.pack)?;
 
     let host_dependencies = Arc::new(Mutex::new(BTreeSet::new()));
     let mut builder = PackWorld::builder(pack)
@@ -899,10 +991,8 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
             Arc::clone(&host_dependencies),
         ));
     }
-    builder = match creation_timestamp_seconds {
-        Some(timestamp) => builder
-            .fixed_timestamp(timestamp)
-            .map_err(|error| error.to_string())?,
+    builder = match fixed_time {
+        Some(time) => builder.fixed_time(time),
         None => builder.system_date(),
     };
     if !args.fonts.ignore_system_fonts {
@@ -917,45 +1007,17 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
 
     let mut world = builder.build();
 
-    let page_selection =
-        PageSelection::new(args.pages.iter().map(|range| range.0.clone()).collect());
-    let standards = args
-        .pdf_standards
-        .iter()
-        .copied()
-        .map(PdfStandard::from)
-        .collect::<Vec<_>>();
-    if args.no_pdf_tags || !page_selection.ranges().is_empty() {
-        let accessible_standard = [
-            (PdfStandard::A_1a, "PDF/A-1a"),
-            (PdfStandard::A_2a, "PDF/A-2a"),
-            (PdfStandard::A_3a, "PDF/A-3a"),
-            (PdfStandard::Ua_1, "PDF/UA-1"),
-        ]
-        .into_iter()
-        .find_map(|(standard, name)| standards.contains(&standard).then_some(name));
-        if let Some(name) = accessible_standard {
-            let message = format!("cannot disable PDF tags when exporting a {name} document");
-            return if args.no_pdf_tags {
-                Err(message.into())
-            } else {
-                Err(format!("{message}\nhint: using --pages implies --no-pdf-tags").into())
-            };
-        }
-    }
-
     let options = CompileOptions {
         page_selection,
         ppi: Some(args.ppi),
         pretty: args.pretty,
-        pdf_standards: PdfStandards::new(&standards).map_err(|err| err.message().to_string())?,
+        pdf_standards,
         pdf_tags: !args.no_pdf_tags,
-        creation_timestamp: creation_timestamp
-            .map(Timestamp::new_utc)
-            .or_else(local_timestamp),
+        creation_timestamp: creation_timestamp.map(Timestamp::new_utc),
     };
 
     let diagnostic_format = args.automation.diagnostic_format.into();
+    let default_output = args.pack.with_extension(format.extension());
     let write_requested_dependencies = |outputs: Option<&[PathBuf]>| {
         let Some(destination) = &args.deps else {
             return Ok(());
@@ -974,12 +1036,21 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     let mut command_result = None;
     let timings = timer.record(&mut world, |world| {
         command_result = Some((|| -> CliResult {
-            let output = match compile(world, format, &options) {
-                Ok(output) => {
-                    emit_diagnostics_with(world, output.warnings.iter(), diagnostic_format, color);
-                    output
-                }
-                Err(CompileError::Diagnostics { errors, warnings }) => {
+            let output = match compile_with_page_preflight(
+                world,
+                format,
+                &options,
+                local_timestamp,
+                |count, warnings| {
+                    validate_page_output_destination(args.output.as_deref(), &default_output, count)
+                        .map_err(|message| (message, warnings.clone()))
+                },
+            ) {
+                Ok(output) => output,
+                Err(CompileWithPagePreflightError::Compile(CompileError::Diagnostics {
+                    errors,
+                    warnings,
+                })) => {
                     emit_diagnostics_with(
                         world,
                         errors.iter().chain(&warnings),
@@ -989,15 +1060,23 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
                     write_requested_dependencies(None)?;
                     return Err(CliError::Reported);
                 }
-                Err(CompileError::PngExport { message, warnings }) => {
+                Err(CompileWithPagePreflightError::Compile(CompileError::PngExport {
+                    message,
+                    warnings,
+                })) => {
+                    emit_owned_error(&format!("PNG export failed: {message}"), color);
                     emit_diagnostics_with(world, warnings.iter(), diagnostic_format, color);
                     write_requested_dependencies(None)?;
-                    return Err(format!("PNG export failed: {message}").into());
+                    return Err(CliError::Reported);
+                }
+                Err(CompileWithPagePreflightError::Preflight((message, warnings))) => {
+                    emit_owned_error(&message, color);
+                    emit_diagnostics_with(world, warnings.iter(), diagnostic_format, color);
+                    write_requested_dependencies(None)?;
+                    return Err(CliError::Reported);
                 }
             };
 
-            let extension = format.extension();
-            let default_output = args.pack.with_extension(extension);
             let export_result = (|| {
                 let targets: Vec<PathBuf> = match &args.output {
                     Some(path) if path == Path::new("-") => vec![path.clone()],
@@ -1009,7 +1088,9 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
                         &output.artifacts,
                         output.source_page_count().unwrap_or(output.artifacts.len()),
                     )?,
-                    None if output.artifacts.len() == 1 => vec![default_output],
+                    None if matches!(format, OutputFormat::Pdf | OutputFormat::Html) => {
+                        vec![default_output]
+                    }
                     None => expand_output_template(
                         &default_output,
                         &output.artifacts,
@@ -1049,10 +1130,14 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
             let (targets, output_is_stdout) = match export_result {
                 Ok(exported) => exported,
                 Err(error) => {
+                    emit_owned_error(&error, color);
+                    emit_diagnostics_with(world, output.warnings.iter(), diagnostic_format, color);
                     write_requested_dependencies(None)?;
-                    return Err(error.into());
+                    return Err(CliError::Reported);
                 }
             };
+
+            emit_diagnostics_with(world, output.warnings.iter(), diagnostic_format, color);
 
             if !output_is_stdout
                 && let Some(viewer) = args.open.as_ref()
@@ -1070,18 +1155,6 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
 
             write_requested_dependencies(Some(&targets))?;
 
-            if output_is_stdout || args.deps.as_deref() == Some(Path::new("-")) {
-                return Ok(());
-            }
-            println!(
-                "compiled `{}` to {}",
-                args.pack.display(),
-                match targets.as_slice() {
-                    [single] => format!("`{}`", single.display()),
-                    many => format!("{} files", many.len()),
-                }
-            );
-
             Ok(())
         })());
     });
@@ -1091,8 +1164,32 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
             .to_string()
             .into());
     };
-    command_result?;
-    timings.map_err(|error| error.to_string())?;
+    let timing_error = timings.err().map(|error| error.to_string());
+    if let Some(error) = timing_error {
+        emit_owned_error(&error, color);
+        return Err(CliError::Reported);
+    }
+    command_result
+}
+
+fn validate_page_output_destination(
+    output: Option<&Path>,
+    default_output: &Path,
+    artifact_count: usize,
+) -> Result<(), String> {
+    if artifact_count <= 1 {
+        return Ok(());
+    }
+    let output = output.unwrap_or(default_output);
+    if output == Path::new("-") {
+        return Err("cannot write output to stdout unless exactly one file is emitted".to_owned());
+    }
+    let Some(text) = output.to_str() else {
+        return Err(missing_page_template_error());
+    };
+    if !has_indexable_page_template(text) {
+        return Err(missing_page_template_error());
+    }
     Ok(())
 }
 
@@ -1107,22 +1204,15 @@ fn expand_output_template(
     }
     let Some(text) = template.to_str() else {
         return if artifacts.len() > 1 {
-            Err(
-                "cannot export multiple images without a page number template ({p}, {0p}) in the output path"
-                    .to_owned(),
-            )
+            Err(missing_page_template_error())
         } else {
             Ok(vec![template.to_path_buf()])
         };
     };
-    let has_page_placeholder =
-        text.contains("{p}") || text.contains("{0p}") || text.contains("{n}");
+    let has_page_placeholder = has_indexable_page_template(text);
     let count = artifacts.len();
     if count > 1 && !has_page_placeholder {
-        return Err(
-            "cannot export multiple images without a page number template ({p}, {0p}) in the output path"
-                .to_owned(),
-        );
+        return Err(missing_page_template_error());
     }
     if !has_page_placeholder {
         return Ok(vec![template.to_path_buf()]);
@@ -1143,6 +1233,15 @@ fn expand_output_template(
             )
         })
         .collect())
+}
+
+fn has_indexable_page_template(output: &str) -> bool {
+    output.contains("{p}") || output.contains("{0p}") || output.contains("{n}")
+}
+
+fn missing_page_template_error() -> String {
+    "cannot export multiple images without a page number template ({p}, {0p}) in the output path"
+        .to_owned()
 }
 
 fn normalize_output_path(path: &Path) -> PathBuf {
@@ -1465,6 +1564,16 @@ fn emit_owned_warning(message: &str, color: ColorChoice) {
     let _ = writeln!(stream, ": {message}");
 }
 
+fn emit_owned_hint(message: &str, color: ColorChoice) {
+    let mut stream = StandardStream::stderr(color);
+    let mut spec = ColorSpec::new();
+    spec.set_fg(Some(Color::Cyan)).set_bold(true);
+    let _ = stream.set_color(&spec);
+    let _ = write!(stream, "hint");
+    let _ = stream.reset();
+    let _ = writeln!(stream, ": {message}");
+}
+
 /// Formats a file ID with its package prefix, if any.
 fn display_file_id(id: FileId) -> String {
     match id.root() {
@@ -1475,9 +1584,55 @@ fn display_file_id(id: FileId) -> String {
     }
 }
 
+fn relative_path(path: &Path, base: &Path) -> Option<PathBuf> {
+    if path.is_absolute() != base.is_absolute() {
+        return path.is_absolute().then(|| path.to_path_buf());
+    }
+
+    let mut path_components = path.components();
+    let mut base_components = base.components();
+    let mut relative = Vec::new();
+    loop {
+        match (path_components.next(), base_components.next()) {
+            (None, None) => break,
+            (Some(component), None) => {
+                relative.push(component);
+                relative.extend(path_components.by_ref());
+                break;
+            }
+            (None, Some(_)) => relative.push(std::path::Component::ParentDir),
+            (Some(path), Some(base)) if relative.is_empty() && path == base => {}
+            (Some(path), Some(std::path::Component::CurDir)) => relative.push(path),
+            (Some(_), Some(std::path::Component::ParentDir)) => return None,
+            (Some(std::path::Component::Prefix(_) | std::path::Component::RootDir), Some(_))
+            | (Some(_), Some(std::path::Component::Prefix(_) | std::path::Component::RootDir)) => {
+                return path.is_absolute().then(|| path.to_path_buf());
+            }
+            (Some(path), Some(_)) => {
+                relative.push(std::path::Component::ParentDir);
+                relative.extend(base_components.map(|_| std::path::Component::ParentDir));
+                relative.push(path);
+                relative.extend(path_components.by_ref());
+                break;
+            }
+        }
+    }
+
+    Some(relative.iter().map(|part| part.as_os_str()).collect())
+}
+
 impl DiagnosticWorld for DiscoveryWorld {
     fn name(&self, id: FileId) -> String {
-        display_file_id(id)
+        match id.root() {
+            VirtualRoot::Project => id
+                .vpath()
+                .realize(self.root())
+                .ok()
+                .and_then(|path| relative_path(&path, self.workdir()?))
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|| display_file_id(id)),
+            VirtualRoot::Package(_) => display_file_id(id),
+        }
     }
 }
 
@@ -1499,6 +1654,19 @@ fn human_size(bytes: usize) -> String {
         format!("{bytes} {}", UNITS[0])
     } else {
         format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(all(test, windows))]
+mod windows_tests {
+    use super::*;
+
+    #[test]
+    fn incompatible_absolute_prefixes_keep_the_target_absolute() {
+        let target = Path::new(r"C:\project\main.typ");
+        let base = Path::new(r"D:\cwd");
+
+        assert_eq!(relative_path(target, base), Some(target.to_path_buf()));
     }
 }
 

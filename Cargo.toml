@@ -17,6 +17,8 @@ required-features = ["cli"]
 
 [features]
 default = []
+# Internal opt-in for controlled package downloader integration tests.
+_test-package-download-probe = []
 # The typst-pack command line tool.
 cli = [
     "dep:chrono",
@@ -24,6 +26,7 @@ cli = [
     "dep:open",
     "dep:rayon",
     "dep:serde_json",
+    "dep:sigpipe",
     "embedded-fonts",
     "fs",
     "typst-kit/emit-diagnostics",
@@ -50,6 +53,7 @@ open = { version = "5", optional = true }
 rayon = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", optional = true }
+sigpipe = { version = "0.1", optional = true }
 thiserror = "2"
 toml = "1.1"
 # Typst crates share internal types and must resolve to the same exact release.

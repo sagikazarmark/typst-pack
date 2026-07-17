@@ -1,5 +1,6 @@
 //! Compiling a pack into Compilation Output Artifacts.
 
+use std::convert::Infallible;
 use std::num::NonZeroUsize;
 
 use ecow::EcoVec;
@@ -217,6 +218,18 @@ pub enum CompileError {
     },
 }
 
+#[derive(Debug)]
+pub(crate) enum CompileWithPagePreflightError<E> {
+    Compile(CompileError),
+    Preflight(E),
+}
+
+impl<E> From<CompileError> for CompileWithPagePreflightError<E> {
+    fn from(error: CompileError) -> Self {
+        Self::Compile(error)
+    }
+}
+
 /// Compiles the world's document and exports it in the requested format.
 ///
 /// This works with any [`World`], but is intended for
@@ -226,6 +239,26 @@ pub fn compile(
     format: OutputFormat,
     options: &CompileOptions,
 ) -> Result<CompilationOutput, CompileError> {
+    match compile_with_page_preflight(
+        world,
+        format,
+        options,
+        || world.today(None).map(Timestamp::new_utc),
+        |_, _| Ok::<_, Infallible>(()),
+    ) {
+        Ok(output) => Ok(output),
+        Err(CompileWithPagePreflightError::Compile(error)) => Err(error),
+        Err(CompileWithPagePreflightError::Preflight(error)) => match error {},
+    }
+}
+
+pub(crate) fn compile_with_page_preflight<E>(
+    world: &dyn World,
+    format: OutputFormat,
+    options: &CompileOptions,
+    default_pdf_timestamp: impl FnOnce() -> Option<Timestamp>,
+    preflight: impl FnOnce(usize, &EcoVec<SourceDiagnostic>) -> Result<(), E>,
+) -> Result<CompilationOutput, CompileWithPagePreflightError<E>> {
     let _compilation_timing = typst_timing::TimingScope::new("typst-pack compilation");
     if format == OutputFormat::Html {
         let Warned { output, warnings } = typst::compile::<HtmlDocument>(world);
@@ -257,12 +290,9 @@ pub fn compile(
 
     let Warned {
         output,
-        mut warnings,
+        warnings: compile_warnings,
     } = typst::compile::<PagedDocument>(world);
-    let document = output.map_err(|errors| CompileError::Diagnostics {
-        errors,
-        warnings: warnings.clone(),
-    })?;
+    let mut warnings = compile_warnings;
     if format == OutputFormat::Pdf
         && !options.page_selection.ranges().is_empty()
         && options.pdf_tags
@@ -275,12 +305,18 @@ pub fn compile(
                 ]),
         );
     }
+    let document = output.map_err(|errors| CompileError::Diagnostics {
+        errors,
+        warnings: warnings.clone(),
+    })?;
+    if matches!(format, OutputFormat::Png | OutputFormat::Svg) {
+        let artifact_count = selected_pages(&document, options).count();
+        preflight(artifact_count, &warnings).map_err(CompileWithPagePreflightError::Preflight)?;
+    }
     let _export_timing = typst_timing::TimingScope::new("export");
     let artifacts = match format {
         OutputFormat::Pdf => {
-            let timestamp = options
-                .creation_timestamp
-                .or_else(|| world.today(None).map(Timestamp::new_utc));
+            let timestamp = options.creation_timestamp.or_else(default_pdf_timestamp);
             let pdf_options = PdfOptions {
                 timestamp,
                 page_ranges: options.page_selection.typst_page_ranges(),
@@ -315,7 +351,7 @@ pub fn compile(
                         message: err.to_string(),
                         warnings: warnings.clone(),
                     })?;
-                Ok(CompilationArtifact {
+                Ok::<_, CompileError>(CompilationArtifact {
                     format,
                     bytes,
                     source_page_number: Some(source_page_number),

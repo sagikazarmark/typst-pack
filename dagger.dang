@@ -41,6 +41,54 @@ type TypstPack {
   }
 
   """
+  Keep removed create and compile argument names out of the module schema.
+  """
+  noLegacyCreateCompileArguments: Void @check {
+    let legacyArguments = [
+      "source",
+      "entrypoint",
+      "inputs",
+      "noPackages",
+      "sourceReferenceDir",
+      "sourceReferences",
+      "externalResources",
+      "sourceDateEpoch",
+    ]
+    let checkedCreate = false
+    let checkedCompile = false
+
+    Dagger
+      .currentTypeDefs(hideCore: true).{{
+      name,
+      asObject.{{
+        functions.{{
+          name,
+          args.{{name}}
+        }}
+      }}
+    }}
+      .each { typeDef =>
+        if (typeDef.name == "TypstPack") {
+          typeDef.asObject.functions.each { function =>
+            if (function.name == "create" or function.name == "compile") {
+              if (function.name == "create") { checkedCreate = true }
+              if (function.name == "compile") { checkedCompile = true }
+              function.args.each { argument =>
+                legacyArguments.each { legacyArgument =>
+                  assert { argument.name != legacyArgument }
+                }
+              }
+            }
+          }
+        }
+      }
+    assert { checkedCreate }
+    assert { checkedCompile }
+
+    null
+  }
+
+  """
   Run the complete Rust test suite with every crate feature enabled.
   """
   test: String! @check {

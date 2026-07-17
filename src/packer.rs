@@ -2,7 +2,7 @@
 
 #![cfg(feature = "fs")]
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -26,6 +26,9 @@ use crate::manifest::PackMetadata;
 use crate::pack::{Pack, PackBuildError};
 use crate::resource::{DiscoveryResources, Provider};
 use crate::world::system_packages;
+
+#[cfg(test)]
+type DiscoveryHook = Box<dyn Fn(&mut DiscoveryWorld)>;
 
 /// Packs a Typst project directory into a [`Pack`].
 ///
@@ -58,6 +61,8 @@ pub struct Packer {
     metadata: Option<PackMetadata>,
     resource_slots: BTreeSet<String>,
     resource_providers: Vec<Provider>,
+    #[cfg(test)]
+    discovery_hook: Option<DiscoveryHook>,
 }
 
 impl Packer {
@@ -86,6 +91,8 @@ impl Packer {
             metadata: None,
             resource_slots: BTreeSet::new(),
             resource_providers: Vec::new(),
+            #[cfg(test)]
+            discovery_hook: None,
         }
     }
 
@@ -211,19 +218,67 @@ impl Packer {
     }
 
     /// Declares a Resource Slot whose representative bytes should be omitted from the Pack.
+    ///
+    /// ```compile_fail
+    /// use typst_pack::Packer;
+    ///
+    /// let _ = Packer::new("project", "main.typ").external_resource("assets/logo.png");
+    /// ```
     pub fn resource_slot(mut self, path: impl Into<String>) -> Self {
         self.resource_slots.insert(path.into());
         self
     }
 
     /// Adds a Resource Provider used during discovery.
+    ///
+    /// ```compile_fail
+    /// use std::path::PathBuf;
+    /// use typst::diag::{FileError, FileResult};
+    /// use typst::foundations::Bytes;
+    /// use typst::syntax::FileId;
+    /// use typst_kit::files::FileLoader;
+    /// use typst_pack::Packer;
+    ///
+    /// struct Missing;
+    /// impl FileLoader for Missing {
+    ///     fn load(&self, id: FileId) -> FileResult<Bytes> {
+    ///         Err(FileError::NotFound(PathBuf::from(
+    ///             id.vpath().get_without_slash(),
+    ///         )))
+    ///     }
+    /// }
+    ///
+    /// let _ = Packer::new("project", "main.typ").external_resource_reference(Missing);
+    /// ```
     pub fn resource_provider(mut self, provider: impl FileLoader + Send + Sync + 'static) -> Self {
         self.resource_providers.push(Box::new(provider));
         self
     }
 
+    #[cfg(test)]
+    pub(crate) fn discovery_hook(mut self, hook: impl Fn(&mut DiscoveryWorld) + 'static) -> Self {
+        self.discovery_hook = Some(Box::new(hook));
+        self
+    }
+
     /// Runs the discovery compile and assembles the pack.
     pub fn pack(self) -> Result<PackOutcome, PackerError> {
+        let (result, timing_error) = self.pack_with_timing();
+        timing_error.map_or(result, Err)
+    }
+
+    pub(crate) fn pack_with_timing(
+        self,
+    ) -> (Result<PackOutcome, PackerError>, Option<PackerError>) {
+        let mut timing_error = None;
+        let result = self.pack_inner(&mut timing_error);
+        (result, timing_error)
+    }
+
+    fn pack_inner(
+        self,
+        timing_error: &mut Option<PackerError>,
+    ) -> Result<PackOutcome, PackerError> {
         let root = self
             .root
             .canonicalize()
@@ -277,6 +332,9 @@ impl Packer {
         };
         let mut world = DiscoveryWorld {
             root: root.clone(),
+            workdir: std::env::current_dir()
+                .ok()
+                .map(|path| path.canonicalize().unwrap_or(path)),
             library: LazyHash::new(
                 Library::builder()
                     .with_inputs(self.inputs.clone())
@@ -297,6 +355,10 @@ impl Packer {
             #[cfg(test)]
             source_request_hook: None,
         };
+        #[cfg(test)]
+        if let Some(hook) = &self.discovery_hook {
+            hook(&mut world);
+        }
 
         // Discovery compile. File stores and Resource Slot provenance accumulate
         // dependencies across targets.
@@ -311,11 +373,16 @@ impl Packer {
             let mut paged_documents = Vec::new();
             let mut html_documents = Vec::new();
             let mut compile_warnings = EcoVec::new();
+            let mut seen_warnings = HashSet::new();
             for target in targets {
                 match target {
                     DiscoveryTarget::Paged => {
                         let Warned { output, warnings } = typst::compile::<PagedDocument>(world);
-                        compile_warnings.extend(warnings);
+                        compile_warnings.extend(
+                            warnings
+                                .into_iter()
+                                .filter(|warning| seen_warnings.insert(warning.clone())),
+                        );
                         match output {
                             Ok(document) => paged_documents.push(document),
                             Err(errors) => {
@@ -326,7 +393,11 @@ impl Packer {
                     }
                     DiscoveryTarget::Html => {
                         let Warned { output, warnings } = typst::compile::<HtmlDocument>(world);
-                        compile_warnings.extend(warnings);
+                        compile_warnings.extend(
+                            warnings
+                                .into_iter()
+                                .filter(|warning| seen_warnings.insert(warning.clone())),
+                        );
                         match output {
                             Ok(document) => html_documents.push(document),
                             Err(errors) => {
@@ -346,6 +417,9 @@ impl Packer {
                     .to_string(),
             ));
         };
+        *timing_error = timings
+            .err()
+            .map(|error| PackerError::Timings(error.to_string()));
         let (paged_documents, html_documents, compile_warnings) = match discovery {
             Ok(discovery) => discovery,
             Err((errors, warnings)) => {
@@ -355,7 +429,6 @@ impl Packer {
         if let Some(path) = world.unavailable_resource_slots().into_iter().next() {
             return Err(PackerError::ResourceSlotUnavailable { path });
         }
-        timings.map_err(|error| PackerError::Timings(error.to_string()))?;
 
         let mut report = PackReport {
             files: Vec::new(),
@@ -635,7 +708,7 @@ pub enum PackerError {
         warnings: EcoVec<SourceDiagnostic>,
     },
     #[error(
-        "requested Resource Slot `{path}` is unavailable for discovery; place representative bytes at `{path}` in the source project or supply them via `--resource-path`; representative bytes are not stored in the Pack"
+        "requested Resource Slot `{path}` is unavailable for discovery; place representative bytes at `{path}` in the source project or supply them through a Resource Provider; representative bytes are not stored in the Pack"
     )]
     ResourceSlotUnavailable { path: String },
     #[error("invalid creation timestamp")]
@@ -665,6 +738,7 @@ impl PackerError {
 /// source context; it is not meant to be constructed directly.
 pub struct DiscoveryWorld {
     root: PathBuf,
+    workdir: Option<PathBuf>,
     library: LazyHash<Library>,
     main: FileId,
     sources: FileStore<Arc<PrimaryLoader>>,
@@ -681,6 +755,10 @@ impl DiscoveryWorld {
         &self.root
     }
 
+    pub(crate) fn workdir(&self) -> Option<&Path> {
+        self.workdir.as_deref()
+    }
+
     fn unavailable_resource_slots(&self) -> Vec<String> {
         self.files.loader().resources.unavailable_resource_slots()
     }
@@ -691,6 +769,11 @@ impl DiscoveryWorld {
         hook: impl Fn(FileId) + Send + Sync + 'static,
     ) {
         self.source_request_hook = Some(Arc::new(hook));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn resolve_resource(&self, id: FileId) -> FileResult<Bytes> {
+        self.files.loader().load(id)
     }
 }
 

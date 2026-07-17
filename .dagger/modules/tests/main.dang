@@ -38,6 +38,33 @@ type Tests {
   }
 
   """
+  Create, inspect, and compile a pack whose package dependency is not vendored.
+  """
+  noVendorPackagesLifecycle: Void @check {
+    let pack = Dagger.typstPack.create(
+      project: self.project,
+      input: "main.typ",
+      noVendorPackages: true,
+      packageDir: self.packages,
+      offline: true,
+    )
+    let inspection = Dagger.typstPack.inspect(pack)
+
+    assert { inspection.contains("unvendored packages:") }
+    assert { inspection.contains("@local/greet:0.1.0") }
+
+    let output = Dagger.typstPack.compile(
+      pack: pack,
+      format: TypstPackOutputFormat.SVG,
+      packageDir: self.packages,
+      offline: true,
+    )
+    assert { output.file("page-1.svg").size > 0 }
+
+    null
+  }
+
+  """
   Extract a pack back into project files and vendored packages.
   """
   extract: Void @check {
@@ -138,6 +165,40 @@ type Tests {
 
     assert { output.contains("paged.txt") }
     assert { output.contains("html.txt") }
+
+    null
+  }
+
+  """
+  Forward sys.inputs through Pack creation, inspection, and final compilation.
+  """
+  sysInputsLifecycle: Void @check {
+    let source = Dagger
+      .currentModule
+      .source
+      .directory("fixtures/sys-inputs")
+    let discoveryResources = source.directory("resources")
+    let pack = Dagger.typstPack.create(
+      project: source,
+      input: "main.typ",
+      sysInputs: ["phase=discovery"],
+      resourceDirs: [discoveryResources],
+      ignoreSystemFonts: true,
+      ignoreEmbeddedFonts: true,
+    )
+    let inspection = Dagger.typstPack.inspect(pack)
+
+    assert { inspection.contains("discovered.txt") }
+
+    let output = Dagger.typstPack.compile(
+      pack: pack,
+      format: TypstPackOutputFormat.SVG,
+      sysInputs: ["phase=compilation"],
+      ignoreSystemFonts: true,
+      ignoreEmbeddedFonts: true,
+    )
+
+    assert { output.file("page-1.svg").size > 0 }
 
     null
   }

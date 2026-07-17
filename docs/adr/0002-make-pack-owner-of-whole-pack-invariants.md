@@ -27,7 +27,7 @@ The Pack module owns:
 
 - canonical, portable paths and coherent project and package file trees;
 - entrypoint presence;
-- disjoint packed-file and External Project Resource roles;
+- disjoint packed-file and Resource Slot roles;
 - agreement between vendored/external package declarations and package bytes;
 - font path, byte, face-index, and declaration consistency;
 - immutable canonical Pack state; and
@@ -58,5 +58,5 @@ Pack content.
   and declaration/content agreement into both construction adapters.
 
 Pack Override remains a separate future concept: it is a compilation-scoped
-replacement for contained Pack content, not Pack mutation and not an External
-Project Resource.
+replacement for contained Pack content, not Pack mutation and not a Resource
+Slot.

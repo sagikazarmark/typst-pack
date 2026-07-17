@@ -150,7 +150,7 @@ Consumers need the `embedded-fonts` feature to supply omitted fonts; pass
 Mind font licenses when redistributing packs with embedded fonts.
 
 When compiling a pack, fonts are used in this order of preference:
-pack fonts, `--font-path` fonts, system fonts, and Typst's embedded fonts
+pack fonts, system fonts, Typst's embedded fonts, and `--font-path` fonts
 (disable system fonts with `--ignore-system-fonts`).
 
 ### Output formats
@@ -245,6 +245,11 @@ compatibility aliases:
   `external_resource_reference` with `resource_slot` and `resource_provider`.
 - Replace CLI `--source-reference <DIR>` with `--resource-path <DIR>` and
   `--external-resource <PATH>` with `--resource-slot <PATH>`.
+- Rename Dagger arguments: `source` -> `project`, `entrypoint` -> `input`,
+  `inputs` -> `sysInputs`, `noPackages` -> `noVendorPackages`,
+  `sourceReferenceDir`/`sourceReferences` -> `resourceDirs`,
+  `externalResources` -> `resourceSlots`, and `sourceDateEpoch` ->
+  `creationTimestamp`.
 - Change creation from a directory plus `--entrypoint`/`--output` to
   `create <INPUT> [OUTPUT]`.
 - `PackWorld::new` and `PackWorldBuilder::build` now return `PackWorld`

@@ -773,6 +773,12 @@ impl PackBuilder {
     }
 
     /// Declares a Resource Slot whose bytes will be supplied at compilation time.
+    ///
+    /// ```compile_fail
+    /// use typst_pack::Pack;
+    ///
+    /// let _ = Pack::builder("main.typ").external_resource("assets/logo.png");
+    /// ```
     pub fn resource_slot(mut self, path: impl AsRef<str>) -> Result<Self, PackBuildError> {
         self.resource_slots
             .insert(canonical_path(PackPathRole::ResourceSlot, path.as_ref())?);

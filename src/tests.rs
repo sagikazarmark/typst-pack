@@ -2,9 +2,12 @@
 
 use crate::*;
 
+#[cfg(feature = "fs")]
+use std::collections::BTreeSet;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
+use std::time::Duration;
 
 use typst::World;
 use typst::diag::{FileError, FileResult};
@@ -93,25 +96,57 @@ struct ErrorProjectLoader {
     calls: Arc<AtomicUsize>,
 }
 
-#[cfg(feature = "fs")]
-struct BlockingProjectFile {
-    path: String,
+struct BlockingProjectFiles {
+    paths: Vec<String>,
     data: Bytes,
-    entered: Arc<std::sync::Barrier>,
-    release: Arc<std::sync::Barrier>,
+    entered: mpsc::Sender<String>,
+    release: Arc<Mutex<mpsc::Receiver<()>>>,
 }
 
-#[cfg(feature = "fs")]
-impl FileLoader for BlockingProjectFile {
+impl FileLoader for BlockingProjectFiles {
     fn load(&self, id: FileId) -> FileResult<Bytes> {
         let path = id.vpath().get_without_slash();
-        if matches!(id.root(), VirtualRoot::Project) && path == self.path {
-            self.entered.wait();
-            self.release.wait();
+        if matches!(id.root(), VirtualRoot::Project)
+            && self.paths.iter().any(|candidate| candidate == path)
+        {
+            self.entered
+                .send(path.to_owned())
+                .map_err(|_| FileError::Other(Some("test entry receiver was dropped".into())))?;
+            self.release
+                .lock()
+                .expect("test release lock poisoned")
+                .recv_timeout(TEST_SYNC_TIMEOUT)
+                .map_err(|_| FileError::Other(Some("timed out waiting for test release".into())))?;
             Ok(self.data.clone())
         } else {
             Err(FileError::NotFound(PathBuf::from(path)))
         }
+    }
+}
+
+const TEST_SYNC_TIMEOUT: Duration = Duration::from_secs(5);
+
+struct ReleaseGuard {
+    sender: mpsc::Sender<()>,
+    remaining: usize,
+}
+
+impl ReleaseGuard {
+    fn new(sender: mpsc::Sender<()>, remaining: usize) -> Self {
+        Self { sender, remaining }
+    }
+
+    fn release_all(&mut self) {
+        while self.remaining > 0 {
+            let _ = self.sender.send(());
+            self.remaining -= 1;
+        }
+    }
+}
+
+impl Drop for ReleaseGuard {
+    fn drop(&mut self) {
+        self.release_all();
     }
 }
 
@@ -343,16 +378,28 @@ fn manifest_defaults_to_no_resource_slots() {
 }
 
 #[test]
-fn pack_rejects_unsafe_resource_slot_declarations() {
+fn resource_slot_invariants_have_archive_and_builder_error_wrappers() {
+    let builder_error = Pack::builder("main.typ")
+        .resource_slot("../secret.png")
+        .unwrap_err();
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\nresource-slots = [\"../secret.png\"]\n";
     let bytes = raw_stored_zip(&[(MANIFEST_PATH, manifest), ("project/main.typ", b"Hello")]);
+    let archive_error = Pack::from_bytes(bytes).unwrap_err();
 
+    let PackBuildError::Invariant(builder_invariant) = builder_error else {
+        panic!("builder did not report a Pack invariant: {builder_error}");
+    };
+    let PackReadError::Invariant(archive_invariant) = archive_error else {
+        panic!("archive did not report a Pack invariant: {archive_error}");
+    };
+    assert_eq!(archive_invariant, builder_invariant);
     assert!(matches!(
-        Pack::from_bytes(bytes),
-        Err(PackReadError::Invariant(PackInvariantError::InvalidPath {
+        archive_invariant,
+        PackInvariantError::InvalidPath {
             role: PackPathRole::ResourceSlot,
+            ref path,
             ..
-        }))
+        } if path == "../secret.png"
     ));
 }
 
@@ -373,6 +420,22 @@ fn pack_normalizes_resource_slots_deterministically() {
         pack.manifest()
             .to_toml()
             .contains("resource-slots = [\n    \"logo.png\",\n    \"z.png\",\n]")
+    );
+
+    let built = Pack::builder("main.typ")
+        .file("main.typ", b"Hello".to_vec())
+        .unwrap()
+        .resource_slot("z.png")
+        .unwrap()
+        .resource_slot("assets/../logo.png")
+        .unwrap()
+        .resource_slot("./logo.png")
+        .unwrap()
+        .build()
+        .unwrap();
+    assert_eq!(
+        built.resource_slots().collect::<Vec<_>>(),
+        ["logo.png", "z.png"]
     );
 }
 
@@ -1686,25 +1749,71 @@ fn declared_resource_slot_compiles_through_a_provider() {
 }
 
 #[test]
-fn resource_provider_cannot_supply_typst_source() {
+fn source_compilation_cannot_use_a_non_typ_resource_slot_provider() {
     let pack = Pack::builder("main.typ")
-        .file(
-            "main.typ",
-            b"#let _ = read(\"provided.typ\")\n#import \"provided.typ\": mark\n#mark".to_vec(),
-        )
+        .file("main.typ", b"#include \"provided.data\"".to_vec())
         .unwrap()
-        .resource_slot("provided.typ")
+        .resource_slot("provided.data")
         .unwrap()
         .build()
         .unwrap();
-    let world = PackWorld::builder(pack)
-        .resource_provider(MemoryProjectFile::new(
-            "provided.typ",
-            b"#let mark = rect(width: 1pt, height: 1pt)".to_vec(),
-        ))
-        .build();
+    let (provider, calls) =
+        MemoryProjectFile::tracked("provided.data", b"#rect(width: 1pt, height: 1pt)".to_vec());
+    let world = PackWorld::builder(pack).resource_provider(provider).build();
 
     assert!(compile(&world, OutputFormat::Svg, &CompileOptions::default()).is_err());
+    assert_eq!(calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn pdf_default_timestamp_is_resolved_after_compilation() {
+    let pack = Pack::builder("main.typ")
+        .file(
+            "main.typ",
+            b"#read(\"timestamp-trigger.bin\")\n#rect(width: 1pt, height: 1pt)".to_vec(),
+        )
+        .unwrap()
+        .resource_slot("timestamp-trigger.bin")
+        .unwrap()
+        .build()
+        .unwrap();
+    let (provider, calls) = MemoryProjectFile::tracked("timestamp-trigger.bin", b"read".to_vec());
+    let world = PackWorld::builder(pack).resource_provider(provider).build();
+    let timestamp = typst_pdf::Timestamp::new_utc(
+        typst::foundations::Datetime::from_ymd_hms(2000, 1, 2, 3, 4, 5).unwrap(),
+    );
+    let default_resolutions = AtomicUsize::new(0);
+
+    let default_output = crate::compile::compile_with_page_preflight(
+        &world,
+        OutputFormat::Pdf,
+        &CompileOptions::default(),
+        || {
+            assert_eq!(calls.load(Ordering::Acquire), 1);
+            default_resolutions.fetch_add(1, Ordering::Relaxed);
+            Some(timestamp)
+        },
+        |_, _| Ok::<_, std::convert::Infallible>(()),
+    )
+    .unwrap();
+
+    let explicit_output = crate::compile::compile_with_page_preflight(
+        &world,
+        OutputFormat::Pdf,
+        &CompileOptions {
+            creation_timestamp: Some(timestamp),
+            ..CompileOptions::default()
+        },
+        || panic!("an explicit timestamp must not resolve the default"),
+        |_, _| Ok::<_, std::convert::Infallible>(()),
+    )
+    .unwrap();
+
+    assert_eq!(default_resolutions.load(Ordering::Relaxed), 1);
+    assert_eq!(
+        default_output.artifacts[0].bytes(),
+        explicit_output.artifacts[0].bytes()
+    );
 }
 
 #[test]
@@ -1801,6 +1910,75 @@ fn source_requests_do_not_consult_resource_providers() {
         Err(FileError::NotFound(_))
     ));
     assert_eq!(calls.load(Ordering::Relaxed), 0);
+}
+
+#[test]
+fn raw_reads_use_providers_even_when_a_resource_slot_has_a_typ_extension() {
+    let pack = Pack::builder("main.typ")
+        .file(
+            "main.typ",
+            b"#assert(read(\"provided.typ\") == \"injected\")\n#rect(width: 1pt, height: 1pt)"
+                .to_vec(),
+        )
+        .unwrap()
+        .resource_slot("provided.typ")
+        .unwrap()
+        .build()
+        .unwrap();
+    let (provider, calls) = MemoryProjectFile::tracked("provided.typ", b"injected".to_vec());
+    let world = PackWorld::builder(pack).resource_provider(provider).build();
+
+    let output = compile(&world, OutputFormat::Svg, &CompileOptions::default()).unwrap();
+
+    assert_eq!(output.artifacts.len(), 1);
+    assert_eq!(calls.load(Ordering::Relaxed), 1);
+}
+
+#[test]
+fn concurrent_world_file_and_source_requests_remain_isolated() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", Vec::new())
+        .unwrap()
+        .resource_slot("external.typ")
+        .unwrap()
+        .build()
+        .unwrap();
+    let (entered_tx, entered_rx) = mpsc::channel();
+    let (release_tx, release_rx) = mpsc::channel();
+    let world = PackWorld::builder(pack)
+        .resource_provider(BlockingProjectFiles {
+            paths: vec!["external.typ".to_owned()],
+            data: Bytes::new(b"provided".to_vec()),
+            entered: entered_tx,
+            release: Arc::new(Mutex::new(release_rx)),
+        })
+        .build();
+    let id = project_file_id("external.typ");
+
+    std::thread::scope(|scope| {
+        let mut release = ReleaseGuard::new(release_tx, 1);
+        let world = &world;
+        let file = scope.spawn(|| world.file(id));
+        assert_eq!(
+            entered_rx.recv_timeout(TEST_SYNC_TIMEOUT).unwrap(),
+            "external.typ"
+        );
+
+        let (source_finished_tx, source_finished_rx) = mpsc::channel();
+        let source = scope.spawn(move || {
+            let result = world.source(id);
+            let _ = source_finished_tx.send(());
+            result
+        });
+        source_finished_rx.recv_timeout(TEST_SYNC_TIMEOUT).unwrap();
+
+        release.release_all();
+        let file_result = file.join().unwrap();
+        let source_result = source.join().unwrap();
+
+        assert!(matches!(source_result, Err(FileError::NotFound(_))));
+        assert_eq!(file_result.unwrap().as_slice(), b"provided");
+    });
 }
 
 #[test]
@@ -2076,6 +2254,39 @@ Rows: #csv("data.csv").len()
     }
 
     #[test]
+    fn discovery_targets_union_shared_warnings() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("main.typ"),
+            "#set text(font: \"Definitely Missing\")\nHello",
+        )
+        .unwrap();
+
+        let outcome = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .typst_embedded_fonts(false)
+            .feature(typst::Feature::Html)
+            .target(DiscoveryTarget::Paged)
+            .target(DiscoveryTarget::Html)
+            .pack()
+            .unwrap();
+
+        let missing_font_warnings = outcome
+            .report
+            .compile_warnings
+            .iter()
+            .filter(|warning| warning.message.contains("unknown font family"))
+            .count();
+        assert_eq!(
+            missing_font_warnings, 1,
+            "{:?}",
+            outcome.report.compile_warnings
+        );
+    }
+
+    #[test]
     fn package_discovery_does_not_consult_resource_providers() {
         let dir = tempfile::tempdir().unwrap();
         let (project, packages) = fixture(dir.path());
@@ -2229,13 +2440,17 @@ Rows: #csv("data.csv").len()
         )
         .unwrap();
         fs::write(project.join("assets/logo.png"), tiny_png()).unwrap();
+        let (provider, provider_calls) =
+            MemoryProjectFile::tracked("assets/logo.png", b"provider bytes".to_vec());
 
         let outcome = Packer::new(&project, "main.typ")
             .system_fonts(false)
             .resource_slot("assets/logo.png")
+            .resource_provider(provider)
             .pack()
             .unwrap();
 
+        assert_eq!(provider_calls.load(Ordering::Relaxed), 0);
         assert_eq!(outcome.report.resource_slots, ["assets/logo.png"]);
         assert!(outcome.pack.file("assets/logo.png").is_none());
         assert_eq!(
@@ -2314,6 +2529,8 @@ Rows: #csv("data.csv").len()
             outcome.pack.resource_slots().collect::<Vec<_>>(),
             ["conditional/logo.png"]
         );
+        assert!(outcome.report.warnings.is_empty());
+        assert!(outcome.report.compile_warnings.is_empty());
     }
 
     #[test]
@@ -2570,8 +2787,9 @@ Rows: #csv("data.csv").len()
                 if path == "branding/logo.bin"
         ));
         let message = error.to_string();
+        assert!(message.contains("Resource Provider"), "{message}");
         assert!(message.contains("source project"), "{message}");
-        assert!(message.contains("--resource-path"), "{message}");
+        assert!(!message.contains("--resource-path"), "{message}");
         assert!(message.contains("not stored in the Pack"), "{message}");
     }
 
@@ -2601,7 +2819,7 @@ Rows: #csv("data.csv").len()
     }
 
     #[test]
-    fn discovery_errors_take_precedence_over_timing_export_errors() {
+    fn timing_export_errors_take_precedence_over_discovery_errors() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
         fs::create_dir_all(&project).unwrap();
@@ -2615,8 +2833,7 @@ Rows: #csv("data.csv").len()
 
         assert!(matches!(
             result,
-            Err(PackerError::ResourceSlotUnavailable { ref path })
-                if path == "branding/logo.bin"
+            Err(PackerError::Timings(ref message)) if message.contains("failed to create file")
         ));
     }
 
@@ -2690,53 +2907,78 @@ Rows: #csv("data.csv").len()
     }
 
     #[test]
-    fn concurrent_provider_file_load_cannot_satisfy_discovery_source_request() {
+    fn concurrent_resource_provenance_is_complete_deduplicated_and_source_isolated() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
         fs::create_dir_all(&project).unwrap();
         fs::write(project.join("main.typ"), "#rect(width: 1pt, height: 1pt)").unwrap();
 
-        let raw_entered = Arc::new(std::sync::Barrier::new(2));
-        let raw_release = Arc::new(std::sync::Barrier::new(2));
-        let mut outcome = Packer::new(&project, "main.typ")
+        let (raw_entered_tx, raw_entered_rx) = mpsc::channel();
+        let (raw_release_tx, raw_release_rx) = mpsc::channel();
+        let first = project_file_id("external-a.typ");
+        let second = project_file_id("external-b.typ");
+        let outcome = Packer::new(&project, "main.typ")
             .system_fonts(false)
-            .resource_provider(BlockingProjectFile {
-                path: "external.typ".to_owned(),
+            .resource_slot("z.bin")
+            .resource_slot("a.bin")
+            .resource_slot("z.bin")
+            .resource_provider(BlockingProjectFiles {
+                paths: vec!["external-a.typ".to_owned(), "external-b.typ".to_owned()],
                 data: Bytes::new(b"#let injected = true".to_vec()),
-                entered: Arc::clone(&raw_entered),
-                release: Arc::clone(&raw_release),
+                entered: raw_entered_tx,
+                release: Arc::new(Mutex::new(raw_release_rx)),
+            })
+            .discovery_hook(move |world| {
+                let (source_entered_tx, source_entered_rx) = mpsc::channel();
+                let (source_release_tx, source_release_rx) = mpsc::channel();
+                let source_release_rx = Arc::new(Mutex::new(source_release_rx));
+                world.set_source_request_hook(move |source_id| {
+                    if source_id == first {
+                        let _ = source_entered_tx.send(());
+                        source_release_rx
+                            .lock()
+                            .expect("source release lock poisoned")
+                            .recv_timeout(TEST_SYNC_TIMEOUT)
+                            .expect("timed out waiting to release source request");
+                    }
+                });
+                let world: &DiscoveryWorld = world;
+
+                std::thread::scope(|scope| {
+                    let mut raw_release = ReleaseGuard::new(raw_release_tx.clone(), 2);
+                    let mut source_release = ReleaseGuard::new(source_release_tx, 1);
+                    let first_file = scope.spawn(|| world.resolve_resource(first));
+                    let second_file = scope.spawn(|| world.resolve_resource(second));
+                    let entered = BTreeSet::from([
+                        raw_entered_rx.recv_timeout(TEST_SYNC_TIMEOUT).unwrap(),
+                        raw_entered_rx.recv_timeout(TEST_SYNC_TIMEOUT).unwrap(),
+                    ]);
+                    assert_eq!(
+                        entered,
+                        BTreeSet::from(["external-a.typ".to_owned(), "external-b.typ".to_owned(),])
+                    );
+
+                    let source = scope.spawn(|| world.source(first));
+                    source_entered_rx.recv_timeout(TEST_SYNC_TIMEOUT).unwrap();
+                    source_release.release_all();
+                    assert!(matches!(
+                        source.join().unwrap(),
+                        Err(FileError::NotFound(_))
+                    ));
+
+                    raw_release.release_all();
+                    assert!(first_file.join().unwrap().is_ok());
+                    assert!(second_file.join().unwrap().is_ok());
+                });
             })
             .pack()
             .unwrap();
-        let id = project_file_id("external.typ");
-        let source_entered = Arc::new(std::sync::Barrier::new(2));
-        let source_release = Arc::new(std::sync::Barrier::new(2));
-        outcome.world.set_source_request_hook({
-            let source_entered = Arc::clone(&source_entered);
-            let source_release = Arc::clone(&source_release);
-            move |source_id| {
-                if source_id == id {
-                    source_entered.wait();
-                    source_release.wait();
-                }
-            }
-        });
+        let expected = ["a.bin", "external-a.typ", "external-b.typ", "z.bin"];
+        let reread = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
 
-        std::thread::scope(|scope| {
-            let file = scope.spawn(|| outcome.world.file(id));
-            raw_entered.wait();
-            let source = scope.spawn(|| outcome.world.source(id));
-            source_entered.wait();
-
-            raw_release.wait();
-            assert!(file.join().unwrap().is_ok());
-            source_release.wait();
-
-            assert!(matches!(
-                source.join().unwrap(),
-                Err(FileError::NotFound(_))
-            ));
-        });
+        assert_eq!(outcome.report.resource_slots, expected);
+        assert_eq!(outcome.pack.resource_slots().collect::<Vec<_>>(), expected);
+        assert_eq!(reread.resource_slots().collect::<Vec<_>>(), expected);
     }
 
     #[test]
@@ -2931,6 +3173,40 @@ fn html_output_is_gated_by_the_html_feature() {
     assert!(html.contains("<html"));
     assert!(html.contains("Hello from HTML"));
     assert!(!output.warnings.is_empty());
+}
+
+#[cfg(feature = "embedded-fonts")]
+#[test]
+fn pack_font_faces_remain_authoritative_over_host_and_typst_embedded_fonts() {
+    let embedded_data = embedded_font_data();
+    let mut pack_data = embedded_data.clone();
+    pack_data.push(0);
+    let pack_font = typst::text::Font::new(Bytes::new(pack_data.clone()), 0).unwrap();
+    let mut host_data = embedded_data.clone();
+    host_data.push(1);
+    let host_font = typst::text::Font::new(Bytes::new(host_data.clone()), 0).unwrap();
+    assert_eq!(pack_font.info().family, host_font.info().family);
+    assert_eq!(pack_font.info().variant, host_font.info().variant);
+    let family = pack_font.info().family.to_lowercase();
+    let variant = pack_font.info().variant;
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"Hello".to_vec())
+        .unwrap()
+        .font(pack_data.clone(), 0)
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let world = PackWorld::builder(pack)
+        .embedded_fonts(true)
+        .extra_fonts([(host_font.clone(), host_font.info().clone())])
+        .build();
+    let selected = world.book().select(&family, variant).unwrap();
+    let selected = world.font(selected).unwrap();
+
+    assert_ne!(pack_data, embedded_data);
+    assert_ne!(pack_data, host_data);
+    assert_eq!(selected.data().as_slice(), pack_data);
 }
 
 #[cfg(feature = "fs")]

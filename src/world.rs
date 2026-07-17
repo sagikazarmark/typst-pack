@@ -19,6 +19,14 @@ use crate::resource::{CompilationResources, Provider};
 #[cfg(feature = "fs")]
 const USER_AGENT: &str = concat!("typst-pack/", env!("CARGO_PKG_VERSION"));
 
+// Integration tests execute a separate non-`cfg(test)` binary.
+#[cfg(all(
+    feature = "fs",
+    feature = "_test-package-download-probe",
+    debug_assertions
+))]
+const PACKAGE_DOWNLOAD_PROBE_ENV: &str = "TYPST_PACK_TEST_PACKAGE_DOWNLOAD_PROBE";
+
 #[cfg(feature = "fs")]
 pub(crate) fn system_packages(
     package_path: Option<&std::path::Path>,
@@ -35,6 +43,14 @@ pub(crate) fn system_packages(
         offline,
         certificate,
         |certificate| {
+            #[cfg(all(feature = "_test-package-download-probe", debug_assertions))]
+            if let Some(output) = std::env::var_os(PACKAGE_DOWNLOAD_PROBE_ENV) {
+                return UniversePackages::new(PackageDownloadProbe {
+                    certificate: certificate.map(PathBuf::from),
+                    output: output.into(),
+                });
+            }
+
             let downloader = match certificate {
                 Some(path) => SystemDownloader::with_cert_path(USER_AGENT, path.to_path_buf()),
                 None => SystemDownloader::new(USER_AGENT),
@@ -262,6 +278,12 @@ impl PackWorldBuilder {
         Ok(self)
     }
 
+    #[cfg(feature = "cli")]
+    pub(crate) fn fixed_time(mut self, time: typst_kit::datetime::Time) -> Self {
+        self.clock = Clock::FixedTimestamp(time);
+        self
+    }
+
     /// Uses the system clock for `datetime.today()`.
     #[cfg(feature = "fs")]
     pub fn system_date(mut self) -> Self {
@@ -305,6 +327,30 @@ impl PackWorldBuilder {
     /// Adds a Resource Provider for declared Resource Slots.
     ///
     /// Providers are tried in registration order after packed project files.
+    ///
+    /// ```compile_fail
+    /// use std::path::PathBuf;
+    /// use typst::diag::{FileError, FileResult};
+    /// use typst::foundations::Bytes;
+    /// use typst::syntax::FileId;
+    /// use typst_kit::files::FileLoader;
+    /// use typst_pack::{Pack, PackWorld};
+    ///
+    /// struct Missing;
+    /// impl FileLoader for Missing {
+    ///     fn load(&self, id: FileId) -> FileResult<Bytes> {
+    ///         Err(FileError::NotFound(PathBuf::from(
+    ///             id.vpath().get_without_slash(),
+    ///         )))
+    ///     }
+    /// }
+    ///
+    /// let pack = Pack::builder("main.typ")
+    ///     .file("main.typ", Vec::new())?
+    ///     .build()?;
+    /// let _ = PackWorld::builder(pack).external_resource_reference(Missing);
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn resource_provider(mut self, provider: impl FileLoader + Send + Sync + 'static) -> Self {
         self.resource_providers.push(Box::new(provider));
         self
@@ -377,6 +423,40 @@ impl SystemPackageLoader {
 /// itself) can satisfy dependencies.
 #[cfg(feature = "fs")]
 pub struct OfflineDownloader;
+
+#[cfg(all(
+    feature = "fs",
+    feature = "_test-package-download-probe",
+    debug_assertions
+))]
+struct PackageDownloadProbe {
+    certificate: Option<PathBuf>,
+    output: PathBuf,
+}
+
+#[cfg(all(
+    feature = "fs",
+    feature = "_test-package-download-probe",
+    debug_assertions
+))]
+impl typst_kit::downloader::Downloader for PackageDownloadProbe {
+    fn stream(
+        &self,
+        _key: &dyn std::any::Any,
+        _url: &str,
+    ) -> std::io::Result<(Option<usize>, Box<dyn std::io::Read>)> {
+        let certificate = self
+            .certificate
+            .as_deref()
+            .map(|path| path.to_string_lossy())
+            .unwrap_or_default();
+        std::fs::write(&self.output, certificate.as_bytes())?;
+        Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "package download stopped by test probe",
+        ))
+    }
+}
 
 #[cfg(feature = "fs")]
 impl typst_kit::downloader::Downloader for OfflineDownloader {
