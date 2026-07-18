@@ -239,14 +239,16 @@ object.
 Both creators share one synchronous discovery and issuance implementation.
 The Asynchronous Creator may acquire a complete Font Catalog Snapshot before
 discovery. When synchronous discovery first reveals an exact Package
-Specification that is not staged, the attempt returns an internal acquisition
-request; the driver acquires it asynchronously and restarts that isolated
-Discovery Variant. Partial traces from an interrupted pass are discarded.
-After dependencies reach a fixed point, both creators perform the same
-discovery, snapshot validation, assembly, replay, and issuance path.
+Specification or selected Font Container whose bytes are not staged, the
+attempt returns an internal acquisition request; the driver acquires it
+asynchronously and restarts that isolated Discovery Variant. Partial traces
+from an interrupted pass are discarded. After dependencies reach a fixed
+point, both creators perform the same discovery, snapshot validation, assembly,
+replay, and issuance path.
 
 This restart behavior is observable through attempt telemetry, not Pack
-semantics. It must be bounded by distinct-package and restart limits.
+semantics. It must be bounded by distinct-package, selected-font-container, and
+restart limits.
 
 Creation owns these invariants:
 
