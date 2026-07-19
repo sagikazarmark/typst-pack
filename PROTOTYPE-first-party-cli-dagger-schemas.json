@@ -1,0 +1,769 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://typst-pack.example/spec/first-party-adapter-schemas.json",
+  "title": "PROTOTYPE typst-pack first-party adapter schemas",
+  "oneOf": [
+    {"$ref": "#/$defs/discovery_variant"},
+    {"$ref": "#/$defs/override_set"},
+    {"$ref": "#/$defs/embedding_policy"},
+    {"$ref": "#/$defs/canonical_diagnostic_policy"},
+    {"$ref": "#/$defs/pack_metadata"},
+    {"$ref": "#/$defs/pack_annotation"},
+    {"$ref": "#/$defs/operation_limits"},
+    {"$ref": "#/$defs/adapter_resource_profile"},
+    {"$ref": "#/$defs/pack_ingress_operation"},
+    {"$ref": "#/$defs/pack_inspection"},
+    {"$ref": "#/$defs/pack_inspection_operation"},
+    {"$ref": "#/$defs/creation_report"},
+    {"$ref": "#/$defs/create_operation"},
+    {"$ref": "#/$defs/compilation_terminal"},
+    {"$ref": "#/$defs/compilation_report"},
+    {"$ref": "#/$defs/compile_operation"},
+    {"$ref": "#/$defs/representation_operation"},
+    {"$ref": "#/$defs/project_materialization_operation"},
+    {"$ref": "#/$defs/compilation_staging"},
+    {"$ref": "#/$defs/watch_state"},
+    {"$ref": "#/$defs/watch_output_root"},
+    {"$ref": "#/$defs/watch_output_pointer"}
+  ],
+  "$defs": {
+    "decimal": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)$"
+    },
+    "positive_decimal": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]*$"
+    },
+    "signed_decimal": {
+      "type": "string",
+      "pattern": "^(0|-?[1-9][0-9]*)$"
+    },
+    "identity": {
+      "type": "string",
+      "pattern": "^typst-pack:[a-z0-9-]+:[0-9]+:sha256:[0-9a-f]{64}$"
+    },
+    "nullable_identity": {
+      "oneOf": [
+        {"$ref": "#/$defs/identity"},
+        {"type": "null"}
+      ]
+    },
+    "project_path": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^(?!/)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!.*[:\\\\])[^/]+(?:/[^/]+)*$"
+    },
+    "input_schema": {
+      "type": "object",
+      "required": ["schema", "schema_version"],
+      "properties": {
+        "schema": {"type": "string"},
+        "schema_version": {"const": 1}
+      }
+    },
+    "output_schema": {
+      "type": "object",
+      "required": ["name", "major", "minor"],
+      "additionalProperties": false,
+      "properties": {
+        "name": {"type": "string", "pattern": "^org\\.typst-pack\\.[a-z0-9-]+$"},
+        "major": {"const": 1},
+        "minor": {"type": "integer", "minimum": 0}
+      }
+    },
+    "producer": {
+      "type": "object",
+      "required": ["adapter", "adapter_version", "typst_pack_version", "typst_version"],
+      "additionalProperties": false,
+      "properties": {
+        "adapter": {"enum": ["cli", "dagger"]},
+        "adapter_version": {"type": "string", "minLength": 1},
+        "typst_pack_version": {"type": "string", "minLength": 1},
+        "typst_version": {"type": "string", "minLength": 1}
+      }
+    },
+    "document_time": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["kind"],
+          "additionalProperties": false,
+          "properties": {"kind": {"const": "absent"}}
+        },
+        {
+          "type": "object",
+          "required": ["kind", "value"],
+          "additionalProperties": false,
+          "properties": {
+            "kind": {"const": "unix_seconds"},
+            "value": {"$ref": "#/$defs/signed_decimal"}
+          }
+        }
+      ]
+    },
+    "source_override": {
+      "type": "object",
+      "required": ["pack_path", "source_file"],
+      "additionalProperties": false,
+      "properties": {
+        "pack_path": {"$ref": "#/$defs/project_path"},
+        "source_file": {"type": "string", "minLength": 1}
+      }
+    },
+    "discovery_variant": {
+      "type": "object",
+      "required": ["schema", "schema_version", "label", "target", "inputs", "features", "document_time", "overrides"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "org.typst-pack.discovery-variant"},
+        "schema_version": {"const": 1},
+        "label": {"type": ["string", "null"], "minLength": 1},
+        "target": {"enum": ["paged", "html"]},
+        "inputs": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["key", "value"],
+            "additionalProperties": false,
+            "properties": {
+              "key": {"type": "string", "minLength": 1},
+              "value": {"type": "string"}
+            }
+          }
+        },
+        "features": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"enum": ["a11y-extras", "bundle"]}
+        },
+        "document_time": {"$ref": "#/$defs/document_time"},
+        "overrides": {"type": "array", "items": {"$ref": "#/$defs/source_override"}}
+      }
+    },
+    "override_set": {
+      "type": "object",
+      "required": ["schema", "schema_version", "overrides"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "org.typst-pack.override-set"},
+        "schema_version": {"const": 1},
+        "overrides": {"type": "array", "items": {"$ref": "#/$defs/source_override"}}
+      }
+    },
+    "embedding_rules": {
+      "type": "object",
+      "required": ["default", "rules"],
+      "additionalProperties": false,
+      "properties": {
+        "default": {"enum": ["embed", "external"]},
+        "rules": {"type": "array"}
+      }
+    },
+    "embedding_policy": {
+      "type": "object",
+      "required": ["schema", "schema_version", "packages", "fonts"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "org.typst-pack.embedding-policy"},
+        "schema_version": {"const": 1},
+        "packages": {
+          "allOf": [
+            {"$ref": "#/$defs/embedding_rules"},
+            {
+              "properties": {
+                "rules": {
+                  "items": {
+                    "type": "object",
+                    "required": ["specification", "disposition"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "specification": {"type": "string", "minLength": 1},
+                      "disposition": {"enum": ["embed", "external"]}
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        },
+        "fonts": {
+          "allOf": [
+            {"$ref": "#/$defs/embedding_rules"},
+            {
+              "properties": {
+                "rules": {
+                  "items": {
+                    "type": "object",
+                    "required": ["container_identity", "disposition"],
+                    "additionalProperties": false,
+                    "properties": {
+                      "container_identity": {"$ref": "#/$defs/identity"},
+                      "disposition": {"enum": ["embed", "external"]}
+                    }
+                  }
+                }
+              }
+            }
+          ]
+        }
+      }
+    },
+    "canonical_diagnostic_policy": {
+      "type": "object",
+      "required": ["schema", "schema_version", "policy_version", "max_entries", "max_canonical_entry_bytes"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "org.typst-pack.canonical-diagnostic-policy"},
+        "schema_version": {"const": 1},
+        "policy_version": {"const": 1},
+        "max_entries": {"$ref": "#/$defs/decimal"},
+        "max_canonical_entry_bytes": {"$ref": "#/$defs/decimal"}
+      }
+    },
+    "pack_metadata": {
+      "type": "object",
+      "required": ["schema", "schema_version", "title", "description", "authors", "keywords"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "org.typst-pack.pack-metadata"},
+        "schema_version": {"const": 1},
+        "title": {"type": ["string", "null"], "minLength": 1},
+        "description": {"type": ["string", "null"], "minLength": 1},
+        "authors": {"type": "array", "items": {"type": "string", "minLength": 1}},
+        "keywords": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "pack_annotation": {
+      "type": "object",
+      "required": ["schema", "schema_version", "identifier", "annotation_epoch", "payload_file"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "org.typst-pack.pack-annotation"},
+        "schema_version": {"const": 1},
+        "identifier": {"type": "string", "pattern": "^[A-Za-z0-9](?:[A-Za-z0-9.-]*[A-Za-z0-9])?\\.ann$"},
+        "annotation_epoch": {"type": "integer", "minimum": 1, "maximum": 4294967295},
+        "payload_file": {"type": "string", "minLength": 1}
+      }
+    },
+    "pack_ingress_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "archive_bytes": {"$ref": "#/$defs/decimal"},
+        "control_record_bytes": {"$ref": "#/$defs/decimal"},
+        "decoded_closure_bytes": {"$ref": "#/$defs/decimal"},
+        "largest_file_bytes": {"$ref": "#/$defs/decimal"},
+        "archive_entries": {"$ref": "#/$defs/decimal"},
+        "files": {"$ref": "#/$defs/decimal"},
+        "maximum_expansion_ratio": {"$ref": "#/$defs/positive_decimal"},
+        "stable_spool_bytes": {"$ref": "#/$defs/decimal"},
+        "retained_memory_bytes": {"$ref": "#/$defs/decimal"}
+      }
+    },
+    "creation_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "project_files": {"$ref": "#/$defs/decimal"},
+        "aggregate_project_bytes": {"$ref": "#/$defs/decimal"},
+        "largest_project_file_bytes": {"$ref": "#/$defs/decimal"},
+        "packages": {"$ref": "#/$defs/decimal"},
+        "package_tree_bytes": {"$ref": "#/$defs/decimal"},
+        "font_containers": {"$ref": "#/$defs/decimal"},
+        "font_faces": {"$ref": "#/$defs/decimal"},
+        "font_bytes": {"$ref": "#/$defs/decimal"},
+        "discovery_variants": {"$ref": "#/$defs/decimal"},
+        "discovery_restarts": {"$ref": "#/$defs/decimal"},
+        "override_count": {"$ref": "#/$defs/decimal"},
+        "largest_override_bytes": {"$ref": "#/$defs/decimal"},
+        "aggregate_override_bytes": {"$ref": "#/$defs/decimal"},
+        "stable_spool_bytes": {"$ref": "#/$defs/decimal"},
+        "retained_memory_bytes": {"$ref": "#/$defs/decimal"}
+      }
+    },
+    "compilation_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "dependencies": {"$ref": "#/$defs/decimal"},
+        "downloaded_dependency_bytes": {"$ref": "#/$defs/decimal"},
+        "expanded_dependency_bytes": {"$ref": "#/$defs/decimal"},
+        "largest_dependency_bytes": {"$ref": "#/$defs/decimal"},
+        "override_count": {"$ref": "#/$defs/decimal"},
+        "largest_override_bytes": {"$ref": "#/$defs/decimal"},
+        "aggregate_override_bytes": {"$ref": "#/$defs/decimal"},
+        "stable_spool_bytes": {"$ref": "#/$defs/decimal"},
+        "pages": {"$ref": "#/$defs/decimal"},
+        "artifacts": {"$ref": "#/$defs/decimal"},
+        "largest_artifact_bytes": {"$ref": "#/$defs/decimal"},
+        "aggregate_artifact_bytes": {"$ref": "#/$defs/decimal"},
+        "largest_raster_pixels": {"$ref": "#/$defs/decimal"},
+        "aggregate_raster_pixels": {"$ref": "#/$defs/decimal"},
+        "retained_memory_bytes": {"$ref": "#/$defs/decimal"},
+        "diagnostic_projection_entries": {"$ref": "#/$defs/decimal"},
+        "diagnostic_projection_bytes": {"$ref": "#/$defs/decimal"},
+        "diagnostic_source_bindings": {"$ref": "#/$defs/decimal"},
+        "diagnostic_source_blobs": {"$ref": "#/$defs/decimal"},
+        "largest_diagnostic_source_bytes": {"$ref": "#/$defs/decimal"},
+        "aggregate_diagnostic_source_bytes": {"$ref": "#/$defs/decimal"},
+        "diagnostic_source_metadata_bytes": {"$ref": "#/$defs/decimal"}
+      }
+    },
+    "representation_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "output_bytes": {"$ref": "#/$defs/decimal"},
+        "files": {"$ref": "#/$defs/decimal"},
+        "stable_spool_bytes": {"$ref": "#/$defs/decimal"},
+        "retained_memory_bytes": {"$ref": "#/$defs/decimal"}
+      }
+    },
+    "spool_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source_bytes": {"$ref": "#/$defs/decimal"},
+        "stable_spool_bytes": {"$ref": "#/$defs/decimal"},
+        "in_flight_bytes": {"$ref": "#/$defs/decimal"},
+        "retained_memory_bytes": {"$ref": "#/$defs/decimal"}
+      }
+    },
+    "transport_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "objects": {"$ref": "#/$defs/decimal"},
+        "aggregate_bytes": {"$ref": "#/$defs/decimal"},
+        "largest_object_bytes": {"$ref": "#/$defs/decimal"},
+        "in_flight_bytes": {"$ref": "#/$defs/decimal"},
+        "transfer_concurrency": {"$ref": "#/$defs/positive_decimal"}
+      }
+    },
+    "execution_limits": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "acquisition_concurrency": {"$ref": "#/$defs/positive_decimal"},
+        "ready_worker_concurrency": {"$ref": "#/$defs/positive_decimal"},
+        "ready_queue_capacity": {"$ref": "#/$defs/decimal"},
+        "queue_timeout_ms": {"$ref": "#/$defs/positive_decimal"},
+        "latency_target_ms": {"$ref": "#/$defs/positive_decimal"},
+        "isolated_worker_capacity": {"$ref": "#/$defs/positive_decimal"},
+        "forced_terminate_ms": {"$ref": "#/$defs/positive_decimal"}
+      }
+    },
+    "operation_limits": {
+      "type": "object",
+      "required": ["schema", "schema_version"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"const": "org.typst-pack.operation-limits"},
+        "schema_version": {"const": 1},
+        "pack_ingress": {"$ref": "#/$defs/pack_ingress_limits"},
+        "creation": {"$ref": "#/$defs/creation_limits"},
+        "compilation": {"$ref": "#/$defs/compilation_limits"},
+        "representation": {"$ref": "#/$defs/representation_limits"},
+        "spool": {"$ref": "#/$defs/spool_limits"},
+        "transport": {"$ref": "#/$defs/transport_limits"},
+        "execution": {"$ref": "#/$defs/execution_limits"}
+      }
+    },
+    "adapter_resource_profile": {
+      "type": "object",
+      "required": ["schema", "schema_version", "profile", "units", "tightening", "pack_ingress", "creation", "compilation", "representation", "spool", "transport", "execution", "canonical_diagnostic_policy", "deadlines", "engine_runtime_domain"],
+      "properties": {
+        "schema": {"const": "org.typst-pack.adapter-resource-profile"},
+        "schema_version": {"const": 1},
+        "profile": {
+          "type": "object",
+          "required": ["name", "version"],
+          "properties": {"name": {"enum": ["native-cli", "dagger-ci"]}, "version": {"const": 1}}
+        },
+        "units": {"type": "object"},
+        "tightening": {"type": "string"},
+        "pack_ingress": {"type": "object"},
+        "creation": {"type": "object"},
+        "compilation": {"type": "object"},
+        "representation": {"type": "object"},
+        "spool": {"type": "object"},
+        "transport": {"type": "object"},
+        "execution": {"type": "object"},
+        "canonical_diagnostic_policy": {"type": "object"},
+        "deadlines": {"type": "object"},
+        "engine_runtime_domain": {"type": "object"}
+      }
+    },
+    "failure": {
+      "type": "object",
+      "required": ["class", "code", "phase", "safe_message", "details"],
+      "additionalProperties": false,
+      "properties": {
+        "class": {"type": "string", "minLength": 1},
+        "code": {"type": "string", "pattern": "^org\\.typst-pack\\.[a-z0-9.-]+$"},
+        "phase": {"type": "string", "minLength": 1},
+        "safe_message": {"type": "string"},
+        "details": {"type": "object"}
+      }
+    },
+    "nullable_failure": {
+      "oneOf": [{"$ref": "#/$defs/failure"}, {"type": "null"}]
+    },
+    "deadline": {
+      "oneOf": [
+        {"type": "object", "required": ["kind"], "additionalProperties": false, "properties": {"kind": {"const": "none"}}},
+        {"type": "object", "required": ["kind", "milliseconds"], "additionalProperties": false, "properties": {"kind": {"const": "relative"}, "milliseconds": {"$ref": "#/$defs/positive_decimal"}}}
+      ]
+    },
+    "admission": {
+      "type": "object",
+      "required": ["status", "requested_trust", "admitted_trust", "resource_profile", "requested_limits", "admitted_limits", "deadline", "interruption_strength", "refusal"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"enum": ["admitted", "refused"]},
+        "requested_trust": {"enum": ["trusted", "partially_trusted", "hostile"]},
+        "admitted_trust": {"type": ["string", "null"], "enum": ["trusted", "partially_trusted", null]},
+        "resource_profile": {"type": ["object", "null"]},
+        "requested_limits": {"type": ["object", "null"]},
+        "admitted_limits": {"type": ["object", "null"]},
+        "deadline": {"$ref": "#/$defs/deadline"},
+        "interruption_strength": {"type": ["string", "null"], "enum": ["cooperative", "isolated", null]},
+        "refusal": {"$ref": "#/$defs/nullable_failure"}
+      }
+    },
+    "channel": {
+      "type": "object",
+      "required": ["status", "reason", "payload"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"enum": ["not_requested", "complete", "redacted", "limited", "unavailable", "not_attempted", "succeeded", "failed"]},
+        "reason": {"type": ["string", "null"]},
+        "payload": {}
+      }
+    },
+    "verification": {
+      "type": "object",
+      "required": ["mode", "expected_pack_identity", "derived_pack_identity", "matched", "assurance"],
+      "additionalProperties": false,
+      "properties": {
+        "mode": {"enum": ["derive", "verify"]},
+        "expected_pack_identity": {"$ref": "#/$defs/nullable_identity"},
+        "derived_pack_identity": {"$ref": "#/$defs/nullable_identity"},
+        "matched": {"type": ["boolean", "null"]},
+        "assurance": {"enum": ["internal_validity_only", "identity_verified", "not_established"]}
+      }
+    },
+    "representation_receipt": {
+      "type": "object",
+      "required": ["contract_version", "role", "terminal", "stage", "input_content_identity", "output_content_identity", "pack_identity", "archive_encoding_identity", "format_epoch", "validation_rules", "pack_exposed", "stable_value_completed", "publication", "failure"],
+      "additionalProperties": false,
+      "properties": {
+        "contract_version": {"const": 1},
+        "role": {"enum": ["archive_read", "closure_import", "archive_encode", "closure_export", "project_materialization"]},
+        "terminal": {"type": "string"},
+        "stage": {"type": "string"},
+        "input_content_identity": {"$ref": "#/$defs/nullable_identity"},
+        "output_content_identity": {"$ref": "#/$defs/nullable_identity"},
+        "pack_identity": {"$ref": "#/$defs/nullable_identity"},
+        "archive_encoding_identity": {"$ref": "#/$defs/nullable_identity"},
+        "format_epoch": {"type": ["integer", "null"]},
+        "validation_rules": {"type": "array", "items": {"type": "string"}},
+        "pack_exposed": {"type": "boolean"},
+        "stable_value_completed": {"type": "boolean"},
+        "publication": {"type": ["object", "null"]},
+        "failure": {"$ref": "#/$defs/nullable_failure"}
+      }
+    },
+    "pack_ingress_operation": {
+      "type": "object",
+      "required": ["schema", "producer", "input_kind", "admission", "terminal", "verification", "pack_identity", "receipt"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.pack-ingress-operation"}}}]},
+        "producer": {"$ref": "#/$defs/producer"},
+        "input_kind": {"enum": ["archive", "closure_export"]},
+        "admission": {"$ref": "#/$defs/admission"},
+        "terminal": {"enum": ["validated", "invalid", "unsupported", "expected_pack_identity_mismatch", "input_content_identity_mismatch", "archive_encoding_assertion_mismatch", "resource_limit", "cancelled", "deadline", "admission_refused", "internal_integrity"]},
+        "verification": {"$ref": "#/$defs/verification"},
+        "pack_identity": {"$ref": "#/$defs/nullable_identity"},
+        "receipt": {"$ref": "#/$defs/representation_receipt"}
+      }
+    },
+    "pack_inspection": {
+      "type": "object",
+      "required": ["schema", "producer", "pack_identity", "entrypoint", "guarantees", "project_files", "discovery_coverage", "explicit_conditional_inclusions", "package_requirements", "font_requirements", "font_catalog", "metadata", "semantic_extensions", "annotations"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.pack-inspection"}}}]},
+        "producer": {"$ref": "#/$defs/producer"},
+        "pack_identity": {"$ref": "#/$defs/identity"},
+        "entrypoint": {"$ref": "#/$defs/project_path"},
+        "guarantees": {"type": "object", "required": ["portable", "self_contained"], "additionalProperties": false, "properties": {"portable": {"type": "boolean"}, "self_contained": {"type": "boolean"}}},
+        "project_files": {"type": "array", "items": {"$ref": "#/$defs/file_inventory"}},
+        "discovery_coverage": {"type": "array", "items": {"$ref": "#/$defs/discovery_coverage"}},
+        "explicit_conditional_inclusions": {"type": "array", "items": {"$ref": "#/$defs/project_path"}},
+        "package_requirements": {"type": "array", "items": {"$ref": "#/$defs/package_requirement"}},
+        "font_requirements": {"type": "array", "items": {"$ref": "#/$defs/font_requirement"}},
+        "font_catalog": {"type": "array", "items": {"$ref": "#/$defs/font_face"}},
+        "metadata": {"type": ["object", "null"]},
+        "semantic_extensions": {"type": "array", "items": {"$ref": "#/$defs/extension_inventory"}},
+        "annotations": {"type": "array", "items": {"$ref": "#/$defs/extension_inventory"}}
+      }
+    },
+    "file_inventory": {
+      "type": "object",
+      "required": ["path", "content_identity", "exact_bytes"],
+      "additionalProperties": false,
+      "properties": {"path": {"$ref": "#/$defs/project_path"}, "content_identity": {"$ref": "#/$defs/identity"}, "exact_bytes": {"$ref": "#/$defs/decimal"}}
+    },
+    "discovery_coverage": {
+      "type": "object",
+      "required": ["ordinal", "label", "variant_identity", "coverage_identity", "trace_identity", "target", "input_commitments", "features", "document_time", "override_commitments"],
+      "additionalProperties": false,
+      "properties": {
+        "ordinal": {"$ref": "#/$defs/decimal"}, "label": {"type": ["string", "null"]}, "variant_identity": {"$ref": "#/$defs/identity"}, "coverage_identity": {"$ref": "#/$defs/identity"}, "trace_identity": {"$ref": "#/$defs/identity"}, "target": {"enum": ["paged", "html"]}, "input_commitments": {"type": "array", "items": {"type": "object"}}, "features": {"type": "array", "items": {"type": "string"}}, "document_time": {"$ref": "#/$defs/document_time"}, "override_commitments": {"type": "array", "items": {"type": "object"}}
+      }
+    },
+    "package_requirement": {
+      "type": "object",
+      "required": ["specification", "tree_identity", "disposition", "provenance"],
+      "additionalProperties": false,
+      "properties": {"specification": {"type": "string"}, "tree_identity": {"$ref": "#/$defs/identity"}, "disposition": {"enum": ["embedded", "external"]}, "provenance": {"type": "object"}}
+    },
+    "font_requirement": {
+      "type": "object",
+      "required": ["container_identity", "face_indices", "disposition", "provenance"],
+      "additionalProperties": false,
+      "properties": {"container_identity": {"$ref": "#/$defs/identity"}, "face_indices": {"type": "array", "items": {"type": "integer", "minimum": 0}}, "disposition": {"enum": ["embedded", "external"]}, "provenance": {"type": "object"}}
+    },
+    "font_face": {
+      "type": "object",
+      "required": ["container_identity", "face_index"],
+      "additionalProperties": false,
+      "properties": {"container_identity": {"$ref": "#/$defs/identity"}, "face_index": {"type": "integer", "minimum": 0}}
+    },
+    "extension_inventory": {
+      "type": "object",
+      "required": ["identifier", "epoch", "payload_bytes"],
+      "additionalProperties": false,
+      "properties": {"identifier": {"type": "string"}, "epoch": {"type": "integer", "minimum": 1}, "payload_bytes": {"$ref": "#/$defs/decimal"}}
+    },
+    "pack_inspection_operation": {
+      "type": "object",
+      "required": ["schema", "producer", "ingress", "inspection"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.pack-inspection-operation"}}}]},
+        "producer": {"$ref": "#/$defs/producer"},
+        "ingress": {"$ref": "#/$defs/pack_ingress_operation"},
+        "inspection": {"oneOf": [{"$ref": "#/$defs/pack_inspection"}, {"type": "null"}]}
+      }
+    },
+    "creation_diagnostic": {
+      "type": "object",
+      "required": ["ordinal", "phase", "scope", "severity", "code", "safe_message"],
+      "additionalProperties": false,
+      "properties": {"ordinal": {"$ref": "#/$defs/decimal"}, "phase": {"type": "string"}, "scope": {"type": "object"}, "severity": {"enum": ["warning", "error"]}, "code": {"type": "string"}, "safe_message": {"type": "string"}}
+    },
+    "creation_report": {
+      "type": "object",
+      "required": ["schema", "producer", "terminal", "pack_identity", "phases", "diagnostics", "failure"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.creation-report"}}}]},
+        "producer": {"$ref": "#/$defs/producer"},
+        "terminal": {"enum": ["issued", "failed"]},
+        "pack_identity": {"$ref": "#/$defs/nullable_identity"},
+        "phases": {"type": "array", "items": {"enum": ["admission", "discovery", "acquisition", "evidence_fence", "assembly", "replay", "issuance"]}},
+        "diagnostics": {"type": "array", "items": {"$ref": "#/$defs/creation_diagnostic"}},
+        "failure": {"$ref": "#/$defs/nullable_failure"}
+      }
+    },
+    "create_operation": {
+      "type": "object",
+      "required": ["schema", "producer", "admission", "request", "creation", "archive_encoding", "publication", "post_commit"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.create-operation"}}}]},
+        "producer": {"$ref": "#/$defs/producer"},
+        "admission": {"$ref": "#/$defs/admission"},
+        "request": {"type": "object"},
+        "creation": {"$ref": "#/$defs/creation_report"},
+        "archive_encoding": {"$ref": "#/$defs/channel"},
+        "publication": {"$ref": "#/$defs/channel"},
+        "post_commit": {"type": "object", "required": ["timings"], "additionalProperties": false, "properties": {"timings": {"$ref": "#/$defs/channel"}}}
+      }
+    },
+    "request_rejection": {
+      "type": "object",
+      "required": ["request_inventory", "issues"],
+      "additionalProperties": false,
+      "properties": {
+        "request_inventory": {"type": "array", "items": {"type": "object"}},
+        "issues": {"type": "array", "items": {"type": "object", "required": ["code", "path", "safe_message"], "properties": {"code": {"type": "string"}, "path": {"type": "string"}, "safe_message": {"type": "string"}}}}
+      }
+    },
+    "artifact": {
+      "type": "object",
+      "required": ["ordinal", "presentation_name", "role", "artifact_identity", "content_identity", "exact_bytes"],
+      "additionalProperties": false,
+      "properties": {
+        "ordinal": {"$ref": "#/$defs/decimal"},
+        "presentation_name": {"type": "string"},
+        "role": {"type": "object", "required": ["kind", "format", "source_page_number"], "additionalProperties": false, "properties": {"kind": {"enum": ["document", "page"]}, "format": {"enum": ["pdf", "png", "svg", "html"]}, "source_page_number": {"oneOf": [{"$ref": "#/$defs/positive_decimal"}, {"type": "null"}]}}},
+        "artifact_identity": {"$ref": "#/$defs/identity"},
+        "content_identity": {"$ref": "#/$defs/identity"},
+        "exact_bytes": {"$ref": "#/$defs/decimal"}
+      }
+    },
+    "diagnostic_envelope": {
+      "type": "object",
+      "required": ["policy", "retained_entries", "retained_canonical_bytes", "completion", "entries"],
+      "additionalProperties": false,
+      "properties": {
+        "policy": {"type": "object"},
+        "retained_entries": {"$ref": "#/$defs/decimal"},
+        "retained_canonical_bytes": {"$ref": "#/$defs/decimal"},
+        "completion": {"type": "object", "required": ["kind"], "properties": {"kind": {"enum": ["complete", "limited"]}, "first_omitted_ordinal": {"oneOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]}, "phase": {"type": ["string", "null"]}, "dimension": {"type": ["string", "null"]}}},
+        "entries": {"type": ["array", "null"], "items": {"type": "object"}}
+      }
+    },
+    "compilation_result": {
+      "type": "object",
+      "required": ["status", "result_identity", "document", "diagnostics", "dependency_projection", "access_trace", "artifacts"],
+      "additionalProperties": false,
+      "properties": {
+        "status": {"enum": ["succeeded", "rejected"]},
+        "result_identity": {"$ref": "#/$defs/identity"},
+        "document": {"type": "object", "required": ["target", "source_page_count"], "additionalProperties": false, "properties": {"target": {"enum": ["paged", "html"]}, "source_page_count": {"oneOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]}}},
+        "diagnostics": {"$ref": "#/$defs/diagnostic_envelope"},
+        "dependency_projection": {"type": "array", "items": {"type": "object"}},
+        "access_trace": {"type": "array", "items": {"type": "object"}},
+        "artifacts": {"oneOf": [{"type": "array", "items": {"$ref": "#/$defs/artifact"}}, {"type": "null"}]}
+      }
+    },
+    "operation_outcome": {
+      "type": "object",
+      "required": ["phase", "cause", "partial_access_trace"],
+      "additionalProperties": false,
+      "properties": {"phase": {"type": "string"}, "cause": {"$ref": "#/$defs/failure"}, "partial_access_trace": {"type": "array", "items": {"type": "object"}}}
+    },
+    "compilation_report": {
+      "type": "object",
+      "required": ["schema", "producer", "compilation_identity", "request_inventory", "operation", "cache", "dependency_evidence", "terminal", "reporting"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.compilation-report"}}}]},
+        "producer": {"$ref": "#/$defs/producer"},
+        "compilation_identity": {"$ref": "#/$defs/identity"},
+        "request_inventory": {"type": "array", "items": {"type": "object"}},
+        "operation": {"type": "object"},
+        "cache": {"type": "object"},
+        "dependency_evidence": {"type": "object"},
+        "terminal": {
+          "oneOf": [
+            {"type": "object", "required": ["kind", "result", "operation_outcome"], "additionalProperties": false, "properties": {"kind": {"const": "result"}, "result": {"$ref": "#/$defs/compilation_result"}, "operation_outcome": {"type": "null"}}},
+            {"type": "object", "required": ["kind", "result", "operation_outcome"], "additionalProperties": false, "properties": {"kind": {"const": "operation_outcome"}, "result": {"type": "null"}, "operation_outcome": {"$ref": "#/$defs/operation_outcome"}}}
+          ]
+        },
+        "reporting": {"type": "object", "required": ["diagnostics", "sources", "request_values", "override_bytes", "backing_locators", "adapter_detail", "timings"], "additionalProperties": false, "properties": {"diagnostics": {"$ref": "#/$defs/channel"}, "sources": {"$ref": "#/$defs/channel"}, "request_values": {"$ref": "#/$defs/channel"}, "override_bytes": {"$ref": "#/$defs/channel"}, "backing_locators": {"$ref": "#/$defs/channel"}, "adapter_detail": {"$ref": "#/$defs/channel"}, "timings": {"$ref": "#/$defs/channel"}}}
+      }
+    },
+    "compilation_terminal": {
+      "type": "object",
+      "required": ["schema", "producer", "kind", "request_rejection", "report"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.compilation-terminal"}}}]},
+        "producer": {"$ref": "#/$defs/producer"},
+        "kind": {"enum": ["request_rejected", "report"]},
+        "request_rejection": {"oneOf": [{"$ref": "#/$defs/request_rejection"}, {"type": "null"}]},
+        "report": {"oneOf": [{"$ref": "#/$defs/compilation_report"}, {"type": "null"}]}
+      }
+    },
+    "transport_receipt": {
+      "type": "object",
+      "required": ["role", "status", "stage", "admission", "requested_commit_strength", "actual_commit_strength", "requested_cleanup_strength", "object_count", "transferred_bytes", "adapter_class", "primary_failure", "cleanup", "subject"],
+      "additionalProperties": false,
+      "properties": {
+        "role": {"type": "string"}, "status": {"enum": ["not_attempted", "refused", "committed", "failed"]}, "stage": {"type": "string"}, "admission": {"$ref": "#/$defs/admission"}, "requested_commit_strength": {"enum": ["complete_collection_atomic", "each_object_atomic", "streaming"]}, "actual_commit_strength": {"type": ["string", "null"], "enum": ["complete_collection_atomic", "each_object_atomic", "streaming", null]}, "requested_cleanup_strength": {"enum": ["complete_before_return", "non_retractable_accepted"]}, "object_count": {"$ref": "#/$defs/decimal"}, "transferred_bytes": {"$ref": "#/$defs/decimal"}, "adapter_class": {"type": "string"}, "primary_failure": {"$ref": "#/$defs/nullable_failure"}, "cleanup": {"type": "object", "required": ["kind"], "properties": {"kind": {"enum": ["not_required", "complete", "residual_reported", "non_retractable", "failed"]}}}, "subject": {"type": "object"}
+      }
+    },
+    "compile_operation": {
+      "type": "object",
+      "required": ["schema", "producer", "admission", "ingress", "adapter_input", "adapter_outcome", "terminal", "delivery", "post_commit", "disclosure"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.compile-operation"}}}]},
+        "producer": {"$ref": "#/$defs/producer"},
+        "admission": {"$ref": "#/$defs/admission"},
+        "ingress": {"oneOf": [{"$ref": "#/$defs/pack_ingress_operation"}, {"type": "null"}]},
+        "adapter_input": {"$ref": "#/$defs/channel"},
+        "adapter_outcome": {"$ref": "#/$defs/nullable_failure"},
+        "terminal": {"oneOf": [{"$ref": "#/$defs/compilation_terminal"}, {"type": "null"}]},
+        "delivery": {"oneOf": [{"$ref": "#/$defs/transport_receipt"}, {"type": "null"}]},
+        "post_commit": {"type": "object", "required": ["dependencies", "timings", "viewer"], "additionalProperties": false, "properties": {"dependencies": {"$ref": "#/$defs/channel"}, "timings": {"$ref": "#/$defs/channel"}, "viewer": {"$ref": "#/$defs/channel"}}},
+        "disclosure": {"type": "object", "required": ["status", "channels"], "properties": {"status": {"enum": ["complete", "redacted", "limited", "unavailable"]}, "channels": {"type": "object"}}}
+      }
+    },
+    "representation_operation": {
+      "type": "object",
+      "required": ["schema", "producer", "ingress", "representation", "publication"],
+      "additionalProperties": false,
+      "properties": {"schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.representation-operation"}}}]}, "producer": {"$ref": "#/$defs/producer"}, "ingress": {"$ref": "#/$defs/pack_ingress_operation"}, "representation": {"$ref": "#/$defs/representation_receipt"}, "publication": {"oneOf": [{"$ref": "#/$defs/transport_receipt"}, {"type": "null"}]}}
+    },
+    "project_materialization_operation": {
+      "type": "object",
+      "required": ["schema", "producer", "ingress", "representation", "publication"],
+      "additionalProperties": false,
+      "properties": {"schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"type": "object", "properties": {"name": {"const": "org.typst-pack.project-materialization-operation"}}}]}, "producer": {"$ref": "#/$defs/producer"}, "ingress": {"$ref": "#/$defs/pack_ingress_operation"}, "representation": {"$ref": "#/$defs/representation_receipt"}, "publication": {"oneOf": [{"$ref": "#/$defs/transport_receipt"}, {"type": "null"}]}}
+    },
+    "compilation_staging": {
+      "type": "object",
+      "required": ["schema", "producer", "status", "result_identity", "artifact_count", "aggregate_bytes", "failure"],
+      "additionalProperties": false,
+      "properties": {"schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.compilation-staging"}}}]}, "producer": {"$ref": "#/$defs/producer"}, "status": {"enum": ["not_applicable", "succeeded", "failed"]}, "result_identity": {"$ref": "#/$defs/nullable_identity"}, "artifact_count": {"$ref": "#/$defs/decimal"}, "aggregate_bytes": {"$ref": "#/$defs/decimal"}, "failure": {"$ref": "#/$defs/nullable_failure"}}
+    },
+    "currentness": {
+      "oneOf": [
+        {"type": "object", "required": ["kind", "observations"], "properties": {"kind": {"const": "current_through_push"}, "observations": {"type": "array"}}},
+        {"type": "object", "required": ["kind", "observation"], "properties": {"kind": {"const": "current_as_of_poll"}, "observation": {"type": "object"}}},
+        {"type": "object", "required": ["kind", "uncovered_scopes"], "properties": {"kind": {"const": "unverified"}, "uncovered_scopes": {"type": "array", "items": {"type": "string"}}}},
+        {"type": "object", "required": ["kind", "dirty_scopes"], "properties": {"kind": {"const": "stale"}, "dirty_scopes": {"type": "array", "items": {"type": "string"}}}}
+      ]
+    },
+    "watch_state": {
+      "type": "object",
+      "required": ["schema", "producer", "status", "session", "publication", "last_successful_compilation", "last_successful_delivery"],
+      "additionalProperties": false,
+      "properties": {
+        "schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.watch-state"}}}]},
+        "producer": {"$ref": "#/$defs/producer"},
+        "status": {"enum": ["starting", "active", "stopped", "failed"]},
+        "session": {"type": "object", "required": ["instance", "pack_identity", "desired_revision"], "additionalProperties": false, "properties": {"instance": {"type": "string"}, "pack_identity": {"$ref": "#/$defs/identity"}, "desired_revision": {"$ref": "#/$defs/decimal"}}},
+        "publication": {"type": ["object", "null"], "properties": {"revision": {"$ref": "#/$defs/decimal"}, "terminal": {"$ref": "#/$defs/compilation_terminal"}, "currentness": {"$ref": "#/$defs/currentness"}}},
+        "last_successful_compilation": {"type": ["object", "null"], "properties": {"revision": {"$ref": "#/$defs/decimal"}, "result_identity": {"$ref": "#/$defs/identity"}, "currentness": {"$ref": "#/$defs/currentness"}}},
+        "last_successful_delivery": {"type": ["object", "null"], "properties": {"revision": {"$ref": "#/$defs/decimal"}, "result_identity": {"$ref": "#/$defs/identity"}, "receipt": {"$ref": "#/$defs/transport_receipt"}}}
+      }
+    },
+    "watch_artifact_pointer": {
+      "type": "object",
+      "required": ["role", "relative_path", "artifact_identity", "content_identity", "exact_bytes"],
+      "additionalProperties": false,
+      "properties": {"role": {"type": "object"}, "relative_path": {"$ref": "#/$defs/project_path"}, "artifact_identity": {"$ref": "#/$defs/identity"}, "content_identity": {"$ref": "#/$defs/identity"}, "exact_bytes": {"$ref": "#/$defs/decimal"}}
+    },
+    "watch_output_root": {
+      "type": "object",
+      "required": ["schema", "schema_version", "owner", "current_pointer"],
+      "additionalProperties": false,
+      "properties": {"schema": {"const": "org.typst-pack.watch-output-root"}, "schema_version": {"const": 1}, "owner": {"const": "typst-pack"}, "current_pointer": {"const": "current.json"}}
+    },
+    "watch_output_pointer": {
+      "type": "object",
+      "required": ["schema", "producer", "session_instance", "revision", "pack_identity", "result_identity", "currentness", "generation", "artifacts"],
+      "additionalProperties": false,
+      "properties": {"schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.watch-output-pointer"}}}]}, "producer": {"$ref": "#/$defs/producer"}, "session_instance": {"type": "string"}, "revision": {"$ref": "#/$defs/decimal"}, "pack_identity": {"$ref": "#/$defs/identity"}, "result_identity": {"$ref": "#/$defs/identity"}, "currentness": {"$ref": "#/$defs/currentness"}, "generation": {"$ref": "#/$defs/project_path"}, "artifacts": {"type": "array", "items": {"$ref": "#/$defs/watch_artifact_pointer"}}}
+    }
+  }
+}

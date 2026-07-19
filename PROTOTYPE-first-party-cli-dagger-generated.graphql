@@ -1,0 +1,271 @@
+# PROTOTYPE - structural projection of the generated Dagger GraphQL contract.
+#
+# This is not Dang source or the complete Dagger core schema. Minimal File and
+# Directory stubs preserve their actual OBJECT kind. The pinned engine exposes
+# main-object functions directly on Query and constructor arguments on
+# Query.with. File, Directory, CacheVolume, and custom-object inputs are IDs.
+# Source arguments with defaults are nullable here and are resolved by the
+# adapter contract.
+
+type File { id: ID! }
+type Directory { id: ID! }
+
+type Query {
+  with(authorityCache: ID, authorityCacheQuotaBytes: String): Query!
+
+  discoveryVariant(
+    label: String
+    target: TypstPackDiscoveryTarget
+    sysInputs: [String!]
+    features: [TypstPackFeature!]
+    documentTime: String
+    overrides: ID
+  ): TypstPackDiscoveryVariant!
+
+  annotation(
+    identifier: String!
+    annotationEpoch: String!
+    payload: ID!
+  ): TypstPackPackAnnotation!
+
+  reportDisclosure(
+    diagnostics: Boolean
+    sources: Boolean
+    requestValues: Boolean
+    overrideBytes: Boolean
+    backingLocators: Boolean
+    adapterDetail: Boolean
+  ): TypstPackReportDisclosure!
+
+  pdf(
+    pages: String
+    identifierMode: TypstPackPdfMetadataMode
+    identifier: String
+    creatorMode: TypstPackPdfMetadataMode
+    creator: String
+    creationTime: String
+    standards: [TypstPackPdfStandard!]
+    tagging: TypstPackPdfTagging
+    pretty: Boolean
+  ): TypstPackCompilationOutput!
+
+  png(pages: String, ppi: String, bleed: Boolean): TypstPackCompilationOutput!
+  svg(pages: String, bleed: Boolean, pretty: Boolean): TypstPackCompilationOutput!
+  html(pretty: Boolean): TypstPackCompilationOutput!
+
+  create(
+    project: ID!
+    input: String
+    variants: [ID!]
+    target: TypstPackDiscoveryTarget
+    sysInputs: [String!]
+    features: [TypstPackFeature!]
+    documentTime: String
+    discoveryOverrides: ID
+    include: [String!]
+    packageDirectories: [ID!]
+    fontDirectories: [ID!]
+    packageEmbedding: TypstPackEmbeddingPolicy
+    fontEmbedding: TypstPackEmbeddingPolicy
+    embeddingPolicy: ID
+    title: String
+    description: String
+    authors: [String!]
+    keywords: [String!]
+    annotations: [ID!]
+    offline: Boolean
+    certificate: ID
+    trust: TypstPackTrustProfile
+    limits: ID
+    deadline: String
+    jobs: Int
+  ): TypstPackPackCreation!
+
+  readArchive(
+    archive: ID!
+    expectedPackIdentity: String
+    expectedContentIdentity: String
+    expectedArchiveEncodingIdentity: String
+    trust: TypstPackTrustProfile
+    limits: ID
+    deadline: String
+  ): TypstPackPackIngress!
+
+  readClosure(
+    closure: ID!
+    expectedPackIdentity: String
+    expectedContentIdentity: String
+    trust: TypstPackTrustProfile
+    limits: ID
+    deadline: String
+  ): TypstPackPackIngress!
+}
+
+type TypstPackDiscoveryVariant { id: ID! }
+type TypstPackPackAnnotation { id: ID! }
+type TypstPackReportDisclosure { id: ID! }
+type TypstPackCompilationOutput { id: ID! }
+
+type TypstPackPackCreation {
+  id: ID!
+  status: TypstPackCreationStatus!
+  report: File!
+  pack: TypstPackPack
+  requirePack: TypstPackPack!
+}
+
+type TypstPackPackIngress {
+  id: ID!
+  status: TypstPackPackIngressStatus!
+  receipt: File!
+  pack: TypstPackPack
+  requirePack: TypstPackPack!
+}
+
+type TypstPackPack {
+  id: ID!
+  identity: String!
+  inspect: File!
+
+  archive(
+    epoch: TypstPackPackFormatEpoch
+    encoding: TypstPackArchiveEncoding
+    trust: TypstPackTrustProfile
+    limits: ID
+    deadline: String
+  ): TypstPackPackArchiveEncoding!
+
+  closureExport(
+    epoch: TypstPackPackFormatEpoch
+    trust: TypstPackTrustProfile
+    limits: ID
+    deadline: String
+  ): TypstPackClosureExport!
+
+  materialize(
+    trust: TypstPackTrustProfile
+    limits: ID
+    deadline: String
+  ): TypstPackProjectMaterialization!
+
+  compile(
+    output: ID!
+    overrides: ID
+    sysInputs: [String!]
+    features: [TypstPackFeature!]
+    documentTime: String
+    packageDirectories: [ID!]
+    fontDirectories: [ID!]
+    offline: Boolean
+    certificate: ID
+    diagnosticPolicy: ID
+    reportDisclosure: ID
+    trust: TypstPackTrustProfile
+    limits: ID
+    deadline: String
+    jobs: Int
+  ): TypstPackCompilation!
+}
+
+type TypstPackPackArchiveEncoding {
+  id: ID!
+  status: TypstPackRepresentationStatus!
+  receipt: File!
+  archive: File
+  requireArchive: File!
+}
+
+type TypstPackClosureExport {
+  id: ID!
+  status: TypstPackRepresentationStatus!
+  receipt: File!
+  tree: Directory
+  requireTree: Directory!
+}
+
+type TypstPackProjectMaterialization {
+  id: ID!
+  status: TypstPackRepresentationStatus!
+  receipt: File!
+  project: Directory
+  requireProject: Directory!
+}
+
+type TypstPackCompilation {
+  id: ID!
+  status: TypstPackCompilationStatus!
+  operation: File!
+  terminal: File
+  report: File
+  compilationIdentity: String
+  resultIdentity: String
+  stagingStatus: TypstPackStagingStatus!
+  stagingReceipt: File!
+  artifacts: Directory
+  requireSuccess: Directory!
+}
+
+enum TypstPackCreationStatus { PACK_ISSUED FAILED }
+
+enum TypstPackPackIngressStatus {
+  VALIDATED
+  INVALID
+  UNSUPPORTED
+  EXPECTED_PACK_IDENTITY_MISMATCH
+  INPUT_CONTENT_IDENTITY_MISMATCH
+  ARCHIVE_ENCODING_ASSERTION_MISMATCH
+  RESOURCE_LIMIT
+  CANCELLED
+  DEADLINE
+  ADMISSION_REFUSED
+  INTERNAL_INTEGRITY
+}
+
+enum TypstPackRepresentationStatus {
+  SUCCEEDED
+  REQUEST_REJECTED
+  RESOURCE_LIMIT
+  CANCELLED
+  DEADLINE
+  ADMISSION_REFUSED
+  INTERNAL_INTEGRITY
+  STAGING_FAILED
+}
+
+enum TypstPackCompilationStatus {
+  ADAPTER_FAILED
+  REQUEST_REJECTED
+  RESULT_SUCCEEDED
+  RESULT_REJECTED
+  OPERATION_FAILED
+}
+
+enum TypstPackStagingStatus { NOT_APPLICABLE SUCCEEDED FAILED }
+enum TypstPackDiscoveryTarget { PAGED HTML }
+enum TypstPackFeature { A11Y_EXTRAS BUNDLE }
+enum TypstPackEmbeddingPolicy { EMBED_ALL EXTERNALLY_FULFILL_ALL }
+enum TypstPackTrustProfile { TRUSTED PARTIALLY_TRUSTED }
+enum TypstPackPackFormatEpoch { EPOCH_2 }
+enum TypstPackArchiveEncoding { EPOCH_2_ALL_STORED_V1 }
+enum TypstPackPdfMetadataMode { AUTOMATIC OMIT CUSTOM }
+enum TypstPackPdfTagging { AUTOMATIC ENABLED DISABLED }
+
+enum TypstPackPdfStandard {
+  V1_4
+  V1_5
+  V1_6
+  V1_7
+  V2_0
+  A_1B
+  A_1A
+  A_2B
+  A_2U
+  A_2A
+  A_3B
+  A_3U
+  A_3A
+  A_4
+  A_4F
+  A_4E
+  UA_1
+}
