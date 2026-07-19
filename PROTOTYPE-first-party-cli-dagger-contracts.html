@@ -100,7 +100,7 @@
     </div>
     <div class="facts" id="facts"></div>
     <div class="state-grid">
-      <div><h3>Stable projection</h3><pre id="json"></pre></div>
+      <div><h3>State sketch (non-wire)</h3><pre id="json"></pre></div>
       <div><h3>Dagger nullability</h3><pre id="dagger"></pre></div>
       <div class="wide"><h3>Invariants exercised</h3><ul id="invariants"></ul></div>
     </div>
@@ -131,6 +131,7 @@ const AdapterModel = (() => {
     desiredRevision: 0,
     publication: null,
     lastSuccess: null,
+    lastDelivery: null,
     history: ["reset"]
   });
 
@@ -147,6 +148,9 @@ const AdapterModel = (() => {
     DELIVERY_FAILED: ["CLI delivery fails", true],
     WATCH_CHANGE: ["Watch change", false],
     WATCH_PUBLISH: ["Publish latest", false],
+    WATCH_INGEST_FAILED: ["Watch ingestion fails", true],
+    WATCH_DELIVERY_FAILED: ["Watch delivery fails", true],
+    WATCH_POLL: ["Poll and publish", false],
     WATCH_GAP: ["Notification gap", true],
     WATCH_UNVERIFIED: ["Publish unverified", true]
   });
@@ -165,16 +169,33 @@ const AdapterModel = (() => {
     if (action === "RESULT_REJECTED") return Object.freeze({ ...state, title: "Rejected Compilation Result", summary: "The compiler or exporter deterministically rejected accepted exact inputs.", adapterOutcome: null, terminal: "report", reportBranch: "result", result: "rejected", staging: "not_applicable", delivery: "not_attempted", history: history(state, action) });
     if (action === "OPERATION_FAILED") return Object.freeze({ ...state, title: "Compilation Operation Outcome", summary: "A dynamic authority, resource, deadline, execution, or isolation failure won before commitment.", adapterOutcome: null, terminal: "report", reportBranch: "operation_outcome", result: null, staging: "not_applicable", delivery: "not_attempted", history: history(state, action) });
     if (action === "STAGING_FAILED" && state.result === "succeeded") return Object.freeze({ ...state, title: "Dagger staging failure", summary: "The semantic result remains succeeded; no complete artifact Directory is exposed.", staging: "failed", history: history(state, action) });
-    if (action === "DELIVERY_FAILED" && state.terminal === "report") return Object.freeze({ ...state, title: "Post-commit delivery failure", summary: "CLI delivery failed while the immutable report and result stayed unchanged.", delivery: "failed", history: history(state, action) });
-    if (action === "WATCH_CHANGE") return Object.freeze({ ...state, title: "New watch revision", summary: "The existing publication and Last Successful Compilation become stale before replacement finishes.", desiredRevision: state.desiredRevision + 1, publication: state.publication ? { ...state.publication, currentness: "stale" } : null, lastSuccess: state.lastSuccess ? { ...state.lastSuccess, currentness: "stale" } : null, history: history(state, action) });
+    if (action === "DELIVERY_FAILED" && state.terminal === "report" && state.delivery !== "committed") return Object.freeze({ ...state, title: "Post-commit delivery failure", summary: "CLI delivery failed while the immutable report and result stayed unchanged.", delivery: "failed", history: history(state, action) });
+    if (action === "WATCH_CHANGE") return Object.freeze({ ...state, title: "New watch revision", summary: "The existing publication and Last Successful Compilation become stale before replacement finishes.", adapterOutcome: null, terminal: null, reportBranch: null, result: null, staging: "not_applicable", delivery: "not_attempted", desiredRevision: state.desiredRevision + 1, publication: state.publication ? { ...state.publication, currentness: "stale" } : null, lastSuccess: state.lastSuccess ? { ...state.lastSuccess, currentness: "stale" } : null, history: history(state, action) });
     if (action === "WATCH_PUBLISH") {
       const revision = state.desiredRevision || 1;
-      return Object.freeze({ ...state, title: "Latest revision published", summary: "A clean live fence lets the latest succeeded result publish.", terminal: "report", reportBranch: "result", result: "succeeded", staging: "succeeded", delivery: "committed", desiredRevision: revision, publication: { revision, currentness: "current_through_push" }, lastSuccess: { revision, resultIdentity: `result-${revision}`, currentness: "current_through_push" }, history: history(state, action) });
+      const resultIdentity = `result-${revision}`;
+      return Object.freeze({ ...state, title: "Latest revision published", summary: "A clean live fence lets the latest succeeded result publish.", adapterOutcome: null, terminal: "report", reportBranch: "result", result: "succeeded", staging: "succeeded", delivery: "committed", desiredRevision: revision, publication: { revision, kind: "compilation_terminal", resultIdentity, currentness: "current_through_push", delivery: "committed" }, lastSuccess: { revision, resultIdentity, currentness: "current_through_push" }, lastDelivery: { revision, resultIdentity }, history: history(state, action) });
     }
-    if (action === "WATCH_GAP") return Object.freeze({ ...state, title: "Watch coverage gap", summary: "A notification gap immediately stales the existing publication.", desiredRevision: state.desiredRevision + 1, publication: state.publication ? { ...state.publication, currentness: "stale" } : null, lastSuccess: state.lastSuccess ? { ...state.lastSuccess, currentness: "stale" } : null, history: history(state, action) });
-    if (action === "WATCH_UNVERIFIED") {
+    if (action === "WATCH_INGEST_FAILED") {
+      const revision = state.desiredRevision + 1;
+      return Object.freeze({ ...state, title: "Watch input-ingestion failure", summary: "The new revision publishes an adapter-owned ingestion-failure branch; prior success remains separate and stale.", adapterOutcome: "watch_input_ingestion", terminal: null, reportBranch: null, result: null, staging: "not_applicable", delivery: "not_applicable", desiredRevision: revision, publication: { revision, kind: "ingestion_failure", resultIdentity: null, currentness: "stale", delivery: null }, lastSuccess: state.lastSuccess ? { ...state.lastSuccess, currentness: "stale" } : null, history: history(state, action) });
+    }
+    if (action === "WATCH_DELIVERY_FAILED" && state.lastSuccess) {
+      const revision = state.desiredRevision + 1;
+      const resultIdentity = state.lastSuccess.resultIdentity;
+      return Object.freeze({ ...state, title: "Latest watch delivery failed", summary: "Equal live revalidation republishes the immutable result, but failed delivery does not replace Last Successful Delivery.", adapterOutcome: null, terminal: "report", reportBranch: "result", result: "succeeded", staging: "succeeded", delivery: "failed", desiredRevision: revision, publication: { revision, kind: "compilation_terminal", resultIdentity, currentness: "current_through_push", delivery: "failed" }, lastSuccess: { revision, resultIdentity, currentness: "current_through_push" }, history: history(state, action) });
+    }
+    if (action === "WATCH_POLL") {
       const revision = state.desiredRevision || 1;
-      return Object.freeze({ ...state, title: "Explicit incomplete coverage", summary: "A new latest publication is usable but can claim only unverified currentness.", desiredRevision: revision, publication: { revision, currentness: "unverified" }, lastSuccess: state.result === "succeeded" ? { revision, resultIdentity: `result-${revision}`, currentness: "unverified" } : state.lastSuccess, history: history(state, action) });
+      const resultIdentity = state.lastSuccess?.resultIdentity ?? `result-${revision}`;
+      return Object.freeze({ ...state, title: "Coherent poll published", summary: "A complete coherent poll supports current-as-of-poll, not continuous push currentness.", adapterOutcome: null, terminal: "report", reportBranch: "result", result: "succeeded", staging: "succeeded", delivery: "committed", desiredRevision: revision, publication: { revision, kind: "compilation_terminal", resultIdentity, currentness: "current_as_of_poll", delivery: "committed" }, lastSuccess: { revision, resultIdentity, currentness: "current_as_of_poll" }, lastDelivery: { revision, resultIdentity }, history: history(state, action) });
+    }
+    if (action === "WATCH_GAP") return Object.freeze({ ...state, title: "Watch coverage gap", summary: "A notification gap immediately stales the existing publication and current pointer.", adapterOutcome: null, terminal: null, reportBranch: null, result: null, staging: "not_applicable", delivery: "not_attempted", desiredRevision: state.desiredRevision + 1, publication: state.publication ? { ...state.publication, currentness: "stale" } : null, lastSuccess: state.lastSuccess ? { ...state.lastSuccess, currentness: "stale" } : null, history: history(state, action) });
+    if (action === "WATCH_UNVERIFIED") {
+      if (!state.lastSuccess) return state;
+      const revision = state.desiredRevision || 1;
+      const resultIdentity = state.lastSuccess.resultIdentity;
+      return Object.freeze({ ...state, title: "Explicit incomplete coverage", summary: "Equal semantic revalidation republishes the same immutable result identity but can claim only unverified currentness.", adapterOutcome: null, terminal: "report", reportBranch: "result", result: "succeeded", staging: "succeeded", delivery: "committed", desiredRevision: revision, publication: { revision, kind: "compilation_terminal", resultIdentity, currentness: "unverified", delivery: "committed" }, lastSuccess: { revision, resultIdentity, currentness: "unverified" }, lastDelivery: { revision, resultIdentity }, history: history(state, action) });
     }
     return state;
   }
@@ -183,7 +204,7 @@ const AdapterModel = (() => {
     const hasReport = state.terminal === "report";
     const hasResult = hasReport && state.reportBranch === "result";
     return {
-      schema: { name: "org.typst-pack.compile-operation", major: 1, minor: 0 },
+      prototype: "non-wire state sketch; normative JSON is in the schema fixture",
       ingress: { terminal: state.pack },
       adapter_outcome: state.adapterOutcome ? { kind: state.adapterOutcome } : null,
       terminal: state.adapterOutcome || !state.terminal ? null : {
@@ -200,7 +221,7 @@ const AdapterModel = (() => {
       },
       staging: { status: state.staging },
       delivery: { status: state.delivery },
-      session: state.desiredRevision ? { desired_revision: String(state.desiredRevision), publication: state.publication, last_successful_compilation: state.lastSuccess } : null
+      session: state.desiredRevision ? { desired_revision: String(state.desiredRevision), publication: state.publication, last_successful_compilation: state.lastSuccess, last_successful_delivery: state.lastDelivery } : null
     };
   }
 
@@ -216,6 +237,7 @@ const AdapterModel = (() => {
     const out = [];
     if (state.pack === "not_exposed") out.push("Identity mismatch retains receipt evidence but exposes no Pack.");
     if (state.adapterOutcome) out.push("Adapter failure has an operation envelope but no core terminal or report.");
+    if (state.adapterOutcome === "watch_input_ingestion") out.push("Watch input-ingestion failure stales any prior publication without manufacturing a Compilation Terminal.");
     if (state.terminal === "request_rejected") out.push("Request rejection has no report, identities, dependency evidence, trace, or artifacts.");
     if (state.reportBranch === "result") out.push("Deterministic compiler/exporter status is a Result inside a report.");
     if (state.reportBranch === "operation_outcome") out.push("Dynamic pre-commit failure is an Operation Outcome inside a report.");
@@ -223,7 +245,10 @@ const AdapterModel = (() => {
     if (state.delivery === "failed") out.push("CLI delivery failure is a post-commit sibling and cannot rewrite the report.");
     if (state.publication?.currentness === "stale") out.push("Dirtiness changes currentness on the existing publication immediately.");
     if (state.publication?.currentness === "unverified") out.push("Incomplete coverage belongs to a new publication and never claims current.");
+    if (state.publication?.currentness === "current_as_of_poll") out.push("Coherent polling claims only current-as-of-poll and never push coverage.");
+    if (state.publication?.kind === "ingestion_failure") out.push("The latest Session Publication owns ingestion failure while Last Successful Compilation remains independent.");
     if (state.lastSuccess) out.push("Last Successful Compilation keeps independent revision and currentness.");
+    if (state.lastDelivery) out.push("Last Successful Delivery retains its own revision and is not rewritten by later delivery failure.");
     if (!out.length) out.push("No compilation branch exists before an exact request is prepared.");
     return out;
   }
@@ -238,7 +263,7 @@ let activeWalkthrough = "terminal";
 const walkthroughs = [
   { id: "terminal", title: "Terminal tree", description: "Compare adapter failure, request rejection, compiler rejection, and operation failure.", steps: ["ADAPTER_FAILED", "ADMIT_PACK", "REQUEST_REJECTED", "RESULT_REJECTED", "OPERATION_FAILED"] },
   { id: "transport", title: "Staging and delivery", description: "Keep one succeeded result while later Dagger staging or CLI delivery fails.", steps: ["ADMIT_PACK", "RESULT_SUCCEEDED", "STAGING_FAILED", "RESULT_SUCCEEDED", "DELIVERY_FAILED"] },
-  { id: "watch", title: "Watch latest-only", description: "Publish success, stale it immediately, then publish with explicitly incomplete coverage.", steps: ["WATCH_CHANGE", "WATCH_PUBLISH", "WATCH_GAP", "WATCH_UNVERIFIED"] },
+  { id: "watch", title: "Watch latest-only", description: "Exercise push, ingestion failure, distinct delivery state, stale/unverified reuse, and coherent polling.", steps: ["WATCH_CHANGE", "WATCH_PUBLISH", "WATCH_INGEST_FAILED", "WATCH_PUBLISH", "WATCH_DELIVERY_FAILED", "WATCH_GAP", "WATCH_UNVERIFIED", "WATCH_POLL"] },
   { id: "ingress", title: "Whole-Pack verification", description: "A Pack Identity mismatch never exposes a Pack.", steps: ["INGRESS_MISMATCH", "ADMIT_PACK"] }
 ];
 
@@ -251,7 +276,7 @@ function render() {
   const badge = document.getElementById("badge");
   badge.textContent = state.publication?.currentness ?? state.adapterOutcome ?? state.terminal ?? "not started";
   badge.className = failed ? "badge failed" : "badge";
-  const facts = { Pack: state.pack, Terminal: state.terminal ?? "none", "Report branch": state.reportBranch ?? "none", Result: state.result ?? "none", "Dagger staging": state.staging, "CLI delivery": state.delivery, "Desired revision": String(state.desiredRevision), Publication: state.publication ? `r${state.publication.revision}: ${state.publication.currentness}` : "none", "Last success": state.lastSuccess ? `r${state.lastSuccess.revision}: ${state.lastSuccess.currentness}` : "none" };
+  const facts = { Pack: state.pack, Terminal: state.terminal ?? "none", "Report branch": state.reportBranch ?? "none", Result: state.result ?? "none", "Dagger staging": state.staging, "CLI delivery": state.delivery, "Desired revision": String(state.desiredRevision), Publication: state.publication ? `r${state.publication.revision} ${state.publication.kind}: ${state.publication.currentness}` : "none", "Last success": state.lastSuccess ? `r${state.lastSuccess.revision}: ${state.lastSuccess.currentness}` : "none", "Last delivery": state.lastDelivery ? `r${state.lastDelivery.revision}` : "none" };
   document.getElementById("facts").replaceChildren(...Object.entries(facts).map(([name, value]) => { const box = document.createElement("div"); box.className = "fact"; const label = document.createElement("b"); label.textContent = name; box.append(label, document.createTextNode(value)); return box; }));
   document.getElementById("json").textContent = JSON.stringify(AdapterModel.projection(state), null, 2);
   document.getElementById("dagger").textContent = JSON.stringify(AdapterModel.dagger(state), null, 2);

@@ -98,10 +98,13 @@ then may it open and validate `--limits`; no other locator is touched first.
 `h`. Fractions, signs, whitespace, and compounds reject. Poll intervals exclude
 `none` and zero.
 
-`UNIX_SECONDS` is optional ASCII `-` followed by digits, with no `+`, whitespace,
-or leading zero except `0`. It must fit `i64` and the engine datetime range.
-Lexical or `i64` failure is usage exit 2; engine-range or semantic combination
-failure is request rejection exit 1. JSON uses the same canonical string.
+`UNIX_SECONDS` follows Typst 0.15.0's ordinary Rust `i64` lexical acceptance:
+ASCII `[+-]?[0-9]+`, including a leading `+` and leading zeroes, but no
+whitespace. Admission normalizes it to the canonical signed decimal string
+(`+000` and `-0` become `0`) before semantic preparation. It must fit `i64` and
+the engine datetime range. Lexical or `i64` failure is usage exit 2;
+engine-range or semantic combination failure is request rejection exit 1. JSON
+uses only the normalized form.
 
 ### Pack Input And Expectations
 
@@ -127,6 +130,19 @@ Archive Encoding expectation is archive-only and requires support for that exact
 recipe, full Pack validation, exact re-encoding, and byte comparison. Generic
 ingress never infers a recipe.
 
+Pack Archive ingress carries a separate `pack_archive_acquisition` Transport
+Receipt for bounded stabilization before the role-refined `archive_read` Format
+Receipt. Acquisition has `not_applicable` commit strength because it produces an
+immutable input value rather than publishing one. Closure Export is already a
+finite-tree input and has no Pack Archive acquisition receipt; its format receipt
+records the canonical tree identity directly. Content-identity mismatch records
+the actual archive identity or actual Closure Export tree identity according to
+the selected input kind. Archive acquisition may itself be `failed` at reference,
+acquisition, spooling, or cleanup; resource, cancellation, deadline, and
+integrity ingress terminals permit either that failed receipt or a completed
+transfer followed by a later format failure. Framing, validation, and identity
+terminals require acquisition `transferred`.
+
 No expected Pack Identity means Derive. Human and machine results show the
 derived identity and `internal_validity_only`; they never imply substitution
 protection. A supplied identity means Verify. No mismatch exposes a Pack.
@@ -147,7 +163,7 @@ and target-specific publication rules.
 | `--creation-timestamp <UNIX_SECONDS>` | `SOURCE_DATE_EPOCH`, then absent | Convenience sets document time and PDF creation time; conflicts with either advanced option. |
 | `--override <PACK_PATH=FILE>` | empty | Repeatable stabilized replacement; duplicate canonical paths reject. |
 | `--override-file <FILE>` | empty | Repeatable strict `org.typst-pack.override-set/1`; supports Pack paths containing `=`. |
-| `--diagnostic-policy <FILE>` | profile semantic default | Strict `org.typst-pack.canonical-diagnostic-policy/1`; identity-bearing. |
+| `--diagnostic-policy <FILE>` | profile semantic default | Strict `org.typst-pack.canonical-diagnostic-policy/1`; identity-bearing; each dimension must be no greater than the selected profile. |
 
 Absent time controls make CLI sample one Unix second after admission and before
 Pack ingress. That value is used for document and PDF creation time and is
@@ -177,6 +193,14 @@ duplicates across sources, and changing files reject.
 Format-inapplicable values reject before Pack I/O, even at another format's
 default. Such CLI-only applicability failures and zero/negative/NaN/infinite
 PPI are usage exit 2. Accepted-shaped semantic request rejections exit 1.
+
+`FINITE_POSITIVE_DECIMAL` accepts the finite subset of Rust `f32` decimal
+syntax: optional `+`, digits with an optional decimal point or a leading decimal
+point with digits, and an optional signed decimal exponent. Admission rounds
+once to IEEE-754 binary32 using round-to-nearest ties-to-even, rejects zero,
+underflow-to-zero, overflow, NaN, and infinity, and records the resulting eight
+lowercase hexadecimal bits as the canonical semantic PPI. CLI and Dagger use
+the same parser and therefore cannot preserve lexical spelling as meaning.
 
 Automatic PDF tagging enables all-page output and disables explicit page
 selection with a canonical warning. Explicit tags plus page selection, or no
@@ -234,6 +258,21 @@ is safe default. Channel states are `not_requested`, `complete`, `redacted`,
 `limited`, or `unavailable`. Human renderers neutralize control characters and
 never interpret untrusted diagnostic text as ANSI/markup; color decorates only
 trusted adapter framing.
+
+The Compilation Report's separate `telemetry` reporting channel contains only
+the closed stable phase/duration projection. It is not one of the six disclosure
+capabilities. CLI `--timings` is a post-commit experimental Perfetto rendering
+of available telemetry and remains outside stable JSON; failure to render it
+cannot rewrite the report.
+
+The stable Compilation Result projection always carries diagnostic policy,
+counts, completion, and identity but sets its canonical `entries` field to null.
+Complete message/hint/span records appear only in the independently authorized
+`diagnostics` channel. `evidence_disclosure: identity` similarly sets dependency
+evidence and access traces to null; explicit `canonical` disclosure admits their
+identity-safe logical projection, still without backing locators. The first-party
+Compilation Report always records Semantic Result Cache as disabled; Dagger
+graph reuse remains outside the attempt and never emits a cache hit.
 
 Dependency JSON remains `{"inputs":[...],"outputs":[...]}`. Inputs are named
 Pack representation members, override/control sources, then causal external
@@ -322,6 +361,11 @@ typst-pack inspect [OPTIONS] <PACK>
 `org.typst-pack.pack-inspection-operation/1`, combining ingress and complete
 logical Pack Inspection. It never acquires dependencies, compiles, applies
 overrides, infers archive recipe, or projects. Failure leaves stdout empty.
+The inspection projection includes every project binding and exact identity,
+the full Discovery Coverage Requests and ordered trace observations, complete
+package tree inventories and manifest summaries, complete font selection and
+licensing descriptors plus catalog order, metadata, and extension/annotation
+payload identities and sizes. It does not expose the Pack Control Record bytes.
 
 ### `compile`
 
@@ -360,7 +404,10 @@ The page root is absent or an existing `org.typst-pack.watch-output-root/1`.
 Each revision stages `generations/<session>/<revision>/`, including an empty
 generation, then atomically replaces `current.json` using
 `org.typst-pack.watch-output-pointer/1`. The pointer carries session/revision,
-Pack and Result identities, currentness, generation, and ordered artifacts.
+Pack and Result identities, currentness, generation, and ordered artifacts. Its
+`desired_revision` is the newest accepted observation; `publication_revision`
+is the revision that produced the retained artifacts, so an immediate stale
+rewrite never pretends old bytes came from the new revision.
 Readers use the pointer only. New Pack Identity creates a session namespace and
 rebinds the pointer. Current plus one previous generation is retained; older or
 abandoned state is boundedly cleaned after commit. Cleanup failure does not roll
@@ -378,6 +425,11 @@ nonempty success; empty output is a no-op.
 
 `--report PATH` atomically replaces `org.typst-pack.watch-state/1` on each
 publication and immediate stale/unverified transition. No implicit sidecar.
+Without `--report`, document-output currentness is still emitted immediately on
+stderr as trusted adapter framing; the retained document file is last-good data
+and never itself claims currentness. Machine consumers that need currentness use
+`--report`; page consumers always use the mandatory `current.json`, which is
+atomically rewritten for stale and coverage transitions before replacement work.
 
 ### `materialize`
 
@@ -428,7 +480,11 @@ Automation consumes JSON status, not a new exit taxonomy.
 
 ## Auxiliary Inputs And Stable JSON
 
-The JSON Schema companion is normative and exhaustive. Inputs are UTF-8 JSON,
+The JSON Schema companion is normative for every serialized structure, closed
+branch, enum, and nullability rule. Cross-field equality, sorted-uniqueness,
+profile tightening, receipt stage monotonicity, and the accepted Format Receipt
+Contract v1 role/terminal matrix remain semantic validation rules because JSON
+Schema cannot compare their independently encoded values. Inputs are UTF-8 JSON,
 at most 1 MiB before payloads, reject BOM, duplicate keys, unknown fields,
 unknown major, and trailing data. Relative source paths resolve from control-file
 parent. It defines:
@@ -443,12 +499,20 @@ parent. It defines:
   transport, watch-state, and watch-pointer output documents.
 
 Duplicate input/override/policy selectors reject after schema parse. Unmatched
-embedding rules reject. Every numeric operational override is a decimal string,
-may only tighten the named profile, and stays separate from semantic diagnostic
-policy, jobs width, and deadlines.
+embedding rules reject. Every numeric operational override is a decimal string
+and may only tighten the named profile. Authority-cache occupancy is part of
+this overlay; Dagger uses the minimum of the `dagger-ci/1` cap, constructor
+quota, and operation override. Operational limits stay separate from semantic
+diagnostic policy, jobs width, and deadlines. Canonical Diagnostic Policy is
+admitted independently by proving both dimensions are no greater than the
+profile defaults; equality and tighter values are valid, while an attempted
+increase is a pre-preparation adapter outcome.
 
 Stable output rules:
 
+- The checked JSON Schema is strict producer conformance for major 1, minor 0.
+  A consumer implements the evolution rule below rather than applying that
+  exact producer schema to a future minor document.
 - UTF-8 JSON plus one trailing newline.
 - Header `{schema:{name,major,minor},producer:{...}}`.
 - Lower snake case fields/enums and required `kind` on unions.
@@ -469,6 +533,12 @@ Compilation operation preserves three layers:
 2. Core Compilation Terminal: Request Rejection or Compilation Report.
 3. Post-commit delivery and sidecars: sibling outcomes retaining a report.
 
+Creation has the same phase ownership: a pre-core adapter outcome may precede a
+Creation Report; request, report, archive encoding receipt, and publication
+receipt are nullable siblings with discriminated coherence. Representation
+operations name their source Pack Identity and make composed ingress optional,
+so a Dagger Pack created in-memory never fabricates an ingress receipt.
+
 | Core state | Compilation ID | Report | Result ID | Semantic artifacts |
 | --- | --- | --- | --- | --- |
 | Adapter failed | null | null | null | null |
@@ -479,18 +549,34 @@ Compilation operation preserves three layers:
 
 Representation receipt distinguishes validation, unsupported, identity mismatch,
 encoding assertion, resource, cancellation, deadline, admission, internal,
-transport, commit, and cleanup facts. Cleanup never replaces primary failure.
+transport, commit, and cleanup facts using the complete accepted Format Receipt
+Contract v1 registry. Project Materialization uses a separately versioned
+adapter projection receipt rather than inventing a Format Receipt role. Cleanup
+never replaces primary failure.
+
+Archive and Closure Export publication envelopes carry two closed projections
+of the same operation: the role-refined Format Receipt Contract v1 publication
+receipt required by the format contract and the role-refined Transport Receipt
+required by the adapter contract. Their terminal, commit, identity, count, and
+cleanup facts must agree. Encoding/projection receipts never double as
+publication receipts. Project Materialization has no Format Receipt role and
+therefore carries only its projection receipt plus a Transport Receipt.
 
 Watch currentness is `current_through_push`, `current_as_of_poll`, `unverified`,
 or `stale`, never boolean. Publication currentness and Last Successful
 Compilation currentness are separate. Last Successful Delivery is separate
-again and may name another revision.
+again and may name another revision. Session Publication is a closed union of a
+Compilation Terminal and an adapter-owned ingestion failure, each carrying its
+revision and currentness; delivery remains a sibling field.
 
 ## Dagger Contract
 
 ### Generated Surface
 
-The GraphQL fixture is normative for names/kinds/nullability. The pinned engine
+The GraphQL fixture is the normative desired generated structure for
+names/kinds/nullability. This planning artifact is not a claim that absent
+implementation source has already passed Dagger generation; the structural
+comparison and generated-client compile below are implementation gates. The pinned engine
 puts main functions directly on `Query` and constructor arguments on
 `Query.with`; it does not generate `Query.typstPack`. Defaulted source args are
 nullable in GraphQL. Required File/Directory/custom inputs are non-null IDs;
@@ -520,7 +606,8 @@ Pack
 - `with`: no cache when both args null. An authority CacheVolume must pair with
   positive quota bytes. It binds one Cache Isolation Domain from volume
   capability, authorized Dagger caller, and exact authority composition;
-  indexes are namespaced and occupancy cannot exceed supplied quota/profile.
+  indexes are namespaced and occupancy cannot exceed the supplied quota or the
+  `dagger-ci/1` cap of 8 GiB (`8589934592` bytes).
   It stores independently verified package/font content only, never results.
 - Discovery Variant: null label, paged, empty inputs/features, Absent time, no
   overrides. `variants:null` creates one convenience variant; empty rejects;
@@ -556,7 +643,7 @@ Sibling fields evaluate one lazy bundle once; `require*` never reruns it.
 | --- | --- | --- |
 | PackCreation issued/failed | operation report | Pack non-null only issued |
 | PackIngress validated/other | receipt | Pack non-null only validated |
-| Representation succeeded/failed | receipt | File/Directory non-null only succeeded |
+| Representation adapter/core outcome | operation receipt; staging receipt | File/Directory non-null only after immutable representation and container-local staging both succeed |
 | Compilation adapter failed | operation; terminal/report null | all identities/artifacts null |
 | Request rejected | operation+terminal; report null | all identities/artifacts null |
 | Operation failed | operation+terminal+report | Compilation ID only |
@@ -570,6 +657,21 @@ succeeded result and staging. Ordinary modeled outcomes do not become GraphQL
 errors before `require*`; malformed GraphQL, protocol failure, or impossible
 internal coherence may raise.
 
+Archive encoding, Closure Export, and Project Materialization use the same
+two-layer rule: `status` describes the immutable format/projection operation,
+while `stagingStatus` and `stagingReceipt` describe container-local File or
+Directory construction. A staging failure never rewrites a succeeded core
+receipt; `requireArchive`, `requireTree`, and `requireProject` require both.
+
+Status mappings are exact: `PackCreation.PACK_ISSUED` iff its Creation Report
+issued a Pack; `PackIngress.VALIDATED` iff its ingress receipt succeeded and
+exposed a Pack; `TypstPackRepresentationStatus.SUCCEEDED` iff the immutable
+encoding/projection receipt succeeded, regardless of later staging. Adapter
+preparation maps to `ADAPTER_FAILED`; Project Materialization request defects
+map to `REQUEST_REJECTED`; resource, cancellation, deadline, admission, and
+integrity terminals map by the same named receipt terminal. Staging status never
+participates in those mappings.
+
 Deterministic files:
 
 | Field | Value |
@@ -577,11 +679,11 @@ Deterministic files:
 | PackCreation.report | `creation-operation.json` |
 | PackIngress.receipt | `pack-ingress-operation.json` |
 | Pack.inspect | `pack-inspection.json` |
-| PackArchiveEncoding | `pack.typk` plus `archive-encoding-operation.json` |
+| PackArchiveEncoding | `pack.typk` plus `archive-encoding-operation.json` and `archive-staging.json` |
 | Compilation.operation | `compile-operation.json` |
 | Compilation.terminal/report | `compilation-terminal.json` / nullable `compilation-report.json` |
 | Compilation.stagingReceipt | `compilation-staging.json` |
-| ClosureExport / materialization | pure tree plus separate receipt |
+| ClosureExport / materialization | pure tree plus operation and staging receipts |
 
 Artifact names are `output.pdf`, `output.html`, `page-<source-page>.png`, and
 `page-<source-page>.svg`, unpadded. Names are presentation, not identity. A
@@ -637,7 +739,7 @@ create/compile, and ignored Rayon initialization error. ADR-0002's one private
 whole-Pack seam remains. Resource Slot parts of ADR-0004/0005 are historical;
 Typst parity parts remain input.
 
-## Verification Gate
+## Implementation Verification Gate
 
 - Snapshot parsed options, defaults, conflicts, environment fallbacks, six
   commands, and aliases against Typst 0.15.0. Help prose/wrapping is not stable.
