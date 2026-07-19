@@ -1,0 +1,1094 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PROTOTYPE - Typst Pack Scale and Resource Limits</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17201d;
+      --muted: #5c6964;
+      --paper: #f4f1e9;
+      --panel: #fffdf8;
+      --line: #d9d4c8;
+      --accent: #166b55;
+      --accent-soft: #dcebe5;
+      --warn: #9b5b0d;
+      --warn-soft: #fff0d2;
+      --fail: #9b2c2c;
+      --fail-soft: #f8dddd;
+      --ok: #266b49;
+      --ok-soft: #dff0e7;
+      --shadow: 0 14px 38px rgba(23, 32, 29, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background:
+        linear-gradient(90deg, rgba(22, 107, 85, 0.035) 1px, transparent 1px),
+        linear-gradient(rgba(22, 107, 85, 0.035) 1px, transparent 1px),
+        var(--paper);
+      background-size: 24px 24px;
+      color: var(--ink);
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      line-height: 1.5;
+    }
+
+    button, input, select { font: inherit; }
+
+    button {
+      border: 1px solid var(--accent);
+      border-radius: 7px;
+      background: var(--panel);
+      color: var(--accent);
+      cursor: pointer;
+      font-weight: 700;
+      padding: 0.62rem 0.78rem;
+    }
+
+    button:hover { background: var(--accent-soft); }
+    button:disabled { cursor: default; opacity: 0.45; }
+
+    button.primary {
+      background: var(--accent);
+      color: white;
+    }
+
+    button.primary:hover { background: #105743; }
+
+    input, select {
+      border: 1px solid var(--line);
+      border-radius: 6px;
+      background: white;
+      color: var(--ink);
+      padding: 0.48rem 0.55rem;
+    }
+
+    input[type="number"] { width: 8.5rem; }
+
+    code {
+      border-radius: 4px;
+      background: #ece8dd;
+      padding: 0.08rem 0.3rem;
+    }
+
+    .shell {
+      margin: 0 auto;
+      max-width: 1500px;
+      padding: 2.5rem clamp(1rem, 4vw, 4rem) 5rem;
+    }
+
+    .eyebrow {
+      color: var(--accent);
+      font-size: 0.76rem;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { font-size: clamp(2rem, 5vw, 4.8rem); letter-spacing: -0.055em; line-height: 0.95; max-width: 1000px; }
+    h2 { font-size: 1.35rem; letter-spacing: -0.02em; }
+    h3 { font-size: 1rem; }
+
+    .intro {
+      border-top: 8px solid var(--accent);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      margin-bottom: 1.5rem;
+      padding: clamp(1.4rem, 4vw, 3.5rem);
+    }
+
+    .intro > p { color: var(--muted); font-size: 1.08rem; max-width: 1050px; }
+
+    .question {
+      border-left: 4px solid var(--accent);
+      color: var(--ink) !important;
+      font-weight: 650;
+      margin: 1.7rem 0 0;
+      padding: 0.2rem 0 0.2rem 1rem;
+    }
+
+    .notice {
+      background: var(--warn-soft);
+      border: 1px solid #e8c882;
+      border-radius: 8px;
+      color: #6d420d;
+      font-weight: 650;
+      margin-top: 1.5rem;
+      padding: 0.9rem 1rem;
+    }
+
+    .grid { display: grid; gap: 1rem; }
+    .grid.two { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .grid.four { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      box-shadow: var(--shadow);
+      margin-top: 1rem;
+      padding: 1.25rem;
+    }
+
+    .panel-head {
+      align-items: flex-start;
+      display: flex;
+      gap: 1rem;
+      justify-content: space-between;
+    }
+
+    .panel-head p { color: var(--muted); margin-bottom: 0; max-width: 850px; }
+
+    .summary-card {
+      border-left: 3px solid var(--accent);
+      min-height: 7rem;
+      padding: 0.3rem 0.8rem;
+    }
+
+    .summary-card span {
+      color: var(--muted);
+      display: block;
+      font-size: 0.76rem;
+      font-weight: 800;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .summary-card strong {
+      display: block;
+      font-size: 1.28rem;
+      line-height: 1.2;
+      margin: 0.35rem 0;
+    }
+
+    .summary-card small { color: var(--muted); }
+
+    .verdict {
+      border-radius: 8px;
+      margin-top: 1rem;
+      padding: 1rem;
+    }
+
+    .verdict.ok { background: var(--ok-soft); border: 1px solid #9bc9ae; }
+    .verdict.warn { background: var(--warn-soft); border: 1px solid #e8c882; }
+    .verdict.fail { background: var(--fail-soft); border: 1px solid #dca5a5; }
+
+    .verdict strong { display: block; font-size: 1.15rem; }
+    .verdict p { margin: 0.25rem 0 0; }
+
+    .controls {
+      align-items: end;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+    }
+
+    .field label {
+      color: var(--muted);
+      display: block;
+      font-size: 0.77rem;
+      font-weight: 800;
+      margin-bottom: 0.25rem;
+      text-transform: uppercase;
+    }
+
+    .button-row { display: flex; flex-wrap: wrap; gap: 0.55rem; }
+
+    .state-change {
+      color: var(--accent);
+      font-size: 0.9rem;
+      font-weight: 700;
+      margin: 0.75rem 0 0;
+    }
+
+    .table-wrap { overflow-x: auto; }
+
+    table {
+      border-collapse: collapse;
+      font-size: 0.9rem;
+      margin-top: 1rem;
+      min-width: 1050px;
+      width: 100%;
+    }
+
+    th, td {
+      border-bottom: 1px solid var(--line);
+      padding: 0.72rem 0.6rem;
+      text-align: left;
+      vertical-align: top;
+    }
+
+    th {
+      color: var(--muted);
+      font-size: 0.72rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    tr.group td {
+      background: #eeebe2;
+      color: var(--ink);
+      font-size: 0.73rem;
+      font-weight: 850;
+      letter-spacing: 0.08em;
+      padding: 0.45rem 0.6rem;
+      text-transform: uppercase;
+    }
+
+    tr.fail-row { background: var(--fail-soft); }
+    tr.warn-row { background: var(--warn-soft); }
+    tr.ok-row:hover { background: #f2f7f4; }
+
+    .status {
+      border-radius: 999px;
+      display: inline-block;
+      font-size: 0.75rem;
+      font-weight: 800;
+      padding: 0.2rem 0.48rem;
+      white-space: nowrap;
+    }
+
+    .status.ok { background: var(--ok-soft); color: var(--ok); }
+    .status.warn { background: var(--warn-soft); color: var(--warn); }
+    .status.fail { background: var(--fail-soft); color: var(--fail); }
+
+    .facts {
+      display: grid;
+      gap: 0.7rem;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      margin-top: 1rem;
+    }
+
+    .fact {
+      background: #f3f0e7;
+      border-radius: 8px;
+      padding: 0.85rem;
+    }
+
+    .fact strong { display: block; margin-bottom: 0.2rem; }
+    .fact span { color: var(--muted); font-size: 0.88rem; }
+
+    .tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.4rem;
+      margin: 1rem 0;
+    }
+
+    .tabs button.active { background: var(--accent); color: white; }
+
+    .walkthrough {
+      background: #f3f0e7;
+      border-radius: 8px;
+      padding: 1rem;
+    }
+
+    .steps { display: grid; gap: 0.55rem; margin-top: 1rem; }
+
+    .step {
+      align-items: center;
+      display: grid;
+      gap: 0.75rem;
+      grid-template-columns: 2rem minmax(0, 1fr) auto;
+    }
+
+    .step-number {
+      align-items: center;
+      background: white;
+      border: 1px solid var(--line);
+      border-radius: 50%;
+      display: flex;
+      font-size: 0.8rem;
+      font-weight: 800;
+      height: 2rem;
+      justify-content: center;
+      width: 2rem;
+    }
+
+    .step.done { opacity: 0.55; }
+
+    .decision-preview {
+      background: #17201d;
+      border-radius: 8px;
+      color: #eef6f2;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.82rem;
+      max-height: 32rem;
+      overflow: auto;
+      padding: 1rem;
+      white-space: pre-wrap;
+    }
+
+    .small { color: var(--muted); font-size: 0.86rem; }
+
+    @media (max-width: 900px) {
+      .grid.two, .grid.four, .facts { grid-template-columns: 1fr; }
+      .panel-head { display: block; }
+      .panel-head .controls { margin-top: 1rem; }
+      .step { grid-template-columns: 2rem minmax(0, 1fr); }
+      .step button { grid-column: 2; justify-self: start; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <section class="intro">
+      <div class="eyebrow">Throwaway decision prototype</div>
+      <h1>How large is large enough?</h1>
+      <p>This demo makes proposed typst-pack resource policies concrete. Load realistic work, edit its measured shape, adjust the proposed policy, and see exactly which seam admits, throttles, or stops it.</p>
+      <p class="question"><strong>Question under test:</strong> Using representative CLI, browser, library, service, and Dagger workloads against the settled target interfaces, which measurable archive, expansion, file, package, font, page, artifact, memory, latency, concurrency, timeout, and cancellation requirements belong in the architecture specification?</p>
+      <div class="notice">Prototype only. The numbers below are candidates for discussion, not shipped defaults, compatibility promises, or production code.</div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <div class="eyebrow">Verdict under test</div>
+          <h2>Two layers, one effective limit</h2>
+          <p>Pack Format Epoch 2 keeps generous immutable representability ceilings. Each core operation requires explicit caller-supplied limits. Target adapters own documented defaults, and callers may tighten them. The effective limit is always the stricter value; policy exhaustion leaves Pack validity unknown.</p>
+        </div>
+      </div>
+      <div class="grid two" style="margin-top: 1rem">
+        <div class="summary-card">
+          <span>Layer 1</span>
+          <strong>Format safety ceiling</strong>
+          <small>Universal and epoch-bound. Crossing it makes a representation invalid.</small>
+        </div>
+        <div class="summary-card">
+          <span>Layer 2</span>
+          <strong>Operation budget</strong>
+          <small>Explicit target policy. Crossing it produces a rejection or resource outcome without judging universal validity.</small>
+        </div>
+      </div>
+    </section>
+
+    <section class="panel" id="current-state">
+      <div class="panel-head">
+        <div>
+          <div class="eyebrow">Current state</div>
+          <h2 id="state-title">Loading...</h2>
+          <p id="state-description"></p>
+        </div>
+        <div class="controls">
+          <div class="field">
+            <label for="profile">Target policy</label>
+            <select id="profile"></select>
+          </div>
+          <button id="reset-policy">Reset proposed limits</button>
+        </div>
+      </div>
+      <div id="state-change" class="state-change"></div>
+      <div class="grid four" id="summary" style="margin-top: 1rem"></div>
+      <div id="verdict"></div>
+      <div class="facts" id="execution-facts"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <div class="eyebrow">Free play</div>
+          <h2>Push the model out of shape</h2>
+          <p>These actions remain available in every state. They mutate the measured workload or execution controls and immediately re-evaluate the complete policy.</p>
+        </div>
+      </div>
+      <div class="button-row" id="free-play"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <div class="eyebrow">Measured workload and proposed policy</div>
+          <h2>Every bounded dimension</h2>
+          <p>Edit workload measurements to represent real projects. Edit operation budgets to test the proposed target policy. Derived expansion is computed from decoded and archive bytes.</p>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Dimension</th>
+              <th>Measured workload</th>
+              <th>Proposed operation budget</th>
+              <th>Format ceiling</th>
+              <th>Enforced by</th>
+              <th>Evaluation</th>
+            </tr>
+          </thead>
+          <tbody id="limits-body"></tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <div class="eyebrow">Guided walkthroughs</div>
+          <h2>Cases that expose bad assumptions</h2>
+          <p>Start a walkthrough to reset to known state. Each step is a real model action; watch the current state and limit table after every click.</p>
+        </div>
+      </div>
+      <div class="tabs" id="tabs"></div>
+      <div class="walkthrough" id="walkthrough"></div>
+    </section>
+
+    <section class="panel">
+      <div class="panel-head">
+        <div>
+          <div class="eyebrow">Decision preview</div>
+          <h2>What this exact state would specify</h2>
+          <p>This is a review aid, not the final issue resolution. It keeps universal claims separate from the selected adapter's candidate defaults.</p>
+        </div>
+        <button id="copy-decision">Copy Markdown</button>
+      </div>
+      <pre class="decision-preview" id="decision-preview"></pre>
+    </section>
+  </main>
+
+  <script>
+    // Pure decision model. It has no DOM dependency and can be lifted out of this page.
+    const BudgetModel = (() => {
+      const MIB_PER_GIB = 1024;
+      const FORMAT_BYTE_CEILING_MIB = 2 ** 43; // 2^63 bytes expressed in MiB.
+      const FORMAT_COUNT_CEILING = 2 ** 32;
+
+      const metrics = [
+        { id: "archiveMiB", group: "Pack ingress", label: "Archive transport bytes", unit: "MiB", seam: "ingress adapter", format: FORMAT_BYTE_CEILING_MIB },
+        { id: "controlMiB", group: "Pack ingress", label: "Pack Control Record bytes", unit: "MiB", seam: "representation reader", format: 4096 },
+        { id: "entries", group: "Pack ingress", label: "Archive entry count", unit: "entries", seam: "representation reader", format: FORMAT_COUNT_CEILING, integer: true },
+        { id: "expansionRatio", group: "Pack ingress", label: "Decoded expansion ratio", unit: "x", seam: "representation reader", format: 2048, formatInclusive: true, derived: workload => workload.decodedMiB / Math.max(workload.archiveMiB, 1 / 1024) },
+        { id: "decodedMiB", group: "Pack ingress", label: "Aggregate decoded bytes", unit: "MiB", seam: "representation reader", format: FORMAT_BYTE_CEILING_MIB },
+
+        { id: "files", group: "Closure content", label: "Project and package file count", unit: "files", seam: "creation / ingress", format: FORMAT_COUNT_CEILING, integer: true },
+        { id: "largestFileMiB", group: "Closure content", label: "Largest project or package file", unit: "MiB", seam: "creation / ingress", format: FORMAT_BYTE_CEILING_MIB },
+        { id: "packages", group: "Closure content", label: "Exact package requirements", unit: "packages", seam: "creation / driver", format: FORMAT_COUNT_CEILING, integer: true },
+        { id: "packageMiB", group: "Closure content", label: "Complete package tree bytes", unit: "MiB", seam: "creation / driver", format: FORMAT_BYTE_CEILING_MIB },
+        { id: "fonts", group: "Closure content", label: "Font containers", unit: "containers", seam: "creation / driver", format: FORMAT_COUNT_CEILING, integer: true },
+        { id: "fontFaces", group: "Closure content", label: "Font faces", unit: "faces", seam: "font authority / creation", format: FORMAT_COUNT_CEILING, integer: true },
+        { id: "fontMiB", group: "Closure content", label: "Font container bytes", unit: "MiB", seam: "creation / driver", format: FORMAT_BYTE_CEILING_MIB },
+        { id: "variants", group: "Closure content", label: "Discovery Variants", unit: "variants", seam: "creation", format: FORMAT_COUNT_CEILING, integer: true },
+        { id: "restarts", group: "Closure content", label: "Async discovery restarts", unit: "restarts", seam: "async creator", integer: true },
+
+        { id: "pages", group: "Compilation result", label: "Source pages", unit: "pages", seam: "compilation kernel", integer: true },
+        { id: "artifacts", group: "Compilation result", label: "Output artifact count", unit: "artifacts", seam: "compilation kernel", integer: true },
+        { id: "largestRasterMegaPixels", group: "Compilation result", label: "Largest raster page", unit: "MP", seam: "raster exporter" },
+        { id: "rasterMegaPixels", group: "Compilation result", label: "Aggregate selected raster pixels", unit: "MP", seam: "raster exporter" },
+        { id: "largestArtifactMiB", group: "Compilation result", label: "Largest output artifact", unit: "MiB", seam: "exporter / delivery" },
+        { id: "artifactMiB", group: "Compilation result", label: "Aggregate artifact bytes", unit: "MiB", seam: "exporter / delivery" },
+        { id: "diagnostics", group: "Compilation result", label: "Canonical diagnostics", unit: "diagnostics", seam: "report finalization", integer: true },
+        { id: "diagnosticMiB", group: "Compilation result", label: "Diagnostics and source bundle bytes", unit: "MiB", seam: "report finalization" },
+
+        { id: "spoolMiB", group: "Operational envelope", label: "Peak stable spool bytes", unit: "MiB", seam: "Spool Facility" },
+        { id: "inFlightMiB", group: "Operational envelope", label: "Peak in-flight transport bytes", unit: "MiB", seam: "transport adapter" },
+        { id: "workingMemoryMiB", group: "Operational envelope", label: "Peak retained memory", unit: "MiB", seam: "execution facility", soft: true },
+        { id: "acquisitionConcurrency", group: "Operational envelope", label: "Requested acquisition concurrency", unit: "tasks", seam: "driver", integer: true, throttle: true },
+        { id: "concurrentAttempts", group: "Operational envelope", label: "Concurrent attempt demand", unit: "attempts", seam: "execution facility", integer: true, throttle: true }
+      ];
+
+      const policies = {
+        library: {
+          name: "Caller-supplied Rust library example",
+          short: "A comparison workload policy, not a default published or selected by the core.",
+          trust: "Caller-selected",
+          execution: "in-process",
+          memoryStrength: "best-effort",
+          cancellation: "cooperative; running kernel must unwind",
+          latencyTargetSeconds: 10,
+          deadlineSeconds: 0,
+          queueTimeoutSeconds: 0,
+          queueCapacity: 0,
+          cancellationGraceSeconds: 0,
+          limits: {
+            archiveMiB: 512, controlMiB: 64, entries: 100000, expansionRatio: 128, decodedMiB: 2048,
+            files: 100000, largestFileMiB: 256, packages: 256, packageMiB: 1024, fonts: 256, fontFaces: 1024, fontMiB: 512, variants: 32, restarts: 512,
+            pages: 2000, artifacts: 2000, largestRasterMegaPixels: 64, rasterMegaPixels: 2048, largestArtifactMiB: 512, artifactMiB: 2048, diagnostics: 10000, diagnosticMiB: 32,
+            spoolMiB: 4096, inFlightMiB: 64, workingMemoryMiB: 2048, acquisitionConcurrency: 8, concurrentAttempts: 1
+          }
+        },
+        cli: {
+          name: "Native CLI",
+          short: "Large local projects with disk spooling and no hidden wall-clock timeout.",
+          trust: "Trusted / Partially Trusted",
+          execution: "in-process",
+          memoryStrength: "best-effort",
+          cancellation: "cooperative; Ctrl-C waits for a running kernel",
+          latencyTargetSeconds: 20,
+          deadlineSeconds: 0,
+          queueTimeoutSeconds: 0,
+          queueCapacity: 0,
+          cancellationGraceSeconds: 0,
+          limits: {
+            archiveMiB: 1024, controlMiB: 64, entries: 200000, expansionRatio: 128, decodedMiB: 4096,
+            files: 100000, largestFileMiB: 512, packages: 512, packageMiB: 2048, fonts: 512, fontFaces: 2048, fontMiB: 1024, variants: 32, restarts: 1024,
+            pages: 5000, artifacts: 5000, largestRasterMegaPixels: 128, rasterMegaPixels: 8192, largestArtifactMiB: 2048, artifactMiB: 8192, diagnostics: 20000, diagnosticMiB: 64,
+            spoolMiB: 16384, inFlightMiB: 64, workingMemoryMiB: 4096, acquisitionConcurrency: 8, concurrentAttempts: 1
+          }
+        },
+        browser: {
+          name: "Browser / WASM interactive",
+          short: "Memory-sensitive editing with one local kernel and bounded browser-owned values.",
+          trust: "Trusted / Partially Trusted",
+          execution: "in-process",
+          memoryStrength: "best-effort",
+          cancellation: "cooperative in-process; dedicated-worker termination targets 2s",
+          latencyTargetSeconds: 2,
+          deadlineSeconds: 30,
+          queueTimeoutSeconds: 2,
+          queueCapacity: 1,
+          cancellationGraceSeconds: 2,
+          limits: {
+            archiveMiB: 128, controlMiB: 16, entries: 20000, expansionRatio: 64, decodedMiB: 512,
+            files: 10000, largestFileMiB: 64, packages: 64, packageMiB: 256, fonts: 128, fontFaces: 512, fontMiB: 256, variants: 16, restarts: 128,
+            pages: 500, artifacts: 500, largestRasterMegaPixels: 32, rasterMegaPixels: 256, largestArtifactMiB: 128, artifactMiB: 512, diagnostics: 5000, diagnosticMiB: 8,
+            spoolMiB: 512, inFlightMiB: 16, workingMemoryMiB: 768, acquisitionConcurrency: 4, concurrentAttempts: 1
+          }
+        },
+        service: {
+          name: "Bounded remote service",
+          short: "Reference-based I/O with bounded queues and isolated workers.",
+          trust: "Partially Trusted",
+          execution: "isolated",
+          memoryStrength: "hard worker quota",
+          cancellation: "forced worker termination and reap",
+          latencyTargetSeconds: 15,
+          deadlineSeconds: 120,
+          queueTimeoutSeconds: 30,
+          queueCapacity: 32,
+          cancellationGraceSeconds: 2,
+          limits: {
+            archiveMiB: 512, controlMiB: 32, entries: 100000, expansionRatio: 64, decodedMiB: 2048,
+            files: 50000, largestFileMiB: 256, packages: 256, packageMiB: 1024, fonts: 256, fontFaces: 2048, fontMiB: 512, variants: 32, restarts: 512,
+            pages: 2000, artifacts: 2000, largestRasterMegaPixels: 64, rasterMegaPixels: 2048, largestArtifactMiB: 1024, artifactMiB: 4096, diagnostics: 10000, diagnosticMiB: 16,
+            spoolMiB: 8192, inFlightMiB: 64, workingMemoryMiB: 4096, acquisitionConcurrency: 16, concurrentAttempts: 4
+          }
+        },
+        dagger: {
+          name: "Dagger / CI batch",
+          short: "Container-local staging with generous disk budgets and bounded worker fan-out.",
+          trust: "Trusted / Partially Trusted",
+          execution: "isolated",
+          memoryStrength: "hard container quota when runtime-verified",
+          cancellation: "forced container termination and reap",
+          latencyTargetSeconds: 60,
+          deadlineSeconds: 600,
+          queueTimeoutSeconds: 120,
+          queueCapacity: 8,
+          cancellationGraceSeconds: 5,
+          limits: {
+            archiveMiB: 2048, controlMiB: 64, entries: 200000, expansionRatio: 128, decodedMiB: 8192,
+            files: 100000, largestFileMiB: 512, packages: 512, packageMiB: 4096, fonts: 512, fontFaces: 4096, fontMiB: 2048, variants: 64, restarts: 2048,
+            pages: 5000, artifacts: 5000, largestRasterMegaPixels: 256, rasterMegaPixels: 16384, largestArtifactMiB: 4096, artifactMiB: 16384, diagnostics: 20000, diagnosticMiB: 64,
+            spoolMiB: 32768, inFlightMiB: 128, workingMemoryMiB: 8192, acquisitionConcurrency: 16, concurrentAttempts: 2
+          }
+        }
+      };
+
+      const workloads = {
+        routineCli: {
+          name: "Routine local report",
+          description: "A self-contained 32-page PDF with a few packages and fonts.",
+          profile: "cli",
+          values: {
+            archiveMiB: 12, controlMiB: 0.4, entries: 180, decodedMiB: 44, files: 150, largestFileMiB: 8,
+            packages: 5, packageMiB: 12, fonts: 6, fontFaces: 14, fontMiB: 18, variants: 2, restarts: 6,
+            pages: 32, artifacts: 1, largestRasterMegaPixels: 0, rasterMegaPixels: 0, largestArtifactMiB: 3, artifactMiB: 3, diagnostics: 4, diagnosticMiB: 0.05,
+            spoolMiB: 20, inFlightMiB: 4, workingMemoryMiB: 260, acquisitionConcurrency: 4, concurrentAttempts: 1,
+            queueSeconds: 0, kernelSeconds: 2.4, cancelDuringKernel: false
+          }
+        },
+        browserDeck: {
+          name: "Image-heavy browser deck",
+          description: "An interactive deck near browser memory and output limits.",
+          profile: "browser",
+          values: {
+            archiveMiB: 85, controlMiB: 5, entries: 4200, decodedMiB: 450, files: 3900, largestFileMiB: 52,
+            packages: 28, packageMiB: 190, fonts: 70, fontFaces: 240, fontMiB: 190, variants: 8, restarts: 45,
+            pages: 240, artifacts: 240, largestRasterMegaPixels: 1, rasterMegaPixels: 240, largestArtifactMiB: 3, artifactMiB: 470, diagnostics: 120, diagnosticMiB: 3,
+            spoolMiB: 480, inFlightMiB: 16, workingMemoryMiB: 720, acquisitionConcurrency: 4, concurrentAttempts: 1,
+            queueSeconds: 0.2, kernelSeconds: 7, cancelDuringKernel: false
+          }
+        },
+        largeBook: {
+          name: "Large illustrated book",
+          description: "A 4,000-page book whose one PDF becomes thousands of artifacts under page-format export.",
+          profile: "cli",
+          values: {
+            archiveMiB: 650, controlMiB: 42, entries: 85000, decodedMiB: 3600, files: 62000, largestFileMiB: 410,
+            packages: 140, packageMiB: 1600, fonts: 180, fontFaces: 920, fontMiB: 780, variants: 18, restarts: 410,
+            pages: 4000, artifacts: 1, largestRasterMegaPixels: 0, rasterMegaPixels: 0, largestArtifactMiB: 650, artifactMiB: 650, diagnostics: 3500, diagnosticMiB: 38,
+            spoolMiB: 14800, inFlightMiB: 64, workingMemoryMiB: 3600, acquisitionConcurrency: 8, concurrentAttempts: 1,
+            queueSeconds: 0, kernelSeconds: 180, cancelDuringKernel: false
+          }
+        },
+        serviceBurst: {
+          name: "Service burst",
+          description: "Twenty-four simultaneous requests compete for four isolated workers.",
+          profile: "service",
+          values: {
+            archiveMiB: 180, controlMiB: 12, entries: 22000, decodedMiB: 920, files: 18000, largestFileMiB: 120,
+            packages: 80, packageMiB: 430, fonts: 90, fontFaces: 430, fontMiB: 260, variants: 12, restarts: 190,
+            pages: 700, artifacts: 700, largestRasterMegaPixels: 2, rasterMegaPixels: 1400, largestArtifactMiB: 4, artifactMiB: 1700, diagnostics: 800, diagnosticMiB: 6,
+            spoolMiB: 2500, inFlightMiB: 64, workingMemoryMiB: 2500, acquisitionConcurrency: 32, concurrentAttempts: 24,
+            queueSeconds: 45, kernelSeconds: 70, cancelDuringKernel: false
+          }
+        },
+        hostileBomb: {
+          name: "Compressed amplification attack",
+          description: "A tiny archive claims 12 GiB of decoded content and crosses the epoch ceiling.",
+          profile: "service",
+          values: {
+            archiveMiB: 4, controlMiB: 1, entries: 120, decodedMiB: 12000, files: 100, largestFileMiB: 1000,
+            packages: 2, packageMiB: 5000, fonts: 3, fontFaces: 10, fontMiB: 3000, variants: 1, restarts: 2,
+            pages: 1, artifacts: 1, largestRasterMegaPixels: 0, rasterMegaPixels: 0, largestArtifactMiB: 1, artifactMiB: 1, diagnostics: 2, diagnosticMiB: 0.01,
+            spoolMiB: 4, inFlightMiB: 4, workingMemoryMiB: 9000, acquisitionConcurrency: 1, concurrentAttempts: 1,
+            queueSeconds: 0, kernelSeconds: 1, cancelDuringKernel: false
+          }
+        },
+        cancellation: {
+          name: "Cancellation during Typst execution",
+          description: "The request is cancelled after a non-cooperative kernel has started.",
+          profile: "library",
+          values: {
+            archiveMiB: 40, controlMiB: 2, entries: 1000, decodedMiB: 120, files: 900, largestFileMiB: 20,
+            packages: 10, packageMiB: 35, fonts: 12, fontFaces: 30, fontMiB: 40, variants: 3, restarts: 12,
+            pages: 600, artifacts: 1, largestRasterMegaPixels: 0, rasterMegaPixels: 0, largestArtifactMiB: 30, artifactMiB: 30, diagnostics: 30, diagnosticMiB: 0.5,
+            spoolMiB: 150, inFlightMiB: 8, workingMemoryMiB: 1200, acquisitionConcurrency: 4, concurrentAttempts: 1,
+            queueSeconds: 0, kernelSeconds: 90, cancelDuringKernel: true
+          }
+        }
+      };
+
+      function clone(value) {
+        return JSON.parse(JSON.stringify(value));
+      }
+
+      function initialState() {
+        const scenario = workloads.routineCli;
+        return {
+          profileId: scenario.profile,
+          budgets: clone(policies[scenario.profile].limits),
+          workloadId: "routineCli",
+          workload: clone(scenario.values),
+          execution: policies[scenario.profile].execution,
+          activeWalkthrough: "layers",
+          walkthroughStep: 0,
+          change: "Loaded the routine local report.",
+          copyStatus: ""
+        };
+      }
+
+      function reducer(state, action) {
+        const next = clone(state);
+        next.copyStatus = "";
+
+        switch (action.type) {
+          case "LOAD_WORKLOAD": {
+            const scenario = workloads[action.id];
+            next.profileId = scenario.profile;
+            next.budgets = clone(policies[scenario.profile].limits);
+            next.workloadId = action.id;
+            next.workload = clone(scenario.values);
+            next.execution = policies[scenario.profile].execution;
+            next.change = `Loaded ${scenario.name}.`;
+            return next;
+          }
+          case "SELECT_PROFILE":
+            next.profileId = action.id;
+            next.budgets = clone(policies[action.id].limits);
+            next.execution = policies[action.id].execution;
+            next.change = `Applied the ${policies[action.id].name} candidate policy without changing the workload.`;
+            return next;
+          case "RESET_POLICY":
+            next.budgets = clone(policies[next.profileId].limits);
+            next.change = "Reset every proposed operation budget for this target.";
+            return next;
+          case "SET_WORKLOAD":
+            next.workload[action.id] = Math.max(0, Number(action.value) || 0);
+            next.workloadId = "custom";
+            next.change = `Changed measured ${action.id}.`;
+            return next;
+          case "SET_BUDGET":
+            next.budgets[action.id] = Math.max(0, Number(action.value) || 0);
+            next.change = `Changed the proposed ${action.id} operation budget.`;
+            return next;
+          case "DOUBLE_ARCHIVE":
+            next.workload.archiveMiB *= 2;
+            next.workload.decodedMiB *= 2;
+            next.workload.spoolMiB *= 2;
+            next.workloadId = "custom";
+            next.change = "Doubled archive, decoded, and spool bytes while preserving expansion ratio.";
+            return next;
+          case "RASTER_ALL_PAGES":
+            next.workload.artifacts = next.workload.pages;
+            next.workload.largestRasterMegaPixels = 3.5;
+            next.workload.rasterMegaPixels = next.workload.pages * next.workload.largestRasterMegaPixels;
+            next.workload.largestArtifactMiB = 3;
+            next.workload.artifactMiB = next.workload.pages * next.workload.largestArtifactMiB;
+            next.workload.workingMemoryMiB *= 1.35;
+            next.workloadId = "custom";
+            next.change = "Requested one raster artifact per source page; output bytes and memory rose multiplicatively.";
+            return next;
+          case "ADD_FONT_COLLECTION":
+            next.workload.fonts += 64;
+            next.workload.fontFaces += 256;
+            next.workload.fontMiB += 240;
+            next.workload.decodedMiB += 240;
+            next.workload.workingMemoryMiB += 180;
+            next.workloadId = "custom";
+            next.change = "Added 64 large font containers and charged their exact bytes.";
+            return next;
+          case "BURST":
+            next.workload.concurrentAttempts *= 4;
+            next.workload.queueSeconds += 20;
+            next.workloadId = "custom";
+            next.change = "Quadrupled simultaneous attempt demand and added queue delay.";
+            return next;
+          case "CANCEL":
+            next.workload.cancelDuringKernel = true;
+            next.change = "Recorded cancellation while the synchronous kernel is running.";
+            return next;
+          case "TOGGLE_EXECUTION":
+            next.execution = next.execution === "isolated" ? "in-process" : "isolated";
+            next.change = `Changed execution to ${next.execution}; semantic inputs and limits did not change.`;
+            return next;
+          case "START_WALKTHROUGH":
+            next.activeWalkthrough = action.id;
+            next.walkthroughStep = 0;
+            next.change = `Started the ${action.id} walkthrough.`;
+            return next;
+          case "WALKTHROUGH_ACTION": {
+            const after = reducer(next, action.action);
+            after.activeWalkthrough = state.activeWalkthrough;
+            after.walkthroughStep = state.walkthroughStep + 1;
+            return after;
+          }
+          default:
+            return next;
+        }
+      }
+
+      function metricValue(metric, workload) {
+        return metric.derived ? metric.derived(workload) : workload[metric.id];
+      }
+
+      function evaluate(state) {
+        const policy = policies[state.profileId];
+        const checks = metrics.map(metric => {
+          const value = metricValue(metric, state.workload);
+          const budget = state.budgets[metric.id];
+          const effective = metric.format === undefined ? budget : Math.min(budget, metric.format);
+          const formatFailure = metric.format !== undefined && (metric.formatInclusive ? value > metric.format : value >= metric.format);
+          const invalidBudget = metric.format !== undefined && budget > metric.format;
+          const overBudget = value > effective;
+          let level = "ok";
+          let message = "Within both layers";
+
+          if (formatFailure) {
+            level = "fail";
+            message = "Crosses immutable format ceiling";
+          } else if (invalidBudget) {
+            level = "fail";
+            message = "Policy tries to raise format ceiling";
+          } else if (overBudget && metric.throttle) {
+            level = "warn";
+            message = `Throttled to ${formatNumber(effective)} ${metric.unit}`;
+          } else if (overBudget && metric.soft && state.execution === "in-process") {
+            level = "warn";
+            message = "Best-effort limit exceeded; no hard in-process claim";
+          } else if (overBudget) {
+            level = "fail";
+            message = "Operation resource budget exceeded";
+          } else if (value > effective * 0.8 && !metric.throttle) {
+            level = "warn";
+            message = "Within 20% of operation budget";
+          }
+
+          return { ...metric, value, budget, effective, formatFailure, invalidBudget, overBudget, level, message };
+        });
+
+        const duration = state.workload.queueSeconds + state.workload.kernelSeconds;
+        const queueDemand = Math.max(0, state.workload.concurrentAttempts - state.budgets.concurrentAttempts);
+        const queueCapacityExceeded = queueDemand > policy.queueCapacity;
+        const queueExceeded = policy.queueTimeoutSeconds > 0 && state.workload.queueSeconds > policy.queueTimeoutSeconds;
+        const deadlineExceeded = policy.deadlineSeconds > 0 && duration > policy.deadlineSeconds;
+        const latencyMiss = duration > policy.latencyTargetSeconds;
+        const cancellation = state.workload.cancelDuringKernel
+          ? state.execution === "isolated"
+            ? `Forced termination and reap within a ${policy.cancellationGraceSeconds || 2}s operational target; no partial result is exposed.`
+            : "Cancellation wins before terminal commitment, but return waits for the non-cooperative kernel to unwind."
+          : "No cancellation signal is pending.";
+
+        const formatFailures = checks.filter(check => check.formatFailure);
+        const policyFailures = checks.filter(check => check.invalidBudget);
+        const resourceFailures = checks.filter(check => check.level === "fail" && !check.formatFailure && !check.invalidBudget);
+        const warnings = checks.filter(check => check.level === "warn");
+
+        let level = "ok";
+        let title = "Admitted under the proposed policy";
+        let detail = "Every measured dimension is within the effective limit.";
+
+        if (formatFailures.length) {
+          level = "fail";
+          title = "Invalid under Pack Format Epoch 2";
+          detail = `${formatFailures.length} dimension(s) cross universal representability ceilings. No target may admit this representation.`;
+        } else if (policyFailures.length) {
+          level = "fail";
+          title = "The proposed policy is invalid";
+          detail = `${policyFailures.length} budget(s) attempt to raise an immutable format ceiling.`;
+        } else if (resourceFailures.length || queueCapacityExceeded || queueExceeded || deadlineExceeded) {
+          level = "fail";
+          title = "Stopped by operation policy"
+          detail = `${resourceFailures.length} measured resource budget(s), ${queueCapacityExceeded ? "the bounded queue" : "no queue-capacity limit"}, ${queueExceeded ? "the queue timeout" : "no queue timeout"}, and ${deadlineExceeded ? "the attempt deadline" : "no attempt deadline"} stop this operation without deciding universal Pack validity.`;
+        } else if (warnings.length || latencyMiss) {
+          level = "warn";
+          title = "Admitted with pressure warnings";
+          detail = `${warnings.length} resource dimension(s) will be throttled, are near budget, or cannot be enforced hard in this execution mode. The ${formatNumber(duration)}s duration ${latencyMiss ? "misses" : "meets"} the latency target.`;
+        }
+
+        return {
+          checks, duration, queueDemand, queueCapacityExceeded, queueExceeded, deadlineExceeded, latencyMiss, cancellation,
+          formatFailures, policyFailures, resourceFailures, warnings, level, title, detail
+        };
+      }
+
+      function formatNumber(value) {
+        if (value === 0) return "0";
+        if (value >= 1000000000) return value.toExponential(2);
+        if (value >= 1000) return Math.round(value).toLocaleString("en-US");
+        if (value >= 10) return Number(value.toFixed(1)).toLocaleString("en-US");
+        return Number(value.toFixed(2)).toLocaleString("en-US");
+      }
+
+      function decisionMarkdown(state) {
+        const policy = policies[state.profileId];
+        const result = evaluate(state);
+        const rows = metrics.map(metric => {
+          const limit = state.budgets[metric.id];
+          return `| ${metric.label} | ${formatNumber(limit)} ${metric.unit} | ${metric.seam} |`;
+        }).join("\n");
+
+        return `## Candidate resource policy: ${policy.name}
+
+- Format safety ceilings remain the immutable Pack Format Epoch 2 ceilings.
+- Every operation receives explicit finite budgets; the effective limit is the stricter format ceiling or operation budget.
+- Crossing an operation budget produces a typed request rejection or operation outcome and leaves universal Pack validity unknown.
+- The core requires caller-supplied limits and publishes no numeric default. Target adapters own documented defaults, which callers may tighten.
+- Acquisition and worker concurrency resolve to the smaller of the documented cap and available target capacity, and the admitted values are recorded.
+- Execution: ${state.execution}; memory enforcement: ${state.execution === "isolated" ? "hard only when the facility verifies quotas" : "best-effort"}.
+- Latency target: ${policy.latencyTargetSeconds}s; attempt deadline: ${policy.deadlineSeconds || "none by default"}; queue timeout: ${policy.queueTimeoutSeconds || "none by default"}.
+- Bounded queue capacity: ${policy.queueCapacity} waiting attempt(s), separate from the worker-concurrency cap.
+- Cancellation: ${state.execution === "isolated" ? "forced termination and reap" : "cooperative; a running kernel must unwind"}.
+
+| Dimension | Candidate budget | Enforcement seam |
+| --- | ---: | --- |
+${rows}
+
+Current prototype result: **${result.title}** - ${result.detail}`;
+      }
+
+      return { metrics, policies, workloads, initialState, reducer, evaluate, formatNumber, decisionMarkdown };
+    })();
+
+    const walkthroughs = {
+      layers: {
+        label: "Two limit layers",
+        description: "Start with ordinary work, exceed a practical adapter budget, then cross a universal format ceiling. Watch the failure meaning change.",
+        steps: [
+          { label: "Load routine CLI work", action: { type: "LOAD_WORKLOAD", id: "routineCli" } },
+          { label: "Double its bytes", action: { type: "DOUBLE_ARCHIVE" } },
+          { label: "Load compressed amplification attack", action: { type: "LOAD_WORKLOAD", id: "hostileBomb" } }
+        ]
+      },
+      outputs: {
+        label: "Page output multiplication",
+        description: "A document-format result is one artifact. A page-format result can create one complete owned artifact per selected source page.",
+        steps: [
+          { label: "Load the large book", action: { type: "LOAD_WORKLOAD", id: "largeBook" } },
+          { label: "Request raster output for every page", action: { type: "RASTER_ALL_PAGES" } },
+          { label: "Apply Dagger / CI policy", action: { type: "SELECT_PROFILE", id: "dagger" } }
+        ]
+      },
+      browser: {
+        label: "Browser pressure",
+        description: "The browser profile is deliberately much smaller. It can report pressure but cannot honestly claim a hard whole-worker memory bound.",
+        steps: [
+          { label: "Load the browser deck", action: { type: "LOAD_WORKLOAD", id: "browserDeck" } },
+          { label: "Add a large font collection", action: { type: "ADD_FONT_COLLECTION" } },
+          { label: "Raster every page", action: { type: "RASTER_ALL_PAGES" } }
+        ]
+      },
+      service: {
+        label: "Service burst",
+        description: "Concurrency limits are facility capacities, not semantic failures. Excess work queues, but queue time consumes the attempt deadline.",
+        steps: [
+          { label: "Load 24-request burst", action: { type: "LOAD_WORKLOAD", id: "serviceBurst" } },
+          { label: "Quadruple demand", action: { type: "BURST" } },
+          { label: "Signal cancellation", action: { type: "CANCEL" } }
+        ]
+      },
+      cancellation: {
+        label: "Cancellation strength",
+        description: "Equal semantic work has different operational interruption guarantees in-process and in an isolated worker.",
+        steps: [
+          { label: "Load cancelled kernel work", action: { type: "LOAD_WORKLOAD", id: "cancellation" } },
+          { label: "Confirm cancellation", action: { type: "CANCEL" } },
+          { label: "Move to isolated execution", action: { type: "TOGGLE_EXECUTION" } }
+        ]
+      }
+    };
+
+    let state = BudgetModel.initialState();
+
+    const profileSelect = document.querySelector("#profile");
+    const limitsBody = document.querySelector("#limits-body");
+    const summary = document.querySelector("#summary");
+    const verdict = document.querySelector("#verdict");
+    const executionFacts = document.querySelector("#execution-facts");
+    const freePlay = document.querySelector("#free-play");
+    const tabs = document.querySelector("#tabs");
+    const walkthrough = document.querySelector("#walkthrough");
+
+    function dispatch(action) {
+      state = BudgetModel.reducer(state, action);
+      render();
+    }
+
+    function render() {
+      const policy = BudgetModel.policies[state.profileId];
+      const result = BudgetModel.evaluate(state);
+      const scenario = BudgetModel.workloads[state.workloadId];
+
+      document.querySelector("#state-title").textContent = scenario ? scenario.name : "Custom measured workload";
+      document.querySelector("#state-description").textContent = scenario ? scenario.description : "A workload edited from one of the representative scenarios.";
+      document.querySelector("#state-change").textContent = state.change;
+
+      profileSelect.innerHTML = Object.entries(BudgetModel.policies)
+        .map(([id, item]) => `<option value="${id}" ${id === state.profileId ? "selected" : ""}>${item.name}</option>`)
+        .join("");
+
+      const formatCount = result.formatFailures.length;
+      const operationCount = result.resourceFailures.length + (result.queueCapacityExceeded ? 1 : 0) + (result.queueExceeded ? 1 : 0) + (result.deadlineExceeded ? 1 : 0);
+      summary.innerHTML = [
+        ["Target policy", policy.name, policy.short],
+        ["Deployment trust", policy.trust, "Trust changes enforcement, never semantic validity."],
+        ["Execution", state.execution, state.execution === "isolated" ? "Hard quotas require a verified facility." : "Memory and running-kernel interruption are best-effort."],
+        ["Failures", `${formatCount} format / ${operationCount} operation`, "The categories intentionally have different meanings."]
+      ].map(([label, value, detail]) => `<div class="summary-card"><span>${label}</span><strong>${value}</strong><small>${detail}</small></div>`).join("");
+
+      verdict.innerHTML = `<div class="verdict ${result.level}"><strong>${result.title}</strong><p>${result.detail}</p></div>`;
+
+      executionFacts.innerHTML = [
+        ["Latency", `${BudgetModel.formatNumber(result.duration)}s measured`, `${policy.latencyTargetSeconds}s target; targets warn but do not change semantic status.`],
+        ["Deadline and queue", `${policy.deadlineSeconds || "No"}s attempt / ${policy.queueTimeoutSeconds || "no"}s queue / ${policy.queueCapacity} waiting`, result.deadlineExceeded || result.queueExceeded || result.queueCapacityExceeded ? "A typed operational outcome is required." : `${result.queueDemand} attempt(s) wait within the bounded queue.`],
+        ["Cancellation", state.workload.cancelDuringKernel ? "Signal pending" : "No signal", result.cancellation]
+      ].map(([label, value, detail]) => `<div class="fact"><strong>${label}: ${value}</strong><span>${detail}</span></div>`).join("");
+
+      renderLimits(result);
+      renderFreePlay();
+      renderWalkthrough();
+      document.querySelector("#decision-preview").textContent = BudgetModel.decisionMarkdown(state);
+    }
+
+    function renderLimits(result) {
+      let currentGroup = "";
+      const rows = [];
+
+      for (const check of result.checks) {
+        if (check.group !== currentGroup) {
+          currentGroup = check.group;
+          rows.push(`<tr class="group"><td colspan="6">${currentGroup}</td></tr>`);
+        }
+
+        const measured = check.derived
+          ? `<strong>${BudgetModel.formatNumber(check.value)} ${check.unit}</strong><div class="small">Derived from archive and decoded bytes</div>`
+          : `<input type="number" min="0" step="${check.integer ? 1 : "any"}" value="${check.value}" data-workload="${check.id}" aria-label="Measured ${check.label}"> <span class="small">${check.unit}</span>`;
+        const format = check.format === undefined
+          ? "Not a representation dimension"
+          : `${check.formatInclusive ? "at most" : "less than"} ${BudgetModel.formatNumber(check.format)} ${check.unit}`;
+
+        rows.push(`
+          <tr class="${check.level}-row">
+            <td><strong>${check.label}</strong></td>
+            <td>${measured}</td>
+            <td><input type="number" min="0" step="${check.integer ? 1 : "any"}" value="${check.budget}" data-budget="${check.id}" aria-label="Budget ${check.label}"> <span class="small">${check.unit}</span></td>
+            <td>${format}</td>
+            <td>${check.seam}</td>
+            <td><span class="status ${check.level}">${check.level}</span><div class="small">${check.message}</div></td>
+          </tr>
+        `);
+      }
+
+      limitsBody.innerHTML = rows.join("");
+      limitsBody.querySelectorAll("[data-workload]").forEach(input => {
+        input.addEventListener("change", event => dispatch({ type: "SET_WORKLOAD", id: event.target.dataset.workload, value: event.target.value }));
+      });
+      limitsBody.querySelectorAll("[data-budget]").forEach(input => {
+        input.addEventListener("change", event => dispatch({ type: "SET_BUDGET", id: event.target.dataset.budget, value: event.target.value }));
+      });
+    }
+
+    function renderFreePlay() {
+      const actions = [
+        ["Routine CLI", { type: "LOAD_WORKLOAD", id: "routineCli" }],
+        ["Browser deck", { type: "LOAD_WORKLOAD", id: "browserDeck" }],
+        ["Large book", { type: "LOAD_WORKLOAD", id: "largeBook" }],
+        ["Service burst", { type: "LOAD_WORKLOAD", id: "serviceBurst" }],
+        ["Amplification attack", { type: "LOAD_WORKLOAD", id: "hostileBomb" }],
+        ["Double archive", { type: "DOUBLE_ARCHIVE" }],
+        ["Raster every page", { type: "RASTER_ALL_PAGES" }],
+        ["Add font collection", { type: "ADD_FONT_COLLECTION" }],
+        ["Burst demand", { type: "BURST" }],
+        ["Cancel in kernel", { type: "CANCEL" }],
+        [state.execution === "isolated" ? "Use in-process execution" : "Use isolated execution", { type: "TOGGLE_EXECUTION" }]
+      ];
+
+      freePlay.innerHTML = actions.map(([label], index) => `<button data-action="${index}">${label}</button>`).join("");
+      freePlay.querySelectorAll("button").forEach(button => {
+        button.addEventListener("click", () => dispatch(actions[Number(button.dataset.action)][1]));
+      });
+    }
+
+    function renderWalkthrough() {
+      tabs.innerHTML = Object.entries(walkthroughs).map(([id, item]) =>
+        `<button class="${id === state.activeWalkthrough ? "active" : ""}" data-tab="${id}">${item.label}</button>`
+      ).join("");
+      tabs.querySelectorAll("button").forEach(button => {
+        button.addEventListener("click", () => dispatch({ type: "START_WALKTHROUGH", id: button.dataset.tab }));
+      });
+
+      const item = walkthroughs[state.activeWalkthrough];
+      const steps = item.steps.map((step, index) => {
+        const done = index < state.walkthroughStep;
+        const active = index === state.walkthroughStep;
+        return `<div class="step ${done ? "done" : ""}">
+          <span class="step-number">${index + 1}</span>
+          <span>${step.label}</span>
+          <button ${active ? "" : "disabled"} data-step="${index}">${done ? "Done" : active ? "Run step" : "Waiting"}</button>
+        </div>`;
+      }).join("");
+
+      walkthrough.innerHTML = `<h3>${item.label}</h3><p>${item.description}</p><div class="steps">${steps}</div>`;
+      walkthrough.querySelectorAll("button:not([disabled])").forEach(button => {
+        button.addEventListener("click", () => {
+          const step = item.steps[Number(button.dataset.step)];
+          dispatch({ type: "WALKTHROUGH_ACTION", action: step.action });
+        });
+      });
+    }
+
+    profileSelect.addEventListener("change", event => dispatch({ type: "SELECT_PROFILE", id: event.target.value }));
+    document.querySelector("#reset-policy").addEventListener("click", () => dispatch({ type: "RESET_POLICY" }));
+    document.querySelector("#copy-decision").addEventListener("click", async event => {
+      await navigator.clipboard.writeText(BudgetModel.decisionMarkdown(state));
+      event.target.textContent = "Copied";
+      setTimeout(() => { event.target.textContent = "Copy Markdown"; }, 1200);
+    });
+
+    render();
+  </script>
+</body>
+</html>
