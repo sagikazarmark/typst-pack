@@ -1,0 +1,113 @@
+{
+  "schema": "org.typst-pack.adapter-resource-profile",
+  "schema_version": 1,
+  "profile": {"name": "native-cli", "version": 1},
+  "units": {
+    "bytes": "binary bytes",
+    "pixels": "physical pixels",
+    "time": "milliseconds",
+    "counts": "whole items",
+    "concurrency": "simultaneous admitted work"
+  },
+  "tightening": "Every numeric override is less than or equal to this profile. Concurrency and ratios must remain positive. Zero is valid only for ready_queue_capacity and count or byte dimensions where admitting none is meaningful.",
+  "pack_ingress": {
+    "archive_bytes": "1073741824",
+    "control_record_bytes": "67108864",
+    "decoded_closure_bytes": "4294967296",
+    "largest_file_bytes": "536870912",
+    "archive_entries": "200000",
+    "files": "100000",
+    "maximum_expansion_ratio": "128",
+    "stable_spool_bytes": "17179869184",
+    "retained_memory_bytes": "4294967296"
+  },
+  "creation": {
+    "project_files": "100000",
+    "aggregate_project_bytes": "4294967296",
+    "largest_project_file_bytes": "536870912",
+    "packages": "512",
+    "package_tree_bytes": "2147483648",
+    "font_containers": "512",
+    "font_faces": "2048",
+    "font_bytes": "1073741824",
+    "discovery_variants": "32",
+    "discovery_restarts": "1024",
+    "override_count": "100000",
+    "largest_override_bytes": "536870912",
+    "aggregate_override_bytes": "4294967296",
+    "stable_spool_bytes": "17179869184",
+    "retained_memory_bytes": "4294967296"
+  },
+  "compilation": {
+    "dependencies": "1024",
+    "downloaded_dependency_bytes": "3221225472",
+    "expanded_dependency_bytes": "3221225472",
+    "largest_dependency_bytes": "536870912",
+    "override_count": "100000",
+    "largest_override_bytes": "536870912",
+    "aggregate_override_bytes": "4294967296",
+    "stable_spool_bytes": "17179869184",
+    "pages": "5000",
+    "artifacts": "5000",
+    "largest_artifact_bytes": "2147483648",
+    "aggregate_artifact_bytes": "8589934592",
+    "largest_raster_pixels": "128000000",
+    "aggregate_raster_pixels": "8192000000",
+    "retained_memory_bytes": "4294967296",
+    "diagnostic_projection_entries": "20000",
+    "diagnostic_projection_bytes": "67108864",
+    "diagnostic_source_bindings": "100000",
+    "diagnostic_source_blobs": "100000",
+    "largest_diagnostic_source_bytes": "536870912",
+    "aggregate_diagnostic_source_bytes": "67108864",
+    "diagnostic_source_metadata_bytes": "67108864"
+  },
+  "representation": {
+    "output_bytes": "8589934592",
+    "files": "100000",
+    "stable_spool_bytes": "17179869184",
+    "retained_memory_bytes": "4294967296"
+  },
+  "spool": {
+    "source_bytes": "17179869184",
+    "stable_spool_bytes": "17179869184",
+    "in_flight_bytes": "67108864",
+    "retained_memory_bytes": "4294967296"
+  },
+  "transport": {
+    "objects": "100000",
+    "aggregate_bytes": "8589934592",
+    "largest_object_bytes": "2147483648",
+    "in_flight_bytes": "67108864",
+    "transfer_concurrency": "8"
+  },
+  "execution": {
+    "acquisition_concurrency": "8",
+    "ready_worker_concurrency": "1",
+    "ready_queue_capacity": "0",
+    "queue_timeout_ms": null,
+    "latency_target_ms": "20000",
+    "isolated_worker_capacity": "1",
+    "forced_terminate_ms": "2000"
+  },
+  "canonical_diagnostic_policy": {
+    "policy_version": 1,
+    "max_entries": "20000",
+    "max_canonical_entry_bytes": "67108864"
+  },
+  "deadlines": {
+    "pack_ingress_ms": null,
+    "creation_attempt_ms": null,
+    "compilation_attempt_ms": null,
+    "representation_ms": null,
+    "publication_ms": null
+  },
+  "engine_runtime_domain": {
+    "automatic_width": "min(verified available parallelism, 32)",
+    "positive_width_must_be_exact": true,
+    "rayon_num_threads_is_ignored": true,
+    "in_process_hard_cpu_or_memory_limit": false,
+    "worker_platforms": ["linux", "macos", "windows"],
+    "worker_hard_limits": "Only limits actually enforced by the selected OS facility may be reported as hard."
+  }
+}
