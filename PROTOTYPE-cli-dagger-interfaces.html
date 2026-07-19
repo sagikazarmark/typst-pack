@@ -1,0 +1,687 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>PROTOTYPE: typst-pack CLI and Dagger interfaces</title>
+  <style>
+    :root {
+      --paper: #f4f1e8;
+      --panel: #fffdf7;
+      --ink: #1e2926;
+      --muted: #66706c;
+      --line: #d6d1c5;
+      --accent: #176b5b;
+      --accent-soft: #dcece6;
+      --warn: #8b3e24;
+      color-scheme: light;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      line-height: 1.5;
+    }
+    main {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 42px 0 72px;
+    }
+    h1, h2, h3 { line-height: 1.15; }
+    h1 { max-width: 850px; margin: 8px 0 12px; font-size: clamp(2rem, 5vw, 4.2rem); letter-spacing: -0.04em; }
+    h2 { margin: 0 0 18px; font-size: 1.45rem; }
+    h3 { margin: 0 0 8px; font-size: 1rem; }
+    p { max-width: 880px; }
+    code, pre { font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; }
+    code { font-size: 0.92em; }
+    pre {
+      margin: 0;
+      padding: 16px;
+      overflow-x: auto;
+      border: 1px solid #2f3b37;
+      border-radius: 8px;
+      background: #17201e;
+      color: #edf5f1;
+      font-size: 0.84rem;
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { padding: 10px 12px; border-bottom: 1px solid var(--line); text-align: left; vertical-align: top; }
+    th { color: var(--muted); font-size: 0.75rem; letter-spacing: 0.08em; text-transform: uppercase; }
+    ul { margin: 8px 0 0; padding-left: 20px; }
+    li + li { margin-top: 6px; }
+
+    .eyebrow {
+      display: inline-block;
+      padding: 5px 9px;
+      border: 1px solid var(--warn);
+      border-radius: 999px;
+      color: var(--warn);
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+    .lede { margin: 0; color: var(--muted); font-size: 1.08rem; }
+    .section { margin-top: 34px; }
+    .panel {
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      background: var(--panel);
+      box-shadow: 0 10px 28px rgb(43 53 49 / 5%);
+    }
+    .verdict {
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
+      gap: 22px;
+      margin-top: 30px;
+    }
+    .verdict strong { color: var(--accent); }
+    .topology {
+      display: grid;
+      gap: 7px;
+      align-content: start;
+      padding: 18px;
+      border-radius: 9px;
+      background: var(--accent-soft);
+    }
+    .topology div { padding: 8px 10px; border-left: 3px solid var(--accent); background: rgb(255 255 255 / 60%); }
+
+    .toolbar { display: flex; flex-wrap: wrap; gap: 8px; }
+    button {
+      padding: 9px 12px;
+      border: 1px solid var(--line);
+      border-radius: 7px;
+      background: #fff;
+      color: var(--ink);
+      font: inherit;
+      font-size: 0.86rem;
+      font-weight: 650;
+      cursor: pointer;
+    }
+    button:hover, button:focus-visible { border-color: var(--accent); outline: none; }
+    button.active, button.primary { border-color: var(--accent); background: var(--accent); color: #fff; }
+
+    .state-header {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: start;
+      margin-bottom: 18px;
+    }
+    .state-header p { margin: 5px 0 0; color: var(--muted); }
+    .status {
+      flex: 0 0 auto;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: 0.76rem;
+      font-weight: 800;
+      letter-spacing: 0.05em;
+      text-transform: uppercase;
+    }
+    .status.refused { background: #f6ded5; color: var(--warn); }
+    .state-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+    .state-block { min-width: 0; }
+    .state-block.wide { grid-column: 1 / -1; }
+    .facts {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+    }
+    .fact { padding: 12px; border: 1px solid var(--line); border-radius: 8px; background: #fff; }
+    .fact b { display: block; margin-bottom: 4px; color: var(--muted); font-size: 0.72rem; letter-spacing: 0.07em; text-transform: uppercase; }
+
+    .tabs { display: flex; gap: 7px; overflow-x: auto; padding-bottom: 8px; }
+    .walkthrough-body { margin-top: 14px; }
+    .walkthrough-body p { color: var(--muted); }
+    .steps { display: grid; gap: 10px; margin-top: 14px; }
+    .step { display: grid; grid-template-columns: 34px 1fr auto; gap: 10px; align-items: center; padding: 10px; border: 1px solid var(--line); border-radius: 8px; }
+    .step-number { display: grid; place-items: center; width: 28px; height: 28px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-weight: 800; }
+
+    .schema-note { margin: 10px 0 0; color: var(--muted); font-size: 0.88rem; }
+    .history { margin-top: 12px; color: var(--muted); font-size: 0.82rem; }
+    .history code { color: var(--ink); }
+
+    @media (max-width: 780px) {
+      main { width: min(100% - 20px, 1180px); padding-top: 24px; }
+      .verdict, .state-grid { grid-template-columns: 1fr; }
+      .state-block.wide { grid-column: auto; }
+      .facts { grid-template-columns: 1fr; }
+      .state-header { display: block; }
+      .status { display: inline-block; margin-top: 10px; }
+      .step { grid-template-columns: 34px 1fr; }
+      .step button { grid-column: 2; justify-self: start; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <span class="eyebrow">Throwaway prototype</span>
+  <h1>One lifecycle, two honest adapter surfaces</h1>
+  <p class="lede">Question: what concrete CLI commands and Dagger functions expose the settled typst-pack lifecycle without leaking library internals, reviving Resource Slots, or pretending Dagger has terminal and watch capabilities?</p>
+
+  <section class="verdict">
+    <article class="panel">
+      <h2>Verdict under test</h2>
+      <ul>
+        <li><strong>Use six CLI commands:</strong> <code>create</code>, <code>inspect</code>, <code>compile</code>, <code>watch</code>, <code>materialize</code>, and <code>convert</code>.</li>
+        <li><strong>Keep Typst muscle memory:</strong> shared compile and watch flags follow the exact embedded Typst version; Pack-specific identity, override, authority, trust, reporting, and limit controls are named differences.</li>
+        <li><strong>Make advanced creation explicit:</strong> flat flags describe one Discovery Variant; repeatable <code>--variant-file</code> values describe a matrix and conflict with the flat variant flags.</li>
+        <li><strong>Use replacement-only overrides:</strong> CLI declarations are <code>--override PACK_PATH=FILE</code>; Dagger accepts a project-shaped immutable <code>Directory</code>.</li>
+        <li><strong>Use Dagger objects, not one giant function:</strong> typed output specifications and lifecycle result objects wrap native <code>File</code> and <code>Directory</code> values plus machine-readable reports.</li>
+        <li><strong>Narrow honestly:</strong> Dagger omits watch, stdout, viewers, color, arbitrary host paths, and Hostile mode. Cache and session-storage topology remains outside this prototype.</li>
+      </ul>
+    </article>
+    <aside class="topology" aria-label="Recommended lifecycle topology">
+      <div>Project <strong>&rarr; create &rarr; Pack</strong></div>
+      <div>Archive or Closure Export <strong>&rarr; read &rarr; Pack</strong></div>
+      <div>Pack <strong>&rarr; inspect</strong></div>
+      <div>Pack <strong>&rarr; compile or watch &rarr; report + artifacts</strong></div>
+      <div>Pack <strong>&rarr; materialize &rarr; editable project</strong></div>
+      <div>Pack <strong>&rarr; convert &rarr; archive or closure</strong></div>
+    </aside>
+  </section>
+
+  <section class="section panel">
+    <h2>Recommended CLI surface</h2>
+    <table>
+      <thead><tr><th>Command</th><th>Shape</th><th>Contract</th></tr></thead>
+      <tbody>
+        <tr><td><code>create</code></td><td><code>typst-pack create [OPTIONS] &lt;INPUT&gt; [OUTPUT]</code></td><td>Stabilize one project, run and replay explicit Discovery Variants, then publish an epoch-2 archive.</td></tr>
+        <tr><td><code>inspect</code></td><td><code>typst-pack inspect [OPTIONS] &lt;PACK&gt;</code></td><td>Validate archive or Closure Export, then render Pack Inspection as text or JSON without acquisition.</td></tr>
+        <tr><td><code>compile</code></td><td><code>typst-pack compile [OPTIONS] &lt;PACK&gt; [OUTPUT]</code></td><td>Prepare one exact request, run one attempt, then deliver the complete artifact collection.</td></tr>
+        <tr><td><code>watch</code></td><td><code>typst-pack watch [OPTIONS] &lt;PACK&gt; [OUTPUT]</code></td><td>Own successive Pack-bound sessions, report coverage/currentness, and atomically publish only the latest revision.</td></tr>
+        <tr><td><code>materialize</code></td><td><code>typst-pack materialize [OPTIONS] &lt;PACK&gt; &lt;DESTINATION&gt;</code></td><td>Publish only baseline project files into an absent destination; no force, merge, dependencies, or overrides.</td></tr>
+        <tr><td><code>convert</code></td><td><code>typst-pack convert [OPTIONS] &lt;PACK&gt; &lt;OUTPUT&gt; --to &lt;archive|closure&gt;</code></td><td>Validate one representation and publish another without discovery, acquisition, repair, or project materialization.</td></tr>
+      </tbody>
+    </table>
+    <p class="schema-note"><code>&lt;PACK&gt;</code> accepts an archive file or Closure Export directory. <code>PACK=-</code> means an archive stream. Archive output may be <code>-</code>; tree output always requires an absent directory. There is no <code>extract --force</code>, generic <code>validate</code>, Resource Slot, or Resource Provider command.</p>
+  </section>
+
+  <section class="section panel">
+    <h2>Free play: inspect a journey</h2>
+    <div class="toolbar" id="scenario-buttons"></div>
+  </section>
+
+  <section class="section panel" aria-live="polite">
+    <div class="state-header">
+      <div>
+        <h2 id="state-title">Current interface state</h2>
+        <p id="state-summary"></p>
+      </div>
+      <span class="status" id="state-status"></span>
+    </div>
+    <div class="state-grid">
+      <div class="state-block">
+        <h3>CLI invocation</h3>
+        <pre id="state-cli"></pre>
+      </div>
+      <div class="state-block">
+        <h3>Dagger expression</h3>
+        <pre id="state-dagger"></pre>
+      </div>
+      <div class="state-block wide facts" id="state-facts"></div>
+      <div class="state-block wide">
+        <h3>Why this shape</h3>
+        <ul id="state-rationale"></ul>
+      </div>
+    </div>
+    <div class="history" id="state-history"></div>
+  </section>
+
+  <section class="section panel">
+    <h2>Guided walkthroughs</h2>
+    <div class="tabs" id="walkthrough-tabs"></div>
+    <div class="walkthrough-body">
+      <h3 id="walkthrough-title"></h3>
+      <p id="walkthrough-description"></p>
+      <div class="steps" id="walkthrough-steps"></div>
+    </div>
+  </section>
+
+  <section class="section panel">
+    <h2>Dagger schema sketch</h2>
+    <pre>type TypstPack {
+  discoveryVariant(..., overrides: Directory): DiscoveryVariant!
+  pdf(...): CompilationOutput!
+  png(...): CompilationOutput!
+  svg(...): CompilationOutput!
+  html(...): CompilationOutput!
+
+  create(
+    project: Directory!, input: String! = "main.typ",
+    variants: [DiscoveryVariant!], include: [String!]! = [],
+    packageDirs: [Directory!]! = [], fontDirs: [Directory!]! = [],
+    packageEmbedding: EmbeddingPolicy! = EMBED_ALL,
+    fontEmbedding: EmbeddingPolicy! = EMBED_ALL,
+    trust: TrustProfile! = PARTIALLY_TRUSTED,
+    limits: File
+  ): PackCreation!
+
+  readArchive(archive: File!, expectedPackIdentity: String, ...): PackIngress!
+  readClosure(closure: Directory!, expectedPackIdentity: String, ...): PackIngress!
+}
+
+type Pack {
+  identity: String!
+  inspect: File!
+  archive(epoch: Int! = 2): File!
+  closureExport(epoch: Int! = 2): ClosureExport!
+  materialize: ProjectMaterialization!
+  compile(
+    output: CompilationOutput!, overrides: Directory,
+    sysInputs: [String!]! = [], features: [Feature!]! = [],
+    documentTime: Int, pdfCreationTime: Int,
+    packageDirs: [Directory!]! = [], fontDirs: [Directory!]! = [],
+    offline: Boolean! = false, limits: File
+  ): Compilation!
+}
+
+type PackCreation { status: CreationStatus!, report: File!, requirePack: Pack! }
+type PackIngress { receipt: File!, pack: Pack! }
+type Compilation {
+  status: CompilationStatus!
+  report: File!
+  artifacts: Directory!
+  resultIdentity: String
+  requireSuccess: Directory!
+}
+type ClosureExport { tree: Directory!, receipt: File! }
+type ProjectMaterialization { project: Directory!, receipt: File! }</pre>
+    <p class="schema-note">The exact generated GraphQL names are secondary. The tested idea is the shape: tagged output values reject irrelevant controls before execution; result objects preserve semantic rejection versus operational failure; native Dagger objects carry bytes and trees; <code>requirePack</code> and <code>requireSuccess</code> provide CI-friendly fail-fast accessors without erasing the report.</p>
+  </section>
+</main>
+
+<script>
+const InterfaceModel = (() => {
+  const scenarios = {
+    createDefault: {
+      label: "Create one variant",
+      title: "Create a self-contained Pack",
+      summary: "The common path remains as short as Typst: one named source file and an optional output.",
+      status: "admitted",
+      cli: `typst-pack create report/main.typ report.typk \\
+  --include 'templates/**' \\
+  --package-embedding embed \\
+  --font-embedding embed`,
+      dagger: `let created = Dagger.typstPack.create(
+  project: source,
+  input: "main.typ",
+  include: ["templates/**"],
+)
+let pack = created.requirePack`,
+      facts: {
+        "Semantic request": "One explicit adapter-synthesized paged Discovery Variant",
+        "Transport": "Archive File, atomically create-new by default",
+        "Guarantee": "Portable and self-contained after replay"
+      },
+      rationale: [
+        "The CLI resolves roots, environment, wall clock, fonts, packages, and limits before the semantic creation seam.",
+        "Embedding all dependencies is the convenience default; the library still owns per-requirement policy.",
+        "Glob and directory inclusions are expanded to exact files before creation."
+      ]
+    },
+    createVariants: {
+      label: "Create variant matrix",
+      title: "Create with several Discovery Variants",
+      summary: "Advanced coverage moves into explicit variant files instead of inventing positional grouping rules.",
+      status: "admitted",
+      cli: `typst-pack create app/main.typ app.typk \\
+  --variant-file variants/print.toml \\
+  --variant-file variants/web.toml \\
+  --include 'content/**'`,
+      dagger: `let print = Dagger.typstPack.discoveryVariant(
+  label: "print", target: DiscoveryTarget.PAGED,
+  sysInputs: ["edition=print"], overrides: printOverrides,
+)
+let web = Dagger.typstPack.discoveryVariant(
+  label: "web", target: DiscoveryTarget.HTML,
+  sysInputs: ["edition=web"],
+)
+let created = Dagger.typstPack.create(
+  project: source, variants: [print, web],
+)`,
+      facts: {
+        "Semantic request": "Two ordered, independently identified variants",
+        "Conflict rule": "Variant files conflict with flat --input/--target/--override flags",
+        "Guarantee": "Coverage is the union of successful traces plus exact inclusions"
+      },
+      rationale: [
+        "One variant file contains one complete request, including sensitive values and discovery-only override sources.",
+        "Dagger uses an immutable DiscoveryVariant object instead of untyped files because it can carry typed graph values.",
+        "Raw sensitive values are attempt inputs; the Pack records commitments and public request structure only."
+      ]
+    },
+    compileOverride: {
+      label: "Compile override",
+      title: "Compile one exact customized request",
+      summary: "Pack Overrides are eager replacement declarations, not a lazy resource-provider chain.",
+      status: "admitted",
+      cli: `typst-pack compile report.typk customer.pdf \\
+  --expect-pack-id '<PACK_ID>' \\
+  --override assets/customer.json=customers/acme.json \\
+  --input edition=annual --offline \\
+  --document-time 1700000000 \\
+  --pdf-creation-time omit`,
+      dagger: `let output = Dagger.typstPack.pdf(
+  standards: [PdfStandard.A_2A], tags: true,
+)
+let compilation = pack.compile(
+  output: output,
+  overrides: customerOverrides,
+  sysInputs: ["edition=annual"],
+  documentTime: 1700000000,
+  offline: true,
+)
+let artifacts = compilation.requireSuccess`,
+      facts: {
+        "Semantic request": "Every override and effective output option is identity-bearing",
+        "Operational controls": "Expected identity, offline policy, limits, deadline, authorities",
+        "Output": "Immutable report, then complete artifact delivery"
+      },
+      rationale: [
+        "The CLI keeps embedded-Typst output flags but adds Pack-specific identity and override controls explicitly.",
+        "Dagger uses a tagged PDF output object, so PNG-only controls cannot appear on a PDF request.",
+        "A result-cache hit may satisfy the exact Compilation Identity without changing the returned semantic result."
+      ]
+    },
+    watch: {
+      label: "Watch latest",
+      title: "Watch a Pack and override sources",
+      summary: "The native CLI owns mutable files and timers around the runtime-neutral Compilation Session reducer.",
+      status: "CLI only",
+      cli: `typst-pack watch report.typk report.pdf \\
+  --override content/data.json=live/data.json \\
+  --watch-mode notify \\
+  --report watch-report.json`,
+      dagger: `Not exposed.
+
+Dagger is a snapshot-oriented, one-shot automation adapter.
+Use compile with new File/Directory inputs for a new graph evaluation.`,
+      facts: {
+        "Session": "New Pack Identity starts a replacement Pack-bound session",
+        "Currentness": "Complete push, current-as-of-poll, or explicitly unverified",
+        "Publication": "Latest revision only; last successful output is stale-marked"
+      },
+      rationale: [
+        "Watch shares compile request flags but adds only notification, polling, coverage, and last-success presentation controls.",
+        "Delivery uses staged output and an atomic current pointer or replace so a late result cannot overwrite a newer revision.",
+        "Dagger snapshots already provide invalidation and memoization at a different seam; a long-lived watcher would be dishonest."
+      ]
+    },
+    inspect: {
+      label: "Inspect contract",
+      title: "Inspect without acquiring or compiling",
+      summary: "Inspection validates the representation and renders the complete logical Pack contract.",
+      status: "admitted",
+      cli: `typst-pack inspect report.typk \\
+  --expect-pack-id '<PACK_ID>' \\
+  --format json`,
+      dagger: `let ingress = Dagger.typstPack.readArchive(
+  archive: archive,
+  expectedPackIdentity: "<PACK_ID>",
+)
+let inspectionJson = ingress.pack.inspect`,
+      facts: {
+        "Side effects": "None after bounded representation ingress",
+        "External dependencies": "Listed exactly, never acquired",
+        "Output": "Text for humans or stable JSON projection for automation"
+      },
+      rationale: [
+        "A separate validate command would duplicate Pack ingress; every operation validates before exposing a Pack.",
+        "Inspection excludes ZIP encoding details because it describes the logical Pack, not its transport wrapper.",
+        "The expected Pack Identity is optional at the adapter, but Verify versus Derive remains explicit at the core seam."
+      ]
+    },
+    materialize: {
+      label: "Materialize project",
+      title: "Publish an editable baseline project",
+      summary: "Materialization is deliberately narrower than historical extraction.",
+      status: "admitted",
+      cli: `typst-pack materialize report.typk ./report-project`,
+      dagger: `let materialized = pack.materialize
+let project = materialized.project
+let receipt = materialized.receipt`,
+      facts: {
+        "Destination": "Must not exist",
+        "Contents": "Baseline project files only",
+        "Excluded": "Packages, fonts, Pack metadata, overrides, generated manifests"
+      },
+      rationale: [
+        "There is no --force, merge, or dependency switch because those would weaken the projection contract.",
+        "The receipt is separate from the editable tree and records the source Pack Identity and committed inventory.",
+        "Creating another Pack from the tree is a fresh discovery operation, not an identity round trip."
+      ]
+    },
+    convert: {
+      label: "Convert representation",
+      title: "Convert Archive and Closure Export",
+      summary: "One representation command stays distinct from project materialization.",
+      status: "admitted",
+      cli: `typst-pack convert report.typk ./report-closure \\
+  --to closure --epoch 2
+
+typst-pack convert ./report-closure report-rewritten.typk \\
+  --to archive --epoch 2`,
+      dagger: `let closure = pack.closureExport(epoch: 2)
+let tree = closure.tree
+
+let imported = Dagger.typstPack.readClosure(closure: tree)
+let archive = imported.pack.archive(epoch: 2)`,
+      facts: {
+        "Semantic action": "Representation rewrite or lossless epoch migration",
+        "Forbidden": "Discovery, dependency acquisition, repair, or default synthesis",
+        "Commit": "Archive create-new/replace or absent-tree atomic publication"
+      },
+      rationale: [
+        "Convert is about one logical Pack in two strict representations; materialize is an editable non-round-tripping projection.",
+        "Input kind is inferred from File versus Directory, while the output kind and epoch are always explicit.",
+        "A downgrade or migration fails unless every value is losslessly representable."
+      ]
+    },
+    daggerResult: {
+      label: "Dagger result",
+      title: "Preserve terminal meaning in Dagger",
+      summary: "A Dagger function should not flatten compiler rejection and operational failure into one GraphQL error.",
+      status: "admitted",
+      cli: `typst-pack compile report.typk report.pdf \\
+  --report compilation-report.json
+
+# Exit is nonzero on rejection; the JSON report preserves its class.`,
+      dagger: `let compilation = pack.compile(output: Dagger.typstPack.pdf())
+
+if (compilation.status == CompilationStatus.RESULT_REJECTED) {
+  inspect(compilation.report)
+}
+
+# CI convenience: raises unless the semantic result succeeded.
+let outputs = compilation.requireSuccess`,
+      facts: {
+        "Status": "REQUEST_REJECTED, RESULT_SUCCEEDED, RESULT_REJECTED, or OPERATION_FAILED",
+        "Report": "Always present after an admitted attempt",
+        "Artifacts": "Complete Directory, empty unless a successful result owns artifacts"
+      },
+      rationale: [
+        "GraphQL unions and transport errors are poor substitutes for the settled terminal model.",
+        "The status enum and report preserve machine meaning; requireSuccess preserves normal CI ergonomics.",
+        "Compilation Delivery remains a later operation and cannot mutate the report after a sink failure."
+      ]
+    },
+    refused: {
+      label: "Refuse mismatch",
+      title: "Refuse an inapplicable or weakened request",
+      summary: "The adapter rejects impossible combinations before semantic work instead of silently ignoring them.",
+      status: "refused",
+      cli: `typst-pack compile report.typk output.pdf \\
+  --format pdf --ppi 300 --trust hostile
+
+error: --ppi applies only to PNG output
+error: ordinary native CLI cannot admit the Hostile profile`,
+      dagger: `Impossible to construct:
+
+pdf() has no ppi argument.
+TrustProfile exposes TRUSTED and PARTIALLY_TRUSTED only.
+The Dagger module has no outputPath, stdout, viewer, color, or watch argument.`,
+      facts: {
+        "Failure phase": "Adapter admission or side-effect-free request preparation",
+        "No fallback": "Never weaken Hostile to Partially Trusted",
+        "No ignored values": "Every accepted semantic argument has defined effect"
+      },
+      rationale: [
+        "CLI parity does not justify retaining irrelevant options for the selected tagged output format.",
+        "The ordinary CLI and OCI/Dagger shapes cannot honestly provide Hostile confinement.",
+        "Narrow target interfaces are preferable to a least-common-denominator core."
+      ]
+    }
+  };
+
+  const initialState = Object.freeze({ scenario: "createDefault", history: ["createDefault"] });
+
+  function reduce(state, action) {
+    if (action.type === "RESET") return initialState;
+    if (action.type === "SELECT" && scenarios[action.scenario]) {
+      return Object.freeze({
+        scenario: action.scenario,
+        history: [...state.history, action.scenario].slice(-8)
+      });
+    }
+    return state;
+  }
+
+  function current(state) {
+    return scenarios[state.scenario];
+  }
+
+  return Object.freeze({ scenarios, initialState, reduce, current });
+})();
+</script>
+
+<script>
+let state = InterfaceModel.initialState;
+
+const walkthroughs = [
+  {
+    id: "local",
+    title: "Local full lifecycle",
+    description: "Follow one project from representative discovery through compilation and editable materialization. Watch the interface change transport roles without changing the logical Pack.",
+    steps: ["createDefault", "inspect", "compileOverride", "materialize"]
+  },
+  {
+    id: "coverage",
+    title: "Coverage and watch",
+    description: "Compare a multi-variant Pack coverage request with later compilation variation and long-lived currentness. Variants establish evidence; overrides remain per-compilation values.",
+    steps: ["createVariants", "compileOverride", "watch"]
+  },
+  {
+    id: "automation",
+    title: "Typed Dagger automation",
+    description: "Load a Pack through target-native objects, compile it without terminal concerns, preserve the terminal report, and reject combinations the target cannot represent honestly.",
+    steps: ["inspect", "daggerResult", "convert", "refused"]
+  }
+];
+
+let activeWalkthrough = walkthroughs[0].id;
+
+function selectScenario(id) {
+  state = InterfaceModel.reduce(state, { type: "SELECT", scenario: id });
+  render();
+}
+
+function render() {
+  const scenario = InterfaceModel.current(state);
+  document.getElementById("state-title").textContent = scenario.title;
+  document.getElementById("state-summary").textContent = scenario.summary;
+  const status = document.getElementById("state-status");
+  status.textContent = scenario.status;
+  status.className = scenario.status === "refused" ? "status refused" : "status";
+  document.getElementById("state-cli").textContent = scenario.cli;
+  document.getElementById("state-dagger").textContent = scenario.dagger;
+
+  const facts = document.getElementById("state-facts");
+  facts.replaceChildren(...Object.entries(scenario.facts).map(([label, value]) => {
+    const box = document.createElement("div");
+    box.className = "fact";
+    const heading = document.createElement("b");
+    heading.textContent = label;
+    box.append(heading, document.createTextNode(value));
+    return box;
+  }));
+
+  const rationale = document.getElementById("state-rationale");
+  rationale.replaceChildren(...scenario.rationale.map(text => {
+    const item = document.createElement("li");
+    item.textContent = text;
+    return item;
+  }));
+
+  document.getElementById("state-history").innerHTML = `Recent journey: ${state.history.map(id => `<code>${InterfaceModel.scenarios[id].label}</code>`).join(" &rarr; ")}`;
+
+  document.querySelectorAll("[data-scenario]").forEach(button => {
+    button.classList.toggle("active", button.dataset.scenario === state.scenario);
+  });
+}
+
+function renderScenarioButtons() {
+  const container = document.getElementById("scenario-buttons");
+  for (const [id, scenario] of Object.entries(InterfaceModel.scenarios)) {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.scenario = id;
+    button.textContent = scenario.label;
+    button.addEventListener("click", () => selectScenario(id));
+    container.append(button);
+  }
+}
+
+function renderWalkthrough() {
+  const tabs = document.getElementById("walkthrough-tabs");
+  tabs.replaceChildren(...walkthroughs.map(walkthrough => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.textContent = walkthrough.title;
+    button.classList.toggle("active", walkthrough.id === activeWalkthrough);
+    button.addEventListener("click", () => {
+      activeWalkthrough = walkthrough.id;
+      state = InterfaceModel.initialState;
+      renderWalkthrough();
+      render();
+    });
+    return button;
+  }));
+
+  const walkthrough = walkthroughs.find(item => item.id === activeWalkthrough);
+  document.getElementById("walkthrough-title").textContent = walkthrough.title;
+  document.getElementById("walkthrough-description").textContent = walkthrough.description;
+  const steps = document.getElementById("walkthrough-steps");
+  steps.replaceChildren(...walkthrough.steps.map((scenarioId, index) => {
+    const scenario = InterfaceModel.scenarios[scenarioId];
+    const row = document.createElement("div");
+    row.className = "step";
+    const number = document.createElement("span");
+    number.className = "step-number";
+    number.textContent = String(index + 1);
+    const text = document.createElement("span");
+    text.textContent = `${scenario.label}: ${scenario.summary}`;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.dataset.scenario = scenarioId;
+    button.textContent = "Load step";
+    button.addEventListener("click", () => selectScenario(scenarioId));
+    row.append(number, text, button);
+    return row;
+  }));
+}
+
+renderScenarioButtons();
+renderWalkthrough();
+render();
+</script>
+</body>
+</html>
