@@ -21,6 +21,7 @@
     {"$ref": "#/$defs/compile_operation"},
     {"$ref": "#/$defs/representation_operation"},
     {"$ref": "#/$defs/project_materialization_operation"},
+    {"$ref": "#/$defs/representation_staging"},
     {"$ref": "#/$defs/compilation_staging"},
     {"$ref": "#/$defs/watch_state"},
     {"$ref": "#/$defs/watch_output_root"},
@@ -43,6 +44,14 @@
       "type": "string",
       "pattern": "^typst-pack:[a-z0-9-]+:[0-9]+:sha256:[0-9a-f]{64}$"
     },
+    "discovery_request_commitment": {
+      "type": "string",
+      "pattern": "^typst-pack:discovery-request-commitment:1:sha256:[0-9a-f]{64}$"
+    },
+    "compilation_request_commitment": {
+      "type": "string",
+      "pattern": "^typst-pack:compilation-request-commitment:1:sha256:[0-9a-f]{64}$"
+    },
     "nullable_identity": {
       "oneOf": [
         {"$ref": "#/$defs/identity"},
@@ -57,6 +66,7 @@
     "input_schema": {
       "type": "object",
       "required": ["schema", "schema_version"],
+      "additionalProperties": false,
       "properties": {
         "schema": {"type": "string"},
         "schema_version": {"const": 1}
@@ -69,7 +79,7 @@
       "properties": {
         "name": {"type": "string", "pattern": "^org\\.typst-pack\\.[a-z0-9-]+$"},
         "major": {"const": 1},
-        "minor": {"type": "integer", "minimum": 0}
+        "minor": {"const": 0}
       }
     },
     "producer": {
@@ -135,7 +145,7 @@
         "features": {
           "type": "array",
           "uniqueItems": true,
-          "items": {"enum": ["a11y-extras", "bundle"]}
+          "items": {"enum": ["html", "a11y-extras", "bundle"]}
         },
         "document_time": {"$ref": "#/$defs/document_time"},
         "overrides": {"type": "array", "items": {"$ref": "#/$defs/source_override"}}
@@ -367,32 +377,36 @@
         "representation": {"$ref": "#/$defs/representation_limits"},
         "spool": {"$ref": "#/$defs/spool_limits"},
         "transport": {"$ref": "#/$defs/transport_limits"},
-        "execution": {"$ref": "#/$defs/execution_limits"}
+        "execution": {"$ref": "#/$defs/execution_limits"},
+        "cache": {"type": "object", "additionalProperties": false, "properties": {"authority_content_occupancy_bytes": {"$ref": "#/$defs/positive_decimal"}}}
       }
     },
     "adapter_resource_profile": {
       "type": "object",
-      "required": ["schema", "schema_version", "profile", "units", "tightening", "pack_ingress", "creation", "compilation", "representation", "spool", "transport", "execution", "canonical_diagnostic_policy", "deadlines", "engine_runtime_domain"],
+      "required": ["schema", "schema_version", "profile", "units", "tightening", "pack_ingress", "creation", "compilation", "representation", "spool", "transport", "execution", "cache", "canonical_diagnostic_policy", "deadlines", "engine_runtime_domain"],
+      "additionalProperties": false,
       "properties": {
         "schema": {"const": "org.typst-pack.adapter-resource-profile"},
         "schema_version": {"const": 1},
         "profile": {
           "type": "object",
           "required": ["name", "version"],
+          "additionalProperties": false,
           "properties": {"name": {"enum": ["native-cli", "dagger-ci"]}, "version": {"const": 1}}
         },
-        "units": {"type": "object"},
+        "units": {"type": "object", "required": ["bytes", "pixels", "time", "counts", "concurrency"], "additionalProperties": false, "properties": {"bytes": {"type": "string"}, "pixels": {"type": "string"}, "time": {"type": "string"}, "counts": {"type": "string"}, "concurrency": {"type": "string"}}},
         "tightening": {"type": "string"},
-        "pack_ingress": {"type": "object"},
-        "creation": {"type": "object"},
-        "compilation": {"type": "object"},
-        "representation": {"type": "object"},
-        "spool": {"type": "object"},
-        "transport": {"type": "object"},
-        "execution": {"type": "object"},
-        "canonical_diagnostic_policy": {"type": "object"},
-        "deadlines": {"type": "object"},
-        "engine_runtime_domain": {"type": "object"}
+        "pack_ingress": {"allOf": [{"$ref": "#/$defs/pack_ingress_limits"}, {"required": ["archive_bytes", "control_record_bytes", "decoded_closure_bytes", "largest_file_bytes", "archive_entries", "files", "maximum_expansion_ratio", "stable_spool_bytes", "retained_memory_bytes"]}]},
+        "creation": {"allOf": [{"$ref": "#/$defs/creation_limits"}, {"required": ["project_files", "aggregate_project_bytes", "largest_project_file_bytes", "packages", "package_tree_bytes", "font_containers", "font_faces", "font_bytes", "discovery_variants", "discovery_restarts", "override_count", "largest_override_bytes", "aggregate_override_bytes", "stable_spool_bytes", "retained_memory_bytes"]}]},
+        "compilation": {"allOf": [{"$ref": "#/$defs/compilation_limits"}, {"required": ["dependencies", "downloaded_dependency_bytes", "expanded_dependency_bytes", "largest_dependency_bytes", "override_count", "largest_override_bytes", "aggregate_override_bytes", "stable_spool_bytes", "pages", "artifacts", "largest_artifact_bytes", "aggregate_artifact_bytes", "largest_raster_pixels", "aggregate_raster_pixels", "retained_memory_bytes", "diagnostic_projection_entries", "diagnostic_projection_bytes", "diagnostic_source_bindings", "diagnostic_source_blobs", "largest_diagnostic_source_bytes", "aggregate_diagnostic_source_bytes", "diagnostic_source_metadata_bytes"]}]},
+        "representation": {"allOf": [{"$ref": "#/$defs/representation_limits"}, {"required": ["output_bytes", "files", "stable_spool_bytes", "retained_memory_bytes"]}]},
+        "spool": {"allOf": [{"$ref": "#/$defs/spool_limits"}, {"required": ["source_bytes", "stable_spool_bytes", "in_flight_bytes", "retained_memory_bytes"]}]},
+        "transport": {"allOf": [{"$ref": "#/$defs/transport_limits"}, {"required": ["objects", "aggregate_bytes", "largest_object_bytes", "in_flight_bytes", "transfer_concurrency"]}]},
+        "execution": {"type": "object", "required": ["acquisition_concurrency", "ready_worker_concurrency", "ready_queue_capacity", "queue_timeout_ms", "latency_target_ms", "isolated_worker_capacity", "forced_terminate_ms"], "additionalProperties": false, "properties": {"acquisition_concurrency": {"$ref": "#/$defs/positive_decimal"}, "ready_worker_concurrency": {"$ref": "#/$defs/positive_decimal"}, "ready_queue_capacity": {"$ref": "#/$defs/decimal"}, "queue_timeout_ms": {"oneOf": [{"$ref": "#/$defs/positive_decimal"}, {"type": "null"}]}, "latency_target_ms": {"$ref": "#/$defs/positive_decimal"}, "isolated_worker_capacity": {"$ref": "#/$defs/positive_decimal"}, "forced_terminate_ms": {"$ref": "#/$defs/positive_decimal"}}},
+        "cache": {"type": "object", "required": ["authority_content_occupancy_bytes"], "additionalProperties": false, "properties": {"authority_content_occupancy_bytes": {"$ref": "#/$defs/positive_decimal"}}},
+        "canonical_diagnostic_policy": {"type": "object", "required": ["policy_version", "max_entries", "max_canonical_entry_bytes"], "additionalProperties": false, "properties": {"policy_version": {"const": 1}, "max_entries": {"$ref": "#/$defs/decimal"}, "max_canonical_entry_bytes": {"$ref": "#/$defs/decimal"}}},
+        "deadlines": {"type": "object", "required": ["pack_ingress_ms", "creation_attempt_ms", "compilation_attempt_ms", "representation_ms", "publication_ms"], "additionalProperties": false, "properties": {"pack_ingress_ms": {"oneOf": [{"$ref": "#/$defs/positive_decimal"}, {"type": "null"}]}, "creation_attempt_ms": {"oneOf": [{"$ref": "#/$defs/positive_decimal"}, {"type": "null"}]}, "compilation_attempt_ms": {"oneOf": [{"$ref": "#/$defs/positive_decimal"}, {"type": "null"}]}, "representation_ms": {"oneOf": [{"$ref": "#/$defs/positive_decimal"}, {"type": "null"}]}, "publication_ms": {"oneOf": [{"$ref": "#/$defs/positive_decimal"}, {"type": "null"}]} }},
+        "engine_runtime_domain": {"type": "object", "required": ["automatic_width", "positive_width_must_be_exact", "rayon_num_threads_is_ignored", "worker_hard_limits"], "additionalProperties": false, "properties": {"automatic_width": {"type": "string"}, "positive_width_must_be_exact": {"const": true}, "rayon_num_threads_is_ignored": {"const": true}, "in_process_hard_cpu_or_memory_limit": {"type": "boolean"}, "worker_platforms": {"type": "array", "items": {"type": "string"}}, "fresh_process_per_uncached_lifecycle_bundle": {"type": "boolean"}, "worker_hard_limits": {"type": "string"}}}
       }
     },
     "failure": {
@@ -404,7 +418,7 @@
         "code": {"type": "string", "pattern": "^org\\.typst-pack\\.[a-z0-9.-]+$"},
         "phase": {"type": "string", "minLength": 1},
         "safe_message": {"type": "string"},
-        "details": {"type": "object"}
+        "details": {"type": "array", "items": {"type": "object", "required": ["name", "value"], "additionalProperties": false, "properties": {"name": {"type": "string", "pattern": "^org\\.typst-pack\\.[a-z0-9.-]+$"}, "value": {"type": ["string", "boolean"]}}}}
       }
     },
     "nullable_failure": {
@@ -416,31 +430,95 @@
         {"type": "object", "required": ["kind", "milliseconds"], "additionalProperties": false, "properties": {"kind": {"const": "relative"}, "milliseconds": {"$ref": "#/$defs/positive_decimal"}}}
       ]
     },
-    "admission": {
+    "profile_reference": {
       "type": "object",
-      "required": ["status", "requested_trust", "admitted_trust", "resource_profile", "requested_limits", "admitted_limits", "deadline", "interruption_strength", "refusal"],
+      "required": ["name", "version"],
       "additionalProperties": false,
-      "properties": {
-        "status": {"enum": ["admitted", "refused"]},
-        "requested_trust": {"enum": ["trusted", "partially_trusted", "hostile"]},
-        "admitted_trust": {"type": ["string", "null"], "enum": ["trusted", "partially_trusted", null]},
-        "resource_profile": {"type": ["object", "null"]},
-        "requested_limits": {"type": ["object", "null"]},
-        "admitted_limits": {"type": ["object", "null"]},
-        "deadline": {"$ref": "#/$defs/deadline"},
-        "interruption_strength": {"type": ["string", "null"], "enum": ["cooperative", "isolated", null]},
-        "refusal": {"$ref": "#/$defs/nullable_failure"}
-      }
+      "properties": {"name": {"enum": ["native-cli", "dagger-ci"]}, "version": {"const": 1}}
+    },
+    "admission": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["status", "requested_trust", "admitted_trust", "resource_profile", "requested_limits", "admitted_limits", "deadline", "interruption_strength", "refusal"],
+          "additionalProperties": false,
+          "properties": {"status": {"const": "admitted"}, "requested_trust": {"const": "trusted"}, "admitted_trust": {"const": "trusted"}, "resource_profile": {"$ref": "#/$defs/profile_reference"}, "requested_limits": {"oneOf": [{"$ref": "#/$defs/operation_limits"}, {"type": "null"}]}, "admitted_limits": {"$ref": "#/$defs/operation_limits"}, "deadline": {"$ref": "#/$defs/deadline"}, "interruption_strength": {"enum": ["cooperative", "isolated"]}, "refusal": {"type": "null"}}
+        },
+        {
+          "type": "object",
+          "required": ["status", "requested_trust", "admitted_trust", "resource_profile", "requested_limits", "admitted_limits", "deadline", "interruption_strength", "refusal"],
+          "additionalProperties": false,
+          "properties": {"status": {"const": "admitted"}, "requested_trust": {"const": "partially_trusted"}, "admitted_trust": {"const": "partially_trusted"}, "resource_profile": {"$ref": "#/$defs/profile_reference"}, "requested_limits": {"oneOf": [{"$ref": "#/$defs/operation_limits"}, {"type": "null"}]}, "admitted_limits": {"$ref": "#/$defs/operation_limits"}, "deadline": {"$ref": "#/$defs/deadline"}, "interruption_strength": {"enum": ["cooperative", "isolated"]}, "refusal": {"type": "null"}}
+        },
+        {
+          "type": "object",
+          "required": ["status", "requested_trust", "admitted_trust", "resource_profile", "requested_limits", "admitted_limits", "deadline", "interruption_strength", "refusal"],
+          "additionalProperties": false,
+          "properties": {"status": {"const": "refused"}, "requested_trust": {"enum": ["trusted", "partially_trusted", "hostile"]}, "admitted_trust": {"type": "null"}, "resource_profile": {"type": "null"}, "requested_limits": {"oneOf": [{"$ref": "#/$defs/operation_limits"}, {"type": "null"}]}, "admitted_limits": {"type": "null"}, "deadline": {"$ref": "#/$defs/deadline"}, "interruption_strength": {"type": "null"}, "refusal": {"$ref": "#/$defs/failure"}}
+        }
+      ]
     },
     "channel": {
+      "oneOf": [
+        {"type": "object", "required": ["status", "reason", "failure"], "additionalProperties": false, "properties": {"status": {"enum": ["not_requested", "not_attempted", "succeeded", "complete"]}, "reason": {"type": "null"}, "failure": {"type": "null"}}},
+        {"type": "object", "required": ["status", "reason", "failure"], "additionalProperties": false, "properties": {"status": {"enum": ["redacted", "limited", "unavailable"]}, "reason": {"type": "string", "minLength": 1}, "failure": {"type": "null"}}},
+        {"type": "object", "required": ["status", "reason", "failure"], "additionalProperties": false, "properties": {"status": {"const": "failed"}, "reason": {"type": "string", "minLength": 1}, "failure": {"$ref": "#/$defs/failure"}}}
+      ]
+    },
+    "not_attempted_channel": {
       "type": "object",
-      "required": ["status", "reason", "payload"],
+      "required": ["status", "reason", "failure"],
       "additionalProperties": false,
-      "properties": {
-        "status": {"enum": ["not_requested", "complete", "redacted", "limited", "unavailable", "not_attempted", "succeeded", "failed"]},
-        "reason": {"type": ["string", "null"]},
-        "payload": {}
-      }
+      "properties": {"status": {"const": "not_attempted"}, "reason": {"type": "null"}, "failure": {"type": "null"}}
+    },
+    "diagnostic_disclosure_record": {
+      "type": "object", "required": ["kind", "entry"], "additionalProperties": false,
+      "properties": {"kind": {"const": "diagnostic"}, "entry": {"$ref": "#/$defs/diagnostic_entry"}}
+    },
+    "source_disclosure_record": {
+      "type": "object", "required": ["kind", "name", "logical_path", "identity", "commitment", "exact_bytes", "public_value", "value_base64"], "additionalProperties": false,
+      "properties": {"kind": {"const": "source"}, "name": {"type": "null"}, "logical_path": {"type": "string"}, "identity": {"$ref": "#/$defs/identity"}, "commitment": {"type": "null"}, "exact_bytes": {"$ref": "#/$defs/decimal"}, "public_value": {"type": "null"}, "value_base64": {"type": "string", "pattern": "^[A-Za-z0-9_-]*$"}}
+    },
+    "request_value_disclosure_record": {
+      "type": "object", "required": ["kind", "name", "logical_path", "identity", "commitment", "exact_bytes", "public_value", "value_base64"], "additionalProperties": false,
+      "properties": {"kind": {"const": "request_value"}, "name": {"type": "string", "minLength": 1}, "logical_path": {"type": ["string", "null"]}, "identity": {"type": "null"}, "commitment": {"$ref": "#/$defs/compilation_request_commitment"}, "exact_bytes": {"$ref": "#/$defs/decimal"}, "public_value": {"type": "null"}, "value_base64": {"type": "string", "pattern": "^[A-Za-z0-9_-]*$"}}
+    },
+    "override_disclosure_record": {
+      "type": "object", "required": ["kind", "name", "logical_path", "identity", "commitment", "exact_bytes", "public_value", "value_base64"], "additionalProperties": false,
+      "properties": {"kind": {"const": "override_bytes"}, "name": {"type": "null"}, "logical_path": {"$ref": "#/$defs/project_path"}, "identity": {"type": "null"}, "commitment": {"$ref": "#/$defs/compilation_request_commitment"}, "exact_bytes": {"$ref": "#/$defs/decimal"}, "public_value": {"type": "null"}, "value_base64": {"type": "string", "pattern": "^[A-Za-z0-9_-]*$"}}
+    },
+    "backing_locator_disclosure_record": {
+      "type": "object", "required": ["kind", "name", "logical_path", "identity", "commitment", "exact_bytes", "public_value", "value_base64"], "additionalProperties": false,
+      "properties": {"kind": {"const": "backing_locator"}, "name": {"type": "string", "minLength": 1}, "logical_path": {"type": "null"}, "identity": {"type": "null"}, "commitment": {"type": "null"}, "exact_bytes": {"type": "null"}, "public_value": {"type": "string"}, "value_base64": {"type": "null"}}
+    },
+    "adapter_detail_disclosure_record": {
+      "type": "object", "required": ["kind", "name", "logical_path", "identity", "commitment", "exact_bytes", "public_value", "value_base64"], "additionalProperties": false,
+      "properties": {"kind": {"const": "adapter_detail"}, "name": {"type": "string", "minLength": 1}, "logical_path": {"type": "null"}, "identity": {"type": "null"}, "commitment": {"type": "null"}, "exact_bytes": {"type": "null"}, "public_value": {"type": ["string", "boolean"]}, "value_base64": {"type": "null"}}
+    },
+    "disclosed_record": {"oneOf": [{"$ref": "#/$defs/diagnostic_disclosure_record"}, {"$ref": "#/$defs/source_disclosure_record"}, {"$ref": "#/$defs/request_value_disclosure_record"}, {"$ref": "#/$defs/override_disclosure_record"}, {"$ref": "#/$defs/backing_locator_disclosure_record"}, {"$ref": "#/$defs/adapter_detail_disclosure_record"}]},
+    "report_channel": {
+      "oneOf": [
+        {"type": "object", "required": ["status", "reason", "records", "limitation"], "additionalProperties": false, "properties": {"status": {"const": "not_requested"}, "reason": {"type": "null"}, "records": {"type": "null"}, "limitation": {"type": "null"}}},
+        {"type": "object", "required": ["status", "reason", "records", "limitation"], "additionalProperties": false, "properties": {"status": {"const": "complete"}, "reason": {"type": "null"}, "records": {"type": "array", "items": {"$ref": "#/$defs/disclosed_record"}}, "limitation": {"type": "null"}}},
+        {"type": "object", "required": ["status", "reason", "records", "limitation"], "additionalProperties": false, "properties": {"status": {"const": "redacted"}, "reason": {"type": "string", "minLength": 1}, "records": {"type": "array", "items": {"$ref": "#/$defs/disclosed_record"}}, "limitation": {"type": "null"}}},
+        {"type": "object", "required": ["status", "reason", "records", "limitation"], "additionalProperties": false, "properties": {"status": {"const": "limited"}, "reason": {"type": "string", "minLength": 1}, "records": {"type": "array", "items": {"$ref": "#/$defs/disclosed_record"}}, "limitation": {"type": "object", "required": ["dimension", "first_omitted"], "additionalProperties": false, "properties": {"dimension": {"type": "string"}, "first_omitted": {"$ref": "#/$defs/decimal"}}}}},
+        {"type": "object", "required": ["status", "reason", "records", "limitation"], "additionalProperties": false, "properties": {"status": {"const": "unavailable"}, "reason": {"type": "string", "minLength": 1}, "records": {"type": "null"}, "limitation": {"type": "null"}}}
+      ]
+    },
+    "diagnostics_channel": {"allOf": [{"$ref": "#/$defs/report_channel"}, {"properties": {"records": {"oneOf": [{"type": "array", "items": {"$ref": "#/$defs/diagnostic_disclosure_record"}}, {"type": "null"}]}}}]},
+    "sources_channel": {"allOf": [{"$ref": "#/$defs/report_channel"}, {"properties": {"records": {"oneOf": [{"type": "array", "items": {"$ref": "#/$defs/source_disclosure_record"}}, {"type": "null"}]}}}]},
+    "request_values_channel": {"allOf": [{"$ref": "#/$defs/report_channel"}, {"properties": {"records": {"oneOf": [{"type": "array", "items": {"$ref": "#/$defs/request_value_disclosure_record"}}, {"type": "null"}]}}}]},
+    "override_bytes_channel": {"allOf": [{"$ref": "#/$defs/report_channel"}, {"properties": {"records": {"oneOf": [{"type": "array", "items": {"$ref": "#/$defs/override_disclosure_record"}}, {"type": "null"}]}}}]},
+    "backing_locators_channel": {"allOf": [{"$ref": "#/$defs/report_channel"}, {"properties": {"records": {"oneOf": [{"type": "array", "items": {"$ref": "#/$defs/backing_locator_disclosure_record"}}, {"type": "null"}]}}}]},
+    "adapter_detail_channel": {"allOf": [{"$ref": "#/$defs/report_channel"}, {"properties": {"records": {"oneOf": [{"type": "array", "items": {"$ref": "#/$defs/adapter_detail_disclosure_record"}}, {"type": "null"}]}}}]},
+    "timing_record": {"type": "object", "required": ["phase", "elapsed_nanoseconds"], "additionalProperties": false, "properties": {"phase": {"enum": ["admission", "queue", "acquisition", "verification", "spooling", "compilation", "export", "finalization"]}, "elapsed_nanoseconds": {"$ref": "#/$defs/decimal"}}},
+    "timing_channel": {
+      "oneOf": [
+        {"type": "object", "required": ["status", "reason", "records", "limitation"], "additionalProperties": false, "properties": {"status": {"const": "not_requested"}, "reason": {"type": "null"}, "records": {"type": "null"}, "limitation": {"type": "null"}}},
+        {"type": "object", "required": ["status", "reason", "records", "limitation"], "additionalProperties": false, "properties": {"status": {"const": "complete"}, "reason": {"type": "null"}, "records": {"type": "array", "items": {"$ref": "#/$defs/timing_record"}}, "limitation": {"type": "null"}}},
+        {"type": "object", "required": ["status", "reason", "records", "limitation"], "additionalProperties": false, "properties": {"status": {"const": "limited"}, "reason": {"type": "string", "minLength": 1}, "records": {"type": "array", "items": {"$ref": "#/$defs/timing_record"}}, "limitation": {"type": "object", "required": ["first_omitted_phase"], "additionalProperties": false, "properties": {"first_omitted_phase": {"type": "string"}}}}},
+        {"type": "object", "required": ["status", "reason", "records", "limitation"], "additionalProperties": false, "properties": {"status": {"const": "unavailable"}, "reason": {"type": "string", "minLength": 1}, "records": {"type": "null"}, "limitation": {"type": "null"}}}
+      ]
     },
     "verification": {
       "type": "object",
@@ -454,31 +532,191 @@
         "assurance": {"enum": ["internal_validity_only", "identity_verified", "not_established"]}
       }
     },
-    "representation_receipt": {
+    "validated_verification": {
+      "oneOf": [
+        {"type": "object", "required": ["mode", "expected_pack_identity", "derived_pack_identity", "matched", "assurance"], "additionalProperties": false, "properties": {"mode": {"const": "derive"}, "expected_pack_identity": {"type": "null"}, "derived_pack_identity": {"$ref": "#/$defs/identity"}, "matched": {"type": "null"}, "assurance": {"const": "internal_validity_only"}}},
+        {"type": "object", "required": ["mode", "expected_pack_identity", "derived_pack_identity", "matched", "assurance"], "additionalProperties": false, "properties": {"mode": {"const": "verify"}, "expected_pack_identity": {"$ref": "#/$defs/identity"}, "derived_pack_identity": {"$ref": "#/$defs/identity"}, "matched": {"const": true}, "assurance": {"const": "identity_verified"}}}
+      ]
+    },
+    "receipt_counters": {
       "type": "object",
-      "required": ["contract_version", "role", "terminal", "stage", "input_content_identity", "output_content_identity", "pack_identity", "archive_encoding_identity", "format_epoch", "validation_rules", "pack_exposed", "stable_value_completed", "publication", "failure"],
+      "required": ["input_bytes", "output_bytes", "control_record_bytes", "planned_objects", "verified_objects", "aggregate_decoded_bytes", "file_count"],
       "additionalProperties": false,
       "properties": {
-        "contract_version": {"const": 1},
-        "role": {"enum": ["archive_read", "closure_import", "archive_encode", "closure_export", "project_materialization"]},
-        "terminal": {"type": "string"},
-        "stage": {"type": "string"},
-        "input_content_identity": {"$ref": "#/$defs/nullable_identity"},
-        "output_content_identity": {"$ref": "#/$defs/nullable_identity"},
-        "pack_identity": {"$ref": "#/$defs/nullable_identity"},
-        "archive_encoding_identity": {"$ref": "#/$defs/nullable_identity"},
-        "format_epoch": {"type": ["integer", "null"]},
-        "validation_rules": {"type": "array", "items": {"type": "string"}},
-        "pack_exposed": {"type": "boolean"},
-        "stable_value_completed": {"type": "boolean"},
-        "publication": {"type": ["object", "null"]},
-        "failure": {"$ref": "#/$defs/nullable_failure"}
+        "input_bytes": {"oneOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "output_bytes": {"oneOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "control_record_bytes": {"oneOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "planned_objects": {"oneOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "verified_objects": {"oneOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "aggregate_decoded_bytes": {"oneOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "file_count": {"oneOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]}
       }
     },
+    "receipt_identities": {
+      "type": "object",
+      "required": ["input_archive", "control_record", "pack", "expected_pack", "archive_encoding", "output_archive", "closure_export_tree", "expected_input"],
+      "additionalProperties": false,
+      "properties": {
+        "input_archive": {"$ref": "#/$defs/nullable_identity"},
+        "control_record": {"$ref": "#/$defs/nullable_identity"},
+        "pack": {"$ref": "#/$defs/nullable_identity"},
+        "expected_pack": {"$ref": "#/$defs/nullable_identity"},
+        "archive_encoding": {"$ref": "#/$defs/nullable_identity"},
+        "output_archive": {"$ref": "#/$defs/nullable_identity"},
+        "closure_export_tree": {"$ref": "#/$defs/nullable_identity"},
+        "expected_input": {"$ref": "#/$defs/nullable_identity"}
+      }
+    },
+    "receipt_controls": {
+      "type": "object",
+      "required": ["trust", "offline", "resource_profile", "deadline_present", "cancellation_present", "publication_strength", "cleanup_strength", "limits", "enforcement_facts"],
+      "additionalProperties": false,
+      "properties": {
+        "trust": {"enum": ["trusted", "partially_trusted", "hostile"]},
+        "offline": {"type": "boolean"},
+        "resource_profile": {"type": "string"},
+        "deadline_present": {"type": "boolean"},
+        "cancellation_present": {"type": "boolean"},
+        "publication_strength": {"enum": ["not_applicable", "complete_collection_atomic", "each_object_atomic", "streaming"]},
+        "cleanup_strength": {"enum": ["not_applicable", "complete", "residual_locator_permitted", "non_retractable_streaming"]},
+        "limits": {"type": "array", "items": {"type": "object", "required": ["kind", "value"], "additionalProperties": false, "properties": {"kind": {"type": "string"}, "value": {"$ref": "#/$defs/decimal"}}}},
+        "enforcement_facts": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}
+      }
+    },
+    "admitted_receipt_controls": {
+      "allOf": [
+        {"$ref": "#/$defs/receipt_controls"},
+        {"properties": {"trust": {"enum": ["trusted", "partially_trusted"]}}}
+      ]
+    },
+    "publication_status": {
+      "type": "object",
+      "required": ["requested", "admitted", "state"],
+      "additionalProperties": false,
+      "properties": {
+        "requested": {"enum": ["not_applicable", "complete_collection_atomic", "each_object_atomic", "streaming"]},
+        "admitted": {"type": ["string", "null"], "enum": ["not_applicable", "complete_collection_atomic", "each_object_atomic", "streaming", null]},
+        "state": {"enum": ["not_applicable", "not_started", "committed", "failed"]}
+      }
+    },
+    "cleanup_status": {
+      "type": "object",
+      "required": ["requested", "admitted", "state"],
+      "additionalProperties": false,
+      "properties": {
+        "requested": {"enum": ["not_applicable", "complete", "residual_locator_permitted", "non_retractable_streaming"]},
+        "admitted": {"type": ["string", "null"], "enum": ["not_applicable", "complete", "residual_locator_permitted", "non_retractable_streaming", null]},
+        "state": {"enum": ["not_applicable", "complete", "residual_exists", "exposed_bytes_non_retractable", "failed"]}
+      }
+    },
+    "receipt_file": {
+      "type": "object",
+      "required": ["path", "exact_bytes", "content_identity"],
+      "additionalProperties": false,
+      "properties": {"path": {"type": "string"}, "exact_bytes": {"$ref": "#/$defs/decimal"}, "content_identity": {"$ref": "#/$defs/identity"}}
+    },
+    "representation_receipt": {
+      "type": "object",
+      "required": ["contract_version", "role", "terminal", "stage", "counters", "identities", "verification_mode", "expected_input_matched", "encoding_assertion", "pack_exposed", "stable_value_completed", "publication", "cleanup", "timing", "adapter_class", "files", "requested_controls", "admitted_controls", "failure_class", "failure_cause", "expected_pack_matched"],
+      "additionalProperties": false,
+      "allOf": [
+        {"if": {"properties": {"terminal": {"const": "success"}}}, "then": {"properties": {"stage": {"const": "complete"}, "admitted_controls": {"$ref": "#/$defs/admitted_receipt_controls"}, "failure_class": {"const": "not_applicable"}, "failure_cause": {"type": "null"}}}},
+        {"if": {"not": {"properties": {"terminal": {"const": "success"}}}}, "then": {"properties": {"pack_exposed": {"const": false}, "stable_value_completed": {"const": false}}}},
+        {"if": {"properties": {"terminal": {"const": "admission_refused"}}}, "then": {"properties": {"stage": {"const": "admission"}, "admitted_controls": {"type": "null"}, "identities": {"properties": {"input_archive": {"type": "null"}, "control_record": {"type": "null"}, "pack": {"type": "null"}, "expected_pack": {"type": "null"}, "archive_encoding": {"type": "null"}, "output_archive": {"type": "null"}, "closure_export_tree": {"type": "null"}, "expected_input": {"type": "null"}}}, "publication": {"properties": {"admitted": {"type": "null"}, "state": {"const": "not_started"}}}, "cleanup": {"properties": {"admitted": {"type": "null"}}}, "failure_class": {"const": "not_applicable"}, "failure_cause": {"type": "null"}}}},
+        {"if": {"properties": {"terminal": {"const": "transport_failure"}}}, "then": {"properties": {"failure_class": {"enum": ["reference_resolution", "acquisition", "spooling", "transfer", "commit", "cleanup", "adapter_contract"]}, "failure_cause": {"type": "string", "minLength": 1}}}},
+        {"if": {"not": {"properties": {"terminal": {"const": "transport_failure"}}}}, "then": {"properties": {"failure_class": {"const": "not_applicable"}, "failure_cause": {"type": "null"}}}},
+        {"if": {"properties": {"terminal": {"const": "expected_pack_identity_mismatch"}}}, "then": {"properties": {"stage": {"const": "construction"}, "verification_mode": {"const": "verify"}, "identities": {"properties": {"pack": {"$ref": "#/$defs/identity"}, "expected_pack": {"$ref": "#/$defs/identity"}}}, "expected_pack_matched": {"const": false}}}},
+        {"if": {"properties": {"terminal": {"const": "input_content_identity_mismatch"}}}, "then": {"properties": {"stage": {"const": "representation_framing"}, "identities": {"properties": {"expected_input": {"$ref": "#/$defs/identity"}, "control_record": {"type": "null"}, "pack": {"type": "null"}, "expected_pack": {"type": "null"}, "archive_encoding": {"type": "null"}, "output_archive": {"type": "null"}}}, "expected_input_matched": {"const": false}}}},
+        {"if": {"properties": {"terminal": {"const": "archive_encoding_assertion_mismatch"}}}, "then": {"properties": {"role": {"const": "archive_read"}, "stage": {"const": "encoding_or_projection"}, "identities": {"properties": {"input_archive": {"$ref": "#/$defs/identity"}, "control_record": {"$ref": "#/$defs/identity"}, "pack": {"$ref": "#/$defs/identity"}, "archive_encoding": {"$ref": "#/$defs/identity"}}}, "encoding_assertion": {"const": "externally_asserted_and_mismatched"}}}}
+      ],
+      "properties": {
+        "contract_version": {"const": 1},
+        "role": {"enum": ["archive_encode", "archive_read", "closure_export_project", "closure_export_import", "archive_publish", "closure_export_publish"]},
+        "terminal": {"enum": ["success", "invalid", "unsupported", "expected_pack_identity_mismatch", "resource_outcome", "cancelled", "deadline", "admission_refused", "internal_integrity", "transport_failure", "archive_encoding_assertion_mismatch", "input_content_identity_mismatch"]},
+        "stage": {"enum": ["admission", "reference_resolution", "acquisition", "spooling", "representation_framing", "control_record", "object_verification", "construction", "encoding_or_projection", "transfer", "commit", "cleanup", "complete"]},
+        "counters": {"$ref": "#/$defs/receipt_counters"},
+        "identities": {"$ref": "#/$defs/receipt_identities"},
+        "verification_mode": {"enum": ["not_applicable", "derive", "verify"]},
+        "expected_input_matched": {"type": ["boolean", "null"]},
+        "encoding_assertion": {"enum": ["not_applicable", "not_asserted", "externally_asserted_and_byte_verified", "externally_asserted_and_mismatched"]},
+        "pack_exposed": {"type": "boolean"},
+        "stable_value_completed": {"type": "boolean"},
+        "publication": {"$ref": "#/$defs/publication_status"},
+        "cleanup": {"$ref": "#/$defs/cleanup_status"},
+        "timing": {"enum": ["not_requested", "complete", "limited", "unavailable"]},
+        "adapter_class": {"type": "string"},
+        "files": {"oneOf": [{"type": "array", "items": {"$ref": "#/$defs/receipt_file"}}, {"type": "null"}]},
+        "requested_controls": {"$ref": "#/$defs/receipt_controls"},
+        "admitted_controls": {"oneOf": [{"$ref": "#/$defs/admitted_receipt_controls"}, {"type": "null"}]},
+        "failure_class": {"enum": ["not_applicable", "reference_resolution", "acquisition", "spooling", "transfer", "commit", "cleanup", "adapter_contract"]},
+        "failure_cause": {"type": ["string", "null"]},
+        "expected_pack_matched": {"type": ["boolean", "null"]}
+      }
+    },
+    "archive_encode_receipt": {
+      "allOf": [
+        {"$ref": "#/$defs/representation_receipt"},
+        {"properties": {"role": {"const": "archive_encode"}}},
+        {"if": {"properties": {"terminal": {"const": "success"}}}, "then": {"properties": {"stage": {"const": "complete"}, "counters": {"properties": {"input_bytes": {"type": "null"}, "output_bytes": {"$ref": "#/$defs/decimal"}, "control_record_bytes": {"$ref": "#/$defs/decimal"}, "planned_objects": {"$ref": "#/$defs/decimal"}, "verified_objects": {"$ref": "#/$defs/decimal"}, "aggregate_decoded_bytes": {"$ref": "#/$defs/decimal"}, "file_count": {"type": "null"}}}, "identities": {"properties": {"input_archive": {"type": "null"}, "control_record": {"$ref": "#/$defs/identity"}, "pack": {"$ref": "#/$defs/identity"}, "expected_pack": {"type": "null"}, "archive_encoding": {"$ref": "#/$defs/identity"}, "output_archive": {"$ref": "#/$defs/identity"}, "closure_export_tree": {"$ref": "#/$defs/identity"}, "expected_input": {"type": "null"}}}, "verification_mode": {"const": "not_applicable"}, "expected_input_matched": {"type": "null"}, "encoding_assertion": {"const": "not_applicable"}, "pack_exposed": {"const": false}, "stable_value_completed": {"const": true}, "publication": {"properties": {"requested": {"const": "not_applicable"}, "admitted": {"const": "not_applicable"}, "state": {"const": "not_applicable"}}}, "files": {"type": "null"}, "failure_class": {"const": "not_applicable"}, "failure_cause": {"type": "null"}, "expected_pack_matched": {"type": "null"}}}}
+      ]
+    },
+    "archive_read_receipt": {
+      "allOf": [
+        {"$ref": "#/$defs/representation_receipt"},
+        {"properties": {"role": {"const": "archive_read"}}},
+        {"if": {"properties": {"terminal": {"const": "input_content_identity_mismatch"}}}, "then": {"properties": {"identities": {"properties": {"input_archive": {"$ref": "#/$defs/identity"}, "closure_export_tree": {"type": "null"}}}}}},
+        {"if": {"properties": {"terminal": {"const": "success"}}}, "then": {"allOf": [
+          {"properties": {"stage": {"const": "complete"}, "counters": {"properties": {"input_bytes": {"$ref": "#/$defs/decimal"}, "output_bytes": {"type": "null"}, "control_record_bytes": {"$ref": "#/$defs/decimal"}, "planned_objects": {"$ref": "#/$defs/decimal"}, "verified_objects": {"$ref": "#/$defs/decimal"}, "aggregate_decoded_bytes": {"$ref": "#/$defs/decimal"}, "file_count": {"type": "null"}}}, "identities": {"properties": {"input_archive": {"$ref": "#/$defs/identity"}, "control_record": {"$ref": "#/$defs/identity"}, "pack": {"$ref": "#/$defs/identity"}, "output_archive": {"type": "null"}, "closure_export_tree": {"type": "null"}}}, "expected_input_matched": {"type": ["boolean", "null"]}, "encoding_assertion": {"enum": ["not_asserted", "externally_asserted_and_byte_verified"]}, "pack_exposed": {"const": true}, "stable_value_completed": {"const": false}, "publication": {"properties": {"requested": {"const": "not_applicable"}, "admitted": {"const": "not_applicable"}, "state": {"const": "not_applicable"}}}, "files": {"type": "null"}, "failure_class": {"const": "not_applicable"}, "failure_cause": {"type": "null"}}},
+          {"oneOf": [{"properties": {"verification_mode": {"const": "derive"}, "identities": {"properties": {"expected_pack": {"type": "null"}}}, "expected_pack_matched": {"type": "null"}}}, {"properties": {"verification_mode": {"const": "verify"}, "identities": {"properties": {"expected_pack": {"$ref": "#/$defs/identity"}}}, "expected_pack_matched": {"const": true}}}]}
+        ]}}
+      ]
+    },
+    "closure_export_project_receipt": {
+      "allOf": [
+        {"$ref": "#/$defs/representation_receipt"},
+        {"properties": {"role": {"const": "closure_export_project"}}},
+        {"if": {"properties": {"terminal": {"const": "success"}}}, "then": {"properties": {"stage": {"const": "complete"}, "counters": {"properties": {"input_bytes": {"type": "null"}, "output_bytes": {"$ref": "#/$defs/decimal"}, "control_record_bytes": {"$ref": "#/$defs/decimal"}, "planned_objects": {"$ref": "#/$defs/decimal"}, "verified_objects": {"$ref": "#/$defs/decimal"}, "aggregate_decoded_bytes": {"$ref": "#/$defs/decimal"}, "file_count": {"$ref": "#/$defs/decimal"}}}, "identities": {"properties": {"input_archive": {"type": "null"}, "control_record": {"$ref": "#/$defs/identity"}, "pack": {"$ref": "#/$defs/identity"}, "expected_pack": {"type": "null"}, "archive_encoding": {"type": "null"}, "output_archive": {"type": "null"}, "closure_export_tree": {"$ref": "#/$defs/identity"}, "expected_input": {"type": "null"}}}, "verification_mode": {"const": "not_applicable"}, "expected_input_matched": {"type": "null"}, "encoding_assertion": {"const": "not_applicable"}, "pack_exposed": {"const": false}, "stable_value_completed": {"const": false}, "publication": {"properties": {"requested": {"const": "not_applicable"}, "admitted": {"const": "not_applicable"}, "state": {"const": "not_applicable"}}}, "files": {"type": "array", "items": {"$ref": "#/$defs/receipt_file"}}, "failure_class": {"const": "not_applicable"}, "failure_cause": {"type": "null"}, "expected_pack_matched": {"type": "null"}}}}
+      ]
+    },
+    "closure_export_import_receipt": {
+      "allOf": [
+        {"$ref": "#/$defs/representation_receipt"},
+        {"properties": {"role": {"const": "closure_export_import"}}},
+        {"if": {"properties": {"terminal": {"const": "input_content_identity_mismatch"}}}, "then": {"properties": {"identities": {"properties": {"input_archive": {"type": "null"}, "closure_export_tree": {"$ref": "#/$defs/identity"}}}}}},
+        {"if": {"properties": {"terminal": {"const": "success"}}}, "then": {"allOf": [
+          {"properties": {"stage": {"const": "complete"}, "counters": {"properties": {"input_bytes": {"$ref": "#/$defs/decimal"}, "output_bytes": {"type": "null"}, "control_record_bytes": {"$ref": "#/$defs/decimal"}, "planned_objects": {"$ref": "#/$defs/decimal"}, "verified_objects": {"$ref": "#/$defs/decimal"}, "aggregate_decoded_bytes": {"$ref": "#/$defs/decimal"}, "file_count": {"$ref": "#/$defs/decimal"}}}, "identities": {"properties": {"input_archive": {"type": "null"}, "control_record": {"$ref": "#/$defs/identity"}, "pack": {"$ref": "#/$defs/identity"}, "archive_encoding": {"type": "null"}, "output_archive": {"type": "null"}, "closure_export_tree": {"$ref": "#/$defs/identity"}}}, "encoding_assertion": {"const": "not_applicable"}, "pack_exposed": {"const": true}, "stable_value_completed": {"const": false}, "publication": {"properties": {"requested": {"const": "not_applicable"}, "admitted": {"const": "not_applicable"}, "state": {"const": "not_applicable"}}}, "files": {"type": "array", "items": {"$ref": "#/$defs/receipt_file"}}, "failure_class": {"const": "not_applicable"}, "failure_cause": {"type": "null"}}},
+          {"oneOf": [{"properties": {"verification_mode": {"const": "derive"}, "identities": {"properties": {"expected_pack": {"type": "null"}}}, "expected_pack_matched": {"type": "null"}}}, {"properties": {"verification_mode": {"const": "verify"}, "identities": {"properties": {"expected_pack": {"$ref": "#/$defs/identity"}}}, "expected_pack_matched": {"const": true}}}]}
+        ]}}
+      ]
+    },
+    "archive_publish_receipt": {"allOf": [{"$ref": "#/$defs/representation_receipt"}, {"properties": {"role": {"const": "archive_publish"}}}, {"if": {"properties": {"terminal": {"const": "success"}}}, "then": {"properties": {"stage": {"const": "complete"}, "counters": {"properties": {"input_bytes": {"$ref": "#/$defs/decimal"}, "output_bytes": {"$ref": "#/$defs/decimal"}, "control_record_bytes": {"type": "null"}, "planned_objects": {"type": "null"}, "verified_objects": {"type": "null"}, "aggregate_decoded_bytes": {"type": "null"}, "file_count": {"type": "null"}}}, "identities": {"properties": {"input_archive": {"$ref": "#/$defs/identity"}, "control_record": {"type": "null"}, "pack": {"type": "null"}, "expected_pack": {"type": "null"}, "output_archive": {"$ref": "#/$defs/identity"}, "closure_export_tree": {"type": "null"}, "expected_input": {"type": "null"}}}, "verification_mode": {"const": "not_applicable"}, "expected_input_matched": {"type": "null"}, "encoding_assertion": {"const": "not_applicable"}, "pack_exposed": {"const": false}, "stable_value_completed": {"const": false}, "publication": {"properties": {"state": {"const": "committed"}}}, "files": {"type": "null"}, "failure_class": {"const": "not_applicable"}, "failure_cause": {"type": "null"}, "expected_pack_matched": {"type": "null"}}}}]},
+    "closure_export_publish_receipt": {"allOf": [{"$ref": "#/$defs/representation_receipt"}, {"properties": {"role": {"const": "closure_export_publish"}}}, {"if": {"properties": {"terminal": {"const": "success"}}}, "then": {"properties": {"stage": {"const": "complete"}, "counters": {"properties": {"input_bytes": {"$ref": "#/$defs/decimal"}, "output_bytes": {"$ref": "#/$defs/decimal"}, "control_record_bytes": {"$ref": "#/$defs/decimal"}, "planned_objects": {"type": "null"}, "verified_objects": {"type": "null"}, "aggregate_decoded_bytes": {"type": "null"}, "file_count": {"$ref": "#/$defs/decimal"}}}, "identities": {"properties": {"input_archive": {"type": "null"}, "control_record": {"$ref": "#/$defs/identity"}, "pack": {"$ref": "#/$defs/identity"}, "expected_pack": {"type": "null"}, "archive_encoding": {"type": "null"}, "output_archive": {"type": "null"}, "closure_export_tree": {"$ref": "#/$defs/identity"}, "expected_input": {"type": "null"}}}, "verification_mode": {"const": "not_applicable"}, "expected_input_matched": {"type": "null"}, "encoding_assertion": {"const": "not_applicable"}, "pack_exposed": {"const": false}, "stable_value_completed": {"const": false}, "publication": {"properties": {"requested": {"const": "complete_collection_atomic"}, "admitted": {"const": "complete_collection_atomic"}, "state": {"const": "committed"}}}, "files": {"type": "array", "items": {"$ref": "#/$defs/receipt_file"}}, "failure_class": {"const": "not_applicable"}, "failure_cause": {"type": "null"}, "expected_pack_matched": {"type": "null"}}}}]},
     "pack_ingress_operation": {
       "type": "object",
-      "required": ["schema", "producer", "input_kind", "admission", "terminal", "verification", "pack_identity", "receipt"],
+      "required": ["schema", "producer", "input_kind", "admission", "terminal", "verification", "pack_identity", "validation_rules", "acquisition", "receipt"],
       "additionalProperties": false,
+      "allOf": [
+        {"if": {"properties": {"input_kind": {"const": "archive"}}}, "then": {"properties": {"receipt": {"$ref": "#/$defs/archive_read_receipt"}}}},
+        {"if": {"properties": {"input_kind": {"const": "archive"}}}, "then": {"properties": {"acquisition": {"$ref": "#/$defs/archive_acquisition_transport_receipt"}}}},
+        {"if": {"properties": {"input_kind": {"const": "closure_export"}}}, "then": {"properties": {"acquisition": {"type": "null"}, "receipt": {"$ref": "#/$defs/closure_export_import_receipt"}}}},
+        {"if": {"properties": {"terminal": {"const": "validated"}}}, "then": {"properties": {"admission": {"properties": {"status": {"const": "admitted"}}}, "pack_identity": {"$ref": "#/$defs/identity"}, "receipt": {"properties": {"terminal": {"const": "success"}}}, "verification": {"$ref": "#/$defs/validated_verification"}}}},
+        {"if": {"not": {"properties": {"terminal": {"const": "validated"}}}}, "then": {"properties": {"pack_identity": {"type": "null"}}}},
+        {"if": {"properties": {"terminal": {"const": "invalid"}}}, "then": {"properties": {"receipt": {"properties": {"terminal": {"const": "invalid"}}}}}},
+        {"if": {"properties": {"terminal": {"const": "unsupported"}}}, "then": {"properties": {"receipt": {"properties": {"terminal": {"const": "unsupported"}}}}}},
+        {"if": {"properties": {"terminal": {"const": "expected_pack_identity_mismatch"}}}, "then": {"properties": {"receipt": {"properties": {"terminal": {"const": "expected_pack_identity_mismatch"}}}}}},
+        {"if": {"properties": {"terminal": {"const": "input_content_identity_mismatch"}}}, "then": {"properties": {"receipt": {"properties": {"terminal": {"const": "input_content_identity_mismatch"}}}}}},
+        {"if": {"properties": {"terminal": {"const": "archive_encoding_assertion_mismatch"}}}, "then": {"properties": {"input_kind": {"const": "archive"}, "receipt": {"properties": {"terminal": {"const": "archive_encoding_assertion_mismatch"}}}}}},
+        {"if": {"properties": {"terminal": {"const": "resource_limit"}}}, "then": {"properties": {"receipt": {"properties": {"terminal": {"const": "resource_outcome"}}}}}},
+        {"if": {"properties": {"terminal": {"const": "cancelled"}}}, "then": {"properties": {"receipt": {"properties": {"terminal": {"const": "cancelled"}}}}}},
+        {"if": {"properties": {"terminal": {"const": "deadline"}}}, "then": {"properties": {"receipt": {"properties": {"terminal": {"const": "deadline"}}}}}},
+        {"if": {"properties": {"terminal": {"const": "admission_refused"}}}, "then": {"properties": {"admission": {"properties": {"status": {"const": "refused"}}}, "receipt": {"properties": {"terminal": {"const": "admission_refused"}, "admitted_controls": {"type": "null"}}}}}},
+        {"if": {"properties": {"terminal": {"const": "internal_integrity"}}}, "then": {"properties": {"receipt": {"properties": {"terminal": {"const": "internal_integrity"}}}}}},
+        {"if": {"properties": {"admission": {"properties": {"status": {"const": "refused"}}, "required": ["status"]}}}, "then": {"properties": {"terminal": {"const": "admission_refused"}}}},
+        {"if": {"not": {"properties": {"terminal": {"const": "admission_refused"}}}}, "then": {"properties": {"admission": {"properties": {"status": {"const": "admitted"}}}}}},
+        {"if": {"properties": {"terminal": {"const": "admission_refused"}}}, "then": {"properties": {"acquisition": {"properties": {"status": {"const": "refused"}}}}}},
+        {"if": {"properties": {"terminal": {"enum": ["validated", "invalid", "unsupported", "expected_pack_identity_mismatch", "input_content_identity_mismatch", "archive_encoding_assertion_mismatch"]}}}, "then": {"properties": {"acquisition": {"properties": {"status": {"const": "transferred"}}}}}},
+        {"if": {"properties": {"terminal": {"enum": ["resource_limit", "cancelled", "deadline", "internal_integrity"]}}}, "then": {"properties": {"acquisition": {"properties": {"status": {"enum": ["transferred", "failed"]}}}}}}
+      ],
       "properties": {
         "schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.pack-ingress-operation"}}}]},
         "producer": {"$ref": "#/$defs/producer"},
@@ -487,7 +725,9 @@
         "terminal": {"enum": ["validated", "invalid", "unsupported", "expected_pack_identity_mismatch", "input_content_identity_mismatch", "archive_encoding_assertion_mismatch", "resource_limit", "cancelled", "deadline", "admission_refused", "internal_integrity"]},
         "verification": {"$ref": "#/$defs/verification"},
         "pack_identity": {"$ref": "#/$defs/nullable_identity"},
-        "receipt": {"$ref": "#/$defs/representation_receipt"}
+        "validation_rules": {"type": "array", "items": {"type": "string"}},
+        "acquisition": {"oneOf": [{"$ref": "#/$defs/archive_acquisition_transport_receipt"}, {"type": "null"}]},
+        "receipt": {"oneOf": [{"$ref": "#/$defs/archive_read_receipt"}, {"$ref": "#/$defs/closure_export_import_receipt"}]}
       }
     },
     "pack_inspection": {
@@ -506,7 +746,7 @@
         "package_requirements": {"type": "array", "items": {"$ref": "#/$defs/package_requirement"}},
         "font_requirements": {"type": "array", "items": {"$ref": "#/$defs/font_requirement"}},
         "font_catalog": {"type": "array", "items": {"$ref": "#/$defs/font_face"}},
-        "metadata": {"type": ["object", "null"]},
+        "metadata": {"oneOf": [{"$ref": "#/$defs/metadata_view"}, {"type": "null"}]},
         "semantic_extensions": {"type": "array", "items": {"$ref": "#/$defs/extension_inventory"}},
         "annotations": {"type": "array", "items": {"$ref": "#/$defs/extension_inventory"}}
       }
@@ -519,40 +759,94 @@
     },
     "discovery_coverage": {
       "type": "object",
-      "required": ["ordinal", "label", "variant_identity", "coverage_identity", "trace_identity", "target", "input_commitments", "features", "document_time", "override_commitments"],
+      "required": ["ordinal", "label", "variant_identity", "coverage_identity", "trace_identity", "target", "input_commitments", "features", "document_time", "override_commitments", "trace"],
       "additionalProperties": false,
       "properties": {
-        "ordinal": {"$ref": "#/$defs/decimal"}, "label": {"type": ["string", "null"]}, "variant_identity": {"$ref": "#/$defs/identity"}, "coverage_identity": {"$ref": "#/$defs/identity"}, "trace_identity": {"$ref": "#/$defs/identity"}, "target": {"enum": ["paged", "html"]}, "input_commitments": {"type": "array", "items": {"type": "object"}}, "features": {"type": "array", "items": {"type": "string"}}, "document_time": {"$ref": "#/$defs/document_time"}, "override_commitments": {"type": "array", "items": {"type": "object"}}
+        "ordinal": {"$ref": "#/$defs/decimal"}, "label": {"type": ["string", "null"]}, "variant_identity": {"$ref": "#/$defs/identity"}, "coverage_identity": {"$ref": "#/$defs/identity"}, "trace_identity": {"$ref": "#/$defs/identity"}, "target": {"enum": ["paged", "html"]}, "input_commitments": {"type": "array", "items": {"$ref": "#/$defs/sensitive_inventory"}}, "features": {"type": "array", "uniqueItems": true, "items": {"enum": ["html", "a11y-extras", "bundle"]}}, "document_time": {"$ref": "#/$defs/document_time"}, "override_commitments": {"type": "array", "items": {"$ref": "#/$defs/sensitive_inventory"}}, "trace": {"$ref": "#/$defs/discovery_trace_view"}
       }
     },
+    "discovery_project_observation": {
+      "oneOf": [
+        {"type": "object", "required": ["kind", "path", "request_kind", "content_identity", "commitment"], "additionalProperties": false, "properties": {"kind": {"const": "baseline_read"}, "path": {"$ref": "#/$defs/project_path"}, "request_kind": {"enum": ["load", "probe"]}, "content_identity": {"$ref": "#/$defs/identity"}, "commitment": {"type": "null"}}},
+        {"type": "object", "required": ["kind", "path", "request_kind", "content_identity", "commitment"], "additionalProperties": false, "properties": {"kind": {"const": "override_read"}, "path": {"$ref": "#/$defs/project_path"}, "request_kind": {"enum": ["load", "probe"]}, "content_identity": {"type": "null"}, "commitment": {"$ref": "#/$defs/discovery_request_commitment"}}},
+        {"type": "object", "required": ["kind", "path", "request_kind", "content_identity", "commitment"], "additionalProperties": false, "properties": {"kind": {"const": "missing"}, "path": {"$ref": "#/$defs/project_path"}, "request_kind": {"enum": ["load", "probe"]}, "content_identity": {"type": "null"}, "commitment": {"type": "null"}}}
+      ]
+    },
+    "discovery_package_observation": {
+      "oneOf": [
+        {"type": "object", "required": ["kind", "requirement_identity", "path", "request_kind", "content_identity"], "additionalProperties": false, "properties": {"kind": {"const": "read"}, "requirement_identity": {"$ref": "#/$defs/identity"}, "path": {"$ref": "#/$defs/project_path"}, "request_kind": {"enum": ["load", "probe"]}, "content_identity": {"$ref": "#/$defs/identity"}}},
+        {"type": "object", "required": ["kind", "requirement_identity", "path", "request_kind", "content_identity"], "additionalProperties": false, "properties": {"kind": {"const": "missing"}, "requirement_identity": {"$ref": "#/$defs/identity"}, "path": {"$ref": "#/$defs/project_path"}, "request_kind": {"enum": ["load", "probe"]}, "content_identity": {"type": "null"}}}
+      ]
+    },
+    "discovery_trace_view": {
+      "type": "object",
+      "required": ["project_observations", "package_observations", "font_faces"],
+      "additionalProperties": false,
+      "properties": {"project_observations": {"type": "array", "items": {"$ref": "#/$defs/discovery_project_observation"}}, "package_observations": {"type": "array", "items": {"$ref": "#/$defs/discovery_package_observation"}}, "font_faces": {"type": "array", "items": {"$ref": "#/$defs/font_face_identity"}}}
+    },
+    "sensitive_inventory": {
+      "type": "object",
+      "required": ["role", "logical_key", "exact_bytes", "commitment"],
+      "additionalProperties": false,
+      "properties": {"role": {"enum": ["typst_input", "pack_override"]}, "logical_key": {"type": "string", "minLength": 1}, "exact_bytes": {"$ref": "#/$defs/decimal"}, "commitment": {"$ref": "#/$defs/discovery_request_commitment"}}
+    },
+    "provenance": {
+      "type": "object",
+      "required": ["authority_kind", "source_class", "logical_origin"],
+      "additionalProperties": false,
+      "properties": {"authority_kind": {"type": "string"}, "source_class": {"enum": ["caller_supplied", "explicit_local", "cache", "network", "system_font", "engine_embedded_font"]}, "logical_origin": {"type": ["string", "null"]}}
+    },
+    "metadata_view": {
+      "type": "object",
+      "required": ["title", "description", "authors", "keywords"],
+      "additionalProperties": false,
+      "properties": {"title": {"type": ["string", "null"]}, "description": {"type": ["string", "null"]}, "authors": {"type": "array", "items": {"type": "string"}}, "keywords": {"type": "array", "uniqueItems": true, "items": {"type": "string"}}}
+    },
+    "embedding_rule_view": {
+      "type": "object",
+      "required": ["selector_kind", "selector", "disposition"],
+      "additionalProperties": false,
+      "properties": {"selector_kind": {"enum": ["package_specification", "font_container_identity"]}, "selector": {"type": "string"}, "disposition": {"enum": ["embed", "external"]}}
+    },
+    "package_embedding_rule_view": {"allOf": [{"$ref": "#/$defs/embedding_rule_view"}, {"properties": {"selector_kind": {"const": "package_specification"}}}]},
+    "font_embedding_rule_view": {"allOf": [{"$ref": "#/$defs/embedding_rule_view"}, {"properties": {"selector_kind": {"const": "font_container_identity"}, "selector": {"$ref": "#/$defs/identity"}}}]},
     "package_requirement": {
       "type": "object",
-      "required": ["specification", "tree_identity", "disposition", "provenance"],
+      "required": ["requirement_identity", "specification", "tree_identity", "files", "manifest", "disposition", "provenance"],
       "additionalProperties": false,
-      "properties": {"specification": {"type": "string"}, "tree_identity": {"$ref": "#/$defs/identity"}, "disposition": {"enum": ["embedded", "external"]}, "provenance": {"type": "object"}}
+      "properties": {"requirement_identity": {"$ref": "#/$defs/identity"}, "specification": {"type": "string"}, "tree_identity": {"$ref": "#/$defs/identity"}, "files": {"type": "array", "items": {"$ref": "#/$defs/file_inventory"}}, "manifest": {"$ref": "#/$defs/package_manifest_summary"}, "disposition": {"enum": ["embedded", "external"]}, "provenance": {"$ref": "#/$defs/provenance"}}
+    },
+    "package_manifest_summary": {
+      "type": "object", "required": ["name", "version", "entrypoint", "minimum_compiler"], "additionalProperties": false,
+      "properties": {"name": {"type": "string", "minLength": 1}, "version": {"type": "string", "pattern": "^(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)\\.(0|[1-9][0-9]*)$"}, "entrypoint": {"$ref": "#/$defs/project_path"}, "minimum_compiler": {"type": ["string", "null"], "pattern": "^(0|[1-9][0-9]*)(?:\\.(0|[1-9][0-9]*)(?:\\.(0|[1-9][0-9]*))?)?$"}}
     },
     "font_requirement": {
       "type": "object",
-      "required": ["container_identity", "face_indices", "disposition", "provenance"],
+      "required": ["requirement_identity", "container_identity", "container_exact_bytes", "faces", "disposition", "provenance"],
       "additionalProperties": false,
-      "properties": {"container_identity": {"$ref": "#/$defs/identity"}, "face_indices": {"type": "array", "items": {"type": "integer", "minimum": 0}}, "disposition": {"enum": ["embedded", "external"]}, "provenance": {"type": "object"}}
+      "properties": {"requirement_identity": {"$ref": "#/$defs/identity"}, "container_identity": {"$ref": "#/$defs/identity"}, "container_exact_bytes": {"$ref": "#/$defs/decimal"}, "faces": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/font_face"}}, "disposition": {"enum": ["embedded", "external"]}, "provenance": {"$ref": "#/$defs/provenance"}}
     },
+    "font_face_identity": {"type": "object", "required": ["container_identity", "face_index"], "additionalProperties": false, "properties": {"container_identity": {"$ref": "#/$defs/identity"}, "face_index": {"type": "integer", "minimum": 0, "maximum": 4294967295}}},
     "font_face": {
       "type": "object",
-      "required": ["container_identity", "face_index"],
+      "required": ["identity", "selection", "licensing"],
       "additionalProperties": false,
-      "properties": {"container_identity": {"$ref": "#/$defs/identity"}, "face_index": {"type": "integer", "minimum": 0}}
+      "properties": {"identity": {"$ref": "#/$defs/font_face_identity"}, "selection": {"type": "object", "required": ["family", "style", "weight", "stretch_thousandths", "flags", "axes", "codepoint_ranges"], "additionalProperties": false, "properties": {"family": {"type": "string", "minLength": 1}, "style": {"enum": ["normal", "italic", "oblique"]}, "weight": {"type": "integer", "minimum": 100, "maximum": 900}, "stretch_thousandths": {"type": "integer", "minimum": 500, "maximum": 2000}, "flags": {"type": "integer", "minimum": 0, "maximum": 15}, "axes": {"type": "array", "items": {"type": "object", "required": ["tag_base64", "minimum_bits", "default_bits", "maximum_bits"], "additionalProperties": false, "properties": {"tag_base64": {"type": "string", "pattern": "^[A-Za-z0-9_-]{6}$"}, "minimum_bits": {"type": "string", "pattern": "^[0-9a-f]{8}$"}, "default_bits": {"type": "string", "pattern": "^[0-9a-f]{8}$"}, "maximum_bits": {"type": "string", "pattern": "^[0-9a-f]{8}$"}}}}, "codepoint_ranges": {"type": "array", "items": {"type": "object", "required": ["first", "last"], "additionalProperties": false, "properties": {"first": {"type": "integer", "minimum": 0, "maximum": 1114111}, "last": {"type": "integer", "minimum": 0, "maximum": 1114111}}}}}}, "licensing": {"type": "object", "required": ["fs_type", "name_records"], "additionalProperties": false, "properties": {"fs_type": {"type": ["integer", "null"], "minimum": 0, "maximum": 65535}, "name_records": {"type": "array", "items": {"type": "object", "required": ["name_id", "platform_id", "encoding_id", "language_id", "value_base64"], "additionalProperties": false, "properties": {"name_id": {"enum": [13, 14]}, "platform_id": {"type": "integer", "minimum": 0, "maximum": 65535}, "encoding_id": {"type": "integer", "minimum": 0, "maximum": 65535}, "language_id": {"type": "integer", "minimum": 0, "maximum": 65535}, "value_base64": {"type": "string", "pattern": "^[A-Za-z0-9_-]*$"}}}}}}}
     },
     "extension_inventory": {
       "type": "object",
-      "required": ["identifier", "epoch", "payload_bytes"],
+      "required": ["identifier", "epoch", "payload_bytes", "payload_content_identity", "embedded_object_identities"],
       "additionalProperties": false,
-      "properties": {"identifier": {"type": "string"}, "epoch": {"type": "integer", "minimum": 1}, "payload_bytes": {"$ref": "#/$defs/decimal"}}
+      "properties": {"identifier": {"type": "string"}, "epoch": {"type": "integer", "minimum": 1}, "payload_bytes": {"$ref": "#/$defs/decimal"}, "payload_content_identity": {"$ref": "#/$defs/identity"}, "embedded_object_identities": {"type": "array", "items": {"$ref": "#/$defs/identity"}}}
     },
     "pack_inspection_operation": {
       "type": "object",
       "required": ["schema", "producer", "ingress", "inspection"],
       "additionalProperties": false,
+      "allOf": [
+        {"if": {"properties": {"ingress": {"properties": {"terminal": {"const": "validated"}}, "required": ["terminal"]}}}, "then": {"properties": {"inspection": {"$ref": "#/$defs/pack_inspection"}}}},
+        {"if": {"properties": {"ingress": {"not": {"properties": {"terminal": {"const": "validated"}}, "required": ["terminal"]}}}}, "then": {"properties": {"inspection": {"type": "null"}}}}
+      ],
       "properties": {
         "schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.pack-inspection-operation"}}}]},
         "producer": {"$ref": "#/$defs/producer"},
@@ -564,12 +858,16 @@
       "type": "object",
       "required": ["ordinal", "phase", "scope", "severity", "code", "safe_message"],
       "additionalProperties": false,
-      "properties": {"ordinal": {"$ref": "#/$defs/decimal"}, "phase": {"type": "string"}, "scope": {"type": "object"}, "severity": {"enum": ["warning", "error"]}, "code": {"type": "string"}, "safe_message": {"type": "string"}}
+      "properties": {"ordinal": {"$ref": "#/$defs/decimal"}, "phase": {"type": "string"}, "scope": {"type": "object", "required": ["kind", "variant_ordinal", "variant_label"], "additionalProperties": false, "properties": {"kind": {"enum": ["operation", "discovery_variant", "replay_variant"]}, "variant_ordinal": {"oneOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]}, "variant_label": {"type": ["string", "null"]}}}, "severity": {"enum": ["warning", "error"]}, "code": {"type": "string"}, "safe_message": {"type": "string"}}
     },
     "creation_report": {
       "type": "object",
       "required": ["schema", "producer", "terminal", "pack_identity", "phases", "diagnostics", "failure"],
       "additionalProperties": false,
+      "allOf": [
+        {"if": {"properties": {"terminal": {"const": "issued"}}}, "then": {"properties": {"pack_identity": {"$ref": "#/$defs/identity"}, "failure": {"type": "null"}}}},
+        {"if": {"properties": {"terminal": {"const": "failed"}}}, "then": {"properties": {"pack_identity": {"type": "null"}, "failure": {"$ref": "#/$defs/failure"}}}}
+      ],
       "properties": {
         "schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.creation-report"}}}]},
         "producer": {"$ref": "#/$defs/producer"},
@@ -580,29 +878,67 @@
         "failure": {"$ref": "#/$defs/nullable_failure"}
       }
     },
+    "creation_request_view": {
+      "type": "object",
+      "required": ["entrypoint", "variants", "explicit_inclusions", "package_embedding", "font_embedding", "metadata", "annotations"],
+      "additionalProperties": false,
+      "properties": {
+        "entrypoint": {"$ref": "#/$defs/project_path"},
+        "variants": {"type": "array", "minItems": 1, "items": {"type": "object", "required": ["ordinal", "label", "target", "inputs", "features", "document_time", "overrides"], "additionalProperties": false, "properties": {"ordinal": {"$ref": "#/$defs/decimal"}, "label": {"type": ["string", "null"]}, "target": {"enum": ["paged", "html"]}, "inputs": {"type": "array", "items": {"allOf": [{"$ref": "#/$defs/sensitive_inventory"}, {"properties": {"role": {"const": "typst_input"}}}]}}, "features": {"type": "array", "uniqueItems": true, "items": {"enum": ["html", "a11y-extras", "bundle"]}}, "document_time": {"$ref": "#/$defs/document_time"}, "overrides": {"type": "array", "items": {"allOf": [{"$ref": "#/$defs/sensitive_inventory"}, {"properties": {"role": {"const": "pack_override"}, "logical_key": {"$ref": "#/$defs/project_path"}}}]}}}}},
+        "explicit_inclusions": {"type": "array", "items": {"$ref": "#/$defs/project_path"}},
+        "package_embedding": {"type": "object", "required": ["default", "rules"], "additionalProperties": false, "properties": {"default": {"enum": ["embed", "external"]}, "rules": {"type": "array", "items": {"$ref": "#/$defs/package_embedding_rule_view"}}}},
+        "font_embedding": {"type": "object", "required": ["default", "rules"], "additionalProperties": false, "properties": {"default": {"enum": ["embed", "external"]}, "rules": {"type": "array", "items": {"$ref": "#/$defs/font_embedding_rule_view"}}}},
+        "metadata": {"oneOf": [{"$ref": "#/$defs/metadata_view"}, {"type": "null"}]},
+        "annotations": {"type": "array", "items": {"$ref": "#/$defs/extension_inventory"}}
+      }
+    },
     "create_operation": {
       "type": "object",
-      "required": ["schema", "producer", "admission", "request", "creation", "archive_encoding", "publication", "post_commit"],
+      "required": ["schema", "producer", "kind", "admission", "adapter_outcome", "request", "creation", "archive_encoding", "publication", "post_commit"],
       "additionalProperties": false,
+      "allOf": [
+        {"if": {"properties": {"kind": {"const": "adapter_failed"}}}, "then": {"properties": {"adapter_outcome": {"$ref": "#/$defs/failure"}, "request": {"type": "null"}, "creation": {"type": "null"}, "archive_encoding": {"type": "null"}, "publication": {"type": "null"}, "post_commit": {"properties": {"timings": {"$ref": "#/$defs/not_attempted_channel"}}}}}},
+        {"if": {"properties": {"kind": {"const": "creation_report"}}}, "then": {"properties": {"adapter_outcome": {"type": "null"}, "request": {"$ref": "#/$defs/creation_request_view"}, "creation": {"$ref": "#/$defs/creation_report"}}}},
+        {"if": {"properties": {"admission": {"properties": {"status": {"const": "refused"}}, "required": ["status"]}}}, "then": {"properties": {"kind": {"const": "adapter_failed"}}}},
+        {"if": {"properties": {"kind": {"const": "creation_report"}}}, "then": {"properties": {"admission": {"properties": {"status": {"const": "admitted"}}}}}},
+        {"if": {"properties": {"creation": {"properties": {"terminal": {"const": "failed"}}}}}, "then": {"properties": {"archive_encoding": {"type": "null"}, "publication": {"type": "null"}}}},
+        {"if": {"properties": {"archive_encoding": {"not": {"type": "null"}}}}, "then": {"properties": {"creation": {"properties": {"terminal": {"const": "issued"}}}}}},
+        {"if": {"properties": {"publication": {"not": {"type": "null"}}}}, "then": {"properties": {"creation": {"properties": {"terminal": {"const": "issued"}}}, "archive_encoding": {"properties": {"terminal": {"const": "success"}}}}}}
+      ],
       "properties": {
         "schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.create-operation"}}}]},
         "producer": {"$ref": "#/$defs/producer"},
+        "kind": {"enum": ["adapter_failed", "creation_report"]},
         "admission": {"$ref": "#/$defs/admission"},
-        "request": {"type": "object"},
-        "creation": {"$ref": "#/$defs/creation_report"},
-        "archive_encoding": {"$ref": "#/$defs/channel"},
-        "publication": {"$ref": "#/$defs/channel"},
+        "adapter_outcome": {"$ref": "#/$defs/nullable_failure"},
+        "request": {"oneOf": [{"$ref": "#/$defs/creation_request_view"}, {"type": "null"}]},
+        "creation": {"oneOf": [{"$ref": "#/$defs/creation_report"}, {"type": "null"}]},
+        "archive_encoding": {"oneOf": [{"$ref": "#/$defs/archive_encode_receipt"}, {"type": "null"}]},
+        "publication": {"oneOf": [{"$ref": "#/$defs/archive_publication_receipts"}, {"type": "null"}]},
         "post_commit": {"type": "object", "required": ["timings"], "additionalProperties": false, "properties": {"timings": {"$ref": "#/$defs/channel"}}}
       }
+    },
+    "request_inventory_entry": {
+      "oneOf": [
+        {"type": "object", "required": ["role", "name", "logical_key", "origin", "classification", "sensitive", "public_value", "commitment", "exact_bytes"], "additionalProperties": false, "properties": {"role": {"const": "public"}, "name": {"type": "string", "minLength": 1}, "logical_key": {"type": ["string", "null"]}, "origin": {"enum": ["caller", "core_default", "core_derived", "adapter_resolved"]}, "classification": {"enum": ["semantic", "operational"]}, "sensitive": {"const": false}, "public_value": {"type": ["string", "boolean"]}, "commitment": {"type": "null"}, "exact_bytes": {"oneOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]}}},
+        {"type": "object", "required": ["role", "name", "logical_key", "origin", "classification", "sensitive", "public_value", "commitment", "exact_bytes"], "additionalProperties": false, "properties": {"role": {"const": "typst_input"}, "name": {"type": "string", "minLength": 1}, "logical_key": {"type": "string", "minLength": 1}, "origin": {"enum": ["caller", "adapter_resolved"]}, "classification": {"const": "semantic"}, "sensitive": {"const": true}, "public_value": {"type": "null"}, "commitment": {"$ref": "#/$defs/compilation_request_commitment"}, "exact_bytes": {"$ref": "#/$defs/decimal"}}},
+        {"type": "object", "required": ["role", "name", "logical_key", "origin", "classification", "sensitive", "public_value", "commitment", "exact_bytes"], "additionalProperties": false, "properties": {"role": {"const": "pack_override"}, "name": {"type": "string", "minLength": 1}, "logical_key": {"$ref": "#/$defs/project_path"}, "origin": {"enum": ["caller", "adapter_resolved"]}, "classification": {"const": "semantic"}, "sensitive": {"const": true}, "public_value": {"type": "null"}, "commitment": {"$ref": "#/$defs/compilation_request_commitment"}, "exact_bytes": {"$ref": "#/$defs/decimal"}}}
+      ]
     },
     "request_rejection": {
       "type": "object",
       "required": ["request_inventory", "issues"],
       "additionalProperties": false,
       "properties": {
-        "request_inventory": {"type": "array", "items": {"type": "object"}},
-        "issues": {"type": "array", "items": {"type": "object", "required": ["code", "path", "safe_message"], "properties": {"code": {"type": "string"}, "path": {"type": "string"}, "safe_message": {"type": "string"}}}}
+        "request_inventory": {"type": "array", "items": {"$ref": "#/$defs/request_inventory_entry"}},
+        "issues": {"type": "array", "items": {"type": "object", "required": ["code", "path", "safe_message"], "additionalProperties": false, "properties": {"code": {"type": "string"}, "path": {"type": "string"}, "safe_message": {"type": "string"}}}}
       }
+    },
+    "artifact_role": {
+      "oneOf": [
+        {"type": "object", "required": ["kind", "format", "source_page_number"], "additionalProperties": false, "properties": {"kind": {"const": "document"}, "format": {"enum": ["pdf", "html"]}, "source_page_number": {"type": "null"}}},
+        {"type": "object", "required": ["kind", "format", "source_page_number"], "additionalProperties": false, "properties": {"kind": {"const": "page"}, "format": {"enum": ["png", "svg"]}, "source_page_number": {"$ref": "#/$defs/positive_decimal"}}}
+      ]
     },
     "artifact": {
       "type": "object",
@@ -611,147 +947,330 @@
       "properties": {
         "ordinal": {"$ref": "#/$defs/decimal"},
         "presentation_name": {"type": "string"},
-        "role": {"type": "object", "required": ["kind", "format", "source_page_number"], "additionalProperties": false, "properties": {"kind": {"enum": ["document", "page"]}, "format": {"enum": ["pdf", "png", "svg", "html"]}, "source_page_number": {"oneOf": [{"$ref": "#/$defs/positive_decimal"}, {"type": "null"}]}}},
+        "role": {"$ref": "#/$defs/artifact_role"},
         "artifact_identity": {"$ref": "#/$defs/identity"},
         "content_identity": {"$ref": "#/$defs/identity"},
         "exact_bytes": {"$ref": "#/$defs/decimal"}
       }
+    },
+    "document_summary": {
+      "oneOf": [
+        {"type": "object", "required": ["target", "source_page_count"], "additionalProperties": false, "properties": {"target": {"const": "paged"}, "source_page_count": {"$ref": "#/$defs/decimal"}}},
+        {"type": "object", "required": ["target", "source_page_count"], "additionalProperties": false, "properties": {"target": {"const": "html"}, "source_page_count": {"type": "null"}}}
+      ]
+    },
+    "dependency_observation": {
+      "type": "object",
+      "required": ["logical_identity", "outcome", "content_identity", "fulfillment", "evidence_refs"],
+      "additionalProperties": false,
+      "properties": {"logical_identity": {"type": "string"}, "outcome": {"enum": ["read", "missing", "unavailable", "failed"]}, "content_identity": {"$ref": "#/$defs/nullable_identity"}, "fulfillment": {"type": ["string", "null"], "enum": ["pack_baseline", "pack_override", "embedded", "external", null]}, "evidence_refs": {"type": "array", "items": {"type": "string"}}}
+    },
+    "access_trace_entry": {
+      "oneOf": [
+        {"type": "object", "required": ["request_kind", "logical_identity", "outcome", "fulfillment", "content_identity", "request_commitment", "provenance"], "additionalProperties": false, "properties": {"request_kind": {"type": "string", "minLength": 1}, "logical_identity": {"type": "string", "minLength": 1}, "outcome": {"enum": ["read", "missing", "failed"]}, "fulfillment": {"enum": ["pack_baseline", "embedded", "external", "missing"]}, "content_identity": {"$ref": "#/$defs/nullable_identity"}, "request_commitment": {"type": "null"}, "provenance": {"type": ["string", "null"], "enum": ["caller_supplied", "explicit_local", "cache", "network", "system_font", "engine_embedded_font", null]}}},
+        {"type": "object", "required": ["request_kind", "logical_identity", "outcome", "fulfillment", "content_identity", "request_commitment", "provenance"], "additionalProperties": false, "properties": {"request_kind": {"type": "string", "minLength": 1}, "logical_identity": {"$ref": "#/$defs/project_path"}, "outcome": {"enum": ["read", "failed"]}, "fulfillment": {"const": "pack_override"}, "content_identity": {"type": "null"}, "request_commitment": {"$ref": "#/$defs/compilation_request_commitment"}, "provenance": {"type": "null"}}}
+      ]
+    },
+    "diagnostic_entry": {
+      "type": "object",
+      "required": ["ordinal", "phase", "severity", "kind", "message", "hints", "spans"],
+      "additionalProperties": false,
+      "properties": {"ordinal": {"$ref": "#/$defs/decimal"}, "phase": {"enum": ["compiler", "exporter", "library"]}, "severity": {"enum": ["warning", "error"]}, "kind": {"type": "string"}, "message": {"type": "string"}, "hints": {"type": "array", "items": {"type": "string"}}, "spans": {"type": "array", "items": {"type": "object", "required": ["source_kind", "logical_path", "start", "end"], "additionalProperties": false, "properties": {"source_kind": {"enum": ["project", "package"]}, "logical_path": {"type": "string"}, "start": {"$ref": "#/$defs/decimal"}, "end": {"$ref": "#/$defs/decimal"}}}}}
     },
     "diagnostic_envelope": {
       "type": "object",
       "required": ["policy", "retained_entries", "retained_canonical_bytes", "completion", "entries"],
       "additionalProperties": false,
       "properties": {
-        "policy": {"type": "object"},
+        "policy": {"type": "object", "required": ["version", "max_entries", "max_canonical_entry_bytes"], "additionalProperties": false, "properties": {"version": {"const": 1}, "max_entries": {"$ref": "#/$defs/decimal"}, "max_canonical_entry_bytes": {"$ref": "#/$defs/decimal"}}},
         "retained_entries": {"$ref": "#/$defs/decimal"},
         "retained_canonical_bytes": {"$ref": "#/$defs/decimal"},
-        "completion": {"type": "object", "required": ["kind"], "properties": {"kind": {"enum": ["complete", "limited"]}, "first_omitted_ordinal": {"oneOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]}, "phase": {"type": ["string", "null"]}, "dimension": {"type": ["string", "null"]}}},
-        "entries": {"type": ["array", "null"], "items": {"type": "object"}}
+        "completion": {"oneOf": [{"type": "object", "required": ["kind", "first_omitted_ordinal", "phase", "dimension"], "additionalProperties": false, "properties": {"kind": {"const": "complete"}, "first_omitted_ordinal": {"type": "null"}, "phase": {"type": "null"}, "dimension": {"type": "null"}}}, {"type": "object", "required": ["kind", "first_omitted_ordinal", "phase", "dimension"], "additionalProperties": false, "properties": {"kind": {"const": "limited"}, "first_omitted_ordinal": {"$ref": "#/$defs/decimal"}, "phase": {"type": "string"}, "dimension": {"enum": ["entry_count", "canonical_entry_bytes"]}}}]},
+        "entries": {"type": "null"}
       }
     },
+    "compilation_terminal_schema": {
+      "allOf": [{"$ref": "#/$defs/output_schema"}, {"type": "object", "properties": {"name": {"const": "org.typst-pack.compilation-terminal"}}}]
+    },
     "compilation_result": {
-      "type": "object",
-      "required": ["status", "result_identity", "document", "diagnostics", "dependency_projection", "access_trace", "artifacts"],
-      "additionalProperties": false,
-      "properties": {
-        "status": {"enum": ["succeeded", "rejected"]},
-        "result_identity": {"$ref": "#/$defs/identity"},
-        "document": {"type": "object", "required": ["target", "source_page_count"], "additionalProperties": false, "properties": {"target": {"enum": ["paged", "html"]}, "source_page_count": {"oneOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]}}},
-        "diagnostics": {"$ref": "#/$defs/diagnostic_envelope"},
-        "dependency_projection": {"type": "array", "items": {"type": "object"}},
-        "access_trace": {"type": "array", "items": {"type": "object"}},
-        "artifacts": {"oneOf": [{"type": "array", "items": {"$ref": "#/$defs/artifact"}}, {"type": "null"}]}
-      }
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["status", "result_identity", "document", "diagnostics", "dependency_projection", "access_trace", "artifacts"],
+          "additionalProperties": false,
+          "properties": {
+            "status": {"const": "succeeded"},
+            "result_identity": {"$ref": "#/$defs/identity"},
+            "document": {"$ref": "#/$defs/document_summary"},
+            "diagnostics": {"$ref": "#/$defs/diagnostic_envelope"},
+            "dependency_projection": {"type": "array", "items": {"$ref": "#/$defs/dependency_observation"}},
+            "access_trace": {"oneOf": [{"type": "array", "items": {"$ref": "#/$defs/access_trace_entry"}}, {"type": "null"}]},
+            "artifacts": {"type": "array", "items": {"$ref": "#/$defs/artifact"}}
+          }
+        },
+        {
+          "type": "object",
+          "required": ["status", "result_identity", "document", "diagnostics", "dependency_projection", "access_trace", "artifacts"],
+          "additionalProperties": false,
+          "properties": {
+            "status": {"const": "rejected"},
+            "result_identity": {"$ref": "#/$defs/identity"},
+            "document": {"$ref": "#/$defs/document_summary"},
+            "diagnostics": {"$ref": "#/$defs/diagnostic_envelope"},
+            "dependency_projection": {"type": "array", "items": {"$ref": "#/$defs/dependency_observation"}},
+            "access_trace": {"oneOf": [{"type": "array", "items": {"$ref": "#/$defs/access_trace_entry"}}, {"type": "null"}]},
+            "artifacts": {"type": "null"}
+          }
+        }
+      ]
     },
     "operation_outcome": {
       "type": "object",
       "required": ["phase", "cause", "partial_access_trace"],
       "additionalProperties": false,
-      "properties": {"phase": {"type": "string"}, "cause": {"$ref": "#/$defs/failure"}, "partial_access_trace": {"type": "array", "items": {"type": "object"}}}
+      "properties": {"phase": {"type": "string"}, "cause": {"$ref": "#/$defs/failure"}, "partial_access_trace": {"oneOf": [{"type": "array", "items": {"$ref": "#/$defs/access_trace_entry"}}, {"type": "null"}]}}
+    },
+    "compilation_operation_view": {
+      "type": "object",
+      "required": ["resource_profile", "engine_runtime_domain", "requested_jobs", "admitted_jobs", "acquisition_concurrency", "ready_worker_concurrency", "ready_queue_capacity", "isolation", "deadline", "interruption_strength", "terminal_phase"],
+      "additionalProperties": false,
+      "properties": {"resource_profile": {"type": "string"}, "engine_runtime_domain": {"type": "string"}, "requested_jobs": {"oneOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]}, "admitted_jobs": {"$ref": "#/$defs/positive_decimal"}, "acquisition_concurrency": {"$ref": "#/$defs/positive_decimal"}, "ready_worker_concurrency": {"$ref": "#/$defs/positive_decimal"}, "ready_queue_capacity": {"$ref": "#/$defs/decimal"}, "isolation": {"enum": ["in_process", "worker"]}, "deadline": {"$ref": "#/$defs/deadline"}, "interruption_strength": {"enum": ["cooperative", "isolated"]}, "terminal_phase": {"type": "string"}}
+    },
+    "cache_view": {
+      "oneOf": [
+        {"type": "object", "required": ["status", "isolation_domain", "record_result_identity", "evidence_scope"], "additionalProperties": false, "properties": {"status": {"const": "disabled"}, "isolation_domain": {"type": "null"}, "record_result_identity": {"type": "null"}, "evidence_scope": {"const": "not_reached"}}},
+        {"type": "object", "required": ["status", "isolation_domain", "record_result_identity", "evidence_scope"], "additionalProperties": false, "properties": {"status": {"const": "miss"}, "isolation_domain": {"type": "string", "minLength": 1}, "record_result_identity": {"type": "null"}, "evidence_scope": {"enum": ["not_reached", "partial_current_attempt", "complete_current_attempt"]}}},
+        {"type": "object", "required": ["status", "isolation_domain", "record_result_identity", "evidence_scope"], "additionalProperties": false, "properties": {"status": {"const": "hit"}, "isolation_domain": {"type": "string", "minLength": 1}, "record_result_identity": {"$ref": "#/$defs/identity"}, "evidence_scope": {"enum": ["historical_only", "partial_current_attempt", "complete_current_attempt"]}}},
+        {"type": "object", "required": ["status", "isolation_domain", "record_result_identity", "evidence_scope"], "additionalProperties": false, "properties": {"status": {"const": "unavailable"}, "isolation_domain": {"type": ["string", "null"]}, "record_result_identity": {"type": "null"}, "evidence_scope": {"const": "not_reached"}}}
+      ]
+    },
+    "disabled_cache_view": {"type": "object", "required": ["status", "isolation_domain", "record_result_identity", "evidence_scope"], "additionalProperties": false, "properties": {"status": {"const": "disabled"}, "isolation_domain": {"type": "null"}, "record_result_identity": {"type": "null"}, "evidence_scope": {"const": "not_reached"}}},
+    "dependency_evidence_entry": {
+      "type": "object",
+      "required": ["logical_identity", "outcome", "content_identity", "authority_kind", "evidence_keys", "provenance"],
+      "additionalProperties": false,
+      "properties": {"logical_identity": {"type": "string"}, "outcome": {"enum": ["selected", "higher_priority_unavailable", "missing", "failed"]}, "content_identity": {"$ref": "#/$defs/nullable_identity"}, "authority_kind": {"type": "string"}, "evidence_keys": {"type": "array", "items": {"type": "string"}}, "provenance": {"type": ["string", "null"], "enum": ["caller_supplied", "explicit_local", "cache", "network", "system_font", "engine_embedded_font", null]}}
     },
     "compilation_report": {
       "type": "object",
-      "required": ["schema", "producer", "compilation_identity", "request_inventory", "operation", "cache", "dependency_evidence", "terminal", "reporting"],
+      "required": ["schema", "producer", "compilation_identity", "request_inventory", "operation", "cache", "evidence_disclosure", "dependency_evidence", "terminal", "reporting"],
       "additionalProperties": false,
+      "allOf": [
+        {"if": {"properties": {"evidence_disclosure": {"const": "identity"}}}, "then": {"properties": {"dependency_evidence": {"type": "null"}, "terminal": {"properties": {"result": {"properties": {"access_trace": {"type": "null"}}}, "operation_outcome": {"properties": {"partial_access_trace": {"type": "null"}}}}}}}},
+        {"if": {"properties": {"evidence_disclosure": {"const": "canonical"}}}, "then": {"properties": {"dependency_evidence": {"type": "array", "items": {"$ref": "#/$defs/dependency_evidence_entry"}}, "terminal": {"properties": {"result": {"properties": {"access_trace": {"type": "array", "items": {"$ref": "#/$defs/access_trace_entry"}}}, "operation_outcome": {"properties": {"partial_access_trace": {"type": "array", "items": {"$ref": "#/$defs/access_trace_entry"}}}}}}}}}}
+      ],
       "properties": {
         "schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.compilation-report"}}}]},
         "producer": {"$ref": "#/$defs/producer"},
         "compilation_identity": {"$ref": "#/$defs/identity"},
-        "request_inventory": {"type": "array", "items": {"type": "object"}},
-        "operation": {"type": "object"},
-        "cache": {"type": "object"},
-        "dependency_evidence": {"type": "object"},
+        "request_inventory": {"type": "array", "items": {"$ref": "#/$defs/request_inventory_entry"}},
+        "operation": {"$ref": "#/$defs/compilation_operation_view"},
+        "cache": {"$ref": "#/$defs/disabled_cache_view"},
+        "evidence_disclosure": {"enum": ["identity", "canonical"]},
+        "dependency_evidence": {"oneOf": [{"type": "array", "items": {"$ref": "#/$defs/dependency_evidence_entry"}}, {"type": "null"}]},
         "terminal": {
           "oneOf": [
             {"type": "object", "required": ["kind", "result", "operation_outcome"], "additionalProperties": false, "properties": {"kind": {"const": "result"}, "result": {"$ref": "#/$defs/compilation_result"}, "operation_outcome": {"type": "null"}}},
             {"type": "object", "required": ["kind", "result", "operation_outcome"], "additionalProperties": false, "properties": {"kind": {"const": "operation_outcome"}, "result": {"type": "null"}, "operation_outcome": {"$ref": "#/$defs/operation_outcome"}}}
           ]
         },
-        "reporting": {"type": "object", "required": ["diagnostics", "sources", "request_values", "override_bytes", "backing_locators", "adapter_detail", "timings"], "additionalProperties": false, "properties": {"diagnostics": {"$ref": "#/$defs/channel"}, "sources": {"$ref": "#/$defs/channel"}, "request_values": {"$ref": "#/$defs/channel"}, "override_bytes": {"$ref": "#/$defs/channel"}, "backing_locators": {"$ref": "#/$defs/channel"}, "adapter_detail": {"$ref": "#/$defs/channel"}, "timings": {"$ref": "#/$defs/channel"}}}
+        "reporting": {"type": "object", "required": ["diagnostics", "sources", "request_values", "override_bytes", "backing_locators", "adapter_detail", "telemetry"], "additionalProperties": false, "properties": {"diagnostics": {"$ref": "#/$defs/diagnostics_channel"}, "sources": {"$ref": "#/$defs/sources_channel"}, "request_values": {"$ref": "#/$defs/request_values_channel"}, "override_bytes": {"$ref": "#/$defs/override_bytes_channel"}, "backing_locators": {"$ref": "#/$defs/backing_locators_channel"}, "adapter_detail": {"$ref": "#/$defs/adapter_detail_channel"}, "telemetry": {"$ref": "#/$defs/timing_channel"}}}
       }
     },
     "compilation_terminal": {
-      "type": "object",
-      "required": ["schema", "producer", "kind", "request_rejection", "report"],
-      "additionalProperties": false,
-      "properties": {
-        "schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.compilation-terminal"}}}]},
-        "producer": {"$ref": "#/$defs/producer"},
-        "kind": {"enum": ["request_rejected", "report"]},
-        "request_rejection": {"oneOf": [{"$ref": "#/$defs/request_rejection"}, {"type": "null"}]},
-        "report": {"oneOf": [{"$ref": "#/$defs/compilation_report"}, {"type": "null"}]}
-      }
+      "oneOf": [
+        {
+          "type": "object",
+          "required": ["schema", "producer", "kind", "request_rejection", "report"],
+          "additionalProperties": false,
+          "properties": {"schema": {"$ref": "#/$defs/compilation_terminal_schema"}, "producer": {"$ref": "#/$defs/producer"}, "kind": {"const": "request_rejected"}, "request_rejection": {"$ref": "#/$defs/request_rejection"}, "report": {"type": "null"}}
+        },
+        {
+          "type": "object",
+          "required": ["schema", "producer", "kind", "request_rejection", "report"],
+          "additionalProperties": false,
+          "properties": {"schema": {"$ref": "#/$defs/compilation_terminal_schema"}, "producer": {"$ref": "#/$defs/producer"}, "kind": {"const": "report"}, "request_rejection": {"type": "null"}, "report": {"$ref": "#/$defs/compilation_report"}}
+        }
+      ]
     },
     "transport_receipt": {
       "type": "object",
-      "required": ["role", "status", "stage", "admission", "requested_commit_strength", "actual_commit_strength", "requested_cleanup_strength", "object_count", "transferred_bytes", "adapter_class", "primary_failure", "cleanup", "subject"],
+      "required": ["contract_version", "role", "status", "stage", "requested_controls", "admitted_controls", "requested_commit_strength", "actual_commit_strength", "requested_cleanup_strength", "actual_cleanup", "deadline", "timing", "object_count", "transferred_bytes", "content_identities", "adapter_class", "primary_failure", "residual_summary", "subject"],
       "additionalProperties": false,
+      "allOf": [
+        {"if": {"properties": {"status": {"const": "not_attempted"}}}, "then": {"properties": {"admitted_controls": {"type": "null"}, "actual_commit_strength": {"type": "null"}, "actual_cleanup": {"const": "not_required"}, "object_count": {"const": "0"}, "transferred_bytes": {"const": "0"}, "content_identities": {"maxItems": 0}, "primary_failure": {"type": "null"}, "residual_summary": {"type": "null"}}}},
+        {"if": {"properties": {"status": {"const": "refused"}}}, "then": {"properties": {"stage": {"const": "admission"}, "admitted_controls": {"type": "null"}, "actual_commit_strength": {"type": "null"}, "actual_cleanup": {"const": "not_required"}, "object_count": {"const": "0"}, "transferred_bytes": {"const": "0"}, "content_identities": {"maxItems": 0}, "primary_failure": {"$ref": "#/$defs/failure"}, "residual_summary": {"type": "null"}}}},
+        {"if": {"properties": {"status": {"const": "transferred"}}}, "then": {"properties": {"admitted_controls": {"$ref": "#/$defs/admitted_receipt_controls"}, "actual_commit_strength": {"enum": ["not_applicable", null]}, "primary_failure": {"type": "null"}, "residual_summary": {"type": "null"}}}},
+        {"if": {"properties": {"status": {"const": "committed"}}}, "then": {"properties": {"stage": {"const": "complete"}, "admitted_controls": {"$ref": "#/$defs/admitted_receipt_controls"}, "actual_commit_strength": {"enum": ["complete_collection_atomic", "each_object_atomic", "streaming"]}, "primary_failure": {"type": "null"}}}},
+        {"if": {"properties": {"status": {"const": "failed"}}}, "then": {"properties": {"primary_failure": {"$ref": "#/$defs/failure"}}}}
+      ],
       "properties": {
-        "role": {"type": "string"}, "status": {"enum": ["not_attempted", "refused", "committed", "failed"]}, "stage": {"type": "string"}, "admission": {"$ref": "#/$defs/admission"}, "requested_commit_strength": {"enum": ["complete_collection_atomic", "each_object_atomic", "streaming"]}, "actual_commit_strength": {"type": ["string", "null"], "enum": ["complete_collection_atomic", "each_object_atomic", "streaming", null]}, "requested_cleanup_strength": {"enum": ["complete_before_return", "non_retractable_accepted"]}, "object_count": {"$ref": "#/$defs/decimal"}, "transferred_bytes": {"$ref": "#/$defs/decimal"}, "adapter_class": {"type": "string"}, "primary_failure": {"$ref": "#/$defs/nullable_failure"}, "cleanup": {"type": "object", "required": ["kind"], "properties": {"kind": {"enum": ["not_required", "complete", "residual_reported", "non_retractable", "failed"]}}}, "subject": {"type": "object"}
+        "contract_version": {"const": 1},
+        "role": {"enum": ["pack_archive_acquisition", "pack_archive_publication", "project_materialization_publication", "closure_export_publication", "compilation_delivery"]},
+        "status": {"enum": ["not_attempted", "refused", "transferred", "committed", "failed"]},
+        "stage": {"enum": ["admission", "reference_resolution", "acquisition", "spooling", "transfer", "commit", "cleanup", "complete"]},
+        "requested_controls": {"$ref": "#/$defs/receipt_controls"},
+        "admitted_controls": {"oneOf": [{"$ref": "#/$defs/admitted_receipt_controls"}, {"type": "null"}]},
+        "requested_commit_strength": {"enum": ["not_applicable", "complete_collection_atomic", "each_object_atomic", "streaming"]},
+        "actual_commit_strength": {"type": ["string", "null"], "enum": ["not_applicable", "complete_collection_atomic", "each_object_atomic", "streaming", null]},
+        "requested_cleanup_strength": {"enum": ["complete_before_return", "residual_locator_permitted", "non_retractable_accepted"]},
+        "actual_cleanup": {"enum": ["not_required", "complete", "residual_reported", "non_retractable", "failed"]},
+        "deadline": {"$ref": "#/$defs/deadline"},
+        "timing": {"enum": ["not_requested", "complete", "limited", "unavailable"]},
+        "object_count": {"$ref": "#/$defs/decimal"},
+        "transferred_bytes": {"$ref": "#/$defs/decimal"},
+        "content_identities": {"type": "array", "items": {"$ref": "#/$defs/identity"}},
+        "adapter_class": {"type": "string"},
+        "primary_failure": {"$ref": "#/$defs/nullable_failure"},
+        "residual_summary": {"type": ["string", "null"]},
+        "subject": {"type": "object", "required": ["pack_identity", "compilation_identity", "result_identity", "archive_encoding_identity", "source_content_identity", "output_content_identity", "artifact_identities"], "additionalProperties": false, "properties": {"pack_identity": {"$ref": "#/$defs/nullable_identity"}, "compilation_identity": {"$ref": "#/$defs/nullable_identity"}, "result_identity": {"$ref": "#/$defs/nullable_identity"}, "archive_encoding_identity": {"$ref": "#/$defs/nullable_identity"}, "source_content_identity": {"$ref": "#/$defs/nullable_identity"}, "output_content_identity": {"$ref": "#/$defs/nullable_identity"}, "artifact_identities": {"type": "array", "items": {"$ref": "#/$defs/identity"}}}}
       }
     },
+    "archive_acquisition_transport_receipt": {"allOf": [{"$ref": "#/$defs/transport_receipt"}, {"properties": {"role": {"const": "pack_archive_acquisition"}, "status": {"enum": ["refused", "transferred", "failed"]}, "requested_commit_strength": {"const": "not_applicable"}, "actual_commit_strength": {"enum": ["not_applicable", null]}}, "allOf": [{"if": {"properties": {"status": {"const": "transferred"}}}, "then": {"properties": {"stage": {"const": "complete"}, "actual_commit_strength": {"const": "not_applicable"}}}}, {"if": {"properties": {"status": {"const": "failed"}}}, "then": {"properties": {"stage": {"enum": ["reference_resolution", "acquisition", "spooling", "cleanup"]}}}}]}]},
+    "archive_publication_transport_receipt": {"allOf": [{"$ref": "#/$defs/transport_receipt"}, {"properties": {"role": {"const": "pack_archive_publication"}, "subject": {"properties": {"pack_identity": {"type": "null"}, "compilation_identity": {"type": "null"}, "result_identity": {"type": "null"}, "archive_encoding_identity": {"$ref": "#/$defs/nullable_identity"}, "source_content_identity": {"$ref": "#/$defs/identity"}, "output_content_identity": {"$ref": "#/$defs/identity"}, "artifact_identities": {"maxItems": 0}}}}}]},
+    "closure_publication_transport_receipt": {"allOf": [{"$ref": "#/$defs/transport_receipt"}, {"properties": {"role": {"const": "closure_export_publication"}, "requested_commit_strength": {"const": "complete_collection_atomic"}, "actual_commit_strength": {"enum": ["complete_collection_atomic", null]}, "subject": {"properties": {"pack_identity": {"$ref": "#/$defs/identity"}, "compilation_identity": {"type": "null"}, "result_identity": {"type": "null"}, "archive_encoding_identity": {"type": "null"}, "source_content_identity": {"$ref": "#/$defs/identity"}, "output_content_identity": {"$ref": "#/$defs/identity"}}}}}]},
+    "materialization_publication_transport_receipt": {"allOf": [{"$ref": "#/$defs/transport_receipt"}, {"properties": {"role": {"const": "project_materialization_publication"}, "subject": {"properties": {"pack_identity": {"$ref": "#/$defs/identity"}, "compilation_identity": {"type": "null"}, "result_identity": {"type": "null"}, "archive_encoding_identity": {"type": "null"}}}}}]},
+    "compilation_delivery_transport_receipt": {"allOf": [{"$ref": "#/$defs/transport_receipt"}, {"properties": {"role": {"const": "compilation_delivery"}, "subject": {"properties": {"compilation_identity": {"$ref": "#/$defs/identity"}, "archive_encoding_identity": {"type": "null"}, "source_content_identity": {"type": "null"}}}}}]},
+    "archive_publication_receipts": {"type": "object", "required": ["format", "transport"], "additionalProperties": false, "properties": {"format": {"$ref": "#/$defs/archive_publish_receipt"}, "transport": {"$ref": "#/$defs/archive_publication_transport_receipt"}}},
+    "closure_publication_receipts": {"type": "object", "required": ["format", "transport"], "additionalProperties": false, "properties": {"format": {"$ref": "#/$defs/closure_export_publish_receipt"}, "transport": {"$ref": "#/$defs/closure_publication_transport_receipt"}}},
     "compile_operation": {
       "type": "object",
-      "required": ["schema", "producer", "admission", "ingress", "adapter_input", "adapter_outcome", "terminal", "delivery", "post_commit", "disclosure"],
+      "required": ["schema", "producer", "kind", "admission", "ingress", "adapter_input", "adapter_outcome", "terminal", "delivery", "post_commit"],
       "additionalProperties": false,
+      "allOf": [
+        {"if": {"properties": {"kind": {"const": "adapter_failed"}}}, "then": {"properties": {"adapter_outcome": {"$ref": "#/$defs/failure"}, "terminal": {"type": "null"}, "delivery": {"type": "null"}, "post_commit": {"properties": {"dependencies": {"$ref": "#/$defs/not_attempted_channel"}, "timings": {"$ref": "#/$defs/not_attempted_channel"}, "viewer": {"$ref": "#/$defs/not_attempted_channel"}}}}}},
+        {"if": {"properties": {"kind": {"const": "terminal"}}}, "then": {"properties": {"adapter_outcome": {"type": "null"}, "terminal": {"$ref": "#/$defs/compilation_terminal"}}}},
+        {"if": {"properties": {"admission": {"properties": {"status": {"const": "refused"}}, "required": ["status"]}}}, "then": {"properties": {"kind": {"const": "adapter_failed"}}}},
+        {"if": {"properties": {"kind": {"const": "terminal"}}}, "then": {"properties": {"admission": {"properties": {"status": {"const": "admitted"}}}}}},
+        {"if": {"properties": {"terminal": {"type": "object", "properties": {"kind": {"const": "request_rejected"}}, "required": ["kind"]}}}, "then": {"properties": {"delivery": {"type": "null"}, "post_commit": {"properties": {"dependencies": {"$ref": "#/$defs/not_attempted_channel"}, "timings": {"$ref": "#/$defs/not_attempted_channel"}, "viewer": {"$ref": "#/$defs/not_attempted_channel"}}}}}},
+        {"if": {"properties": {"delivery": {"not": {"type": "null"}}}}, "then": {"properties": {"terminal": {"type": "object", "properties": {"kind": {"const": "report"}}, "required": ["kind"]}}}}
+      ],
       "properties": {
         "schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.compile-operation"}}}]},
         "producer": {"$ref": "#/$defs/producer"},
+        "kind": {"enum": ["adapter_failed", "terminal"]},
         "admission": {"$ref": "#/$defs/admission"},
         "ingress": {"oneOf": [{"$ref": "#/$defs/pack_ingress_operation"}, {"type": "null"}]},
         "adapter_input": {"$ref": "#/$defs/channel"},
         "adapter_outcome": {"$ref": "#/$defs/nullable_failure"},
         "terminal": {"oneOf": [{"$ref": "#/$defs/compilation_terminal"}, {"type": "null"}]},
-        "delivery": {"oneOf": [{"$ref": "#/$defs/transport_receipt"}, {"type": "null"}]},
-        "post_commit": {"type": "object", "required": ["dependencies", "timings", "viewer"], "additionalProperties": false, "properties": {"dependencies": {"$ref": "#/$defs/channel"}, "timings": {"$ref": "#/$defs/channel"}, "viewer": {"$ref": "#/$defs/channel"}}},
-        "disclosure": {"type": "object", "required": ["status", "channels"], "properties": {"status": {"enum": ["complete", "redacted", "limited", "unavailable"]}, "channels": {"type": "object"}}}
+        "delivery": {"oneOf": [{"$ref": "#/$defs/compilation_delivery_transport_receipt"}, {"type": "null"}]},
+        "post_commit": {"type": "object", "required": ["dependencies", "timings", "viewer"], "additionalProperties": false, "properties": {"dependencies": {"$ref": "#/$defs/channel"}, "timings": {"$ref": "#/$defs/channel"}, "viewer": {"$ref": "#/$defs/channel"}}}
       }
+    },
+    "projection_receipt": {
+      "type": "object",
+      "required": ["contract_version", "kind", "status", "pack_identity", "object_count", "aggregate_bytes", "files", "admission", "failure"],
+      "additionalProperties": false,
+      "allOf": [
+        {"if": {"properties": {"status": {"const": "succeeded"}}}, "then": {"properties": {"failure": {"type": "null"}}}},
+        {"if": {"not": {"properties": {"status": {"const": "succeeded"}}}}, "then": {"properties": {"object_count": {"const": "0"}, "aggregate_bytes": {"const": "0"}, "files": {"maxItems": 0}, "failure": {"$ref": "#/$defs/failure"}}}}
+      ],
+      "properties": {
+        "contract_version": {"const": 1},
+        "kind": {"const": "project_materialization"},
+        "status": {"enum": ["succeeded", "request_rejected", "resource_limit", "cancelled", "deadline", "admission_refused", "internal_integrity"]},
+        "pack_identity": {"$ref": "#/$defs/identity"},
+        "object_count": {"$ref": "#/$defs/decimal"},
+        "aggregate_bytes": {"$ref": "#/$defs/decimal"},
+        "files": {"type": "array", "items": {"$ref": "#/$defs/receipt_file"}},
+        "admission": {"$ref": "#/$defs/admission"},
+        "failure": {"$ref": "#/$defs/nullable_failure"}
+      }
+    },
+    "representation_staging": {
+      "oneOf": [
+        {"type": "object", "required": ["schema", "producer", "value_kind", "status", "source_identity", "object_count", "aggregate_bytes", "files", "failure"], "additionalProperties": false, "properties": {"schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.representation-staging"}}}]}, "producer": {"$ref": "#/$defs/producer"}, "value_kind": {"enum": ["archive_file", "closure_export_directory", "project_directory"]}, "status": {"const": "not_applicable"}, "source_identity": {"type": "null"}, "object_count": {"const": "0"}, "aggregate_bytes": {"const": "0"}, "files": {"type": "null"}, "failure": {"type": "null"}}},
+        {"type": "object", "required": ["schema", "producer", "value_kind", "status", "source_identity", "object_count", "aggregate_bytes", "files", "failure"], "additionalProperties": false, "properties": {"schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.representation-staging"}}}]}, "producer": {"$ref": "#/$defs/producer"}, "value_kind": {"enum": ["archive_file", "closure_export_directory", "project_directory"]}, "status": {"const": "succeeded"}, "source_identity": {"$ref": "#/$defs/identity"}, "object_count": {"$ref": "#/$defs/positive_decimal"}, "aggregate_bytes": {"$ref": "#/$defs/decimal"}, "files": {"oneOf": [{"type": "array", "items": {"$ref": "#/$defs/receipt_file"}}, {"type": "null"}]}, "failure": {"type": "null"}}},
+        {"type": "object", "required": ["schema", "producer", "value_kind", "status", "source_identity", "object_count", "aggregate_bytes", "files", "failure"], "additionalProperties": false, "properties": {"schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.representation-staging"}}}]}, "producer": {"$ref": "#/$defs/producer"}, "value_kind": {"enum": ["archive_file", "closure_export_directory", "project_directory"]}, "status": {"const": "failed"}, "source_identity": {"$ref": "#/$defs/identity"}, "object_count": {"$ref": "#/$defs/decimal"}, "aggregate_bytes": {"$ref": "#/$defs/decimal"}, "files": {"type": "null"}, "failure": {"$ref": "#/$defs/failure"}}}
+      ]
     },
     "representation_operation": {
       "type": "object",
-      "required": ["schema", "producer", "ingress", "representation", "publication"],
+      "required": ["schema", "producer", "kind", "representation_kind", "source_pack_identity", "ingress", "adapter_outcome", "representation", "publication", "staging"],
       "additionalProperties": false,
-      "properties": {"schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.representation-operation"}}}]}, "producer": {"$ref": "#/$defs/producer"}, "ingress": {"$ref": "#/$defs/pack_ingress_operation"}, "representation": {"$ref": "#/$defs/representation_receipt"}, "publication": {"oneOf": [{"$ref": "#/$defs/transport_receipt"}, {"type": "null"}]}}
+      "allOf": [
+        {"if": {"properties": {"kind": {"const": "adapter_failed"}}}, "then": {"properties": {"adapter_outcome": {"$ref": "#/$defs/failure"}, "representation": {"type": "null"}, "publication": {"type": "null"}, "staging": {"type": "null"}}}},
+        {"if": {"properties": {"kind": {"const": "representation"}}}, "then": {"properties": {"source_pack_identity": {"$ref": "#/$defs/identity"}, "adapter_outcome": {"type": "null"}, "representation": {"oneOf": [{"$ref": "#/$defs/archive_encode_receipt"}, {"$ref": "#/$defs/closure_export_project_receipt"}]}}}},
+        {"if": {"properties": {"representation_kind": {"const": "archive"}}}, "then": {"properties": {"representation": {"oneOf": [{"$ref": "#/$defs/archive_encode_receipt"}, {"type": "null"}]}, "publication": {"oneOf": [{"$ref": "#/$defs/archive_publication_receipts"}, {"type": "null"}]}, "staging": {"oneOf": [{"allOf": [{"$ref": "#/$defs/representation_staging"}, {"properties": {"value_kind": {"const": "archive_file"}}}]}, {"type": "null"}]}}}},
+        {"if": {"properties": {"representation_kind": {"const": "closure_export"}}}, "then": {"properties": {"representation": {"oneOf": [{"$ref": "#/$defs/closure_export_project_receipt"}, {"type": "null"}]}, "publication": {"oneOf": [{"$ref": "#/$defs/closure_publication_receipts"}, {"type": "null"}]}, "staging": {"oneOf": [{"allOf": [{"$ref": "#/$defs/representation_staging"}, {"properties": {"value_kind": {"const": "closure_export_directory"}}}]}, {"type": "null"}]}}}},
+        {"if": {"properties": {"publication": {"not": {"type": "null"}}}}, "then": {"properties": {"representation": {"type": "object", "properties": {"terminal": {"const": "success"}}}}}},
+        {"if": {"properties": {"staging": {"not": {"type": "null"}}}}, "then": {"properties": {"representation": {"type": "object", "properties": {"terminal": {"const": "success"}}}}}}
+      ],
+      "properties": {"schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.representation-operation"}}}]}, "producer": {"$ref": "#/$defs/producer"}, "kind": {"enum": ["adapter_failed", "representation"]}, "representation_kind": {"enum": ["archive", "closure_export"]}, "source_pack_identity": {"$ref": "#/$defs/nullable_identity"}, "ingress": {"oneOf": [{"$ref": "#/$defs/pack_ingress_operation"}, {"type": "null"}]}, "adapter_outcome": {"$ref": "#/$defs/nullable_failure"}, "representation": {"oneOf": [{"$ref": "#/$defs/archive_encode_receipt"}, {"$ref": "#/$defs/closure_export_project_receipt"}, {"type": "null"}]}, "publication": {"oneOf": [{"$ref": "#/$defs/archive_publication_receipts"}, {"$ref": "#/$defs/closure_publication_receipts"}, {"type": "null"}]}, "staging": {"oneOf": [{"$ref": "#/$defs/representation_staging"}, {"type": "null"}]}}
     },
     "project_materialization_operation": {
       "type": "object",
-      "required": ["schema", "producer", "ingress", "representation", "publication"],
+      "required": ["schema", "producer", "kind", "source_pack_identity", "ingress", "adapter_outcome", "projection", "publication", "staging"],
       "additionalProperties": false,
-      "properties": {"schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"type": "object", "properties": {"name": {"const": "org.typst-pack.project-materialization-operation"}}}]}, "producer": {"$ref": "#/$defs/producer"}, "ingress": {"$ref": "#/$defs/pack_ingress_operation"}, "representation": {"$ref": "#/$defs/representation_receipt"}, "publication": {"oneOf": [{"$ref": "#/$defs/transport_receipt"}, {"type": "null"}]}}
+      "allOf": [
+        {"if": {"properties": {"kind": {"const": "adapter_failed"}}}, "then": {"properties": {"adapter_outcome": {"$ref": "#/$defs/failure"}, "projection": {"type": "null"}, "publication": {"type": "null"}, "staging": {"type": "null"}}}},
+        {"if": {"properties": {"kind": {"const": "projection"}}}, "then": {"properties": {"source_pack_identity": {"$ref": "#/$defs/identity"}, "adapter_outcome": {"type": "null"}, "projection": {"$ref": "#/$defs/projection_receipt"}}}},
+        {"if": {"properties": {"publication": {"not": {"type": "null"}}}}, "then": {"properties": {"projection": {"type": "object", "properties": {"status": {"const": "succeeded"}}}}}},
+        {"if": {"properties": {"staging": {"not": {"type": "null"}}}}, "then": {"properties": {"projection": {"type": "object", "properties": {"status": {"const": "succeeded"}}}}}}
+      ],
+      "properties": {"schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"type": "object", "properties": {"name": {"const": "org.typst-pack.project-materialization-operation"}}}]}, "producer": {"$ref": "#/$defs/producer"}, "kind": {"enum": ["adapter_failed", "projection"]}, "source_pack_identity": {"$ref": "#/$defs/nullable_identity"}, "ingress": {"oneOf": [{"$ref": "#/$defs/pack_ingress_operation"}, {"type": "null"}]}, "adapter_outcome": {"$ref": "#/$defs/nullable_failure"}, "projection": {"oneOf": [{"$ref": "#/$defs/projection_receipt"}, {"type": "null"}]}, "publication": {"oneOf": [{"$ref": "#/$defs/materialization_publication_transport_receipt"}, {"type": "null"}]}, "staging": {"oneOf": [{"allOf": [{"$ref": "#/$defs/representation_staging"}, {"properties": {"value_kind": {"const": "project_directory"}}}]}, {"type": "null"}]}}
     },
     "compilation_staging": {
-      "type": "object",
-      "required": ["schema", "producer", "status", "result_identity", "artifact_count", "aggregate_bytes", "failure"],
-      "additionalProperties": false,
-      "properties": {"schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.compilation-staging"}}}]}, "producer": {"$ref": "#/$defs/producer"}, "status": {"enum": ["not_applicable", "succeeded", "failed"]}, "result_identity": {"$ref": "#/$defs/nullable_identity"}, "artifact_count": {"$ref": "#/$defs/decimal"}, "aggregate_bytes": {"$ref": "#/$defs/decimal"}, "failure": {"$ref": "#/$defs/nullable_failure"}}
+      "oneOf": [
+        {"type": "object", "required": ["schema", "producer", "status", "result_identity", "artifact_count", "aggregate_bytes", "artifacts", "failure"], "additionalProperties": false, "properties": {"schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.compilation-staging"}}}]}, "producer": {"$ref": "#/$defs/producer"}, "status": {"const": "not_applicable"}, "result_identity": {"type": "null"}, "artifact_count": {"const": "0"}, "aggregate_bytes": {"const": "0"}, "artifacts": {"type": "null"}, "failure": {"type": "null"}}},
+        {"type": "object", "required": ["schema", "producer", "status", "result_identity", "artifact_count", "aggregate_bytes", "artifacts", "failure"], "additionalProperties": false, "properties": {"schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.compilation-staging"}}}]}, "producer": {"$ref": "#/$defs/producer"}, "status": {"const": "succeeded"}, "result_identity": {"$ref": "#/$defs/identity"}, "artifact_count": {"$ref": "#/$defs/decimal"}, "aggregate_bytes": {"$ref": "#/$defs/decimal"}, "artifacts": {"type": "array", "items": {"$ref": "#/$defs/artifact"}}, "failure": {"type": "null"}}},
+        {"type": "object", "required": ["schema", "producer", "status", "result_identity", "artifact_count", "aggregate_bytes", "artifacts", "failure"], "additionalProperties": false, "properties": {"schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.compilation-staging"}}}]}, "producer": {"$ref": "#/$defs/producer"}, "status": {"const": "failed"}, "result_identity": {"$ref": "#/$defs/identity"}, "artifact_count": {"$ref": "#/$defs/decimal"}, "aggregate_bytes": {"$ref": "#/$defs/decimal"}, "artifacts": {"type": "null"}, "failure": {"$ref": "#/$defs/failure"}}}
+      ]
     },
     "currentness": {
       "oneOf": [
-        {"type": "object", "required": ["kind", "observations"], "properties": {"kind": {"const": "current_through_push"}, "observations": {"type": "array"}}},
-        {"type": "object", "required": ["kind", "observation"], "properties": {"kind": {"const": "current_as_of_poll"}, "observation": {"type": "object"}}},
-        {"type": "object", "required": ["kind", "uncovered_scopes"], "properties": {"kind": {"const": "unverified"}, "uncovered_scopes": {"type": "array", "items": {"type": "string"}}}},
-        {"type": "object", "required": ["kind", "dirty_scopes"], "properties": {"kind": {"const": "stale"}, "dirty_scopes": {"type": "array", "items": {"type": "string"}}}}
+        {"type": "object", "required": ["kind", "observations", "observation", "uncovered_scopes", "dirty_scopes"], "additionalProperties": false, "properties": {"kind": {"const": "current_through_push"}, "observations": {"type": "array", "items": {"type": "string"}}, "observation": {"type": "null"}, "uncovered_scopes": {"type": "null"}, "dirty_scopes": {"type": "null"}}},
+        {"type": "object", "required": ["kind", "observations", "observation", "uncovered_scopes", "dirty_scopes"], "additionalProperties": false, "properties": {"kind": {"const": "current_as_of_poll"}, "observations": {"type": "null"}, "observation": {"type": "string", "minLength": 1}, "uncovered_scopes": {"type": "null"}, "dirty_scopes": {"type": "null"}}},
+        {"type": "object", "required": ["kind", "observations", "observation", "uncovered_scopes", "dirty_scopes"], "additionalProperties": false, "properties": {"kind": {"const": "unverified"}, "observations": {"type": "null"}, "observation": {"type": "null"}, "uncovered_scopes": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "dirty_scopes": {"type": "null"}}},
+        {"type": "object", "required": ["kind", "observations", "observation", "uncovered_scopes", "dirty_scopes"], "additionalProperties": false, "properties": {"kind": {"const": "stale"}, "observations": {"type": "null"}, "observation": {"type": "null"}, "uncovered_scopes": {"type": "null"}, "dirty_scopes": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}}}
       ]
+    },
+    "session_publication": {
+      "oneOf": [
+        {"type": "object", "required": ["revision", "kind", "compilation_terminal", "ingestion_failure", "currentness", "delivery"], "additionalProperties": false, "allOf": [{"if": {"properties": {"compilation_terminal": {"properties": {"kind": {"const": "request_rejected"}}, "required": ["kind"]}}}, "then": {"properties": {"delivery": {"type": "null"}}}}], "properties": {"revision": {"$ref": "#/$defs/decimal"}, "kind": {"const": "compilation_terminal"}, "compilation_terminal": {"$ref": "#/$defs/compilation_terminal"}, "ingestion_failure": {"type": "null"}, "currentness": {"$ref": "#/$defs/currentness"}, "delivery": {"oneOf": [{"$ref": "#/$defs/compilation_delivery_transport_receipt"}, {"type": "null"}]}}},
+        {"type": "object", "required": ["revision", "kind", "compilation_terminal", "ingestion_failure", "currentness", "delivery"], "additionalProperties": false, "properties": {"revision": {"$ref": "#/$defs/decimal"}, "kind": {"const": "ingestion_failure"}, "compilation_terminal": {"type": "null"}, "ingestion_failure": {"$ref": "#/$defs/failure"}, "currentness": {"allOf": [{"$ref": "#/$defs/currentness"}, {"properties": {"kind": {"enum": ["unverified", "stale"]}}}]}, "delivery": {"type": "null"}}}
+      ]
+    },
+    "last_successful_compilation": {
+      "type": "object",
+      "required": ["revision", "result_identity", "currentness"],
+      "additionalProperties": false,
+      "properties": {"revision": {"$ref": "#/$defs/decimal"}, "result_identity": {"$ref": "#/$defs/identity"}, "currentness": {"$ref": "#/$defs/currentness"}}
+    },
+    "last_successful_delivery": {
+      "type": "object",
+      "required": ["revision", "result_identity", "receipt"],
+      "additionalProperties": false,
+      "properties": {"revision": {"$ref": "#/$defs/decimal"}, "result_identity": {"$ref": "#/$defs/identity"}, "receipt": {"allOf": [{"$ref": "#/$defs/compilation_delivery_transport_receipt"}, {"properties": {"status": {"const": "committed"}}}]}}
     },
     "watch_state": {
       "type": "object",
-      "required": ["schema", "producer", "status", "session", "publication", "last_successful_compilation", "last_successful_delivery"],
+      "required": ["schema", "producer", "status", "session", "publication", "last_successful_compilation", "last_successful_delivery", "failure"],
       "additionalProperties": false,
+      "allOf": [
+        {"if": {"properties": {"status": {"enum": ["active", "stopped"]}}}, "then": {"properties": {"session": {"type": "object"}, "failure": {"type": "null"}}}},
+        {"if": {"properties": {"status": {"enum": ["starting"]}}}, "then": {"properties": {"failure": {"type": "null"}}}},
+        {"if": {"properties": {"status": {"const": "failed"}}}, "then": {"properties": {"failure": {"$ref": "#/$defs/failure"}}}},
+        {"if": {"properties": {"session": {"type": "null"}}}, "then": {"properties": {"publication": {"type": "null"}, "last_successful_compilation": {"type": "null"}, "last_successful_delivery": {"type": "null"}}}},
+        {"if": {"properties": {"publication": {"type": "object", "properties": {"kind": {"const": "ingestion_failure"}}, "required": ["kind"]}}}, "then": {"properties": {"last_successful_compilation": {"oneOf": [{"type": "null"}, {"allOf": [{"$ref": "#/$defs/last_successful_compilation"}, {"properties": {"currentness": {"properties": {"kind": {"const": "stale"}}}}}]}]}}}}
+      ],
       "properties": {
         "schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.watch-state"}}}]},
         "producer": {"$ref": "#/$defs/producer"},
         "status": {"enum": ["starting", "active", "stopped", "failed"]},
-        "session": {"type": "object", "required": ["instance", "pack_identity", "desired_revision"], "additionalProperties": false, "properties": {"instance": {"type": "string"}, "pack_identity": {"$ref": "#/$defs/identity"}, "desired_revision": {"$ref": "#/$defs/decimal"}}},
-        "publication": {"type": ["object", "null"], "properties": {"revision": {"$ref": "#/$defs/decimal"}, "terminal": {"$ref": "#/$defs/compilation_terminal"}, "currentness": {"$ref": "#/$defs/currentness"}}},
-        "last_successful_compilation": {"type": ["object", "null"], "properties": {"revision": {"$ref": "#/$defs/decimal"}, "result_identity": {"$ref": "#/$defs/identity"}, "currentness": {"$ref": "#/$defs/currentness"}}},
-        "last_successful_delivery": {"type": ["object", "null"], "properties": {"revision": {"$ref": "#/$defs/decimal"}, "result_identity": {"$ref": "#/$defs/identity"}, "receipt": {"$ref": "#/$defs/transport_receipt"}}}
+        "session": {"oneOf": [{"type": "object", "required": ["instance", "pack_identity", "desired_revision"], "additionalProperties": false, "properties": {"instance": {"type": "string"}, "pack_identity": {"$ref": "#/$defs/identity"}, "desired_revision": {"$ref": "#/$defs/decimal"}}}, {"type": "null"}]},
+        "publication": {"oneOf": [{"$ref": "#/$defs/session_publication"}, {"type": "null"}]},
+        "last_successful_compilation": {"oneOf": [{"$ref": "#/$defs/last_successful_compilation"}, {"type": "null"}]},
+        "last_successful_delivery": {"oneOf": [{"$ref": "#/$defs/last_successful_delivery"}, {"type": "null"}]},
+        "failure": {"$ref": "#/$defs/nullable_failure"}
       }
     },
     "watch_artifact_pointer": {
       "type": "object",
       "required": ["role", "relative_path", "artifact_identity", "content_identity", "exact_bytes"],
       "additionalProperties": false,
-      "properties": {"role": {"type": "object"}, "relative_path": {"$ref": "#/$defs/project_path"}, "artifact_identity": {"$ref": "#/$defs/identity"}, "content_identity": {"$ref": "#/$defs/identity"}, "exact_bytes": {"$ref": "#/$defs/decimal"}}
+      "properties": {"role": {"$ref": "#/$defs/artifact_role"}, "relative_path": {"$ref": "#/$defs/project_path"}, "artifact_identity": {"$ref": "#/$defs/identity"}, "content_identity": {"$ref": "#/$defs/identity"}, "exact_bytes": {"$ref": "#/$defs/decimal"}}
     },
     "watch_output_root": {
       "type": "object",
@@ -761,9 +1280,9 @@
     },
     "watch_output_pointer": {
       "type": "object",
-      "required": ["schema", "producer", "session_instance", "revision", "pack_identity", "result_identity", "currentness", "generation", "artifacts"],
+      "required": ["schema", "producer", "session_instance", "desired_revision", "publication_revision", "pack_identity", "result_identity", "currentness", "generation", "artifacts"],
       "additionalProperties": false,
-      "properties": {"schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.watch-output-pointer"}}}]}, "producer": {"$ref": "#/$defs/producer"}, "session_instance": {"type": "string"}, "revision": {"$ref": "#/$defs/decimal"}, "pack_identity": {"$ref": "#/$defs/identity"}, "result_identity": {"$ref": "#/$defs/identity"}, "currentness": {"$ref": "#/$defs/currentness"}, "generation": {"$ref": "#/$defs/project_path"}, "artifacts": {"type": "array", "items": {"$ref": "#/$defs/watch_artifact_pointer"}}}
+      "properties": {"schema": {"allOf": [{"$ref": "#/$defs/output_schema"}, {"properties": {"name": {"const": "org.typst-pack.watch-output-pointer"}}}]}, "producer": {"$ref": "#/$defs/producer"}, "session_instance": {"type": "string"}, "desired_revision": {"$ref": "#/$defs/decimal"}, "publication_revision": {"$ref": "#/$defs/decimal"}, "pack_identity": {"$ref": "#/$defs/identity"}, "result_identity": {"$ref": "#/$defs/identity"}, "currentness": {"$ref": "#/$defs/currentness"}, "generation": {"$ref": "#/$defs/project_path"}, "artifacts": {"type": "array", "items": {"$ref": "#/$defs/watch_artifact_pointer"}}}
     }
   }
 }

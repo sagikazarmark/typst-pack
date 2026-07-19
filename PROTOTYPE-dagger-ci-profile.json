@@ -9,7 +9,7 @@
     "counts": "whole items",
     "concurrency": "simultaneous admitted work"
   },
-  "tightening": "Every numeric override is less than or equal to this profile. Concurrency and ratios must remain positive. Zero is valid only for count or byte dimensions where admitting none is meaningful.",
+  "tightening": "Every numeric override is less than or equal to this profile. Concurrency and ratios must remain positive. Zero is valid only for ready_queue_capacity and count or byte dimensions where admitting none is meaningful.",
   "pack_ingress": {
     "archive_bytes": "2147483648",
     "control_record_bytes": "67108864",
@@ -89,6 +89,9 @@
     "latency_target_ms": "60000",
     "isolated_worker_capacity": "2",
     "forced_terminate_ms": "5000"
+  },
+  "cache": {
+    "authority_content_occupancy_bytes": "8589934592"
   },
   "canonical_diagnostic_policy": {
     "policy_version": 1,

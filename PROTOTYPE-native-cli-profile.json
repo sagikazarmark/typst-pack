@@ -90,6 +90,9 @@
     "isolated_worker_capacity": "1",
     "forced_terminate_ms": "2000"
   },
+  "cache": {
+    "authority_content_occupancy_bytes": "4294967296"
+  },
   "canonical_diagnostic_policy": {
     "policy_version": 1,
     "max_entries": "20000",
