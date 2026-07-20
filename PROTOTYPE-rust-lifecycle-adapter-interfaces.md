@@ -1,6 +1,8 @@
-# PROTOTYPE: Rust Lifecycle and Adapter Interfaces
+# PROTOTYPE: Completed Rust Lifecycle and Receipt Interfaces
 
 > Throwaway design artifact for
+> [Complete the Rust lifecycle and receipt interfaces](https://github.com/sagikazarmark/typst-pack/issues/65),
+> revising the accepted baseline from
 > [Freeze the Rust lifecycle and adapter interfaces](https://github.com/sagikazarmark/typst-pack/issues/61).
 > This freezes the recommended public contract for implementation planning. It
 > is not production code or a compatibility promise for the current 0.3 crate.
@@ -13,12 +15,12 @@ traits, and visibility without implementing the destination.
 
 ## Question
 
-What compilable public Rust interface and private seam contract realizes the
-accepted lifecycle, including module ownership, Stable Byte Value backings,
-Operation Resource Limit placement and reuse, authority evidence revalidation,
-session fencing events, sync and async traits, semantic caching, and
-first-release Hostile behavior without leaking target dependencies into the
-featureless core?
+What compile-checked Rust 1.92 contract for the accepted seven public modules
+closes the remaining font-catalog, creation, inspection, request-inventory,
+trace, artifact-identity, disclosure, limit, creation-facility reporting,
+representation-expectation, and Format Receipt and Transport Receipt
+composition gaps without adding a generic public seam or changing the accepted
+semantic model?
 
 ## Verdict
 
@@ -61,6 +63,30 @@ with the following concrete refinements:
     first-release admission return `HostileUnavailableInFirstRelease` before
     input-dependent interpretation. Publish no Hostile facility trait until a
     complete raw-ingress-to-parent-verified-output implementation exists.
+12. Represent every known Epoch 2 and compilation-family identity position with
+    its exact opaque Rust type. Generic identities never stand in for known
+    kinds, and core-derived identities have no public digest constructor.
+13. Make Font Catalog candidates complete and validated while keeping candidate
+    acquisition identity operational and distinct from exact container Content
+    Identity. Package-tree and Font Catalog collection consume the active
+    Acquisition Budget incrementally.
+14. Carry metadata and annotations through creation and evidence fencing, and
+    make Pack Inspection lossless for the validated Pack's complete static
+    contract while preserving commitment-only sensitive request values.
+15. Expose one typed semantic Compilation Request Inventory, a separate typed
+    Attempt Operational Inventory, the exact complete/partial access-observation
+    enum, report-local evidence references, both Artifact and Content Identity,
+    and seven independently gated disclosure channels.
+16. Put override count, largest-value, and aggregate-byte limits at creation and
+    compilation declaration seams. Report distinct creation and compilation
+    facility capacities and operational inventories.
+17. Split Pack Archive read expectations from Closure Export import
+    expectations, remove the pre-preparation Compilation Identity hint, and
+    register only `epoch-2-all-stored-v1` for writing while retaining Deflate
+    reader support.
+18. Use core-owned role-specific Format Receipts and subject-bound Transport
+    Receipts. Archive and Closure Export publication outcomes retain both; a
+    Transport Receipt never replaces the representation fact record.
 
 This is the recommended answer for every design branch. It favors semantic
 depth and honest guarantees over a smaller but leaky facade.
@@ -138,6 +164,26 @@ through Stable Byte Value.
 `Pack::prepare` is a thin forwarding convenience. Creation, representation,
 transport, execution, delivery, and sessions remain operation-owned modules.
 
+### Typed identities
+
+The public Rust vocabulary follows the frozen global kind registry exactly.
+Known positions use `ContentIdentity`, `ProjectTreeIdentity`,
+`CompletePackageTreeIdentity`, `PackageRequirementIdentity`,
+`FontRequirementIdentity`, `DiscoveryRequestCommitment`,
+`DiscoveryVariantIdentity`, `DiscoveryTraceIdentity`,
+`DiscoveryCoverageIdentity`, `EngineIdentity`, `PackIdentity`,
+`ArchiveEncodingIdentity`, `ClosureExportTreeContentIdentity`,
+`CompilationRequestCommitment`, `ExporterIdentity`,
+`EngineNeutralCompilationIntentIdentity`, `CompilationIdentity`,
+`CompilationArtifactIdentity`, or `CompilationResultIdentity`. A generic
+`CanonicalIdentity` is never returned for one of these schema-1 positions.
+
+Core-derived identities expose inspection only, not unchecked construction.
+External parsing exists only where a caller can legitimately supply an expected
+identity. Prepared Compilation exposes both Engine-Neutral Compilation Intent
+Identity and Compilation Identity; artifact views expose both role-bound
+Compilation Artifact Identity and exact-byte Content Identity.
+
 ## Stable Byte Values
 
 `StableByteValue` is a finite, immutable, exact byte sequence whose complete
@@ -148,10 +194,10 @@ take ownership or copy into a sealed backing:
 pub struct StableByteValue(Arc<private::StableBacking>);
 
 impl StableByteValue {
-    pub fn from_vec(admission: &OrdinaryAdmission, bytes: Vec<u8>) -> Self;
-    pub fn from_arc(admission: &OrdinaryAdmission, bytes: Arc<[u8]>) -> Self;
-    pub fn copy_from_slice(admission: &OrdinaryAdmission, bytes: &[u8]) -> Self;
-    pub fn from_static(admission: &OrdinaryAdmission, bytes: &'static [u8]) -> Self;
+    pub fn from_vec(admission: &OrdinaryAdmission, bytes: Vec<u8>) -> Result<Self, StableByteValueConstructionError>;
+    pub fn from_arc(admission: &OrdinaryAdmission, bytes: Arc<[u8]>) -> Result<Self, StableByteValueConstructionError>;
+    pub fn copy_from_slice(admission: &OrdinaryAdmission, bytes: &[u8]) -> Result<Self, StableByteValueConstructionError>;
+    pub fn from_static(admission: &OrdinaryAdmission, bytes: &'static [u8]) -> Result<Self, StableByteValueConstructionError>;
     pub fn from_chunks(
         admission: &OrdinaryAdmission,
         chunks: impl IntoIterator<Item = Arc<[u8]>>,
@@ -201,6 +247,10 @@ values, and an optional first-party adapter profile identity. A generic library
 caller uses checked `try_caller_selected`; a shipped adapter uses checked
 `try_from_adapter_profile`. Operation limit records have private fields and
 validated constructors, so neither limits nor admitted capacity can be forged.
+The Format Receipt contract requires a resource-profile identifier even for a
+generic caller, so the core records its frozen
+`caller-selected-format-receipt-v1` identity when no adapter profile exists;
+general creation and compilation inventories continue to report profile absent.
 The immutable record may be shared across calls, but each operation creates a
 new private budget ledger. Counters, reservations, pinned bytes, queue places,
 and deadlines are never reused.
@@ -238,6 +288,13 @@ invalidating the Prepared Compilation or changing Compilation Identity.
 Project Snapshot contains only canonical paths and Stable Byte Values. It never
 contains source paths, Transport Locators, Dependency Evidence Keys, revalidation
 callbacks, watchers, generations, or authority handles.
+
+Creation Request additionally owns validated Pack Metadata and opaque Pack
+Annotations. The evidence-subject vocabulary covers metadata, annotation
+membership, and each annotation payload, so mutable origins cannot change
+non-identifying Pack state between discovery and issuance. Generic semantic
+extension construction remains absent: only understood core-owned extension
+values may enter a Pack.
 
 Creation receives a parallel `CreationInputEvidence` value and a role-specific
 evidence adapter:
@@ -289,15 +346,27 @@ ordinary admission
 
 The Creation Report distinguishes source change, revalidation failure, and
 insufficient evidence capability. None degrades into a warning or exposes a
-Pack.
+Pack. It also exposes requested/admitted trust and limits, resource profile,
+dependency concurrency, deadline, caller-thread or creation-facility execution,
+the separately typed creation capacity, Engine Runtime Domain, and reporting
+channel status.
 
 Discovery Variant construction covers the complete Discovery Coverage Request:
 target, Typst input map, Compilation Document Time, engine features, and
 discovery-only Pack Overrides, plus a non-identifying label. Package and Font
 Embedding Policies support all-embedded, all-external, or exact mixed
-dispositions keyed by Package Specification or Font Container Identity. The
+dispositions keyed by Package Specification or exact Font Container Content
+Identity. The
 policy is deterministic and each discovered requirement's resulting disposition
 enters Pack Identity.
+
+Pack Inspection is lossless for the validated Pack's static control contract:
+discovery engine descriptor; project inventory and explicit inclusions; complete
+coverage requests using exact sizes and Discovery Request Commitments; typed
+Discovery Traces and their identities; package and font requirement inventories,
+catalog order, descriptors, licensing, dispositions, and provenance; metadata;
+understood semantic extensions; annotations; and derived guarantees. It neither
+acquires object bytes nor recovers discarded raw discovery values.
 
 ## Authorities
 
@@ -343,7 +412,17 @@ cannot satisfy mutable Pack creation or complete Session Watch Coverage.
 
 Adapter-produced values have controlled public construction paths rather than
 unchecked semantic constructors. Complete Package Tree and Font Catalog
-candidates use validated finite builders. Dependency Evidence Keys and
+candidates use validated finite builders that consume the active Acquisition
+Controls while collecting. A Font Catalog candidate carries family, typed style,
+weight, stretch, registered flags, canonical binary32 axes, and canonical
+Unicode scalar coverage. Its authority-bound
+`FontContainerAcquisitionIdentity` is only a lazy operational round-trip key;
+the core derives and verifies exact Font Container Content Identity after a
+selected container is acquired. Acquisition Budget and Acquisition Controls
+construction is private to the driver; authority adapters can reserve through
+the supplied ledger but cannot substitute a different one. Font Catalog success
+also returns the exact Font Scan Policy and every deterministic scan diagnostic,
+so omit/warn/reject behavior is never silent. Dependency Evidence Keys and
 Dependency Resolution Evidence use an authority-bound builder. Acquisition
 Provenance and failure details accept only sanitized namespaced codes. Evidence
 fences, provider cursors, transport receipts, and session fence observations
@@ -389,7 +468,7 @@ retains the immutable report.
 The primitive reusable seams are:
 
 ```rust
-prepare(&OrdinaryAdmission, &Pack, CompilationRequest)
+prepare(&OrdinaryAdmission, &CompilationResourceLimits, &Pack, CompilationRequest)
     -> Result<PreparedCompilation, CompilationRequestRejection>
 
 run_sync(&PreparedCompilation, SyncCompilationControls)
@@ -403,16 +482,25 @@ run_async(&PreparedCompilation, AsyncCompilationControls)
 and one attempt into `CompilationTerminal`, but they cannot flatten or discard
 the stages.
 
-Compilation Report, Result, and disclosure views expose complete immutable
-structure: request-inventory origin and semantic classification; operational
-profile and Engine Runtime Domain; cache and evidence scope; document target and
-page count; format-bearing artifact roles and bytes; Compilation Access Trace;
-and canonical diagnostic phase, severity, kind, spans, message, hints, and
-completion. A limited Canonical Diagnostic Envelope identifies the first
-omitted ordinal, phase, and limiting dimension. Creation Report has its own
-phase-ordered structured diagnostic view with Discovery Variant or replay scope.
-Diagnostic spans use typed logical project or package locations rather than
-assuming every source belongs to the project tree.
+Prepared Compilation and every report expose the same typed semantic request
+inventory; request rejection exposes its bounded supplied inventory and ordered
+issues without inventing a Compilation Identity. Attempt controls occupy a
+separate six-part typed operational inventory. Reports expose current-attempt
+evidence, originating-evidence availability, and either a result-owned or
+partial access trace through the same closed project/package/font observation
+enum and reached-scope record.
+
+Compilation Result exposes complete immutable semantic structure: document
+target and page count; format-bearing artifact roles, Compilation Artifact
+Identities, Content Identities, sizes, and bytes; the typed Compilation Access
+Trace; and canonical diagnostic policy, phase, severity, kind, spans, messages,
+hints, and completion. A limited Canonical Diagnostic Envelope identifies the
+first omitted ordinal, phase, and limiting dimension. Identity disclosure
+contains artifact metadata but never artifact bytes or a raw-report escape;
+delivery receives bytes through a separate core-produced plan. Creation Report
+has its own phase-ordered structured diagnostic view plus operational inventory
+and reporting-channel status. Diagnostic spans distinguish Pack baseline,
+committed Pack Override, and Package Requirement locations.
 
 Compilation Request construction covers Typst inputs, selected engine features,
 Compilation Document Time, a Pack Override Set, Canonical Diagnostic Policy, and
@@ -422,6 +510,15 @@ modes, PDF Creation Time, standards, and tagging. The core derives target and
 required HTML features and deterministically rejects the representable but
 unsupported bundle feature and other contradictory combinations during
 preparation.
+
+Canonical conveniences construct already-valid values. The lower-level
+`CompilationRequest::from_declarations` path boundedly retains raw paths, keys,
+times, feature identifiers, output controls, origins, and declaration ordinals;
+it never returns an early semantic error. Preparation then returns one ordered
+Compilation Request Rejection containing every independently detectable issue
+and safe supplied inventory node. Unknown Pack paths retain path and size but no
+Compilation Request Commitment; malformed values never receive invented typed
+values.
 
 ## Semantic Result Cache
 
@@ -473,9 +570,12 @@ Compilation Report committed
 ```
 
 `CompilationCacheAdmissionOutcome` carries the immutable report beside the
-cache outcome. Likewise, `CompilationDeliveryOutcome` carries the report beside
-its Transport Outcome and receipt. Admission or delivery failure cannot mutate,
-replace, detach from, or reclassify the report. This
+cache outcome. Likewise, the core-owned `CompilationDeliveryOutcome` carries
+the report beside its Transport Outcome and receipt. A delivery adapter receives
+only a borrowed transfer view and returns a report-free Transport Outcome; the
+core composes the report-bearing outcome after the adapter returns, so selected
+disclosure cannot be bypassed through the completion type. Admission or delivery
+failure cannot mutate, replace, detach from, or reclassify the report. This
 supersedes the earlier implication that a read-write driver cache policy could
 hide cache writes inside the immutable Compilation Report.
 
@@ -492,7 +592,7 @@ pub trait CompilationExecutionFacility {
         Self: 'a;
 
     fn domain(&self) -> &EngineRuntimeDomainDescriptor;
-    fn capacity(&self) -> ExecutionFacilityCapacity;
+    fn capacity(&self) -> CompilationExecutionFacilityCapacity;
     fn dispatch<'a>(
         &'a self,
         job: ReadyCompilationJob,
@@ -505,10 +605,12 @@ The facility may call `ReadyCompilationJob::run_in_process`, or use
 worker. It cannot construct a ready job, Compilation Dependency Snapshot,
 successful completion, report, result, Engine Identity, or Exporter Identity.
 
-Creation has a parallel role-specific facility because discovery/replay queue
-semantics are not Compilation Execution Facility `K`/`Q`. Both may identify the
-same fixed Engine Runtime Domain. Neither initializes a global scheduler for a
-generic library caller.
+Creation has a parallel role-specific facility and
+`CreationExecutionFacilityCapacity` because discovery/replay queue semantics are
+not Compilation Execution Facility `K`/`Q`. Both may identify the same fixed
+Engine Runtime Domain, but their capacities remain non-interchangeable types and
+separate report facts. Neither initializes a global scheduler for a generic
+library caller.
 
 The worker protocol is operational, opaque, versioned, bounded, and verified by
 the parent. Kernel isolation supplies killability and resource placement, not a
@@ -520,20 +622,24 @@ single immediately-ready poll.
 
 ## Representation And Transport
 
-Representation ingress takes one explicit `PackIngressExpectations` value:
+Representation ingress uses distinct expectation types:
 
 ```rust
-pub struct PackIngressExpectations {
-    pub input_content_identity: Option<ContentIdentity>,
-    pub pack_identity: PackIdentityVerificationMode,
-    pub archive_encoding: Option<ArchiveEncodingIdentity>,
-}
+pub struct PackArchiveReadExpectations { /* archive, Pack, optional recipe assertion */ }
+pub struct ClosureExportImportExpectations { /* Pack verification only */ }
 ```
 
-This makes the content-identity mismatch and asserted-recipe mismatch terminal
-branches reachable. Invalid and unsupported terminals carry stable validation
-rule codes in fixed precedence, and Representation Receipt exposes the rules and
-derived input identity rather than collapsing validation to prose.
+This makes archive Content Identity and asserted-recipe mismatches reachable
+without permitting Archive Encoding Identity on Closure Export. Closure Export
+Tree Content Identity remains a derived representation fact; adding an expected
+tree mismatch would require a new Format Receipt contract version. Invalid and
+unsupported terminals carry stable validation rule codes in fixed precedence.
+Core-owned role-specific Format Receipts expose a shared contract-v1 envelope
+plus only the identity, verification, and file payload legal for their role. The
+combined views cover the complete
+terminal, stage, counters, identities, verification and assertion state,
+requested/admitted controls, file inventory, exposure, commit, cleanup, timing,
+and structured failure facts.
 
 Representation owns validated Pack Archive ingress, validated Closure Export
 import, registered Archive Encoding Identity selection, deterministic Pack
@@ -542,25 +648,28 @@ Closure Export plans. The plans expose canonically ordered paths, Stable Byte
 Values, and identities. Publishing those values is later transport work.
 
 Project Materialization entries use Project Path. Closure Export uses a distinct
-namespaced Closure Export Path and role-tagged entries for its control record,
-project files, package files, Font Containers, extensions, and annotations. The
-two finite-tree contracts cannot be confused through one generic projection
-type.
+namespaced Closure Export Path and contains only the control record plus
+deduplicated blobs; semantic roles remain in `pack.cbor`. The two finite-tree
+contracts cannot be confused through one generic projection type.
 
 Transport keeps separate sync and GAT-async roles for Pack Archive acquisition
 and publication, Project Materialization publication, Closure Export
 publication, and Compilation Delivery. There is no universal store. Adapters
-construct Transport Receipt through its coherence-checking constructor.
+construct role-specific Transport Receipts through coherence-checking
+constructors bound to the exact archive, plan, or delivery value.
 Requested cleanup strength and actual cleanup outcome are distinct, and a
 failure retains its primary stage/cause beside cleanup completion, residual
 state, or non-retractable exposure. Cleanup can never replace the primary
 failure.
 
-Transport Receipt exposes one admission view containing exact requested and
+Transport Receipt exposes a closed role and subject plus one admission view
+containing exact requested and
 admitted role-specific limits, trust, profile, requested commit and cleanup
-strengths, deadline, actual commit, transferred identity and bytes, adapter
-class, and cleanup result. Residual locators provide a safe summary by default
-and raw adapter detail only through an explicit disclosure capability.
+strengths, deadline, object and byte counts, ordered identities, actual commit,
+adapter class, and cleanup result. Archive and Closure Export publication
+outcomes compose the Transport Receipt with a separately retained Format
+Receipt. Residual locators provide a safe summary by default and raw adapter
+detail only through an explicit disclosure capability.
 
 ## Compilation Session
 
@@ -684,7 +793,7 @@ let project = creation::ProjectSnapshot::try_from_files(
     &creation_limits,
     ProjectPath::parse(&admission, "main.typ")?,
     [(ProjectPath::parse(&admission, "main.typ")?,
-      StableByteValue::from_static(&admission, b"Hello"))],
+      StableByteValue::from_static(&admission, b"Hello")?)],
 )?;
 
 let request = creation::CreationRequest::try_new(
@@ -693,6 +802,8 @@ let request = creation::CreationRequest::try_new(
     [creation::DiscoveryVariant::paged_explicit_empty()],
     creation::PackageEmbeddingPolicy::embed_all(),
     creation::FontEmbeddingPolicy::embed_all(),
+    pack::PackMetadata::empty(),
+    [],
 )?;
 
 let input = creation::CreationInput {
@@ -704,7 +815,7 @@ let pack = creation::create_sync(input, creation_controls)
     .into_pack()
     .map_err(CreateError::from_report)?;
 
-let prepared = pack.prepare(&admission, compilation_request)?;
+let prepared = pack.prepare(&admission, &compilation_limits, compilation_request)?;
 let report = compilation::run_sync(&prepared, compilation_controls);
 ```
 
@@ -727,10 +838,11 @@ let cache_outcome = compilation::admit_to_cache_sync(
     cache_controls,
 );
 
-let projection = CompilationReportDisclosure::identity()
-    .project(&report, compilation_limits);
-let delivery_outcome = delivery.deliver(
-    projection,
+let plan = CompilationReportDisclosure::identity()
+    .plan_delivery(report.clone(), compilation_limits);
+let delivery_outcome = transport::deliver_compilation_sync(
+    plan,
+    &delivery,
     destination,
     delivery_controls,
 );
@@ -790,13 +902,14 @@ rustc --edition=2024 \
 ```
 
 The downstream probe constructs the common sync lifecycle, uses sync trait
-objects, implements external authorities and evidence, consumes report/result
-views, and proves both a local non-`Send` GAT future and a call-site `Send`
-future. Together the checks cover the seven-module topology, sealed-value
-visibility, validated adapter-produced candidates, role-specific facilities,
-terminal tree, cache records, and reducer event/effect flow. Runtime behavior
-remains deliberately unimplemented because this map plans the destination
-rather than building it.
+objects, implements external authorities, evidence, delivery, and all three
+publication roles, and proves both a local non-`Send` GAT future and a call-site
+`Send` future. It traverses complete Pack Inspection, semantic and operational
+inventories, complete and partial typed traces, evidence tables, artifacts,
+every disclosure channel, creation reporting, all representation report roles,
+Format Receipts, Transport Receipt subjects, and publication composition.
+Runtime behavior remains deliberately unimplemented because this map plans the
+destination rather than building it.
 
 The same two commands pass under `rustc 1.92.0` in the official `rust:1.92`
 container, matching the repository's declared `rust-version`.
@@ -804,8 +917,9 @@ container, matching the repository's declared `rust-version`.
 ## Planning Consequence
 
 This contract is sufficient for
-[Freeze the first-party CLI and Dagger contracts](https://github.com/sagikazarmark/typst-pack/issues/56)
-to freeze generated adapter surfaces without inventing lifecycle semantics. It
-introduces no new decision ticket and leaves no new in-scope fog. Exact private
-layout, helper decomposition, cache eviction, allocator strategy, and benchmark
-tuning below the frozen limits remain implementation choices.
+[Reconcile the first-party adapter schemas and profiles](https://github.com/sagikazarmark/typst-pack/issues/63)
+to serialize the core-owned views and receipts without inventing lifecycle or
+identity semantics. It introduces no new decision ticket and leaves no new
+in-scope fog. Exact private layout, helper decomposition, cache eviction,
+allocator strategy, and benchmark tuning below the frozen limits remain
+implementation choices.
