@@ -1,9 +1,13 @@
-# PROTOTYPE: Completed Rust Lifecycle and Receipt Interfaces
+# PROTOTYPE: Reconciled Rust Lifecycle Implementability
 
 > Throwaway design artifact for
-> [Complete the Rust lifecycle and receipt interfaces](https://github.com/sagikazarmark/typst-pack/issues/65),
-> revising the accepted baseline from
-> [Freeze the Rust lifecycle and adapter interfaces](https://github.com/sagikazarmark/typst-pack/issues/61).
+> [Reconcile Rust lifecycle implementability](https://github.com/sagikazarmark/typst-pack/issues/73),
+> correcting the accepted baseline from
+> [Complete the Rust lifecycle and receipt interfaces](https://github.com/sagikazarmark/typst-pack/issues/65)
+> with the decisions in
+> [Define session preparation and pre-attempt terminal semantics](https://github.com/sagikazarmark/typst-pack/issues/68),
+> [Freeze operational capability and execution-report inputs](https://github.com/sagikazarmark/typst-pack/issues/71), and
+> [Define pre-admission representation and transport receipt semantics](https://github.com/sagikazarmark/typst-pack/issues/70).
 > This freezes the recommended public contract for implementation planning. It
 > is not production code or a compatibility promise for the current 0.3 crate.
 
@@ -15,16 +19,15 @@ traits, and visibility without implementing the destination.
 
 ## Question
 
-What compile-checked Rust 1.92 contract for the accepted seven public modules
-closes the remaining font-catalog, creation, inspection, request-inventory,
-trace, artifact-identity, disclosure, limit, creation-facility reporting,
-representation-expectation, and Format Receipt and Transport Receipt
-composition gaps without adding a generic public seam or changing the accepted
-semantic model?
+What corrected Rust 1.92 contract and external-consumer probe make every
+accepted session, bounded builder, creation rejection, semantic and operational
+inventory, execution, representation, and receipt state constructible and
+inspectable through exactly seven deep modules without adding generic seams or
+changing accepted semantics?
 
 ## Verdict
 
-Freeze the operation-owned hybrid from
+Adopt the corrected operation-owned hybrid from
 [Prototype the library module and interface architecture](https://github.com/sagikazarmark/typst-pack/issues/39),
 with the following concrete refinements:
 
@@ -87,6 +90,34 @@ with the following concrete refinements:
 18. Use core-owned role-specific Format Receipts and subject-bound Transport
     Receipts. Archive and Closure Export publication outcomes retain both; a
     Transport Receipt never replaces the representation fact record.
+19. Require every operation-causal authority, cache, evidence provider, Engine
+    Runtime Domain, execution facility, spool, and transport adapter to expose
+    one immutable role-specific capability descriptor from the exact object.
+    Admission freezes a separate requested/admitted record; reports append only
+    reached facts. Classes, profiles, concrete types, placement, and success are
+    never inference sources.
+20. Replace flat operational inventories with six closed sections for
+    admission, resources, dependency execution, attempt control, role
+    execution, and reporting. Requested, admitted, not-applicable, and reached
+    `D/K/Q/W/P/T` facts remain distinguishable.
+21. Make collection budgets count package files, largest package members, Font
+    Catalog candidates, and faces at their first retaining seam. Creation
+    Request Rejection is externally inspectable and cannot appear inside a
+    Creation Report.
+22. Preserve origin, status, declaration ordinal, diagnostic-policy leaves,
+    and safe-node joins on every Compilation Request Inventory position.
+23. Make session preparation limits revision-owned. Preparation happens
+    synchronously inside the reducer and yields either request rejection or a
+    Prepared Compilation; ingestion failure remains tokenless. Session
+    Instance, Evaluation, Attempt, Fence, Subscription Generation, and
+    Publication Sequence values are opaque but inspectable, and attempt plans
+    carry a synchronously revocable supersession permit.
+24. Model representation and transport admission as discriminated refusal or
+    admitted branches. A well-formed unsupported archive recipe retains its
+    selected or asserted identity; archive assertions record
+    `supplied-but-unevaluated` until exact comparison is reached. Transport uses
+    six role-specific opaque receipts and a complete stage ledger; cleanup,
+    residual state, and exposure are independent.
 
 This is the recommended answer for every design branch. It favors semantic
 depth and honest guarantees over a smaller but leaky facade.
@@ -235,7 +266,7 @@ public contract uses operation-specific records rather than one universal bag:
 
 | Record | Owned dimensions |
 | --- | --- |
-| `creation::CreationResourceLimits` | Project inventory, variants, packages, fonts, discovery restarts, stable spool, retained memory |
+| `creation::CreationResourceLimits` | Project inventory, variants, package trees and files, largest package member, Font Containers, Font Catalog candidates and faces, discovery restarts, overrides, stable spool, retained memory |
 | `representation::PackIngressResourceLimits` | Archive/control/decoded bytes, entries, files, expansion, spool, retained memory |
 | `representation::RepresentationResourceLimits` | Encoded/projected objects and bytes, spool, retained memory |
 | `compilation::CompilationResourceLimits` | Dependencies, dependency bytes, pages, artifacts, raster work, spool, retained memory, reporting channels |
@@ -258,12 +289,13 @@ and deadlines are never reused.
 Limits reach the first observable seam. Project Snapshot and Creation Request
 construction receive Creation Resource Limits before consuming caller
 collections. Package and Font Authorities receive an operation-private
-`AcquisitionBudget` through inspectable Acquisition Controls and reserve
-downloaded, expanded, spooled, and retained bytes incrementally. Cache adapters
-receive an equivalent `CacheBudget`. Spool, transport, acquisition, and cache
-controls expose immutable views of their admitted limits, expected identities,
-deadlines, clocks, interruption sources, and role-specific commit or cleanup
-requirements.
+`AcquisitionBudget` through inspectable Acquisition Controls and reserve each
+package file, largest member, Font Catalog candidate, face, downloaded byte,
+expanded byte, spool byte, and retained byte before retaining it. Iterators do
+not need an honest size hint. Cache adapters receive an equivalent
+`CacheBudget`. Spool, transport, acquisition, and cache controls expose
+immutable views of their admitted limits, expected identities, deadlines,
+clocks, interruption sources, and role-specific commit or cleanup requirements.
 
 These controls remain separate:
 
@@ -301,11 +333,13 @@ evidence adapter:
 
 ```rust
 pub struct CreationInput {
-    pub request: CreationRequest,
-    pub evidence: CreationInputEvidence,
+    /* request-bound private state */
 }
 
+// CreationInput::try_new(request, evidence) rejects mismatched evidence.
+
 pub trait SyncCreationEvidence {
+    fn descriptor(&self) -> &CreationEvidenceCapabilityDescriptor;
     fn fence(
         &self,
         request: CreationEvidenceFenceRequest,
@@ -328,6 +362,18 @@ and keys to one provider identity. Creation compares that binding with the
 provider and its advertised capabilities during admission, before discovery. A
 mutable adapter must retain enough operational evidence to revalidate every
 causal content, absence, membership, order, metadata, and source-choice fact.
+The descriptor states immutable, versioned, or revalidated stability; exact-key
+and opaque-scope revalidation; polling, push, and cursor replay; race-closing
+fence support; and its selected network contract.
+
+Project Snapshot, Discovery Variant, override, inclusion, metadata, annotation,
+and Creation Request builders return one inspectable Creation Request Rejection
+with closed issue code, role, and optional source ordinal. They enforce every
+count, largest-member, aggregate, and format ceiling while consuming the input.
+Every builder that accepts raw strings or bytes also receives Ordinary Admission,
+so Hostile is refused before those values are interpreted.
+Rejection precedes operational admission and never appears inside a Creation
+Report.
 
 The private creator owns this sequence:
 
@@ -344,12 +390,15 @@ ordinary admission
 -> discard raw sensitive values, keys, revalidators and locators
 ```
 
-The Creation Report distinguishes source change, revalidation failure, and
-insufficient evidence capability. None degrades into a warning or exposes a
-Pack. It also exposes requested/admitted trust and limits, resource profile,
-dependency concurrency, deadline, caller-thread or creation-facility execution,
-the separately typed creation capacity, Engine Runtime Domain, and reporting
-channel status.
+Operational refusal precedes a Creation Report and retains the complete request,
+safe projections of every appraised role descriptor, and one closed refusal
+reason. An admitted Creation Report distinguishes source change, revalidation
+failure, and insufficient evidence capability; none degrades into a warning or
+exposes a Pack. Its six sections report admission, resources, dependency
+execution, attempt control, creation-engine execution, and reporting. They
+retain requested and admitted trust, network, enforcement, limits, `D/K/Q/W/P`,
+interruption, domain, isolation, deadline, queue, worker, and channel facts
+without reconstructing them from a profile or concrete type.
 
 Discovery Variant construction covers the complete Discovery Coverage Request:
 target, Typst input map, Compilation Document Time, engine features, and
@@ -389,6 +438,7 @@ pub trait AsyncPackageAuthority {
     type Revalidate<'a>: Future<Output = EvidenceRevalidationOutcome> + 'a
     where
         Self: 'a;
+    fn descriptor(&self) -> &PackageAuthorityCapabilityDescriptor;
     // acquire(...), revalidate(...)
 }
 ```
@@ -398,6 +448,17 @@ the complete driver future adds `P: Send + Sync` and
 `for<'a> P::Acquire<'a>: Send` at its own seam. GAT traits are intentionally not
 dyn-compatible; runtime-selected adapters use concrete enums or adapter-owned
 local/Send erasing wrappers rather than a second semantic contract.
+
+The exact authority object owns its immutable
+`PackageAuthorityCapabilityDescriptor` or `FontAuthorityCapabilityDescriptor`.
+It carries descriptor version 1, an Operational Capability Class, ordered safe
+source classes, exact evidence and watch capabilities, selected network
+contract, authority-private resolution-cache policy, and safe projections of
+private content caches. The descriptor is obtained from the executable object;
+callers never pass a detached descriptor beside a different authority.
+Operational Capability Class follows
+`<reverse-dns-namespace>/<lower-kebab-path>/<positive-major>`, is ASCII and at
+most 255 bytes, and is descriptive rather than proof.
 
 Only `DependencyAcquisitionOutcome::Failed` with
 `AuthorityFailureClass::Unavailable` permits fallback. The composed authority
@@ -413,14 +474,17 @@ cannot satisfy mutable Pack creation or complete Session Watch Coverage.
 Adapter-produced values have controlled public construction paths rather than
 unchecked semantic constructors. Complete Package Tree and Font Catalog
 candidates use validated finite builders that consume the active Acquisition
-Controls while collecting. A Font Catalog candidate carries family, typed style,
+Controls while collecting. Those controls also issue the only externally usable
+authority-bound Dependency Resolution Evidence builder; callers cannot forge
+evidence by supplying an Authority Instance Identity. A Font Catalog candidate carries family, typed style,
 weight, stretch, registered flags, canonical binary32 axes, and canonical
 Unicode scalar coverage. Its authority-bound
 `FontContainerAcquisitionIdentity` is only a lazy operational round-trip key;
 the core derives and verifies exact Font Container Content Identity after a
 selected container is acquired. Acquisition Budget and Acquisition Controls
-construction is private to the driver; authority adapters can reserve through
-the supplied ledger but cannot substitute a different one. Font Catalog success
+construction is private to the driver; authority adapters reserve file count,
+largest file, candidate, face, and byte dimensions through the supplied ledger
+but cannot substitute a different one. Font Catalog success
 also returns the exact Font Scan Policy and every deterministic scan diagnostic,
 so omit/warn/reject behavior is never silent. Dependency Evidence Keys and
 Dependency Resolution Evidence use an authority-bound builder. Acquisition
@@ -471,10 +535,10 @@ The primitive reusable seams are:
 prepare(&OrdinaryAdmission, &CompilationResourceLimits, &Pack, CompilationRequest)
     -> Result<PreparedCompilation, CompilationRequestRejection>
 
-run_sync(&PreparedCompilation, SyncCompilationControls)
+run_sync(&PreparedCompilation, admitted SyncCompilationControls)
     -> CompilationReport
 
-run_async(&PreparedCompilation, AsyncCompilationControls)
+run_async(&PreparedCompilation, admitted AsyncCompilationControls)
     -> CompilationReport
 ```
 
@@ -489,6 +553,23 @@ separate six-part typed operational inventory. Reports expose current-attempt
 evidence, originating-evidence availability, and either a result-owned or
 partial access trace through the same closed project/package/font observation
 enum and reached-scope record.
+
+Every semantic inventory node carries its applicable origin, status, and source
+ordinal. Output and Canonical Diagnostic Policy retain per-leaf origins. Engine
+and Exporter retain attested origins and statuses. An invalid-declaration marker
+retains its optional join to exactly one safe supplied node, so a consumer can
+follow the issue without reconstructing a path, key, identity, or commitment.
+The external probe destructures every field rather than hiding omissions behind
+`..` patterns.
+
+Compilation control admission is outer and reportless on refusal. Its safe
+refusal records the complete operation request, every appraised descriptor, and
+one closed reason. An admitted report exposes six non-interchangeable sections:
+admission, resources, dependency execution, attempt control, kernel execution,
+and reporting. They retain exact requested/admitted network policy, cache
+policy and lookup state, authority and private-cache capabilities, `D/K/Q/W/P`,
+domain selection, isolation, interruption and winner, enforcement, queue and
+worker facts, and channel states.
 
 Compilation Result exposes complete immutable semantic structure: document
 target and page count; format-bearing artifact roles, Compilation Artifact
@@ -532,6 +613,7 @@ store and retrieve an opaque `SemanticCacheRecord` backed by Stable Byte Value:
 
 ```rust
 pub trait SyncSemanticResultCache {
+    fn descriptor(&self) -> &SemanticResultCacheCapabilityDescriptor;
     fn lookup(
         &self,
         request: SemanticCacheLookupRequest<'_>,
@@ -540,9 +622,16 @@ pub trait SyncSemanticResultCache {
     fn admit(
         &self,
         request: SemanticCacheAdmissionRequest<'_>,
-    ) -> SemanticCacheAdmissionOutcome;
+    ) -> SemanticCacheAdapterAdmissionOutcome;
 }
 ```
+
+The descriptor belongs to the exact cache object and supplies class, Cache
+Isolation Domain presence, selected network contract, trusted-domain or
+authenticated-record writer capability, and supported availability behavior.
+The admitted policy is exactly disabled, read-only, read-write, or
+rebuild-and-write. A cache hit records no engine dispatch or selected runtime
+domain and preserves its originating result and trace.
 
 Each cache instance exposes one fixed Cache Isolation Domain; callers do not
 assert a different domain per lookup. A tenant-aware storage implementation
@@ -570,7 +659,9 @@ Compilation Report committed
 ```
 
 `CompilationCacheAdmissionOutcome` carries the immutable report beside the
-cache outcome. Likewise, the core-owned `CompilationDeliveryOutcome` carries
+cache outcome. The adapter-level outcome reports only reached storage facts;
+core-owned record preparation failure is added only by the core. Likewise, the
+core-owned `CompilationDeliveryOutcome` carries
 the report beside its Transport Outcome and receipt. A delivery adapter receives
 only a borrowed transfer view and returns a report-free Transport Outcome; the
 core composes the report-bearing outcome after the adapter returns, so selected
@@ -591,8 +682,7 @@ pub trait CompilationExecutionFacility {
     where
         Self: 'a;
 
-    fn domain(&self) -> &EngineRuntimeDomainDescriptor;
-    fn capacity(&self) -> CompilationExecutionFacilityCapacity;
+    fn descriptor(&self) -> &CompilationExecutionFacilityCapabilityDescriptor;
     fn dispatch<'a>(
         &'a self,
         job: ReadyCompilationJob,
@@ -600,8 +690,24 @@ pub trait CompilationExecutionFacility {
 }
 ```
 
+The bound descriptor supplies class, capacity-scope class and sharing relation,
+supported placement, maximum `K/Q/P`, worker overlap, Engine Runtime Domain
+policy, interruption, worker protocol, parent verification and output
+withholding, no-fallback, selected execution and optional worker-control network
+contracts, and enforcement. The operation request separately
+states requested `K/Q/P/W`; admission records requested, admitted, constrained,
+and not-applicable positions. Caller-thread execution makes `K/Q/P` not
+applicable, and in-process facility execution makes `P` not applicable.
+
+Engine Runtime Domain policy and reached selection are separate. Inherited
+unmanaged selection carries neither an invented identity nor width. Managed
+selection carries the parent-attested exact domain identity, placement, positive
+`W`, and whether an exclusive fine-timing lease was reached. Exact width is
+admitted unchanged or refused; automatic width resolves before managed engine
+work.
+
 The facility may call `ReadyCompilationJob::run_in_process`, or use
-`into_worker_request` and the paired response verifier for an ordinary isolated
+`into_worker_request(parent_assigned_domain)` and the paired response verifier for an ordinary isolated
 worker. It cannot construct a ready job, Compilation Dependency Snapshot,
 successful completion, report, result, Engine Identity, or Exporter Identity.
 
@@ -611,6 +717,11 @@ not Compilation Execution Facility `K`/`Q`. Both may identify the same fixed
 Engine Runtime Domain, but their capacities remain non-interchangeable types and
 separate report facts. Neither initializes a global scheduler for a generic
 library caller.
+
+A worker-isolated creation holds one worker lease and one domain across the
+whole attempt. Compilation dispatches one ready kernel/export job. A worker
+string cannot assert its own identity; the parent binds the dispatch token and
+domain before encoding and verifies the complete response before exposure.
 
 The worker protocol is operational, opaque, versioned, bounded, and verified by
 the parent. Kernel isolation supplies killability and resource placement, not a
@@ -630,16 +741,22 @@ pub struct ClosureExportImportExpectations { /* Pack verification only */ }
 ```
 
 This makes archive Content Identity and asserted-recipe mismatches reachable
-without permitting Archive Encoding Identity on Closure Export. Closure Export
+without permitting Archive Encoding Identity on Closure Export. Typed request
+construction failure produces no receipt. A well-formed unsupported recipe is
+a Representation Admission Refusal before effects or interpretation. Archive
+encoding always retains the selected identity and source Pack Identity; archive
+read always retains the asserted identity and reports
+`supplied-but-unevaluated` until complete supported exact re-encoding and byte
+comparison are actually reached. Closure Export
 Tree Content Identity remains a derived representation fact; adding an expected
 tree mismatch would require a new Format Receipt contract version. Invalid and
 unsupported terminals carry stable validation rule codes in fixed precedence.
 Core-owned role-specific Format Receipts expose a shared contract-v1 envelope
-plus only the identity, verification, and file payload legal for their role. The
-combined views cover the complete
-terminal, stage, counters, identities, verification and assertion state,
-requested/admitted controls, file inventory, exposure, commit, cleanup, timing,
-and structured failure facts.
+plus only the identity, verification, and file payload legal for their role.
+Their admission view is discriminated: Refused owns the complete requested
+controls and one reason but no admitted or reached facts; Admitted owns one
+requested/admitted record and permits reached counters, identities, timing,
+publication, cleanup, exposure, and structured failure facts.
 
 Representation owns validated Pack Archive ingress, validated Closure Export
 import, registered Archive Encoding Identity selection, deterministic Pack
@@ -652,24 +769,32 @@ namespaced Closure Export Path and contains only the control record plus
 deduplicated blobs; semantic roles remain in `pack.cbor`. The two finite-tree
 contracts cannot be confused through one generic projection type.
 
-Transport keeps separate sync and GAT-async roles for Pack Archive acquisition
-and publication, Project Materialization publication, Closure Export
-publication, and Compilation Delivery. There is no universal store. Adapters
-construct role-specific Transport Receipts through coherence-checking
-constructors bound to the exact archive, plan, or delivery value.
-Requested cleanup strength and actual cleanup outcome are distinct, and a
-failure retains its primary stage/cause beside cleanup completion, residual
-state, or non-retractable exposure. Cleanup can never replace the primary
-failure.
+Transport keeps separate sync and GAT-async roles for spooling, Pack Archive
+acquisition and publication, Project Materialization publication, Closure Export
+publication, and Compilation Delivery. There is no universal store, receipt, or
+public receipt-payload enum. Each exact adapter object supplies a role-specific
+capability descriptor and returns only role-specific reached facts. Core-owned
+operation functions admit the request and construct exactly one of six opaque
+subject-bound receipt types.
 
-Transport Receipt exposes a closed role and subject plus one admission view
-containing exact requested and
-admitted role-specific limits, trust, profile, requested commit and cleanup
-strengths, deadline, object and byte counts, ordered identities, actual commit,
-adapter class, and cleanup result. Archive and Closure Export publication
-outcomes compose the Transport Receipt with a separately retained Format
-Receipt. Residual locators provide a safe summary by default and raw adapter
-detail only through an explicit disclosure capability.
+Each receipt has a discriminated Refused or Admitted branch. Refused retains the
+complete request, safe descriptor projection, and one reason, with no admission
+record or actual fact. Admitted retains one Operation Admission Record and one
+sealed role-legal stage ledger over `admission`, `plan-freeze`,
+`reference-resolution`, `acquisition`, `spooling`, `transfer`, `verification`,
+`commit`, `cleanup`, and `complete`. A role never requested has no receipt.
+Adapters return only role-specific reached-stage inputs. Their stage vocabulary
+excludes core-owned `admission`, `plan-freeze`, and `complete`; core orchestration
+validates role legality and composes those stages into the sealed receipt ledger.
+Adapter timing uses the same restricted adapter-stage vocabulary.
+
+Requested cleanup requirement, cleanup outcome, residual locator, and exposed
+bytes are independent, so exposure and cleanup failure may coexist. Requested,
+admitted, and actual commit strengths remain distinct; a weaker sink is refused
+before transfer. Archive and Closure Export publication outcomes derive their
+Format and Transport Receipts from one private operation record and retain both.
+An archive encoder also retains any independent spool receipt rather than
+folding transport into representation success.
 
 ## Compilation Session
 
@@ -678,10 +803,31 @@ currentness state, publication, and Last Successful Compilation. It owns no
 authority, cache, watcher, subscription handle, clock, runtime, execution
 facility, transport, delivery adapter, or persistent store.
 
+Each accepted stabilized input carries one immutable `SessionPolicy` with exact
+caller-selected or adapter-profile requested/admitted Compilation Resource
+Limits. Accept performs bounded preparation synchronously and purely. It creates
+either a request-rejection candidate or a Prepared Compilation; only the latter
+can own a Session Attempt Token. A typed Session Ingestion Failure carries its
+failed request-source scopes and policy but is tokenless and never prepares.
+
+Session Instance, Revision, Evaluation, Attempt, Fence, Subscription Generation,
+and Publication Sequence are separate opaque values with routing and ordering
+accessors. Tokens are not externally constructible. One attempt plan binds its
+Prepared Compilation and a session-owned synchronously revocable supersession
+permit. Recording a newer accepted revision revokes eligibility before an
+`InterruptAttempt` effect wakes or kills work; the effect is not the
+linearization point.
+
+At most one attempt is active or draining and at most one latest prepared
+revision is pending. Newer input replaces an older pending revision. A matching
+late completion still clears the active slot and activates the latest pending
+revision even when the old evaluation cannot publish. Request rejection and
+ingestion failure need no slot and may reconcile while older work drains.
+
 The reducer protocol is explicit:
 
 ```text
-candidate Compilation Terminal or ingestion failure
+request rejection, Compilation Report, or ingestion-failure candidate
 -> ReadFence over mutable request sources and causal dependency evidence
 -> keep old subscriptions active
 -> ArmSubscriptions from read cursors or before confirmation
@@ -696,32 +842,47 @@ The frozen event/effect vocabulary appears in the fixture:
 
 | Events | Effects |
 | --- | --- |
-| `Accept`, `IngestionFailed` | `StartAttempt`, `InterruptAttempt` |
-| `AttemptFinished` | `ReadFence` |
+| `Accept(Stabilized or IngestionFailure)` | `StartAttempt`, `InterruptAttempt` |
+| `AttemptFinished`, `AttemptReleased` | `ReadFence` |
 | `FenceReadFinished` | `ArmSubscriptions` |
 | `SubscriptionsArmed` | `ConfirmFence` |
 | `FenceConfirmed` | `Publish`, then `RetireSubscriptions` |
 | `DependencyChanged`, `NotificationGap` | Dirties the candidate and may restart reconciliation |
 
-Late attempt completions, old-generation notifications, duplicate completions,
-and stale fence responses are normal asynchronous races and return
-`SessionTransition::Ignored`, not protocol errors.
+Old-session completions, old-generation notifications, duplicates, and stale
+fence responses are normal asynchronous races and return
+`SessionTransition::Ignored`, not protocol errors. A completion for the matching
+active draining token is consumed rather than ignored.
 
 Read, subscription, and confirmation plans are inspectable by adapters. They
 group exact scopes, Dependency Evidence Keys, provider cursors, generations,
-and handoff strategy. Read completion includes scope-keyed mutable request-source
-observations as well as dependency evidence, so a clean fence proves both sides
-of Session Currentness.
+and handoff strategy by the internal provider identity needed to route work;
+ordinary reports still expose only report-safe descriptor projections. Read and
+confirmation outcomes retain exact changed,
+dirty, uncovered, and failed request-source and dependency scopes. Dependency
+evidence is optional when preparation rejected before dependency resolution.
+Complete polling retains a coherent set of zero or more provider cursors rather
+than selecting one privileged cursor. Equality is recognized from ordinary
+observations; there is no `ReconciledEqual` event.
 
 A Semantic Result Cache hit follows exactly the same fence. It is never current
-by itself. `SessionPublicationTerminal` preserves the distinct Compilation
-Terminal and adapter-owned ingestion-failure branches. Request rejection may be
+by itself. `SessionPublicationTerminalRef` preserves distinct Request Rejection,
+Compilation Report, and ingestion-failure branches. Request rejection may be
 current relative to fully covered mutable request sources without inventing
-dependency evidence. Each publication carries its Session Revision. Last
-Successful Compilation exposes its originating revision and independent
+dependency evidence. Each publication carries Session Instance, Revision,
+Evaluation, and Publication Sequence. Last Successful Compilation exposes its
+originating revision, evaluation, publication sequence, and independent
 currentness; a newer rejection, operation outcome, ingestion failure, or
 delivery failure does not replace it, and it becomes stale when its fence no
 longer holds.
+
+The public view exposes `Running`, `Retiring`, or `Retired`, the latest revision
+and evaluation, active or draining attempt, latest pending prepared revision,
+publication, and Last Successful Compilation. Shutdown rejects new input and
+retry, revokes unpublished work, retires active and proposed subscriptions, and
+interrupts active work. Retirement completes only after every attempt or arm
+operation returns, is reaped, or is abandoned with proof that no live resource
+remains. Publication and subscription retirement have no completion events.
 
 Session Recovery Record remains caller-owned application data. Restoring it
 creates a new session instance and requires fresh ingestion, evidence, and
@@ -786,18 +947,22 @@ An in-memory synchronous caller performs no hidden filesystem, network,
 environment, wall-clock, cache, runtime, or scheduler access:
 
 ```rust,ignore
-let creation_limits = creation::CreationResourceLimits::try_new(/* explicit dimensions */)?;
+let creation_limits = creation::CreationResourceLimits::try_new(
+    creation::CreationResourceLimitSpec { /* every explicit dimension */ },
+)?;
+let admitted_creation_limits =
+    AdmittedOperationResourceLimits::try_caller_selected(creation_limits)?;
 
 let project = creation::ProjectSnapshot::try_from_files(
     &admission,
-    &creation_limits,
+    &admitted_creation_limits,
     ProjectPath::parse(&admission, "main.typ")?,
     [(ProjectPath::parse(&admission, "main.typ")?,
       StableByteValue::from_static(&admission, b"Hello")?)],
 )?;
 
 let request = creation::CreationRequest::try_new(
-    &creation_limits,
+    &admitted_creation_limits,
     project,
     [creation::DiscoveryVariant::paged_explicit_empty()],
     creation::PackageEmbeddingPolicy::embed_all(),
@@ -806,10 +971,19 @@ let request = creation::CreationRequest::try_new(
     [],
 )?;
 
-let input = creation::CreationInput {
-    evidence: creation::CreationInputEvidence::caller_owned_immutable(&request),
-    request,
-};
+let evidence = creation::CreationInputEvidence::caller_owned_immutable(&request);
+let input = creation::CreationInput::try_new(request, evidence)?;
+
+let creation_controls = creation::SyncCreationControls::try_admit(
+    admission.clone(),
+    admitted_creation_limits,
+    &creation_evidence,
+    &package_authority,
+    &font_authority,
+    creation_operation_request,
+    &clock,
+    &interruption,
+)?;
 
 let pack = creation::create_sync(input, creation_controls)
     .into_pack()
@@ -828,14 +1002,11 @@ the semantic values or base trait definitions.
 Post-commit work is explicit:
 
 ```rust,ignore
-let preparation = compilation::prepare_cache_admission(
-    report.clone(),
-    compilation_limits,
-);
 let cache_outcome = compilation::admit_to_cache_sync(
-    preparation,
+    report.clone(),
     &cache,
-    cache_controls,
+    &clock,
+    &interruption,
 );
 
 let plan = CompilationReportDisclosure::identity()
@@ -891,23 +1062,31 @@ The fixture and a downstream consumer compile as standalone Rust 2024 crates:
 
 ```sh
 rustc --edition=2024 \
+  -D warnings \
   --crate-type=lib \
   --crate-name=typst_pack_interface \
   PROTOTYPE-rust-lifecycle-adapter-interfaces.rs \
   -o /tmp/libtypst_pack_interface.rlib
 
 rustc --edition=2024 \
+  -D warnings \
   PROTOTYPE-rust-lifecycle-adapter-consumer.rs \
   --extern typst_pack_interface=/tmp/libtypst_pack_interface.rlib
 ```
 
-The downstream probe constructs the common sync lifecycle, uses sync trait
-objects, implements external authorities, evidence, delivery, and all three
-publication roles, and proves both a local non-`Send` GAT future and a call-site
-`Send` future. It traverses complete Pack Inspection, semantic and operational
-inventories, complete and partial typed traces, evidence tables, artifacts,
-every disclosure channel, creation reporting, all representation report roles,
-Format Receipts, Transport Receipt subjects, and publication composition.
+The downstream probe constructs every authority, cache, evidence, runtime,
+creation, compilation, spool, and transport descriptor family; the common sync
+lifecycle; session preparation and ingestion branches; sync trait objects; and
+external authority, evidence, delivery, and publication roles. It proves both a
+local non-`Send` GAT future and a call-site `Send` future. It traverses complete
+Pack Inspection; every semantic inventory origin, status, declaration ordinal,
+diagnostic leaf, and safe-node join; all six creation and compilation
+operational sections; complete and partial traces; evidence; artifacts;
+disclosure; request rejection; session instance/evaluation/token/publication
+views; representation refusal and assertion states; every role-specific
+Transport Receipt admission and stage-ledger branch; cleanup, residual and
+exposure; and paired publication receipts. The public adapter traits return
+reached facts and cannot construct a receipt.
 Runtime behavior remains deliberately unimplemented because this map plans the
 destination rather than building it.
 
@@ -917,7 +1096,7 @@ container, matching the repository's declared `rust-version`.
 ## Planning Consequence
 
 This contract is sufficient for
-[Reconcile the first-party adapter schemas and profiles](https://github.com/sagikazarmark/typst-pack/issues/63)
+[Regenerate first-party adapters and watch semantics](https://github.com/sagikazarmark/typst-pack/issues/69)
 to serialize the core-owned views and receipts without inventing lifecycle or
 identity semantics. It introduces no new decision ticket and leaves no new
 in-scope fog. Exact private layout, helper decomposition, cache eviction,
