@@ -1,5 +1,7 @@
-# PROTOTYPE - canonical structural target for the generated Dagger GraphQL contract.
+# PROTOTYPE - issue 63 reconciliation target for the generated Dagger GraphQL contract.
 #
+# Under the no-external-v1 premise, this supersedes the unreleased issue-56
+# prototype in place.
 # This desired module projection freezes names, kinds, references, and
 # nullability; it is not evidence that implementation source was generated in
 # this planning branch. It is not Dang source or the complete Dagger core schema. Minimal File and
@@ -19,7 +21,7 @@ type Query {
     label: String
     target: TypstPackDiscoveryTarget
     sysInputs: [String!]
-    features: [TypstPackFeature!]
+    features: [String!]
     documentTime: String
     overrides: ID
   ): TypstPackDiscoveryVariant!
@@ -32,6 +34,7 @@ type Query {
 
   reportDisclosure(
     diagnostics: Boolean
+    evidence: Boolean
     sources: Boolean
     requestValues: Boolean
     overrideBytes: Boolean
@@ -61,7 +64,7 @@ type Query {
     variants: [ID!]
     target: TypstPackDiscoveryTarget
     sysInputs: [String!]
-    features: [TypstPackFeature!]
+    features: [String!]
     documentTime: String
     discoveryOverrides: ID
     include: [String!]
@@ -86,7 +89,7 @@ type Query {
   readArchive(
     archive: ID!
     expectedPackIdentity: String
-    expectedContentIdentity: String
+    expectedArchiveContentIdentity: String
     expectedArchiveEncodingIdentity: String
     trust: TypstPackTrustProfile
     limits: ID
@@ -96,7 +99,6 @@ type Query {
   readClosure(
     closure: ID!
     expectedPackIdentity: String
-    expectedContentIdentity: String
     trust: TypstPackTrustProfile
     limits: ID
     deadline: String
@@ -111,6 +113,8 @@ type TypstPackCompilationOutput { id: ID! }
 type TypstPackPackCreation {
   id: ID!
   status: TypstPackCreationStatus!
+  # Complete org.typst-pack.create-operation envelope, including the fixed
+  # adapter-owned font scan policy outside the nested core Creation Report.
   report: File!
   pack: TypstPackPack
   requirePack: TypstPackPack!
@@ -154,7 +158,7 @@ type TypstPackPack {
     output: ID!
     overrides: ID
     sysInputs: [String!]
-    features: [TypstPackFeature!]
+    features: [String!]
     documentTime: String
     packageDirectories: [ID!]
     fontDirectories: [ID!]
@@ -172,7 +176,9 @@ type TypstPackPack {
 type TypstPackPackArchiveEncoding {
   id: ID!
   status: TypstPackRepresentationStatus!
+  # Complete org.typst-pack.representation-operation envelope.
   receipt: File!
+  # Final only: NOT_APPLICABLE, SUCCEEDED, or FAILED; reducer intermediates are not wire values.
   stagingStatus: TypstPackStagingStatus!
   stagingReceipt: File!
   archive: File
@@ -182,7 +188,9 @@ type TypstPackPackArchiveEncoding {
 type TypstPackClosureExport {
   id: ID!
   status: TypstPackRepresentationStatus!
+  # Complete org.typst-pack.representation-operation envelope.
   receipt: File!
+  # Final only: NOT_APPLICABLE, SUCCEEDED, or FAILED; reducer intermediates are not wire values.
   stagingStatus: TypstPackStagingStatus!
   stagingReceipt: File!
   tree: Directory
@@ -192,7 +200,9 @@ type TypstPackClosureExport {
 type TypstPackProjectMaterialization {
   id: ID!
   status: TypstPackRepresentationStatus!
+  # Complete org.typst-pack.project-materialization-operation envelope.
   receipt: File!
+  # Final only: NOT_APPLICABLE, SUCCEEDED, or FAILED; reducer intermediates are not wire values.
   stagingStatus: TypstPackStagingStatus!
   stagingReceipt: File!
   project: Directory
@@ -203,19 +213,23 @@ type TypstPackCompilation {
   id: ID!
   status: TypstPackCompilationStatus!
   operation: File!
+  # Exact org.typst-pack.compilation-terminal projection envelope.
   terminal: File
+  # Report metadata wrapper with exact CompilationReportProjection in report_projection.
   report: File
   compilationIdentity: String
   resultIdentity: String
+  # Final only: NOT_APPLICABLE, SUCCEEDED, or FAILED; reducer intermediates are not wire values.
   stagingStatus: TypstPackStagingStatus!
   stagingReceipt: File!
   artifacts: Directory
   requireSuccess: Directory!
 }
 
-enum TypstPackCreationStatus { PACK_ISSUED FAILED }
+enum TypstPackCreationStatus { ADAPTER_FAILED PACK_ISSUED FAILED }
 
 enum TypstPackPackIngressStatus {
+  ADAPTER_FAILED
   VALIDATED
   INVALID
   UNSUPPORTED
@@ -232,7 +246,8 @@ enum TypstPackPackIngressStatus {
 enum TypstPackRepresentationStatus {
   ADAPTER_FAILED
   SUCCEEDED
-  REQUEST_REJECTED
+  ENCODING_FAILED
+  SPOOLING_FAILED
   RESOURCE_LIMIT
   CANCELLED
   DEADLINE
@@ -250,7 +265,6 @@ enum TypstPackCompilationStatus {
 
 enum TypstPackStagingStatus { NOT_APPLICABLE SUCCEEDED FAILED }
 enum TypstPackDiscoveryTarget { PAGED HTML }
-enum TypstPackFeature { HTML A11Y_EXTRAS BUNDLE }
 enum TypstPackEmbeddingPolicy { EMBED_ALL EXTERNALLY_FULFILL_ALL }
 enum TypstPackTrustProfile { TRUSTED PARTIALLY_TRUSTED }
 enum TypstPackPackFormatEpoch { EPOCH_2 }
