@@ -9,7 +9,11 @@
     "counts": "whole items",
     "concurrency": "simultaneous admitted work"
   },
-  "tightening": "Every numeric override is less than or equal to this profile. Concurrency and ratios must remain positive. Zero is valid only for ready_queue_capacity and count or byte dimensions where admitting none is meaningful.",
+  "tightening": "Profile limit objects are complete resolved views; operation-limit inputs are partial tightening overlays. Every numeric override is less than or equal to this profile. Concurrency and ratios must remain positive. Zero is valid only for ready_queue_capacity and count or byte dimensions where admitting none is meaningful. Creation and compilation capacities are distinct views over one adapter-owned execution pool; equal values do not make the role contracts interchangeable.",
+  "font_scan_policy": {
+    "invalid_candidate": "warn_and_omit",
+    "unreadable_candidate": "warn_and_omit"
+  },
   "pack_ingress": {
     "archive_bytes": "2147483648",
     "control_record_bytes": "67108864",
@@ -82,13 +86,24 @@
     "transfer_concurrency": "16"
   },
   "execution": {
-    "acquisition_concurrency": "16",
-    "ready_worker_concurrency": "2",
-    "ready_queue_capacity": "8",
-    "queue_timeout_ms": "120000",
-    "latency_target_ms": "60000",
-    "isolated_worker_capacity": "2",
-    "forced_terminate_ms": "5000"
+    "pool_sharing": "creation-and-compilation-role-views-share-one-adapter-owned-pool",
+    "creation": {
+      "acquisition_concurrency": "16",
+      "ready_worker_concurrency": "2",
+      "ready_queue_capacity": "8",
+      "queue_timeout_ms": "120000",
+      "latency_target_ms": "60000",
+      "forced_terminate_ms": "5000"
+    },
+    "compilation": {
+      "acquisition_concurrency": "16",
+      "ready_worker_concurrency": "2",
+      "ready_queue_capacity": "8",
+      "queue_timeout_ms": "120000",
+      "latency_target_ms": "60000",
+      "isolated_worker_capacity": "2",
+      "forced_terminate_ms": "5000"
+    }
   },
   "cache": {
     "authority_content_occupancy_bytes": "8589934592"
