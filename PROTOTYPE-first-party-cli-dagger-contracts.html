@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="en" data-fixture-id="final-cli-watch-traces-v3" data-source-commit="prototype/final-rust-first-party-adapter-contracts">
+<html lang="en" data-fixture-id="corrected-cli-watch-traces-v4" data-source-commit="prototype/correct-final-rust-first-party-contract-realization">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -108,7 +108,7 @@
     </article>
     <aside class="panel assumption">
       <h2>Assumption</h2>
-      <p>The regenerated fixture is the final reachable Rust interface. These are immutable expected traces, not an implementation of <code>CompilationSession::apply</code>.</p>
+      <p>The corrected fixture is the reachable Rust interface under test. These are immutable expected traces, not an implementation of <code>CompilationSession::apply</code>.</p>
       <div class="metadata" id="source-metadata"></div>
     </aside>
   </section>
@@ -563,7 +563,7 @@ const traces = deepFreeze([
         id: "consume-late-report",
         name: "Consume the late report from a1",
         note: "The report clears the exact draining slot. It emits only StartAttempt for a2, not Publish or ReadFence for e1.",
-        input: event("AttemptFinished", { token: "a1", report: "ResultSucceeded", result_identity: RESULT_A }),
+        input: event("AttemptFinished", { bound_token: "a1", report: "ResultSucceeded", result_identity: RESULT_A }),
         effects: [effect("StartAttempt", { token: "a2", revision: "r2", evaluation: "e2" })],
         state: makeState({ session: "session-a-02", revision: "r2", evaluation: "e2", attempt: activeAttempt("a2", "r2", "e2") })
       }),
@@ -571,7 +571,7 @@ const traces = deepFreeze([
         id: "ignore-duplicate-late-report",
         name: "Ignore a duplicate completion",
         note: "The duplicate cannot disturb a2 or create a candidate.",
-        input: event("AttemptFinished", { token: "a1", report: "ResultSucceeded", result_identity: RESULT_A }),
+        input: event("AttemptFinished", { bound_token: "a1", report: "ResultSucceeded", result_identity: RESULT_A }),
         ignored: { reason: "DuplicateCompletion", token: "a1" },
         state: makeState({ session: "session-a-02", revision: "r2", evaluation: "e2", attempt: activeAttempt("a2", "r2", "e2") })
       }),
@@ -579,7 +579,7 @@ const traces = deepFreeze([
         id: "finish-current-attempt",
         name: "Finish the current attempt",
         note: "Only a2 may retain its report candidate and start a fence.",
-        input: event("AttemptFinished", { token: "a2", report: "ResultSucceeded", result_identity: RESULT_B }),
+        input: event("AttemptFinished", { bound_token: "a2", report: "ResultSucceeded", result_identity: RESULT_B }),
         effects: [effect("ReadFence", { token: "f2", revision: "r2", evaluation: "e2" })],
         state: makeState({
           session: "session-a-02",
@@ -800,7 +800,7 @@ const traces = deepFreeze([
         id: "finish-e1-outcome",
         name: "Finish e1 with an operation outcome",
         note: "The immutable report candidate enters the ordinary fence.",
-        input: event("AttemptFinished", { token: "a1", report: "OperationOutcome", code: "authority-unavailable" }),
+        input: event("AttemptFinished", { bound_token: "a1", report: "OperationOutcome", code: "authority-unavailable" }),
         effects: [effect("ReadFence", { token: "rf1", revision: "r1", evaluation: "e1" })],
         state: makeState({
           session: "session-retry-01",
@@ -873,7 +873,7 @@ const traces = deepFreeze([
         id: "finish-e2-success",
         name: "Finish e2 successfully",
         note: "The matching current attempt starts a distinct fence.",
-        input: event("AttemptFinished", { token: "a2", report: "ResultSucceeded", result_identity: RESULT_A }),
+        input: event("AttemptFinished", { bound_token: "a2", report: "ResultSucceeded", result_identity: RESULT_A }),
         effects: [effect("ReadFence", { token: "rf2", revision: "r1", evaluation: "e2" })],
         state: makeState({
           session: "session-retry-01",
@@ -1130,7 +1130,7 @@ const traces = deepFreeze([
   {
     id: "attempt-admission-refusal-starts-pending",
     title: "Reportless admission refusal advances pending work",
-    description: "A refused admitted-attempt construction clears only its exact token, starts the latest pending prepared revision, and creates no report or publication candidate.",
+    description: "One fallible token-bound admission seam either returns a refusal event value or an admitted session attempt; refusal clears only its exact token, starts pending work, and creates no report or publication candidate.",
     steps: [
       traceStep({
         id: "admission-refusal-empty",
@@ -1141,7 +1141,7 @@ const traces = deepFreeze([
       traceStep({
         id: "admission-refusal-start-r1",
         name: "Prepare and start revision 1",
-        note: "a1 owns the active slot, but operation admission has not yet produced a report.",
+        note: "The StartAttempt plan owns a1, its Prepared Compilation, and its supersession permit; operation admission has not yet produced a report.",
         input: event("Accept", { branch: "Stabilized", revision: "r1", evaluation: "e1" }),
         effects: [effect("StartAttempt", { token: "a1", revision: "r1", evaluation: "e1" })],
         state: makeState({ session: "session-admission-refusal", revision: "r1", evaluation: "e1", attempt: activeAttempt("a1", "r1", "e1") })
@@ -1163,8 +1163,8 @@ const traces = deepFreeze([
       traceStep({
         id: "admission-refusal-clear-token",
         name: "Consume the reportless refusal",
-        note: "The exact a1 token is cleared and a2 starts r2. No AttemptFinished, report candidate, fence, Publish effect, currentness claim, or last-success replacement is fabricated.",
-        input: event("AttemptAdmissionRefused", { token: "a1", stage: "Admission", reason: "execution-placement-unavailable" }),
+        note: "The refusal value came from a1's single admission call and carries that token by construction. a2 starts r2; no AttemptFinished, report candidate, fence, Publish effect, currentness claim, or last-success replacement is fabricated.",
+        input: event("AttemptAdmissionRefused", { bound_token: "a1", stage: "Admission", reason: "execution-placement-unavailable" }),
         effects: [effect("StartAttempt", { token: "a2", revision: "r2", evaluation: "e2" })],
         state: makeState({
           session: "session-admission-refusal",

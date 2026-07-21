@@ -1,6 +1,8 @@
-# PROTOTYPE: Final Rust And First-Party Adapter Contract Regeneration
+# PROTOTYPE: Corrected Final Rust And First-Party Adapter Contract Realization
 
 > Throwaway design artifact for
+> [Correct the final Rust and first-party contract realization](https://github.com/sagikazarmark/typst-pack/issues/80),
+> correcting the exact baseline adopted by
 > [Regenerate the final Rust and first-party adapter contracts](https://github.com/sagikazarmark/typst-pack/issues/78).
 > It is an implementation-planning contract, not production code and not a
 > compatibility promise for the current 0.3 surfaces.
@@ -31,11 +33,11 @@ Companion planning fixtures:
 
 ## Question
 
-What regenerated Rust 1.92 lifecycle fixture, strict JSON schemas, desired
-GraphQL structure, first-party profiles, serializer probe, watch model, and
-locked replay harness make every accepted lifecycle, receipt, terminal,
-resource, and publication-fence state constructible, inspectable, lossless, and
-cross-artifact coherent without adapter-invented facts?
+What smallest corrected Rust 1.92 fixture, strict JSON schemas, desired GraphQL
+structure, first-party profiles, serializer probe, watch model, and locked replay
+harness make reached creation resources lossless and Session preparation and
+attempt admission unrepresentable incorrectly without changing any other
+accepted contract?
 
 ## Verdict
 
@@ -75,6 +77,16 @@ Freeze two first-party adapters over one lifecycle:
   logical dimensions from physical representation and peak occupancy. Archive,
   Closure Export, and materialization limits are role-specific rather than one
   representation bag.
+- Creation reports expose every reached category, aggregate, and peak dimension
+  from the sealed Rust ledger. First-party serializers cannot omit package,
+  largest-member, Font Catalog, face, variant, or restart facts.
+- Session Policy owns an exact profile-attributed Compilation Preparation Policy
+  and Limits value. `StartAttempt` carries one token-owning plan; consuming that
+  plan in one fallible sync or async admission call returns either its exact
+  reportless refusal event value or an admitted attempt that alone can run.
+  Running that admitted value returns the only constructible token-bound
+  `SessionAttemptCompletion`, so a separately obtained report cannot be paired
+  with a session token.
 - Epoch 2 writing uses the registered `org.typst-pack.archive.all-stored`
   recipe, exposed as `epoch-2-all-stored-v1` and
   `EPOCH_2_ALL_STORED_V1`. It is the only first-release writer. Stored,
@@ -819,10 +831,13 @@ publication, Last Successful Compilation, and subscription namespace. There is
 no Pack-change session event.
 
 Each accepted stabilized request state becomes a new Session Revision whose
-`SessionPolicy` owns the exact requested/admitted preparation limits. `Accept`
-performs bounded semantic preparation synchronously inside the reducer. Success
-creates a Prepared Compilation and may create an attempt token. Compilation
-Request Rejection becomes a tokenless candidate. Adapter ingestion failure is
+`SessionPolicy` owns the exact one-shot Compilation Preparation Policy and
+Limits plus caller-selected or adapter-profile origin. It never substitutes
+broader Compilation Resource Limits. `Accept` performs bounded semantic
+preparation synchronously inside the reducer through the same private path as
+one-shot compilation. Success creates a Prepared Compilation and may create an
+attempt token. Compilation Request Rejection becomes a tokenless candidate.
+Adapter ingestion failure is
 also tokenless, retains its failed request-source scopes and policy, and never
 calls preparation. Neither branch fabricates a report or occupies the attempt
 slot.
@@ -836,8 +851,16 @@ when that completion cannot publish. `Retry` creates a new Session Evaluation in
 the same Session Revision; it does not create a revision or mutate the prepared
 semantic request. There is no automatic terminal retry.
 
-Attempt admission happens after the reducer emits `StartAttempt`. If admission
-refuses, `AttemptAdmissionRefused { token, refusal }` clears only the exact
+Attempt admission happens after the reducer emits `StartAttempt { plan }`. The
+plan owns its token, Prepared Compilation, Session Policy, and supersession
+permit. Consuming it through one `try_admit_sync` or `try_admit_async` call
+returns either `SessionAttemptAdmissionRefusal` or an opaque admitted session
+attempt that also binds the sealed Prepared Compilation, controls, admitted
+Compilation Resource Limits, and Operation Admission Record. Running the
+admitted value returns `SessionAttemptCompletion`, the only constructible value
+that binds its token to its report. No public seam exposes the plan's Prepared
+Compilation or accepts separately pre-admitted controls.
+`AttemptAdmissionRefused(refusal)` clears only the refusal's exact
 active token and starts the latest eligible pending Prepared Compilation. It is
 reportless: it emits no `AttemptFinished`, creates no publication candidate or
 fence, cannot claim currentness, and cannot replace Last Successful Compilation.
@@ -852,8 +875,8 @@ one-to-one event/effect mapping.
 | `NotificationGap { generation, scope }` |
 | `Refresh` |
 | `Retry` |
-| `AttemptFinished { token, report }` |
-| `AttemptAdmissionRefused { token, refusal }` |
+| `AttemptFinished(SessionAttemptCompletion)` |
+| `AttemptAdmissionRefused(SessionAttemptAdmissionRefusal)` |
 | `AttemptReleased { token, release }` |
 | `FenceReadFinished { token, outcome }` |
 | `SubscriptionsArmed { token, outcome }` |
@@ -862,7 +885,7 @@ one-to-one event/effect mapping.
 
 | Session effects |
 | --- |
-| `StartAttempt { token, plan }` |
+| `StartAttempt { plan }` |
 | `InterruptAttempt { token }` |
 | `ReadFence { token, plan }` |
 | `ArmSubscriptions { token, plan }` |
@@ -1020,7 +1043,9 @@ regenerated strict schema defines:
 - `org.typst-pack.adapter-resource-profile/1`, with role-specific creation and
   compilation execution capacities over one shared adapter pool, creation
   package-file/largest-member/Font Catalog candidate limits, isolated creation
-  worker capacity, and the first-party `warn_and_omit` Font Scan Policy default;
+  worker capacity, the first-party `warn_and_omit` Font Scan Policy default, and
+  one explicit `compilation_preparation` projection containing exact policy and
+  limits rather than an implicit mapping from Compilation Resource Limits;
   and
 - all ingress, inspection, creation, compilation, representation, staging,
   transport, watch-state, and watch-pointer output documents.
@@ -1034,6 +1059,12 @@ diagnostic policy, jobs width, and deadlines. Canonical Diagnostic Policy is
 admitted independently by proving both dimensions are no greater than the
 profile defaults; equality and tighter values are valid, while an attempted
 increase is a pre-preparation adapter outcome.
+
+The first-party preparation projection copies override ceilings from the named
+compilation profile and canonical diagnostic ceilings from the named Canonical
+Diagnostic Policy. That complete mapping and its profile identity are frozen and
+inspectable before a Session Revision is accepted. Diagnostic projection limits
+are operational report limits and are never used as preparation inputs.
 
 Operation Limits and resource profiles remain schema version 1 and replace their
 earlier prototype shapes in place. These unreleased artifacts have no persisted
@@ -1461,20 +1492,24 @@ for Pack ingress, the creation steps do not run.
     state in Epoch 2 order.
 13. Check expected Pack Identity after complete derivation.
 14. Verify an admitted asserted archive recipe by supported exact re-encoding.
-15. Stabilize overrides and resolve adapter defaults.
-16. Admit the Compilation Operation against the bound descriptors, the exact
-    requested engine width, and the explicitly disabled Semantic Result Cache
-    branch; an unavailable exact-positive width is refused rather than lowered,
-    and refusal remains in the operation envelope with no terminal or report.
-17. Compilation Request Rejection occurs before Compilation
-    Identity/authority/report.
-18. Deterministic compiler/exporter rejection is Result; dynamic pre-commit
+15. Stabilize overrides and resolve every adapter semantic default.
+16. Run pure bounded semantic preparation under the exact Compilation
+    Preparation Policy and Limits. Return Compilation Request Rejection, with no
+    Prepared Compilation, Compilation Identity, authority appraisal, terminal,
+    or report; otherwise retain the resulting Prepared Compilation.
+17. Admit only that Prepared Compilation against the bound descriptors, exact
+    requested engine width, and explicitly disabled Semantic Result Cache
+    branch. An unavailable exact-positive width is refused rather than lowered;
+    refusal remains in the operation envelope with Compilation Identity but no
+    terminal or report.
+18. Run one admitted attempt and commit one immutable Compilation Report.
+    Deterministic compiler/exporter rejection is Result; dynamic pre-commit
     authority/resource/deadline/execution/isolation failure is Operation Outcome.
 19. Cancellation/deadline/supersession before terminal commitment wins under the
     core ordering; later signals cannot mutate it.
-20. Archive encoding, publication, dependencies, timing, rendering, viewer, and
-    response are later siblings of the immutable semantic terminal they consume;
-    first-party Semantic Result Cache admission is absent.
+20. Cache admission, delivery, publication, disclosure, rendering, viewer, and
+    response transport are later operations that retain and cannot reclassify
+    the immutable report; first-party Semantic Result Cache admission is absent.
 21. Commit wins over later cancellation/deadline. Cleanup never replaces an
     earlier transfer/commit failure, but cleanup is the primary stage when it is
     the first failure after a successful commit; actual commit and exposure stay true.
@@ -1490,9 +1525,13 @@ for Pack ingress, the creation steps do not run.
   operation-bound descriptors and inventories, request-inventory origins,
   representation/transport admission, receipts, and session semantics over the
   prior adapter baseline `43f2af9`.
-- The final Rust Creation Resource Limits, Pack Inspection, request inventory,
-  and receipt accessors are serialized without adapter-created semantic fields
-  or omissions.
+- This correction controls over commit `a92c6b3` only for complete reached
+  Creation Resource projection, exact Session preparation ownership, the
+  token-bound single attempt-admission seam, failure precedence, and corrected
+  examples. Every unaffected exact contract remains inherited from that commit.
+- The final Rust Creation Resource Limits and complete reached view, Pack
+  Inspection, request inventory, and receipt accessors are serialized without
+  adapter-created semantic fields or omissions.
 
 The clean break removes current `extract`, Resource Slot/provider flags,
 `--embed-fonts`, `--include-typst-embedded-fonts`, `--no-vendor-packages`, direct
@@ -1511,6 +1550,7 @@ evidence of actual adapter or generated-Dagger parity. Run these commands from
 $ cargo fmt --all -- --check
 $ cargo check --locked --all-targets
 $ cargo test --locked --all-targets
+$ cargo test --locked --doc
 $ cargo run --locked
 $ jq empty fixtures/cases.json ../PROTOTYPE-first-party-cli-dagger-schemas.json ../PROTOTYPE-native-cli-profile.json ../PROTOTYPE-dagger-ci-profile.json
 $ diff -u <(jq -S '[.schema_cases[], .generated_schema_cases[], .semantic_generated_cases[]] | map(.id) | sort' fixtures/cases.json) <(jq -S '[.schema_cases[], .generated_schema_cases[], .semantic_generated_cases[]] | map(.id) | sort | unique' fixtures/cases.json)
@@ -1519,19 +1559,20 @@ $ diff -u <(jq -S '[del(.engine_runtime_domain) | paths | map(tostring) | join("
 $ git -C .. diff --check -- PROTOTYPE-first-party-cli-dagger-validation PROTOTYPE-first-party-cli-dagger-contracts.md
 ```
 
-`cargo fmt`, all three `jq`/`diff` checks, the profile-path comparison, and
-`git diff --check` exit 0 with no output. `cargo check --locked --all-targets`
+`cargo fmt`, both cargo test lanes, all three `jq`/`diff` checks, the profile-path
+comparison, and `git diff --check` exit 0 with no output.
+`cargo check --locked --all-targets`
 exits 0 after compiling the final interface, prior consumer, serializer probe,
 and harness. The deterministic `cargo run --locked` summary is:
 
 ```text
 final contract validation: ok
-json-schema: Draft 2020-12, 367 definitions, 1501 local refs, 40 direct + 45 generated cases
+json-schema: Draft 2020-12, 368 definitions, 1513 local refs, 40 direct + 47 generated cases
 profiles: 2 valid; final aggregate, representation, and transport relationships verified
 capabilities: 17 producer-correlated constants and first-party trust/cache constraints verified
 graphql: 29 types; hand-authored target topology, statuses, and nullability verified
 html: 7 scenarios; 9/12 allowed events covered, 7 allowed effects, 6 publish fences and 2 delivery wrappers structurally verified
-serializer sources: 31 mechanically linked leaves; 17 poison derivations declared; 46 semantic cases checked
+serializer sources: 32 mechanically linked leaves; 19 poison derivations declared; 48 semantic cases checked
 dagger generated parity: DEFERRED (implementation gate not executed)
 ```
 
@@ -1540,7 +1581,7 @@ accessor marker or to a schema pointer checked by the harness. This proves the
 listed representative links, not exhaustive coverage of every schema leaf or a
 serializer implementation. The poison derivations are audited declarations;
 where no forbidden implementation exists, they are not claimed as executed
-rejections. Schema-negative fixtures and the 46 cross-field semantic cases are
+rejections. Schema-negative fixtures and the 48 cross-field semantic cases are
 executed separately.
 
 The exact-positive create and compile cases compare normalized width, the core
@@ -1548,6 +1589,22 @@ exact Engine Width Request, outer admitted jobs, admitted Engine Width, and the
 selected managed-domain width, with one independent mismatch case per value. A
 separate exact-positive admission-refusal case compares normalized width with the
 refused operation request and requires outer admitted jobs to remain null.
+
+The correction replay additionally requires all twenty reached Creation Resource
+fields, rejects the old broad Session preparation shape, checks profile-to-exact
+preparation coherence including profile-bound wire values, rejects mixed
+Prepared Compilation or admitted-limit session bindings, and verifies that an
+exact-token admission refusal advances pending work without a report or
+publication candidate. A parsed Rust AST audit and the external consumer prove
+that plans cannot expose their Prepared Compilation or accept separately pre-admitted
+controls, and that both sync and async admitted attempts expose their bound
+Operation Admission Record before returning a token-bound completion.
+Two compile-fail doctests reject extracting a plan's sealed Prepared Compilation
+and constructing `AttemptFinished` from an independently obtained token and
+report. The AST audit recognizes qualified inherent impls and return types,
+forbids aliases of the protected plan and completion types, locks both public
+method sets, and permits completion production only from the admitted sync and
+async attempt runners.
 
 HTML delivery validation structurally inspects the embedded helper and immutable
 snapshot source for complete, coherent Current Delivery and Last Successful

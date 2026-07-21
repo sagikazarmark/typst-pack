@@ -1,8 +1,10 @@
-# PROTOTYPE: Final Rust Lifecycle And Adapter Interfaces
+# PROTOTYPE: Corrected Final Rust Lifecycle And Adapter Interfaces
 
 > Throwaway design artifact for
+> [Correct the final Rust and first-party contract realization](https://github.com/sagikazarmark/typst-pack/issues/80),
+> correcting the accepted exact baseline from
 > [Regenerate the final Rust and first-party adapter contracts](https://github.com/sagikazarmark/typst-pack/issues/78),
-> correcting the accepted baseline from
+> which in turn corrected
 > [Complete the Rust lifecycle and receipt interfaces](https://github.com/sagikazarmark/typst-pack/issues/65)
 > with the decisions in
 > [Define session preparation and pre-attempt terminal semantics](https://github.com/sagikazarmark/typst-pack/issues/68),
@@ -21,10 +23,11 @@ traits, and visibility without implementing the destination.
 
 ## Question
 
-What regenerated Rust 1.92 lifecycle fixture and external-consumer probe make
-every accepted lifecycle, receipt, terminal, resource, and publication-fence
-state constructible, inspectable, lossless, and cross-artifact coherent without
-adapter-invented facts?
+What smallest correction makes every reached creation-resource category public,
+gives Compilation Session the exact one-shot preparation contract, and makes a
+Session Attempt Plan the only fallible token-bound admission seam without
+changing any other accepted lifecycle, receipt, terminal, resource, or
+publication-fence decision?
 
 ## Verdict
 
@@ -104,22 +107,33 @@ with the following concrete refinements:
     execution, and reporting. Requested, admitted, not-applicable, and reached
     `D/K/Q/W/P/T` facts remain distinguishable.
 21. Make collection budgets count package files, largest package members, Font
-    Catalog candidates, and faces at their first retaining seam. Creation
-    Request Rejection is externally inspectable and cannot appear inside a
-    Creation Report.
+    Catalog candidates, faces, variants, and restarts at their first retaining
+    seam. `CreationResourceReachedView` projects every category, aggregate, and
+    peak dimension from `CreationResourceLimits`; Creation Request Rejection is
+    externally inspectable and cannot appear inside a Creation Report.
 22. Preserve origin, status, declaration ordinal, diagnostic-policy leaves,
     and safe-node joins on every Compilation Request Inventory position.
-23. Make session preparation limits revision-owned. Preparation happens
-    synchronously inside the reducer and yields either request rejection or a
-    Prepared Compilation; ingestion failure remains tokenless. Session
-    Instance, Evaluation, Attempt, Fence, Subscription Generation, and
-    Publication Sequence values are opaque but inspectable, and attempt plans
-    carry a synchronously revocable supersession permit.
-24. A reportless `AttemptAdmissionRefused` session event consumes the exact
-    attempt token, starts eligible latest pending work, and cannot create an
-    `AttemptFinished`, report, publication candidate, currentness claim, or Last
-    Successful Compilation.
-25. Model representation and transport admission as discriminated refusal or
+23. Make one profile-attributed `SessionPreparation` revision-owned. It carries
+    the exact `CompilationPreparationPolicy` and `CompilationPreparationLimits`
+    accepted by one-shot `prepare`; no broader Compilation Resource Limits are
+    inferred or substituted. Preparation happens synchronously inside the
+    reducer and yields either request rejection or a Prepared Compilation;
+    ingestion failure remains tokenless.
+24. Make `SessionAttemptPlan` own its exact Session Attempt Token, sealed
+    Prepared Compilation, policy, and synchronously revocable supersession permit. Its
+    sync and async `try_admit_*` methods are the sole session attempt-admission
+    seam and return either a token-bound `SessionAttemptAdmissionRefusal` or an
+    opaque admitted attempt binding the plan, controls, admitted limits, and
+    Operation Admission Record. Only that admitted value can run, and running it
+    returns a core-constructed `SessionAttemptCompletion` that binds the same
+    token to its Compilation Report.
+25. The reducer accepts only core-constructed token-bound terminal values:
+    `AttemptAdmissionRefused(SessionAttemptAdmissionRefusal)` or
+    `AttemptFinished(SessionAttemptCompletion)`. A reportless refusal consumes
+    its exact token, starts eligible latest pending work, and cannot create a
+    report, publication candidate, currentness claim, or Last Successful
+    Compilation.
+26. Model representation and transport admission as discriminated refusal or
     admitted branches. A well-formed unsupported archive recipe retains its
     selected or asserted identity; archive assertions record
     `supplied-but-unevaluated` until exact comparison is reached. Transport uses
@@ -127,7 +141,7 @@ with the following concrete refinements:
     residual state, and exposure are independent. Publication Format and
     Transport Receipts are sibling projections of one private publication record
     and preserve the same transport refusal reason and explicit admission stage.
-26. Keep requested, admitted, and reached role-specific capability scopes,
+27. Keep requested, admitted, and reached role-specific capability scopes,
     execution placement, and isolation orthogonal. Domain selection adds
     `NotSelected`; worker setup can be reached before any domain is assigned.
 
@@ -572,14 +586,18 @@ retains the immutable report.
 The primitive reusable seams are:
 
 ```rust
-prepare(&OrdinaryAdmission, &CompilationResourceLimits, &Pack, CompilationRequest)
+prepare(
+    &OrdinaryAdmission,
+    &CompilationPreparationPolicy,
+    &CompilationPreparationLimits,
+    &Pack,
+    CompilationRequest,
+)
     -> Result<PreparedCompilation, CompilationRequestRejection>
 
-run_sync(&PreparedCompilation, admitted SyncCompilationControls)
-    -> CompilationReport
+run_sync(admitted SyncCompilationControls) -> CompilationReport
 
-run_async(&PreparedCompilation, admitted AsyncCompilationControls)
-    -> CompilationReport
+run_async(admitted AsyncCompilationControls) -> CompilationReport
 ```
 
 `compile_sync` and corresponding adapter conveniences may compose preparation
@@ -862,18 +880,24 @@ currentness state, publication, and Last Successful Compilation. It owns no
 authority, cache, watcher, subscription handle, clock, runtime, execution
 facility, transport, delivery adapter, or persistent store.
 
-Each accepted stabilized input carries one immutable `SessionPolicy` with exact
-caller-selected or adapter-profile requested/admitted Compilation Resource
-Limits. Accept performs bounded preparation synchronously and purely. It creates
-either a request-rejection candidate or a Prepared Compilation; only the latter
-can own a Session Attempt Token. A typed Session Ingestion Failure carries its
-failed request-source scopes and policy but is tokenless and never prepares.
+Each accepted stabilized input carries one immutable `SessionPolicy`. Its
+`SessionPreparation` records caller-selected or adapter-profile origin and the
+exact one-shot Compilation Preparation Policy and Limits. It does not carry or
+derive from Compilation Resource Limits. Accept calls the same private pure
+preparation implementation as one-shot compilation and creates either a
+request-rejection candidate or a Prepared Compilation; only the latter can own a
+Session Attempt Token. A typed Session Ingestion Failure carries its failed
+request-source scopes and policy but is tokenless and never prepares.
 
 Session Instance, Revision, Evaluation, Attempt, Fence, Subscription Generation,
 and Publication Sequence are separate opaque values with routing and ordering
-accessors. Tokens are not externally constructible. One attempt plan binds its
-Prepared Compilation and a session-owned synchronously revocable supersession
-permit. Recording a newer accepted revision revokes eligibility before an
+accessors. Tokens are not externally constructible. `StartAttempt` carries only
+one attempt plan; that plan binds its token, Prepared Compilation, and a
+session-owned synchronously revocable supersession permit, so no public call can
+extract the Prepared Compilation or pair the plan with a second token. An
+admitted attempt returns `SessionAttemptCompletion`; callers cannot pair an
+independently obtained Compilation Report with a Session Attempt Token.
+Recording a newer accepted revision revokes eligibility before an
 `InterruptAttempt` effect wakes or kills work; the effect is not the
 linearization point.
 
@@ -883,8 +907,10 @@ late completion still clears the active slot and activates the latest pending
 revision even when the old evaluation cannot publish. Request rejection and
 ingestion failure need no slot and may reconcile while older work drains.
 A reportless attempt-admission refusal uses
-`AttemptAdmissionRefused { token, refusal }`: the reducer validates and clears
-only that token and starts latest eligible pending work. It emits no
+`AttemptAdmissionRefused(SessionAttemptAdmissionRefusal)`. The value can be
+created only by consuming the plan in its single fallible admission call, so the
+reducer validates and clears only its bound token and starts latest eligible
+pending work. It emits no
 `AttemptFinished`, fence, or publication and leaves currentness and Last
 Successful Compilation untouched.
 
@@ -906,8 +932,8 @@ The frozen event/effect vocabulary appears in the fixture:
 
 | Events | Effects |
 | --- | --- |
-| `Accept(Stabilized or IngestionFailure)` | `StartAttempt`, `InterruptAttempt` |
-| `AttemptFinished`, `AttemptAdmissionRefused`, `AttemptReleased` | `ReadFence` only for a report candidate; refusal only frees the slot and may `StartAttempt` |
+| `Accept(Stabilized or IngestionFailure)` | `StartAttempt { plan }`, `InterruptAttempt` |
+| `AttemptFinished(SessionAttemptCompletion)`, `AttemptAdmissionRefused(SessionAttemptAdmissionRefusal)`, `AttemptReleased` | `ReadFence` only for a report candidate; refusal only frees the slot and may `StartAttempt` |
 | `FenceReadFinished` | `ArmSubscriptions` |
 | `SubscriptionsArmed` | `ConfirmFence` |
 | `FenceConfirmed` | `Publish`, then `RetireSubscriptions` |
@@ -1017,16 +1043,19 @@ let creation_limits = creation::CreationResourceLimits::try_new(
 let admitted_creation_limits =
     AdmittedOperationResourceLimits::try_caller_selected(creation_limits)?;
 
+let creation_resources = creation::CreationResourceLedger::try_new(
+    admitted_creation_limits,
+)?;
 let project = creation::ProjectSnapshot::try_from_files(
     &admission,
-    &admitted_creation_limits,
+    &creation_resources,
     ProjectPath::parse(&admission, "main.typ")?,
     [(ProjectPath::parse(&admission, "main.typ")?,
       StableByteValue::from_static(&admission, b"Hello")?)],
 )?;
 
 let request = creation::CreationRequest::try_new(
-    &admitted_creation_limits,
+    creation_resources.limits(),
     project,
     [creation::DiscoveryVariant::paged_explicit_empty()],
     creation::PackageEmbeddingPolicy::embed_all(),
@@ -1040,7 +1069,7 @@ let input = creation::CreationInput::try_new(request, evidence)?;
 
 let creation_controls = creation::SyncCreationControls::try_admit(
     admission.clone(),
-    admitted_creation_limits,
+    creation_resources,
     &creation_evidence,
     &package_authority,
     &font_authority,
@@ -1071,6 +1100,38 @@ let compilation_controls = compilation::SyncCompilationControls::try_admit(
     Some(&interruption),
 )?;
 let report = compilation::run_sync(compilation_controls);
+```
+
+A session reuses the same preparation contract but admits a plan exactly once:
+
+```rust,ignore
+let preparation = session::SessionPreparation::from_adapter_profile(
+    profile,
+    preparation_policy,
+    preparation_limits,
+);
+let policy = session::SessionPolicy::latest_only_complete_coverage(preparation);
+
+if let session::SessionEffect::StartAttempt { plan } = effect {
+    match plan.try_admit_sync(
+        admission,
+        admitted_compilation_limits,
+        &package_authority,
+        &font_authority,
+        semantic_cache,
+        compilation_operation_request,
+        &clock,
+        Some(&interruption),
+    ) {
+        Err(refusal) => session.apply(
+            session::SessionEvent::AttemptAdmissionRefused(refusal),
+        )?,
+        Ok(attempt) => {
+            let completion = attempt.run_sync();
+            session.apply(session::SessionEvent::AttemptFinished(completion))?
+        }
+    };
+}
 ```
 
 An asynchronous browser worker uses the same authority contracts with local,

@@ -32,3 +32,4 @@ graphql-parser = "=0.4.1"
 jsonschema = { version = "=0.48.2", default-features = false }
 serde = "=1.0.228"
 serde_json = "=1.0.150"
+syn = { version = "=2.0.119", features = ["full"] }

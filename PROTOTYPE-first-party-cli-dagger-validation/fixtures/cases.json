@@ -56,6 +56,7 @@
     {"id": "session-request-rejection-attempt-poison", "definition": "session_publication", "builder": "session_request_rejection_with_attempt", "valid": false},
     {"id": "session-ingestion-failure-tokenless", "definition": "session_publication", "builder": "session_ingestion_failure", "valid": true},
     {"id": "session-ingestion-failure-attempt-poison", "definition": "session_publication", "builder": "session_ingestion_failure_with_attempt", "valid": false},
+    {"id": "session-ingestion-old-broad-preparation-poison", "definition": "session_publication", "builder": "session_ingestion_old_broad_preparation", "valid": false},
     {"id": "session-running", "definition": "session_state_projection", "builder": "session_running", "valid": true},
     {"id": "session-retiring", "definition": "session_state_projection", "builder": "session_retiring", "valid": true},
     {"id": "session-retired-last-success", "definition": "session_state_projection", "builder": "session_retired_last_success", "valid": true},
@@ -86,7 +87,8 @@
     {"id": "hostile-compilation-refusal-poison", "definition": "compilation_admission_refusal", "builder": "hostile_compilation_refusal", "valid": false},
     {"id": "hostile-compilation-report-poison", "definition": "compilation_report", "builder": "hostile_compilation_report", "valid": false},
     {"id": "hostile-transport-receipt-poison", "definition": "spool_transport_receipt", "builder": "hostile_transport_receipt", "valid": false},
-    {"id": "hostile-format-receipt-poison", "definition": "archive_read_receipt", "builder": "representation_hostile", "valid": false}
+    {"id": "hostile-format-receipt-poison", "definition": "archive_read_receipt", "builder": "representation_hostile", "valid": false},
+    {"id": "create-reached-packages-required-poison", "definition": "create_operation", "builder": "create_report_missing_reached_packages", "valid": false}
   ],
   "semantic_generated_cases": [
     {"id": "create-automatic-jobs-width-equality", "definition": "create_operation", "builder": "create_report", "semantic": "automatic_jobs", "valid": true},
@@ -106,6 +108,8 @@
     {"id": "compile-exact-report-admitted-width-poison", "definition": "compile_operation", "builder": "compile_report_exact_report_admitted_width_poison", "semantic": "exact_jobs", "valid": false},
     {"id": "compile-exact-domain-width-poison", "definition": "compile_operation", "builder": "compile_report_exact_domain_width_poison", "semantic": "exact_jobs", "valid": false},
     {"id": "create-exact-admission-refusal-width-equality", "definition": "create_operation", "builder": "create_refusal_exact", "semantic": "exact_refusal", "valid": true},
+    {"id": "session-preparation-matches-profile", "definition": "session_publication", "builder": "session_ingestion_failure", "semantic": "session_preparation", "valid": true},
+    {"id": "session-preparation-profile-mismatch-poison", "definition": "session_publication", "builder": "session_preparation_profile_mismatch", "semantic": "session_preparation", "valid": false},
     {"id": "watch-delivery-fenced", "definition": "watch_delivery", "builder": "watch_delivery", "semantic": "watch_delivery", "valid": true},
     {"id": "watch-delivery-session-mismatch-poison", "definition": "watch_delivery", "builder": "watch_delivery_session_mismatch", "semantic": "watch_delivery", "valid": false},
     {"id": "watch-delivery-result-mismatch-poison", "definition": "watch_delivery", "builder": "watch_delivery_result_mismatch", "semantic": "watch_delivery", "valid": false}
@@ -160,11 +164,12 @@
     {"leaf": "dagger.creation.status", "source_class": "adapter_derivation", "source": "closed creation operation branch mapping", "schema_pointer": "/$defs/create_operation/oneOf"},
     {"leaf": "schema.major", "source_class": "constant", "source": "adapter schema major 1", "schema_pointer": "/$defs/output_schema/properties/major/const"},
     {"leaf": "creation.request.font_scan_policy", "source_class": "rust_accessor", "source": "CreationOperationRequest::font_scan_policy", "probe_marker": "creation.request.font_scan_policy"},
-    {"leaf": "creation.resources.aggregate", "source_class": "rust_accessor", "source": "CreationResourceReachedView", "probe_marker": "creation.resources.aggregate"},
+    {"leaf": "creation.resources.reached", "source_class": "rust_accessor", "source": "complete CreationResourceReachedView", "probe_marker": "creation.resources.reached"},
     {"leaf": "operation.capability_scopes", "source_class": "rust_accessor", "source": "role-specific requested/admitted/reached scope projections", "probe_marker": "operation.capability_scopes"},
     {"leaf": "compilation.domain.not_selected", "source_class": "rust_accessor", "source": "EngineRuntimeDomainSelectionView::NotSelected", "probe_marker": "compilation.domain.not_selected"},
     {"leaf": "compilation.admission.prepared_identity", "source_class": "rust_accessor", "source": "CompilationAdmissionRefusal::compilation_identity", "probe_marker": "compilation.admission.prepared_identity"},
-    {"leaf": "session.attempt_admission_refused", "source_class": "rust_accessor", "source": "SessionEvent::AttemptAdmissionRefused", "probe_marker": "session.attempt_admission_refused"},
+    {"leaf": "session.attempt_admission_refused", "source_class": "rust_accessor", "source": "SessionAttemptAdmissionRefusal", "probe_marker": "session.attempt_admission_refused"},
+    {"leaf": "session.preparation.exact", "source_class": "rust_accessor", "source": "SessionPolicy exact preparation accessors", "probe_marker": "session.preparation.exact"},
     {"leaf": "publication.format.transport_refusal.reason", "source_class": "rust_accessor", "source": "PublicationFormatAdmissionDispositionView::Refused", "probe_marker": "publication.format.transport_refusal.reason"},
     {"leaf": "transport.receipt.refusal.stage", "source_class": "rust_accessor", "source": "TransportAdmissionRefusalView::stage", "probe_marker": "transport.receipt.refusal.stage"},
     {"leaf": "transport.receipt.stage_ledger.object_count", "source_class": "rust_accessor", "source": "TransportStageLedgerView::object_count", "probe_marker": "transport.receipt.stage_ledger.object_count"},
@@ -193,7 +198,9 @@
     {"id": "font-policy-from-profile", "target_leaf": "creation.request.font_scan_policy", "attempted_source": "adapter profile default"},
     {"id": "domain-from-worker-placement", "target_leaf": "compilation.domain.not_selected", "attempted_source": "worker placement"},
     {"id": "publication-reason-coercion", "target_leaf": "publication.format.transport_refusal.reason", "attempted_source": "Representation Admission Refusal reason"},
-    {"id": "cleanup-outcome-from-requirement", "target_leaf": "transport.cleanup_outcome", "attempted_source": "requested cleanup requirement"}
+    {"id": "cleanup-outcome-from-requirement", "target_leaf": "transport.cleanup_outcome", "attempted_source": "requested cleanup requirement"},
+    {"id": "creation-reached-from-admitted", "target_leaf": "creation.resources.reached", "attempted_source": "admitted creation limits"},
+    {"id": "session-preparation-from-compilation-profile", "target_leaf": "session.preparation.exact", "attempted_source": "broader compilation operation limits"}
   ],
   "html_contract": {
     "forbidden_protocol_tokens": ["ReconciledEqual", "CompilationFinished", "AttemptCompleted", "FencePassed", "SubscriptionsReady"],

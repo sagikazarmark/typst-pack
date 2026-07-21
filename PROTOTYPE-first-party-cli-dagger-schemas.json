@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://typst-pack.example/spec/first-party-adapter-schemas.json",
-  "title": "PROTOTYPE final first-party adapter lifecycle schema bundle",
+  "title": "PROTOTYPE corrected final first-party adapter lifecycle schema bundle",
   "anyOf": [
     {
       "$ref": "#/$defs/discovery_variant"
@@ -1359,6 +1359,7 @@
         "pack_ingress",
         "creation",
         "compilation",
+        "compilation_preparation",
         "representation",
         "spool",
         "transport",
@@ -1437,6 +1438,9 @@
         },
         "compilation": {
           "$ref": "#/$defs/resolved_compilation_limits"
+        },
+        "compilation_preparation": {
+          "$ref": "#/$defs/compilation_preparation_profile"
         },
         "representation": {
           "$ref": "#/$defs/resolved_representation_limits"
@@ -7970,15 +7974,22 @@
             },
             "reached": {
               "type": "object",
-              "required": ["project_files", "aggregate_project_bytes", "package_files", "package_tree_bytes", "font_containers", "font_bytes", "aggregate_file_bindings", "aggregate_logical_bytes", "override_count", "largest_override_bytes", "aggregate_override_bytes", "peak_stable_spool_bytes", "peak_retained_memory_bytes"],
+              "required": ["project_files", "aggregate_project_bytes", "largest_project_file_bytes", "packages", "package_files", "largest_package_file_bytes", "package_tree_bytes", "font_containers", "font_candidates", "font_faces", "font_bytes", "discovery_variants", "discovery_restarts", "aggregate_file_bindings", "aggregate_logical_bytes", "override_count", "largest_override_bytes", "aggregate_override_bytes", "peak_stable_spool_bytes", "peak_retained_memory_bytes"],
               "additionalProperties": false,
               "properties": {
                 "project_files": {"$ref": "#/$defs/decimal"},
                 "aggregate_project_bytes": {"$ref": "#/$defs/decimal"},
+                "largest_project_file_bytes": {"$ref": "#/$defs/decimal"},
+                "packages": {"$ref": "#/$defs/decimal"},
                 "package_files": {"$ref": "#/$defs/decimal"},
+                "largest_package_file_bytes": {"$ref": "#/$defs/decimal"},
                 "package_tree_bytes": {"$ref": "#/$defs/decimal"},
                 "font_containers": {"$ref": "#/$defs/decimal"},
+                "font_candidates": {"$ref": "#/$defs/decimal"},
+                "font_faces": {"$ref": "#/$defs/decimal"},
                 "font_bytes": {"$ref": "#/$defs/decimal"},
+                "discovery_variants": {"$ref": "#/$defs/decimal"},
+                "discovery_restarts": {"$ref": "#/$defs/decimal"},
                 "aggregate_file_bindings": {"$ref": "#/$defs/decimal"},
                 "aggregate_logical_bytes": {"$ref": "#/$defs/decimal"},
                 "override_count": {"$ref": "#/$defs/decimal"},
@@ -11712,6 +11723,15 @@
         "aggregate_override_bytes": {"$ref": "#/$defs/decimal"},
         "diagnostic_entries": {"$ref": "#/$defs/decimal"},
         "diagnostic_entry_bytes": {"$ref": "#/$defs/decimal"}
+      }
+    },
+    "compilation_preparation_profile": {
+      "type": "object",
+      "required": ["policy", "limits"],
+      "additionalProperties": false,
+      "properties": {
+        "policy": {"$ref": "#/$defs/compilation_preparation_policy"},
+        "limits": {"$ref": "#/$defs/compilation_preparation_limits"}
       }
     },
     "request_rejection": {
@@ -19776,24 +19796,29 @@
           ]
         },
         "preparation": {
-          "type": "object",
-          "required": [
-            "resource_profile",
-            "requested_limits",
-            "admitted_limits"
-          ],
-          "additionalProperties": false,
-          "properties": {
-            "resource_profile": {
-              "$ref": "#/$defs/profile_reference"
+          "oneOf": [
+            {
+              "type": "object",
+              "required": ["origin", "policy", "limits"],
+              "additionalProperties": false,
+              "properties": {
+                "origin": {"const": "caller_selected"},
+                "policy": {"$ref": "#/$defs/compilation_preparation_policy"},
+                "limits": {"$ref": "#/$defs/compilation_preparation_limits"}
+              }
             },
-            "requested_limits": {
-              "$ref": "#/$defs/resolved_compilation_limits"
-            },
-            "admitted_limits": {
-              "$ref": "#/$defs/resolved_compilation_limits"
+            {
+              "type": "object",
+              "required": ["origin", "resource_profile", "policy", "limits"],
+              "additionalProperties": false,
+              "properties": {
+                "origin": {"const": "adapter_profile"},
+                "resource_profile": {"$ref": "#/$defs/profile_reference"},
+                "policy": {"$ref": "#/$defs/compilation_preparation_policy"},
+                "limits": {"$ref": "#/$defs/compilation_preparation_limits"}
+              }
             }
-          }
+          ]
         }
       }
     },

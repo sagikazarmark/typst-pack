@@ -1382,7 +1382,8 @@ fn drive_session_effect(
     effect: SessionEffect,
 ) {
     match effect {
-        SessionEffect::StartAttempt { plan, .. } => {
+        SessionEffect::StartAttempt { plan } => {
+            let _ = plan.token().ordinal();
             let _ = plan.prepared_identity();
             let _ = plan.revision();
             let _ = plan.evaluation();
@@ -1558,8 +1559,8 @@ fn inspect_session_transition(
         Ok(tp::session::SessionTransition::Applied(effects)) => {
             for effect in effects {
                 match effect {
-                    SessionEffect::StartAttempt { token, plan } => {
-                        let _ = (token.ordinal(), plan.prepared_identity());
+                    SessionEffect::StartAttempt { plan } => {
+                        let _ = (plan.token().ordinal(), plan.prepared_identity());
                     }
                     SessionEffect::InterruptAttempt { token } => {
                         let _ = token.ordinal();
@@ -2334,14 +2335,31 @@ fn inspect_creation_report(report: &tp::creation::CreationReport) {
         admission.admitted_isolation,
     );
     let resources = inventory.resources();
+    let reached = resources.reached;
     let _ = (
         resources.profile,
         resources.requested,
         resources.admitted,
-        resources.reached.aggregate_file_bindings,
-        resources.reached.aggregate_logical_bytes,
-        resources.reached.peak_stable_spool_bytes,
-        resources.reached.peak_retained_memory_bytes,
+        reached.project_files,
+        reached.aggregate_project_bytes,
+        reached.largest_project_file_bytes,
+        reached.packages,
+        reached.package_files,
+        reached.largest_package_file_bytes,
+        reached.package_tree_bytes,
+        reached.font_containers,
+        reached.font_candidates,
+        reached.font_faces,
+        reached.font_bytes,
+        reached.discovery_variants,
+        reached.discovery_restarts,
+        reached.aggregate_file_bindings,
+        reached.aggregate_logical_bytes,
+        reached.override_count,
+        reached.largest_override_bytes,
+        reached.aggregate_override_bytes,
+        reached.peak_stable_spool_bytes,
+        reached.peak_retained_memory_bytes,
     );
     let dependencies = inventory.dependency_execution();
     let _ = (
@@ -3455,12 +3473,30 @@ fn typecheck_session_inputs(
     admission: OrdinaryAdmission,
     pack: &tp::Pack,
     request: CompilationRequest,
-    limits: CompilationResourceLimits,
+    _limits: CompilationResourceLimits,
 ) {
-    let preparation =
-        tp::session::SessionPreparationLimits::try_caller_selected(limits.clone()).unwrap();
+    let preparation_policy = CompilationPreparationPolicy {
+        reject_unknown_engine_features: true,
+        require_canonical_diagnostic_policy: true,
+    };
+    let preparation_limits = CompilationPreparationLimits {
+        override_count: 100_000,
+        largest_override_bytes: 536_870_912,
+        aggregate_override_bytes: 4_294_967_296,
+        diagnostic_entries: 20_000,
+        diagnostic_entry_bytes: 67_108_864,
+    };
+    let preparation = tp::session::SessionPreparation::caller_selected(
+        preparation_policy.clone(),
+        preparation_limits.clone(),
+    );
     let policy = tp::session::SessionPolicy::latest_only_complete_coverage(preparation);
-    let _ = policy.mode();
+    let _ = (
+        policy.mode(),
+        policy.preparation_resource_profile(),
+        policy.preparation_policy(),
+        policy.preparation_limits(),
+    );
     let stabilized = tp::session::StabilizedSessionInput::try_new(
         request,
         tp::session::SessionRequestEvidence::caller_owned_immutable(),
@@ -3473,7 +3509,7 @@ fn typecheck_session_inputs(
     )));
 
     let failure_policy = tp::session::SessionPolicy::latest_only_allow_unverified(
-        tp::session::SessionPreparationLimits::try_caller_selected(limits).unwrap(),
+        tp::session::SessionPreparation::caller_selected(preparation_policy, preparation_limits),
     );
     let scope = tp::session::EvidenceScope::try_new("org.example/request-source").unwrap();
     let failure = tp::session::SessionIngestionFailure::try_new(
@@ -3558,7 +3594,10 @@ fn inspect_session_view(view: tp::session::SessionView<'_>) {
             tp::session::SessionPublicationTerminalRef::IngestionFailure(failure) => {
                 let _ = failure.safe_code();
                 let _ = failure.failed_request_sources().count();
-                let _ = failure.policy().preparation_limits().admitted();
+                let _ = (
+                    failure.policy().preparation_policy(),
+                    failure.policy().preparation_limits(),
+                );
             }
         }
     }
@@ -3573,15 +3612,86 @@ fn inspect_session_view(view: tp::session::SessionView<'_>) {
     }
 }
 
-fn execute_session_plan<
+fn execute_session_plan<'a, P, F, C>(
+    plan: tp::session::SessionAttemptPlan,
+    admission: OrdinaryAdmission,
+    limits: AdmittedOperationResourceLimits<CompilationResourceLimits>,
+    packages: &'a P,
+    fonts: &'a F,
+    semantic_cache: SyncSemanticCacheLookup<'a, C>,
+    request: tp::compilation::CompilationOperationRequest,
+    clock: &'a dyn MonotonicClock,
+    interruption: Option<&'a dyn InterruptionSource>,
+) -> Result<tp::session::SessionAttemptCompletion, tp::session::SessionAttemptAdmissionRefusal>
+where
     P: SyncPackageAuthority + ?Sized,
     F: SyncFontAuthority + ?Sized,
     C: SyncSemanticResultCache + ?Sized,
->(
+{
+    let admitted = plan.try_admit_sync(
+        admission,
+        limits,
+        packages,
+        fonts,
+        semantic_cache,
+        request,
+        clock,
+        interruption,
+    )?;
+    let operation_admission = admitted.operation_admission();
+    let _ = (
+        admitted.token(),
+        admitted.prepared_identity(),
+        admitted.supersession_permit(),
+        admitted.admitted_limits().admitted(),
+        operation_admission.operation_request,
+        operation_admission.resources.admitted(),
+        operation_admission.admission.admitted_trust,
+    );
+    let completion = admitted.run_sync();
+    let _ = (completion.token(), completion.report());
+    Ok(completion)
+}
+
+async fn execute_session_plan_async<'a, P, F, C, X>(
     plan: tp::session::SessionAttemptPlan,
-    controls: SyncCompilationControls<'_, P, F, C>,
-) {
-    let _ = plan.run_sync(controls);
+    admission: OrdinaryAdmission,
+    limits: AdmittedOperationResourceLimits<CompilationResourceLimits>,
+    packages: &'a P,
+    fonts: &'a F,
+    semantic_cache: tp::compilation::AsyncSemanticCacheLookup<'a, C>,
+    execution: &'a X,
+    request: tp::compilation::CompilationOperationRequest,
+    clock: &'a dyn MonotonicClock,
+    interruption: Option<&'a dyn InterruptionSource>,
+) -> Result<tp::session::SessionAttemptCompletion, tp::session::SessionAttemptAdmissionRefusal>
+where
+    P: tp::authority::AsyncPackageAuthority + ?Sized,
+    F: tp::authority::AsyncFontAuthority + ?Sized,
+    C: tp::compilation::AsyncSemanticResultCache + ?Sized,
+    X: tp::compilation::CompilationExecutionFacility + ?Sized,
+{
+    let admitted = plan.try_admit_async(
+        admission,
+        limits,
+        packages,
+        fonts,
+        semantic_cache,
+        execution,
+        request,
+        clock,
+        interruption,
+    )?;
+    let _ = (
+        admitted.token(),
+        admitted.prepared_identity(),
+        admitted.supersession_permit(),
+        admitted.admitted_limits().admitted(),
+        admitted.operation_admission().admission.admitted_trust,
+    );
+    let completion = admitted.run_async().await;
+    let _ = (completion.token(), completion.report());
+    Ok(completion)
 }
 
 fn inspect_remaining_transport_roles(

@@ -19,6 +19,8 @@ const DAGGER_PROFILE_FILE: &str = "PROTOTYPE-dagger-ci-profile.json";
 const GRAPHQL_FILE: &str = "PROTOTYPE-first-party-cli-dagger-generated.graphql";
 const HTML_FILE: &str = "PROTOTYPE-first-party-cli-dagger-contracts.html";
 const SERIALIZER_PROBE_FILE: &str = "PROTOTYPE-first-party-cli-dagger-serializer-probe.rs";
+const RUST_INTERFACE_FILE: &str = "PROTOTYPE-rust-lifecycle-adapter-interfaces.rs";
+const RUST_CONSUMER_FILE: &str = "PROTOTYPE-rust-lifecycle-adapter-consumer.rs";
 
 #[derive(Clone)]
 struct UniqueValue(Value);
@@ -203,6 +205,7 @@ fn run() -> CheckResult<()> {
 
     let mut summary = Summary::default();
     validate_schema_bundle(&schema, &mut summary)?;
+    validate_corrected_schema_contract(&schema)?;
     validate_profiles(&schema, &native, &dagger, &cases)?;
     validate_capability_constants(&schema, &cases, &mut summary)?;
     validate_schema_cases(&schema, &native, &dagger, &cases, &mut summary)?;
@@ -214,6 +217,11 @@ fn run() -> CheckResult<()> {
     validate_html(&html, &cases, &mut summary)?;
     let serializer_probe = read_utf8(&parent_path(SERIALIZER_PROBE_FILE))?;
     validate_source_manifest(&cases, &schema, &serializer_probe, &mut summary)?;
+    validate_creation_serializer_coverage(&serializer_probe)?;
+    let rust_interface = read_utf8(&parent_path(RUST_INTERFACE_FILE))?;
+    let rust_consumer = read_utf8(&parent_path(RUST_CONSUMER_FILE))?;
+    validate_corrected_rust_contract(&rust_interface, &rust_consumer)?;
+    validate_session_admission_vectors()?;
 
     println!("final contract validation: ok");
     println!(
@@ -459,6 +467,14 @@ fn validate_profiles(
                 ("/execution/creation/isolated_worker_capacity", "1"),
                 ("/creation/aggregate_file_bindings", "100000"),
                 ("/creation/aggregate_logical_bytes", "4294967296"),
+                (
+                    "/compilation_preparation/limits/diagnostic_entries",
+                    "20000",
+                ),
+                (
+                    "/compilation_preparation/limits/diagnostic_entry_bytes",
+                    "67108864",
+                ),
                 ("/pack_ingress/logical_file_bindings", "100000"),
                 ("/pack_ingress/logical_decoded_bytes", "4294967296"),
                 ("/pack_ingress/physical_blob_bytes", "4294967296"),
@@ -483,6 +499,14 @@ fn validate_profiles(
                 ("/execution/creation/isolated_worker_capacity", "2"),
                 ("/creation/aggregate_file_bindings", "100000"),
                 ("/creation/aggregate_logical_bytes", "8589934592"),
+                (
+                    "/compilation_preparation/limits/diagnostic_entries",
+                    "20000",
+                ),
+                (
+                    "/compilation_preparation/limits/diagnostic_entry_bytes",
+                    "67108864",
+                ),
                 ("/pack_ingress/logical_file_bindings", "100000"),
                 ("/pack_ingress/logical_decoded_bytes", "8589934592"),
                 ("/pack_ingress/physical_blob_bytes", "8589934592"),
@@ -540,6 +564,448 @@ fn validate_profiles(
             overlay.get("valid").and_then(Value::as_bool),
             &format!("overlay {id} tightening result"),
         )?;
+    }
+    Ok(())
+}
+
+fn validate_corrected_schema_contract(schema: &Value) -> CheckResult<()> {
+    let reached = strings_at(
+        schema,
+        "/$defs/creation_operational_inventory/properties/resources/properties/reached/required",
+    )?
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    let expected = [
+        "project_files",
+        "aggregate_project_bytes",
+        "largest_project_file_bytes",
+        "packages",
+        "package_files",
+        "largest_package_file_bytes",
+        "package_tree_bytes",
+        "font_containers",
+        "font_candidates",
+        "font_faces",
+        "font_bytes",
+        "discovery_variants",
+        "discovery_restarts",
+        "aggregate_file_bindings",
+        "aggregate_logical_bytes",
+        "override_count",
+        "largest_override_bytes",
+        "aggregate_override_bytes",
+        "peak_stable_spool_bytes",
+        "peak_retained_memory_bytes",
+    ]
+    .into_iter()
+    .collect::<BTreeSet<_>>();
+    if reached != expected {
+        return Err(format!(
+            "creation reached-resource schema is not lossless: expected {expected:?}, got {reached:?}"
+        ));
+    }
+
+    let session_preparation = schema
+        .pointer("/$defs/session_policy/properties/preparation/oneOf")
+        .and_then(Value::as_array)
+        .ok_or("session policy preparation is not a discriminated exact contract")?;
+    if session_preparation.len() != 2
+        || session_preparation.iter().any(|branch| {
+            branch
+                .pointer("/properties/policy/$ref")
+                .and_then(Value::as_str)
+                != Some("#/$defs/compilation_preparation_policy")
+                || branch
+                    .pointer("/properties/limits/$ref")
+                    .and_then(Value::as_str)
+                    != Some("#/$defs/compilation_preparation_limits")
+        })
+    {
+        return Err(
+            "session policy does not reuse the exact one-shot preparation contract".to_owned(),
+        );
+    }
+    Ok(())
+}
+
+fn validate_corrected_rust_contract(interface: &str, consumer: &str) -> CheckResult<()> {
+    for required in [
+        "pub struct SessionPreparation {",
+        "pub fn preparation_policy(",
+        "pub fn preparation_limits(",
+        "pub fn token(&self) -> &SessionAttemptToken",
+        "pub fn try_admit_sync<'a",
+        "pub fn try_admit_async<'a",
+        "pub struct SessionAttemptAdmissionRefusal",
+        "pub struct SessionAttemptCompletion",
+        "pub struct AdmittedSyncSessionAttempt",
+        "pub struct AdmittedAsyncSessionAttempt",
+        "AttemptAdmissionRefused(SessionAttemptAdmissionRefusal)",
+        "AttemptFinished(SessionAttemptCompletion)",
+        "pub struct CompilationOperationAdmissionRecordView",
+    ] {
+        if !interface.contains(required) {
+            return Err(format!("corrected Rust interface is missing `{required}`"));
+        }
+    }
+    for forbidden in [
+        "SessionPreparationLimits",
+        "bind_session(",
+        "StartAttempt {\n            token:",
+        "pub fn prepared(&self) -> &crate::PreparedCompilation",
+        "pub fn run_sync<P: ?Sized, F: ?Sized, C: ?Sized>(\n            self,\n            _controls:",
+    ] {
+        if interface.contains(forbidden) {
+            return Err(format!(
+                "corrected Rust interface retains forbidden `{forbidden}`"
+            ));
+        }
+    }
+
+    validate_session_rust_ast(interface)?;
+    for required in [
+        "SessionPreparation::caller_selected",
+        "plan.try_admit_sync(",
+        "plan.try_admit_async(",
+        "admitted.operation_admission()",
+        "let completion = admitted.run_sync()",
+        "let completion = admitted.run_async().await",
+        "completion.token()",
+        "completion.report()",
+    ] {
+        if !consumer.contains(required) {
+            return Err(format!("external consumer does not prove `{required}`"));
+        }
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct SessionRustAst {
+    plan_impls: usize,
+    plan_methods: BTreeSet<String>,
+    completion_impls: usize,
+    completion_methods: BTreeSet<String>,
+    completion_producers: BTreeSet<String>,
+    protected_aliases: Vec<String>,
+    protected_trait_impls: Vec<String>,
+    session_macros: Vec<String>,
+}
+
+fn validate_session_rust_ast(interface: &str) -> CheckResult<()> {
+    let file = syn::parse_file(interface)
+        .map_err(|error| format!("cannot parse corrected Rust interface: {error}"))?;
+    let mut audit = SessionRustAst::default();
+    inspect_rust_items(&file.items, &mut audit, false);
+
+    let expected_plan_methods = [
+        "token",
+        "revision",
+        "evaluation",
+        "policy",
+        "prepared_identity",
+        "supersession_permit",
+        "try_admit_sync",
+        "try_admit_async",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    if audit.plan_impls != 1 || audit.plan_methods != expected_plan_methods {
+        return Err(format!(
+            "SessionAttemptPlan interface differs: impls {}, methods {:?}",
+            audit.plan_impls, audit.plan_methods
+        ));
+    }
+
+    let expected_completion_methods = ["token", "report", "into_parts"]
+        .into_iter()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+    if audit.completion_impls != 1 || audit.completion_methods != expected_completion_methods {
+        return Err(format!(
+            "SessionAttemptCompletion interface differs: impls {}, methods {:?}",
+            audit.completion_impls, audit.completion_methods
+        ));
+    }
+
+    let expected_producers = [
+        "AdmittedAsyncSessionAttempt::run_async",
+        "AdmittedSyncSessionAttempt::run_sync",
+    ]
+    .into_iter()
+    .map(str::to_owned)
+    .collect::<BTreeSet<_>>();
+    if audit.completion_producers != expected_producers {
+        return Err(format!(
+            "SessionAttemptCompletion producers differ: expected {expected_producers:?}, got {:?}",
+            audit.completion_producers
+        ));
+    }
+    if !audit.protected_aliases.is_empty() {
+        return Err(format!(
+            "protected session types have aliases: {:?}",
+            audit.protected_aliases
+        ));
+    }
+    if !audit.protected_trait_impls.is_empty() {
+        return Err(format!(
+            "protected session types have public trait seams: {:?}",
+            audit.protected_trait_impls
+        ));
+    }
+    if !audit.session_macros.is_empty() {
+        return Err(format!(
+            "session module contains unaudited item macros: {:?}",
+            audit.session_macros
+        ));
+    }
+    Ok(())
+}
+
+fn inspect_rust_items(items: &[syn::Item], audit: &mut SessionRustAst, in_session: bool) {
+    for item in items {
+        match item {
+            syn::Item::Mod(module) => {
+                if let Some((_, items)) = &module.content {
+                    inspect_rust_items(items, audit, in_session || module.ident == "session");
+                }
+            }
+            syn::Item::Impl(implementation) => {
+                let Some(owner) = rust_type_last_ident(&implementation.self_ty) else {
+                    continue;
+                };
+                let owner = owner.to_string();
+                if implementation.trait_.is_some()
+                    && matches!(
+                        owner.as_str(),
+                        "SessionAttemptPlan" | "SessionAttemptCompletion"
+                    )
+                {
+                    audit.protected_trait_impls.push(owner);
+                    continue;
+                }
+                if implementation.trait_.is_some() {
+                    continue;
+                }
+                if owner == "SessionAttemptPlan" {
+                    audit.plan_impls += 1;
+                }
+                if owner == "SessionAttemptCompletion" {
+                    audit.completion_impls += 1;
+                }
+                for member in &implementation.items {
+                    let syn::ImplItem::Fn(method) = member else {
+                        continue;
+                    };
+                    if matches!(method.vis, syn::Visibility::Public(_)) {
+                        if owner == "SessionAttemptPlan" {
+                            audit.plan_methods.insert(method.sig.ident.to_string());
+                        }
+                        if owner == "SessionAttemptCompletion" {
+                            audit
+                                .completion_methods
+                                .insert(method.sig.ident.to_string());
+                        }
+                        if rust_return_contains(&method.sig.output, "SessionAttemptCompletion") {
+                            audit
+                                .completion_producers
+                                .insert(format!("{owner}::{}", method.sig.ident));
+                        }
+                    }
+                }
+            }
+            syn::Item::Fn(function) if matches!(function.vis, syn::Visibility::Public(_)) => {
+                if rust_return_contains(&function.sig.output, "SessionAttemptCompletion") {
+                    audit
+                        .completion_producers
+                        .insert(format!("fn::{}", function.sig.ident));
+                }
+            }
+            syn::Item::Type(alias) => {
+                if rust_type_contains(&alias.ty, "SessionAttemptPlan")
+                    || rust_type_contains(&alias.ty, "SessionAttemptCompletion")
+                {
+                    audit.protected_aliases.push(alias.ident.to_string());
+                }
+            }
+            syn::Item::Use(import) => {
+                inspect_use_aliases(&import.tree, audit);
+            }
+            syn::Item::Macro(item_macro) if in_session => {
+                audit.session_macros.push(
+                    item_macro
+                        .mac
+                        .path
+                        .segments
+                        .last()
+                        .map(|segment| segment.ident.to_string())
+                        .unwrap_or_else(|| "<unknown>".to_owned()),
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
+fn inspect_use_aliases(tree: &syn::UseTree, audit: &mut SessionRustAst) {
+    match tree {
+        syn::UseTree::Rename(rename)
+            if rename.ident == "SessionAttemptPlan"
+                || rename.ident == "SessionAttemptCompletion" =>
+        {
+            audit.protected_aliases.push(rename.rename.to_string());
+        }
+        syn::UseTree::Path(path) => inspect_use_aliases(&path.tree, audit),
+        syn::UseTree::Group(group) => {
+            for item in &group.items {
+                inspect_use_aliases(item, audit);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn rust_return_contains(output: &syn::ReturnType, expected: &str) -> bool {
+    match output {
+        syn::ReturnType::Default => false,
+        syn::ReturnType::Type(_, ty) => rust_type_contains(ty, expected),
+    }
+}
+
+fn rust_type_contains(ty: &syn::Type, expected: &str) -> bool {
+    match ty {
+        syn::Type::Path(path) => path.path.segments.iter().any(|segment| {
+            segment.ident == expected
+                || match &segment.arguments {
+                    syn::PathArguments::None => false,
+                    syn::PathArguments::AngleBracketed(arguments) => {
+                        arguments.args.iter().any(|argument| match argument {
+                            syn::GenericArgument::Type(ty) => rust_type_contains(ty, expected),
+                            syn::GenericArgument::AssocType(association) => {
+                                rust_type_contains(&association.ty, expected)
+                            }
+                            _ => false,
+                        })
+                    }
+                    syn::PathArguments::Parenthesized(arguments) => {
+                        arguments
+                            .inputs
+                            .iter()
+                            .any(|ty| rust_type_contains(ty, expected))
+                            || rust_return_contains(&arguments.output, expected)
+                    }
+                }
+        }),
+        syn::Type::Array(array) => rust_type_contains(&array.elem, expected),
+        syn::Type::BareFn(function) => rust_return_contains(&function.output, expected),
+        syn::Type::Group(group) => rust_type_contains(&group.elem, expected),
+        syn::Type::Paren(parenthesized) => rust_type_contains(&parenthesized.elem, expected),
+        syn::Type::Ptr(pointer) => rust_type_contains(&pointer.elem, expected),
+        syn::Type::Reference(reference) => rust_type_contains(&reference.elem, expected),
+        syn::Type::Slice(slice) => rust_type_contains(&slice.elem, expected),
+        syn::Type::Tuple(tuple) => tuple
+            .elems
+            .iter()
+            .any(|ty| rust_type_contains(ty, expected)),
+        _ => false,
+    }
+}
+
+fn rust_type_last_ident(ty: &syn::Type) -> Option<&syn::Ident> {
+    let syn::Type::Path(path) = ty else {
+        return None;
+    };
+    path.path.segments.last().map(|segment| &segment.ident)
+}
+
+fn validate_creation_serializer_coverage(serializer: &str) -> CheckResult<()> {
+    for field in [
+        "project_files",
+        "aggregate_project_bytes",
+        "largest_project_file_bytes",
+        "packages",
+        "package_files",
+        "largest_package_file_bytes",
+        "package_tree_bytes",
+        "font_containers",
+        "font_candidates",
+        "font_faces",
+        "font_bytes",
+        "discovery_variants",
+        "discovery_restarts",
+        "aggregate_file_bindings",
+        "aggregate_logical_bytes",
+        "override_count",
+        "largest_override_bytes",
+        "aggregate_override_bytes",
+        "peak_stable_spool_bytes",
+        "peak_retained_memory_bytes",
+    ] {
+        if !serializer.contains(&format!("reached.{field}")) {
+            return Err(format!(
+                "serializer probe omits reached Creation Resource field `{field}`"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_session_admission_vectors() -> CheckResult<()> {
+    #[derive(Clone, Copy)]
+    struct Plan<'a> {
+        token: &'a str,
+        prepared: &'a str,
+        permit: &'a str,
+        limits: &'a str,
+    }
+
+    fn bind<'a>(
+        plan: Plan<'a>,
+        admitted_prepared: &'a str,
+        admitted_limits: &'a str,
+    ) -> Option<Plan<'a>> {
+        (plan.prepared == admitted_prepared && plan.limits == admitted_limits).then_some(plan)
+    }
+
+    let plan = Plan {
+        token: "attempt-a1",
+        prepared: "compilation-c1",
+        permit: "permit-a1",
+        limits: "limits-l1",
+    };
+    let admitted = bind(plan, "compilation-c1", "limits-l1")
+        .ok_or("coherent session attempt admission was refused")?;
+    if admitted.token != "attempt-a1" || admitted.permit != "permit-a1" {
+        return Err("session attempt admission lost its token or supersession permit".to_owned());
+    }
+    if bind(plan, "compilation-c2", "limits-l1").is_some()
+        || bind(plan, "compilation-c1", "limits-l2").is_some()
+    {
+        return Err("session attempt admission accepted mixed plan facts".to_owned());
+    }
+
+    let mut active = Some("attempt-a1");
+    let pending = Some("attempt-a2");
+    let refused = "attempt-a1";
+    let mut report_count = 0_u64;
+    let mut publication_candidate = false;
+    if active == Some(refused) {
+        active = pending;
+    }
+    if active != Some("attempt-a2") || report_count != 0 || publication_candidate {
+        return Err(
+            "exact-token admission refusal fabricated or stranded session state".to_owned(),
+        );
+    }
+    let stale_refusal = "attempt-old";
+    if active == Some(stale_refusal) {
+        active = None;
+        report_count += 1;
+        publication_candidate = true;
+    }
+    if active != Some("attempt-a2") || report_count != 0 || publication_candidate {
+        return Err("stale admission refusal mutated the active session attempt".to_owned());
     }
     Ok(())
 }
@@ -608,6 +1074,29 @@ fn validate_profile_coherence(profile: &Value, label: &str) -> CheckResult<()> {
     )?;
     let largest_blob = profile_u64(profile, "/pack_ingress/largest_physical_blob_bytes", label)?;
     let control = profile_u64(profile, "/pack_ingress/control_record_bytes", label)?;
+
+    for field in [
+        "override_count",
+        "largest_override_bytes",
+        "aggregate_override_bytes",
+    ] {
+        if profile.pointer(&format!("/compilation_preparation/limits/{field}"))
+            != profile.pointer(&format!("/compilation/{field}"))
+        {
+            return Err(format!(
+                "{label}: preparation limit {field} is not the explicit profile projection"
+            ));
+        }
+    }
+    if profile.pointer("/compilation_preparation/limits/diagnostic_entries")
+        != profile.pointer("/canonical_diagnostic_policy/max_entries")
+        || profile.pointer("/compilation_preparation/limits/diagnostic_entry_bytes")
+            != profile.pointer("/canonical_diagnostic_policy/max_canonical_entry_bytes")
+    {
+        return Err(format!(
+            "{label}: preparation diagnostic limits do not match the canonical policy ceilings"
+        ));
+    }
 
     if archive_output > archive_ingress
         || closure_output > closure_ingress
@@ -1162,6 +1651,21 @@ fn build_generated_case(builder: &str, native: &Value, dagger: &Value) -> CheckR
                 .insert("attempt".to_owned(), json!("forbidden-attempt"));
             value
         }
+        "session_ingestion_old_broad_preparation" => {
+            let mut value = session_ingestion_failure(native);
+            value["ingestion_failure"]["policy"]["preparation"] = json!({
+                "resource_profile": profile_reference(),
+                "requested_limits": native["compilation"].clone(),
+                "admitted_limits": native["compilation"].clone()
+            });
+            value
+        }
+        "session_preparation_profile_mismatch" => {
+            let mut value = session_ingestion_failure(native);
+            value["ingestion_failure"]["policy"]["preparation"]["limits"]["override_count"] =
+                json!("100001");
+            value
+        }
         "session_running" => session_state("running", false),
         "session_retiring" => session_state("retiring", false),
         "session_retired_last_success" => session_state("retired", true),
@@ -1302,6 +1806,14 @@ fn build_generated_case(builder: &str, native: &Value, dagger: &Value) -> CheckR
             exact_width_poison(compile_operation_report_exact(native), "domain")
         }
         "create_refusal_exact" => create_operation_admission_refused_exact(native),
+        "create_report_missing_reached_packages" => {
+            let mut value = create_operation_report(native);
+            value["report"]["operational_inventory"]["resources"]["reached"]
+                .as_object_mut()
+                .expect("reached creation resources")
+                .remove("packages");
+            value
+        }
         "representation_hostile" => {
             let mut value = representation_unsupported(native);
             value["admission"]["requested"]["trust"] = json!("hostile");
@@ -1543,7 +2055,7 @@ fn creation_operational_inventory(native: &Value) -> Value {
         },
         "resources": {
             "profile": profile_reference(), "requested": native["creation"].clone(), "admitted": native["creation"].clone(),
-            "reached": {"project_files": "1", "aggregate_project_bytes": "8", "package_files": "0", "package_tree_bytes": "0", "font_containers": "0", "font_bytes": "0", "aggregate_file_bindings": "1", "aggregate_logical_bytes": "8", "override_count": "0", "largest_override_bytes": "0", "aggregate_override_bytes": "0", "peak_stable_spool_bytes": "0", "peak_retained_memory_bytes": "8"}
+            "reached": {"project_files": "1", "aggregate_project_bytes": "8", "largest_project_file_bytes": "8", "packages": "0", "package_files": "0", "largest_package_file_bytes": "0", "package_tree_bytes": "0", "font_containers": "0", "font_candidates": "0", "font_faces": "0", "font_bytes": "0", "discovery_variants": "1", "discovery_restarts": "0", "aggregate_file_bindings": "1", "aggregate_logical_bytes": "8", "override_count": "0", "largest_override_bytes": "0", "aggregate_override_bytes": "0", "peak_stable_spool_bytes": "0", "peak_retained_memory_bytes": "8"}
         },
         "dependency_execution": {
             "evidence": evidence_descriptor(), "packages": authority_descriptor("package_authority"), "fonts": authority_descriptor("font_authority"),
@@ -2393,8 +2905,8 @@ fn watch_delivery(native: &Value) -> Value {
 
 fn compilation_request_rejection(native: &Value) -> Value {
     json!({
-        "preparation_policy": {"reject_unknown_engine_features": true, "require_canonical_diagnostic_policy": true},
-        "preparation_limits": {"override_count": native["compilation"]["override_count"], "largest_override_bytes": native["compilation"]["largest_override_bytes"], "aggregate_override_bytes": native["compilation"]["aggregate_override_bytes"], "diagnostic_entries": native["compilation"]["diagnostic_projection_entries"], "diagnostic_entry_bytes": native["compilation"]["diagnostic_projection_bytes"]},
+        "preparation_policy": native["compilation_preparation"]["policy"].clone(),
+        "preparation_limits": native["compilation_preparation"]["limits"].clone(),
         "request_inventory": [],
         "issues": [{"code": "unsupported_feature", "role": "feature", "declaration_ordinal": "0", "referenced_inventory_ordinal": null}]
     })
@@ -2403,7 +2915,12 @@ fn compilation_request_rejection(native: &Value) -> Value {
 fn session_policy(native: &Value) -> Value {
     json!({
         "mode": "latest_only_complete_coverage",
-        "preparation": {"resource_profile": profile_reference(), "requested_limits": native["compilation"].clone(), "admitted_limits": native["compilation"].clone()}
+        "preparation": {
+            "origin": "adapter_profile",
+            "resource_profile": profile_reference(),
+            "policy": native["compilation_preparation"]["policy"].clone(),
+            "limits": native["compilation_preparation"]["limits"].clone()
+        }
     })
 }
 
@@ -2946,6 +3463,7 @@ fn validate_semantics(
             "automatic_jobs" => automatic_jobs_width_coherent(&instance),
             "exact_jobs" => exact_jobs_width_coherent(&instance),
             "exact_refusal" => exact_refusal_width_coherent(&instance),
+            "session_preparation" => session_preparation_profile_coherent(&instance, native),
             "no_hostile" => !contains_string(&instance, "hostile"),
             "watch_delivery" => watch_delivery_coherent(&instance),
             other => return Err(format!("{id}: unknown semantic validator `{other}`")),
@@ -3051,6 +3569,19 @@ fn exact_refusal_width_coherent(operation: &Value) -> bool {
             == Some("exact")
         && normalized.is_some()
         && normalized == requested
+}
+
+fn session_preparation_profile_coherent(publication: &Value, profile: &Value) -> bool {
+    let preparation = publication.pointer("/ingestion_failure/policy/preparation");
+    preparation
+        .and_then(|value| value.get("origin"))
+        .and_then(Value::as_str)
+        == Some("adapter_profile")
+        && preparation.and_then(|value| value.get("resource_profile")) == Some(&profile_reference())
+        && preparation.and_then(|value| value.get("policy"))
+            == profile.pointer("/compilation_preparation/policy")
+        && preparation.and_then(|value| value.get("limits"))
+            == profile.pointer("/compilation_preparation/limits")
 }
 
 fn contains_string(value: &Value, needle: &str) -> bool {
@@ -4227,7 +4758,7 @@ fn validate_html(source: &str, cases: &Value, summary: &mut Summary) -> CheckRes
         .iter()
         .find(|step| step.contains("id: \"admission-refusal-clear-token\""))
         .ok_or("HTML lacks exact attempt-admission-refusal trace step")?;
-    if !refusal_step.contains("event(\"AttemptAdmissionRefused\", { token: \"a1\"")
+    if !refusal_step.contains("event(\"AttemptAdmissionRefused\", { bound_token: \"a1\"")
         || !refusal_step.contains("effect(\"StartAttempt\", { token: \"a2\"")
         || refusal_step.contains("event(\"AttemptFinished\"")
         || refusal_step.contains("effect(\"ReadFence\"")
@@ -4640,6 +5171,18 @@ fn validate_source_manifest(
             "cleanup-outcome-from-requirement",
             "transport.cleanup_outcome",
             "requested cleanup requirement",
+            "rust_accessor",
+        ),
+        (
+            "creation-reached-from-admitted",
+            "creation.resources.reached",
+            "admitted creation limits",
+            "rust_accessor",
+        ),
+        (
+            "session-preparation-from-compilation-profile",
+            "session.preparation.exact",
+            "broader compilation operation limits",
             "rust_accessor",
         ),
     ];

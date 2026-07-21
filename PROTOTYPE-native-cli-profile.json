@@ -73,6 +73,19 @@
     "aggregate_diagnostic_source_bytes": "67108864",
     "diagnostic_source_metadata_bytes": "67108864"
   },
+  "compilation_preparation": {
+    "policy": {
+      "reject_unknown_engine_features": true,
+      "require_canonical_diagnostic_policy": true
+    },
+    "limits": {
+      "override_count": "100000",
+      "largest_override_bytes": "536870912",
+      "aggregate_override_bytes": "4294967296",
+      "diagnostic_entries": "20000",
+      "diagnostic_entry_bytes": "67108864"
+    }
+  },
   "representation": {
     "pack_archive": {"output_bytes": "1073741824"},
     "closure_export": {"payload_bytes": "4362076160"},

@@ -1,4 +1,4 @@
-# PROTOTYPE - final issue 78 target for the generated Dagger GraphQL contract.
+# PROTOTYPE - corrected issue 80 target for the generated Dagger GraphQL contract.
 #
 # This desired module projection is corrected against the regenerated Rust
 # fixture. It freezes names, kinds, references, list shapes, and nullability; it
@@ -117,7 +117,8 @@ type TypstPackPackCreation {
   status: TypstPackCreationStatus!
   # Non-null exactly when status is ADMISSION_REFUSED; stage is non-null inside.
   admissionRefusal: TypstPackAdmissionRefusal
-  # Complete corrected org.typst-pack.create-operation envelope, not an alias
+  # Complete corrected org.typst-pack.create-operation envelope, including every
+  # public reached creation-resource category; it is not an alias
   # for Creation Report. It preserves adapter failure, Creation Request
   # Rejection, Creation Admission Refusal, and admitted Creation Report branches.
   report: File!

@@ -1,4 +1,4 @@
-//! Compile-only serializer reachability probe for the final issue-78 contract.
+//! Compile-only serializer reachability probe for the corrected issue-80 contract.
 
 #![allow(dead_code)]
 
@@ -93,6 +93,8 @@ fn creation_report_sources(report: &tp::creation::CreationReport) {
     let dependencies = inventory.dependency_execution();
     let attempt = inventory.attempt_control();
     let reporting = inventory.reporting();
+    // final-source: creation.resources.reached
+    let reached = resources.reached;
     let _ = (
         admission.admitted_network,
         resources.admitted,
@@ -101,8 +103,26 @@ fn creation_report_sources(report: &tp::creation::CreationReport) {
         dependencies.fonts.class(),
         attempt.admitted_interruption,
         reporting.fine_engine_timing,
-        resources.reached.aggregate_file_bindings,
-        resources.reached.aggregate_logical_bytes,
+        reached.project_files,
+        reached.aggregate_project_bytes,
+        reached.largest_project_file_bytes,
+        reached.packages,
+        reached.package_files,
+        reached.largest_package_file_bytes,
+        reached.package_tree_bytes,
+        reached.font_containers,
+        reached.font_candidates,
+        reached.font_faces,
+        reached.font_bytes,
+        reached.discovery_variants,
+        reached.discovery_restarts,
+        reached.aggregate_file_bindings,
+        reached.aggregate_logical_bytes,
+        reached.override_count,
+        reached.largest_override_bytes,
+        reached.aggregate_override_bytes,
+        reached.peak_stable_spool_bytes,
+        reached.peak_retained_memory_bytes,
         dependencies.font_scan_policy.requested,
         dependencies.font_scan_policy.admitted,
         dependencies.reached_evidence_scope,
@@ -389,13 +409,13 @@ fn publication_sources(
 fn session_event_sources(event: &tp::session::SessionEvent) {
     // final-source: session.attempt_admission_refused
     // final-source: compilation.admission.prepared_identity
-    if let tp::session::SessionEvent::AttemptAdmissionRefused { token, refusal } = event {
+    if let tp::session::SessionEvent::AttemptAdmissionRefused(refusal) = event {
         let _ = (
-            token.session_instance(),
-            token.evaluation(),
-            refusal.stage(),
-            refusal.prepared(),
-            refusal.compilation_identity(),
+            refusal.token().session_instance(),
+            refusal.token().evaluation(),
+            refusal.refusal().stage(),
+            refusal.refusal().prepared(),
+            refusal.refusal().compilation_identity(),
         );
     }
 }
@@ -427,9 +447,13 @@ fn session_sources(view: tp::session::SessionView<'_>) {
             }
             tp::session::SessionPublicationTerminalRef::IngestionFailure(failure) => {
                 // final-source: session.publication.ingestion_failure
+                // final-source: session.preparation.exact
                 let _ = (
                     failure.safe_code(),
                     failure.failed_request_sources().count(),
+                    failure.policy().preparation_resource_profile(),
+                    failure.policy().preparation_policy(),
+                    failure.policy().preparation_limits(),
                 );
             }
         }

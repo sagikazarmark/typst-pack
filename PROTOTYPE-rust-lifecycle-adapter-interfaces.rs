@@ -5404,10 +5404,17 @@ pub mod creation {
     pub struct CreationResourceReachedView {
         pub project_files: u64,
         pub aggregate_project_bytes: u64,
+        pub largest_project_file_bytes: u64,
+        pub packages: u64,
         pub package_files: u64,
+        pub largest_package_file_bytes: u64,
         pub package_tree_bytes: u64,
         pub font_containers: u64,
+        pub font_candidates: u64,
+        pub font_faces: u64,
         pub font_bytes: u64,
+        pub discovery_variants: u64,
+        pub discovery_restarts: u64,
         pub aggregate_file_bindings: u64,
         pub aggregate_logical_bytes: u64,
         pub override_count: u64,
@@ -7328,6 +7335,12 @@ pub mod compilation {
         Admission,
     }
 
+    pub struct CompilationOperationAdmissionRecordView<'a> {
+        pub operation_request: &'a CompilationOperationRequest,
+        pub resources: &'a AdmittedOperationResourceLimits<CompilationResourceLimits>,
+        pub admission: CompilationAdmissionInventoryView<'a>,
+    }
+
     pub struct SyncCompilationControls<'a, P: ?Sized, F: ?Sized, C: ?Sized> {
         prepared: PreparedCompilation,
         admission: OrdinaryAdmission,
@@ -7362,11 +7375,13 @@ pub mod compilation {
             unimplemented!()
         }
 
-        pub(crate) fn bind_session(
-            self,
-            _permit: &crate::session::SessionSupersessionPermit,
-            _limits: &crate::session::SessionPreparationLimits,
-        ) -> Result<Self, CompilationAdmissionRefusal> {
+        pub fn admitted_limits(
+            &self,
+        ) -> &AdmittedOperationResourceLimits<CompilationResourceLimits> {
+            &self.limits
+        }
+
+        pub fn operation_admission(&self) -> CompilationOperationAdmissionRecordView<'_> {
             unimplemented!()
         }
     }
@@ -7408,11 +7423,13 @@ pub mod compilation {
             unimplemented!()
         }
 
-        pub(crate) fn bind_session(
-            self,
-            _permit: &crate::session::SessionSupersessionPermit,
-            _limits: &crate::session::SessionPreparationLimits,
-        ) -> Result<Self, CompilationAdmissionRefusal> {
+        pub fn admitted_limits(
+            &self,
+        ) -> &AdmittedOperationResourceLimits<CompilationResourceLimits> {
+            &self.limits
+        }
+
+        pub fn operation_admission(&self) -> CompilationOperationAdmissionRecordView<'_> {
             unimplemented!()
         }
     }
@@ -9428,22 +9445,23 @@ pub mod session {
     }
 
     #[derive(Clone, Debug)]
-    pub struct SessionPreparationLimits {
-        private: crate::private::SessionPreparationLimitsState,
+    pub struct SessionPreparation {
+        private: crate::private::SessionPreparationState,
     }
 
-    impl SessionPreparationLimits {
-        pub fn try_caller_selected(
-            _limits: crate::compilation::CompilationResourceLimits,
-        ) -> Result<Self, crate::AdmissionRefusal> {
+    impl SessionPreparation {
+        pub fn caller_selected(
+            _policy: crate::compilation::CompilationPreparationPolicy,
+            _limits: crate::compilation::CompilationPreparationLimits,
+        ) -> Self {
             unimplemented!()
         }
 
-        pub fn try_from_adapter_profile(
+        pub fn from_adapter_profile(
             _profile: crate::ResourceProfileIdentity,
-            _requested: crate::compilation::CompilationResourceLimits,
-            _admitted: crate::compilation::CompilationResourceLimits,
-        ) -> Result<Self, crate::AdmissionRefusal> {
+            _policy: crate::compilation::CompilationPreparationPolicy,
+            _limits: crate::compilation::CompilationPreparationLimits,
+        ) -> Self {
             unimplemented!()
         }
 
@@ -9451,26 +9469,35 @@ pub mod session {
             unimplemented!()
         }
 
-        pub fn requested(&self) -> &crate::compilation::CompilationResourceLimits {
+        pub fn policy(&self) -> &crate::compilation::CompilationPreparationPolicy {
             unimplemented!()
         }
 
-        pub fn admitted(&self) -> &crate::compilation::CompilationResourceLimits {
+        pub fn limits(&self) -> &crate::compilation::CompilationPreparationLimits {
             unimplemented!()
         }
     }
 
     impl SessionPolicy {
-        pub fn latest_only_complete_coverage(_preparation: SessionPreparationLimits) -> Self {
+        pub fn latest_only_complete_coverage(_preparation: SessionPreparation) -> Self {
             unimplemented!()
         }
 
-        pub fn latest_only_allow_unverified(_preparation: SessionPreparationLimits) -> Self {
+        pub fn latest_only_allow_unverified(_preparation: SessionPreparation) -> Self {
             unimplemented!()
         }
 
-        pub fn preparation_limits(&self) -> &SessionPreparationLimits {
+        pub fn preparation(&self) -> &SessionPreparation {
             unimplemented!()
+        }
+        pub fn preparation_policy(&self) -> &crate::compilation::CompilationPreparationPolicy {
+            self.preparation().policy()
+        }
+        pub fn preparation_limits(&self) -> &crate::compilation::CompilationPreparationLimits {
+            self.preparation().limits()
+        }
+        pub fn preparation_resource_profile(&self) -> Option<&crate::ResourceProfileIdentity> {
+            self.preparation().resource_profile()
         }
         pub fn mode(&self) -> SessionPolicyMode {
             unimplemented!()
@@ -9656,14 +9683,8 @@ pub mod session {
         },
         Refresh,
         Retry,
-        AttemptFinished {
-            token: SessionAttemptToken,
-            report: CompilationReport,
-        },
-        AttemptAdmissionRefused {
-            token: SessionAttemptToken,
-            refusal: crate::compilation::CompilationAdmissionRefusal,
-        },
+        AttemptFinished(SessionAttemptCompletion),
+        AttemptAdmissionRefused(SessionAttemptAdmissionRefusal),
         AttemptReleased {
             token: SessionAttemptToken,
             release: SessionAttemptRelease,
@@ -9691,7 +9712,6 @@ pub mod session {
 
     pub enum SessionEffect {
         StartAttempt {
-            token: SessionAttemptToken,
             plan: SessionAttemptPlan,
         },
         InterruptAttempt {
@@ -9717,8 +9737,73 @@ pub mod session {
         },
     }
 
+    /// A plan's Prepared Compilation is deliberately sealed until this value is
+    /// consumed by one of its fallible admission methods.
+    ///
+    /// ```compile_fail
+    /// use typst_pack_interface::session::SessionAttemptPlan;
+    ///
+    /// fn bypass(plan: SessionAttemptPlan) {
+    ///     let _prepared = plan.prepared().clone();
+    /// }
+    /// ```
     pub struct SessionAttemptPlan {
         private: crate::private::SessionAttemptPlanState,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct SessionAttemptAdmissionRefusal {
+        token: SessionAttemptToken,
+        refusal: crate::compilation::CompilationAdmissionRefusal,
+    }
+
+    /// Successful session completion cannot be assembled from an independently
+    /// obtained report and a cloned token.
+    ///
+    /// ```compile_fail
+    /// use typst_pack_interface::CompilationReport;
+    /// use typst_pack_interface::session::{
+    ///     SessionAttemptCompletion, SessionAttemptToken, SessionEvent,
+    /// };
+    ///
+    /// fn fabricate(token: SessionAttemptToken, report: CompilationReport) -> SessionEvent {
+    ///     let completion = SessionAttemptCompletion::new(token, report);
+    ///     SessionEvent::AttemptFinished(completion)
+    /// }
+    /// ```
+    #[derive(Clone)]
+    pub struct SessionAttemptCompletion {
+        token: SessionAttemptToken,
+        report: CompilationReport,
+    }
+
+    impl SessionAttemptCompletion {
+        pub fn token(&self) -> &SessionAttemptToken {
+            &self.token
+        }
+        pub fn report(&self) -> &CompilationReport {
+            &self.report
+        }
+        pub fn into_parts(self) -> (SessionAttemptToken, CompilationReport) {
+            (self.token, self.report)
+        }
+    }
+
+    impl SessionAttemptAdmissionRefusal {
+        pub fn token(&self) -> &SessionAttemptToken {
+            &self.token
+        }
+        pub fn refusal(&self) -> &crate::compilation::CompilationAdmissionRefusal {
+            &self.refusal
+        }
+        pub fn into_parts(
+            self,
+        ) -> (
+            SessionAttemptToken,
+            crate::compilation::CompilationAdmissionRefusal,
+        ) {
+            (self.token, self.refusal)
+        }
     }
 
     #[derive(Clone)]
@@ -9733,6 +9818,9 @@ pub mod session {
     }
 
     impl SessionAttemptPlan {
+        pub fn token(&self) -> &SessionAttemptToken {
+            unimplemented!()
+        }
         pub fn revision(&self) -> &SessionRevision {
             unimplemented!()
         }
@@ -9745,17 +9833,24 @@ pub mod session {
         pub fn prepared_identity(&self) -> &crate::CompilationIdentity {
             unimplemented!()
         }
-        pub fn prepared(&self) -> &crate::PreparedCompilation {
-            unimplemented!()
-        }
         pub fn supersession_permit(&self) -> &SessionSupersessionPermit {
             unimplemented!()
         }
 
-        pub fn run_sync<P: ?Sized, F: ?Sized, C: ?Sized>(
+        #[allow(clippy::too_many_arguments)]
+        pub fn try_admit_sync<'a, P: ?Sized, F: ?Sized, C: ?Sized>(
             self,
-            _controls: crate::compilation::SyncCompilationControls<'_, P, F, C>,
-        ) -> CompilationReport
+            _admission: crate::OrdinaryAdmission,
+            _limits: crate::AdmittedOperationResourceLimits<
+                crate::compilation::CompilationResourceLimits,
+            >,
+            _packages: &'a P,
+            _fonts: &'a F,
+            _semantic_cache: crate::compilation::SyncSemanticCacheLookup<'a, C>,
+            _request: crate::compilation::CompilationOperationRequest,
+            _clock: &'a dyn crate::MonotonicClock,
+            _interruption: Option<&'a dyn crate::InterruptionSource>,
+        ) -> Result<AdmittedSyncSessionAttempt<'a, P, F, C>, SessionAttemptAdmissionRefusal>
         where
             P: crate::authority::SyncPackageAuthority,
             F: crate::authority::SyncFontAuthority,
@@ -9764,10 +9859,94 @@ pub mod session {
             unimplemented!()
         }
 
-        pub async fn run_async<P: ?Sized, F: ?Sized, C: ?Sized, X: ?Sized>(
+        #[allow(clippy::too_many_arguments)]
+        pub fn try_admit_async<'a, P: ?Sized, F: ?Sized, C: ?Sized, X: ?Sized>(
             self,
-            _controls: crate::compilation::AsyncCompilationControls<'_, P, F, C, X>,
-        ) -> CompilationReport
+            _admission: crate::OrdinaryAdmission,
+            _limits: crate::AdmittedOperationResourceLimits<
+                crate::compilation::CompilationResourceLimits,
+            >,
+            _packages: &'a P,
+            _fonts: &'a F,
+            _semantic_cache: crate::compilation::AsyncSemanticCacheLookup<'a, C>,
+            _execution: &'a X,
+            _request: crate::compilation::CompilationOperationRequest,
+            _clock: &'a dyn crate::MonotonicClock,
+            _interruption: Option<&'a dyn crate::InterruptionSource>,
+        ) -> Result<AdmittedAsyncSessionAttempt<'a, P, F, C, X>, SessionAttemptAdmissionRefusal>
+        where
+            P: crate::authority::AsyncPackageAuthority,
+            F: crate::authority::AsyncFontAuthority,
+            C: crate::compilation::AsyncSemanticResultCache,
+            X: crate::compilation::CompilationExecutionFacility,
+        {
+            unimplemented!()
+        }
+    }
+
+    pub struct AdmittedSyncSessionAttempt<'a, P: ?Sized, F: ?Sized, C: ?Sized> {
+        plan: SessionAttemptPlan,
+        controls: crate::compilation::SyncCompilationControls<'a, P, F, C>,
+    }
+
+    impl<'a, P: ?Sized, F: ?Sized, C: ?Sized> AdmittedSyncSessionAttempt<'a, P, F, C> {
+        pub fn token(&self) -> &SessionAttemptToken {
+            self.plan.token()
+        }
+        pub fn prepared_identity(&self) -> &crate::CompilationIdentity {
+            self.plan.prepared_identity()
+        }
+        pub fn supersession_permit(&self) -> &SessionSupersessionPermit {
+            self.plan.supersession_permit()
+        }
+        pub fn admitted_limits(
+            &self,
+        ) -> &crate::AdmittedOperationResourceLimits<crate::compilation::CompilationResourceLimits>
+        {
+            self.controls.admitted_limits()
+        }
+        pub fn operation_admission(
+            &self,
+        ) -> crate::compilation::CompilationOperationAdmissionRecordView<'_> {
+            self.controls.operation_admission()
+        }
+        pub fn run_sync(self) -> SessionAttemptCompletion
+        where
+            P: crate::authority::SyncPackageAuthority,
+            F: crate::authority::SyncFontAuthority,
+            C: crate::compilation::SyncSemanticResultCache,
+        {
+            unimplemented!()
+        }
+    }
+
+    pub struct AdmittedAsyncSessionAttempt<'a, P: ?Sized, F: ?Sized, C: ?Sized, X: ?Sized> {
+        plan: SessionAttemptPlan,
+        controls: crate::compilation::AsyncCompilationControls<'a, P, F, C, X>,
+    }
+
+    impl<'a, P: ?Sized, F: ?Sized, C: ?Sized, X: ?Sized> AdmittedAsyncSessionAttempt<'a, P, F, C, X> {
+        pub fn token(&self) -> &SessionAttemptToken {
+            self.plan.token()
+        }
+        pub fn prepared_identity(&self) -> &crate::CompilationIdentity {
+            self.plan.prepared_identity()
+        }
+        pub fn supersession_permit(&self) -> &SessionSupersessionPermit {
+            self.plan.supersession_permit()
+        }
+        pub fn admitted_limits(
+            &self,
+        ) -> &crate::AdmittedOperationResourceLimits<crate::compilation::CompilationResourceLimits>
+        {
+            self.controls.admitted_limits()
+        }
+        pub fn operation_admission(
+            &self,
+        ) -> crate::compilation::CompilationOperationAdmissionRecordView<'_> {
+            self.controls.operation_admission()
+        }
+        pub async fn run_async(self) -> SessionAttemptCompletion
         where
             P: crate::authority::AsyncPackageAuthority,
             F: crate::authority::AsyncFontAuthority,
@@ -10460,7 +10639,7 @@ mod private {
         ClosureExportPublisherCapabilityDescriptorState,
         CompilationDeliveryCapabilityDescriptorState,
         SpoolFacilityCapabilityDescriptorState,
-        SessionPreparationLimitsState,
+        SessionPreparationState,
         SessionInstanceIdentityState,
         SessionEvaluationState,
         SessionPublicationSequenceState,
