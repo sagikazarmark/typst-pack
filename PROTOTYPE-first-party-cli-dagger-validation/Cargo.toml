@@ -1,0 +1,30 @@
+[package]
+name = "typst-pack-issue-69-validation"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.92"
+publish = false
+autobins = false
+default-run = "issue-69-validator"
+
+[lib]
+name = "typst_pack_interface"
+path = "../PROTOTYPE-rust-lifecycle-adapter-interfaces.rs"
+
+[[bin]]
+name = "issue-69-validator"
+path = "src/main.rs"
+
+[[bin]]
+name = "prior-consumer-probe"
+path = "../PROTOTYPE-rust-lifecycle-adapter-consumer.rs"
+
+[[bin]]
+name = "serializer-source-probe"
+path = "../PROTOTYPE-first-party-cli-dagger-serializer-probe.rs"
+
+[dependencies]
+graphql-parser = "=0.4.1"
+jsonschema = { version = "=0.48.2", default-features = false }
+serde = "=1.0.228"
+serde_json = "=1.0.150"

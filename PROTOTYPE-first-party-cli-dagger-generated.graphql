@@ -1,15 +1,14 @@
-# PROTOTYPE - issue 63 reconciliation target for the generated Dagger GraphQL contract.
+# PROTOTYPE - issue 69 corrected target for the generated Dagger GraphQL contract.
 #
-# Under the no-external-v1 premise, this supersedes the unreleased issue-56
-# prototype in place.
-# This desired module projection freezes names, kinds, references, and
-# nullability; it is not evidence that implementation source was generated in
-# this planning branch. It is not Dang source or the complete Dagger core schema. Minimal File and
+# This desired module projection is corrected against final Rust fixture
+# 00cfca1. It freezes names, kinds, references, list shapes, and nullability; it
+# is still not evidence that implementation source or generated bindings exist.
+# It is not Dang source or the complete Dagger core schema. Minimal File and
 # Directory stubs preserve their actual OBJECT kind. The pinned engine exposes
 # main-object functions directly on Query and constructor arguments on
 # Query.with. File, Directory, CacheVolume, and custom-object inputs are IDs.
 # Source arguments with defaults are nullable here and are resolved by the
-# adapter contract.
+# adapter contract. Dagger intentionally has no watch or session surface.
 
 type File { id: ID! }
 type Directory { id: ID! }
@@ -83,6 +82,9 @@ type Query {
     trust: TypstPackTrustProfile
     limits: ID
     deadline: String
+    # Null and zero remain distinct requested values even though both select
+    # automatic width. Negative values are rejected during argument handling.
+    # The adapter jobs record is outer operation data, never Creation Report state.
     jobs: Int
   ): TypstPackPackCreation!
 
@@ -113,8 +115,9 @@ type TypstPackCompilationOutput { id: ID! }
 type TypstPackPackCreation {
   id: ID!
   status: TypstPackCreationStatus!
-  # Complete org.typst-pack.create-operation envelope, including the fixed
-  # adapter-owned font scan policy outside the nested core Creation Report.
+  # Complete corrected org.typst-pack.create-operation envelope, not an alias
+  # for Creation Report. It preserves adapter failure, Creation Request
+  # Rejection, Creation Admission Refusal, and admitted Creation Report branches.
   report: File!
   pack: TypstPackPack
   requirePack: TypstPackPack!
@@ -169,6 +172,9 @@ type TypstPackPack {
     trust: TypstPackTrustProfile
     limits: ID
     deadline: String
+    # Null and zero remain distinct requested values even though both select
+    # automatic width. Negative values are rejected during argument handling.
+    # The adapter jobs record is outer operation data, never Compilation Report state.
     jobs: Int
   ): TypstPackCompilation!
 }
@@ -176,10 +182,12 @@ type TypstPackPack {
 type TypstPackPackArchiveEncoding {
   id: ID!
   status: TypstPackRepresentationStatus!
-  # Complete org.typst-pack.representation-operation envelope.
+  # Complete corrected org.typst-pack.representation-operation envelope. Its
+  # nested Format Receipt retains refusal or reached outcome data.
   receipt: File!
   # Final only: NOT_APPLICABLE, SUCCEEDED, or FAILED; reducer intermediates are not wire values.
   stagingStatus: TypstPackStagingStatus!
+  # Paired container-local staging receipt; it never rewrites the operation.
   stagingReceipt: File!
   archive: File
   requireArchive: File!
@@ -188,10 +196,12 @@ type TypstPackPackArchiveEncoding {
 type TypstPackClosureExport {
   id: ID!
   status: TypstPackRepresentationStatus!
-  # Complete org.typst-pack.representation-operation envelope.
+  # Complete corrected org.typst-pack.representation-operation envelope. Its
+  # nested Format Receipt retains refusal or reached outcome data.
   receipt: File!
   # Final only: NOT_APPLICABLE, SUCCEEDED, or FAILED; reducer intermediates are not wire values.
   stagingStatus: TypstPackStagingStatus!
+  # Paired container-local staging receipt; it never rewrites the operation.
   stagingReceipt: File!
   tree: Directory
   requireTree: Directory!
@@ -200,10 +210,12 @@ type TypstPackClosureExport {
 type TypstPackProjectMaterialization {
   id: ID!
   status: TypstPackRepresentationStatus!
-  # Complete org.typst-pack.project-materialization-operation envelope.
+  # Complete corrected org.typst-pack.project-materialization-operation
+  # envelope. Its nested projection receipt retains refusal or reached data.
   receipt: File!
   # Final only: NOT_APPLICABLE, SUCCEEDED, or FAILED; reducer intermediates are not wire values.
   stagingStatus: TypstPackStagingStatus!
+  # Paired container-local staging receipt; it never rewrites the operation.
   stagingReceipt: File!
   project: Directory
   requireProject: Directory!
@@ -212,10 +224,17 @@ type TypstPackProjectMaterialization {
 type TypstPackCompilation {
   id: ID!
   status: TypstPackCompilationStatus!
+  # Complete corrected org.typst-pack.compilation-operation envelope. It keeps
+  # nullable requested jobs distinct from zero, records admitted jobs as an
+  # outer adapter fact, and preserves adapter failure, request rejection, and
+  # operational admission refusal before any Compilation Report exists.
   operation: File!
-  # Exact org.typst-pack.compilation-terminal projection envelope.
+  # Exact org.typst-pack.compilation-terminal projection envelope. Null for
+  # adapter failure and operational admission refusal; those stay inspectable
+  # through operation and do not fabricate a CompilationTerminal branch.
   terminal: File
-  # Report metadata wrapper with exact CompilationReportProjection in report_projection.
+  # Report metadata wrapper with exact CompilationReportProjection in
+  # report_projection. Null unless terminal is the Compilation Report branch.
   report: File
   compilationIdentity: String
   resultIdentity: String
@@ -226,7 +245,13 @@ type TypstPackCompilation {
   requireSuccess: Directory!
 }
 
-enum TypstPackCreationStatus { ADAPTER_FAILED PACK_ISSUED FAILED }
+enum TypstPackCreationStatus {
+  ADAPTER_FAILED
+  REQUEST_REJECTED
+  ADMISSION_REFUSED
+  CREATION_FAILED
+  PACK_ISSUED
+}
 
 enum TypstPackPackIngressStatus {
   ADAPTER_FAILED
@@ -258,6 +283,7 @@ enum TypstPackRepresentationStatus {
 enum TypstPackCompilationStatus {
   ADAPTER_FAILED
   REQUEST_REJECTED
+  ADMISSION_REFUSED
   RESULT_SUCCEEDED
   RESULT_REJECTED
   OPERATION_FAILED

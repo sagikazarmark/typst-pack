@@ -1,30 +1,38 @@
-# PROTOTYPE: Issue 63 First-Party CLI and Dagger Reconciliation
+# PROTOTYPE: Issue 69 First-Party Adapter Regeneration
 
 > Throwaway design artifact for
-> [Reconcile the first-party adapter schemas and profiles](https://github.com/sagikazarmark/typst-pack/issues/63).
+> [Regenerate first-party adapters and watch semantics](https://github.com/sagikazarmark/typst-pack/issues/69).
 > It is an implementation-planning contract, not production code and not a
 > compatibility promise for the current 0.3 surfaces.
 > Under the standing premise that no external or persisted v1 consumer exists,
-> this issue-63 reconciliation supersedes the unreleased issue-56 prototype in
-> place rather than introducing a compatibility branch or a new schema major.
+> this issue-69 prototype corrects the final issue-63 adapter baseline at
+> `43f2af9` in place against the final Rust narrative and fixture at `00cfca1`.
+> The strict adapter contract and every adapter schema remain major/version 1;
+> there are no compatibility aliases, legacy branches, or dual serializers.
 
-Companion primary sources:
+Companion planning fixtures:
 
 - [`PROTOTYPE-first-party-cli-dagger-generated.graphql`](./PROTOTYPE-first-party-cli-dagger-generated.graphql)
-  freezes Dagger generated names and nullability.
+  declares the generated-surface target; it is not evidence that the actual
+  implementation currently generates it.
 - [`PROTOTYPE-first-party-cli-dagger-schemas.json`](./PROTOTYPE-first-party-cli-dagger-schemas.json)
-  freezes auxiliary inputs, stable JSON fields, union branches, and nullability.
+  declares the strict schema target to validate against this corrected contract.
 - [`PROTOTYPE-native-cli-profile.json`](./PROTOTYPE-native-cli-profile.json) and
   [`PROTOTYPE-dagger-ci-profile.json`](./PROTOTYPE-dagger-ci-profile.json) freeze
   every first-party numeric default.
 - [`PROTOTYPE-first-party-cli-dagger-contracts.html`](./PROTOTYPE-first-party-cli-dagger-contracts.html)
-  exercises the terminal, staging, delivery, and watch state model.
+  is a throwaway trace viewer over the final Rust session vocabulary. It renders
+  checked immutable scenarios and deliberately implements no second reducer.
+- [`PROTOTYPE-first-party-cli-dagger-validation`](./PROTOTYPE-first-party-cli-dagger-validation)
+  is the locked replayable validation harness. Its Cargo targets contain compile
+  probes for the final Rust fixture, prior consumer, mechanically linked
+  serializer-source markers, and validator.
 
 ## Question
 
-What exact CLI flags and auxiliary schemas, stable JSON envelopes, Dagger
-generated names and nullability, representation controls, report behavior,
-trust and watch controls, and publication controls make the accepted
+What exact CLI flags, strict version-1 adapter projections, bound capability
+descriptors, Dagger names and nullability, representation and transport
+receipts, report behavior, and final-Rust watch semantics make the accepted
 six-command CLI and typed Dagger object model implementation-ready?
 
 ## Verdict
@@ -40,9 +48,17 @@ Freeze two first-party adapters over one lifecycle:
   has no watch, terminal, stdout, viewer, host-path, or Hostile facade.
 - Both adapters emit the same versioned projection families. These are adapter
   documents, not serialized Rust values and not Pack Format epochs.
+- Every wire leaf is auditable to one Rust accessor or discriminated branch, one
+  explicit adapter input, one closed adapter derivation declared by this
+  contract, or one schema constant. Profiles, concrete types, placement labels,
+  and success status are never substitute evidence for a requested, admitted,
+  selected, or reached fact.
 - Expected failures remain queryable. Only Dagger `requirePack`,
   `requireArchive`, `requireTree`, `requireProject`, and `requireSuccess`
   deliberately raise for modeled outcomes.
+- Creation request-construction failure is the outer typed
+  `CreationRequestRejection`; it precedes operation admission and can never be
+  represented as a `CreationReport`.
 - Compilation Request Rejection has no fabricated Compilation Report,
   Compilation Identity, dependency evidence, or access trace. Post-commit work
   retains and never reclassifies an immutable report.
@@ -67,7 +83,114 @@ Freeze two first-party adapters over one lifecycle:
 | Canonical Diagnostic Policy | 20,000 entries and 64 MiB canonical entry bytes |
 
 None means "latest". Upgrades deliberately update snapshots, schemas, and
-generated-client probes.
+generated-client probes. Because this contract is unreleased, all corrected
+version-1 shapes replace their prior prototype definitions in place. A producer
+emits only the corrected spelling and branch; a consumer accepts no old alias.
+
+## Serializer Source Rule
+
+Each serialized leaf must have exactly one of these sources:
+
+1. A value returned by the corresponding final-Rust accessor or discriminated
+   branch at `00cfca1`.
+2. An explicit adapter input retained without semantic reinterpretation, such
+   as the lexical jobs class, a destination spelling, or a presentation option.
+3. A closed adapter derivation defined in this document, such as mapping one
+   Rust enum variant to its lower-snake-case wire token or computing a CLI exit
+   status from the complete set of requested operation outcomes.
+4. A constant fixed by adapter schema major 1, such as the schema name,
+   producer discriminator, capability class, or contract version.
+
+A serializer must not recover a missing leaf from a resource profile, Rust or
+GraphQL concrete type, requested placement, facility class, terminal success,
+or neighboring value. In particular, profiles supply requested policy ceilings
+to admission; they never manufacture admitted or reached report values. A
+closed derivation operates only on its named source branch and must serialize
+`not_applicable`, `not_reached`, or null when that branch says so rather than
+guessing a value.
+
+### Bound Capability Classes
+
+Every executable authority, evidence provider, Engine Runtime Domain policy,
+execution facility, spool, and transport adapter owns its immutable
+role-specific descriptor. The adapter obtains the descriptor from that exact
+object, serializes descriptor version 1 and its safe capability projection, and
+then serializes the separate operation request, admission, and reached facts.
+The following Operational Capability Class strings are exact constants:
+
+| Role | Native CLI | Dagger CI |
+| --- | --- | --- |
+| Creation Evidence | `org.typst-pack/native-cli/creation-evidence/1` | `org.typst-pack/dagger/creation-evidence/1` |
+| Package Authority | `org.typst-pack/native-cli/package-authority/1` | `org.typst-pack/dagger/package-authority/1` |
+| Font Authority | `org.typst-pack/native-cli/font-authority/1` | `org.typst-pack/dagger/font-authority/1` |
+| Authority-private content cache, when present | `org.typst-pack/native-cli/authority-content-cache/1` | `org.typst-pack/dagger/authority-content-cache/1` |
+| Engine Runtime Domain policy | `org.typst-pack/native-cli/engine-domain/1` | `org.typst-pack/dagger/engine-domain/1` |
+| Engine Runtime Domain sharing scope | `org.typst-pack/native-cli/engine-runtime-sharing-scope/1` | `org.typst-pack/dagger/engine-runtime-sharing-scope/1` |
+| Shared execution capacity scope | `org.typst-pack/native-cli/shared-execution-capacity/1` | `org.typst-pack/dagger/shared-execution-capacity/1` |
+| Creation Execution Facility | `org.typst-pack/native-cli/creation-facility/1` | `org.typst-pack/dagger/creation-facility/1` |
+| Compilation Execution Facility | `org.typst-pack/native-cli/compilation-facility/1` | `org.typst-pack/dagger/compilation-facility/1` |
+| Ready-job worker protocol, when present | `org.typst-pack/native-cli/ready-job-worker/1` | `org.typst-pack/dagger/ready-job-worker/1` |
+| Spool Facility | `org.typst-pack/native-cli/spool-facility/1` | `org.typst-pack/dagger/spool-facility/1` |
+| Pack Archive Acquirer | `org.typst-pack/native-cli/pack-archive-acquirer/1` | `org.typst-pack/dagger/pack-archive-acquirer/1` |
+| Pack Archive Publisher | `org.typst-pack/native-cli/pack-archive-publisher/1` | `org.typst-pack/dagger/pack-archive-publisher/1` |
+| Project Materialization Publisher | `org.typst-pack/native-cli/project-materialization-publisher/1` | `org.typst-pack/dagger/project-materialization-publisher/1` |
+| Closure Export Publisher | `org.typst-pack/native-cli/closure-export-publisher/1` | `org.typst-pack/dagger/closure-export-publisher/1` |
+| Compilation Delivery | `org.typst-pack/native-cli/compilation-delivery/1` | `org.typst-pack/dagger/compilation-delivery/1` |
+
+The eight capability constants inherited from issue 71 are Creation Evidence,
+Package Authority, Font Authority, Authority-private content cache, Engine
+Runtime Domain policy, Creation Execution Facility, Compilation Execution
+Facility, and Ready-job worker protocol. This contract preserves those strings
+byte-for-byte. The two sharing-scope constants and the six transport-role
+constants are frozen here under the same grammar; their names are constants, not
+evidence of a reached capability.
+
+Semantic Result Cache is disabled coherently at every first-party compilation
+seam. `CompilationOperationRequest.cache` is `Disabled`; operational admission
+binds the disabled cache lookup branch and no cache object or descriptor; an
+admission refusal therefore also exposes no cache descriptor. An admitted
+report's dependency-execution inventory has `cache_descriptor: null`,
+`cache_policy: disabled`, `cache_lookup: disabled`, and
+`cache_isolation_domain_present: false`, while report cache provenance is
+`disabled`. No serializer may infer a descriptor, hit, isolation domain, lookup,
+or admission from Dagger graph reuse, an authority-private content cache, a
+concrete no-cache helper type, or successful compilation.
+
+### Operational Inventories
+
+Every admitted Creation Report and Compilation Report serializes all six
+role-specific sections below. The two report families have distinct wire types;
+there is no generic operational inventory and no `kernel_execution` alias for
+the final `role_execution` section.
+
+| Section | Creation source | Compilation source |
+| --- | --- | --- |
+| `admission` | `CreationAdmissionInventoryView`: requested/admitted trust and network, contractual no-network, structural network enforcement, and requested/admitted/reached enforcement | `CompilationAdmissionInventoryView` with the same role-bound distinctions |
+| `resources` | profile plus requested and admitted `CreationResourceLimits` | profile plus requested and admitted `CompilationResourceLimits` |
+| `dependency_execution` | bound Creation Evidence, Package Authority, and Font Authority descriptors; offline roles; requested/admitted `D` | bound Package/Font descriptors; optional cache descriptor, policy, lookup, isolation-domain presence, offline roles, and requested/admitted `D` |
+| `attempt_control` | deadline, cancellation presence, monotonic domain, queue timeout, latency target, requested/admitted interruption, and reached winner | the same plus explicit session-supersession applicability |
+| `role_execution` | exact caller-thread or facility branch, bound facility/domain descriptors, `K/Q/W/P` request/admission/applicability, domain selection, and reached queue/dispatch/termination/reap facts | the corresponding compilation-specific branch and types |
+| `reporting` | requested/admitted timing policies and reached channel/lease states | requested/admitted diagnostic, source, timing, and fine-timing policies plus reached channel/lease states |
+
+The dimension vocabulary is fixed: dependency acquisition concurrency `D`,
+ready-job concurrency `K`, ready queue `Q`, Engine Runtime Domain width `W`,
+isolated worker capacity `P`, and transport concurrency `T`. `D` comes only from
+the operation request and `DependencyConcurrencyAdmission`; `K/Q/P` come only
+from the execution request, the bound role descriptor, and the role-specific
+capacity admission; `W` comes only from `EngineWidthRequest`,
+`EngineWidthAdmission`, and the reached domain-selection branch; `T` comes only
+from the transport request, bound transport descriptor, transport admission,
+and stage ledger. A caller-thread branch explicitly makes `K/Q/P` not
+applicable. Native in-process facility execution makes `P` not applicable;
+for native creation specifically, `P` is applicable only when isolated creation
+was selected and is otherwise not applicable. The same rule applies to native
+compilation. Dagger always requests its managed worker topology, so its actual
+creation or compilation facility admission carries `P`. `T` is not a Creation
+or Compilation Report fact and is serialized only in the separate transport
+receipt. Reached state is a separate branch or marker from the final Rust view:
+for example, admitted `T` does not mean transfer was reached, and a reached
+transfer stage does not invent a measured peak concurrency. None of these facts
+is copied from the profile.
 
 ## CLI Grammar
 
@@ -139,7 +262,14 @@ Closure Export accepts only expected Pack Identity; its Tree Content Identity is
 a derived representation fact and has no expectation or mismatch terminal in
 contract v1. Archive Encoding expectation is also archive-only and requires
 support for that exact recipe, full Pack validation, exact re-encoding, and byte
-comparison. Generic ingress never infers a recipe.
+comparison. Generic ingress never infers a recipe. A well-formed but unsupported
+asserted recipe is a typed Representation Admission Refusal before effects; the
+Pack Archive Read Format Receipt still retains the supplied assertion and marks
+it `supplied_but_unevaluated`. If another earlier admitted terminal prevents the
+exact comparison, that same status remains reportable. Only a reached exact
+comparison may report externally asserted and byte-verified or byte-mismatched.
+Malformed expectation construction is a typed outer input rejection and creates
+no Format Receipt.
 
 Closure Export wrapper file paths are exactly `typst-pack/pack.cbor` and
 `typst-pack/blobs/sha256/<64 lowercase hex>`. Bare `pack.cbor`, bare `blobs/`,
@@ -156,14 +286,19 @@ acquisition may itself be `failed` at reference, acquisition, spooling, or
 cleanup; resource, cancellation, deadline, and integrity ingress terminals
 permit either that failed receipt or a completed transfer followed by a later
 format failure. Framing, validation, and identity terminals require acquisition
-`transferred`.
+`transferred`. A Transport Receipt is never fabricated for a role that was not
+attempted.
 
 `org.typst-pack.pack-ingress-operation/1` is the common CLI and Dagger operation
 envelope. `kind: adapter_failed` owns a non-null adapter outcome and no Format
 Receipt; `kind: format_terminal` owns the role-specific Pack Archive Read or
 Closure Export Import Format Receipt. Archive acquisition remains a sibling
 Transport Receipt. The Dagger `receipt` field names this complete operation
-envelope, not the nested Format Receipt alone.
+envelope, not the nested Format Receipt alone. Within a Format Receipt,
+`admission` is a closed `refused` or `admitted` branch. Refusal retains complete
+requested controls and its reason, with no admitted or reached facts; admission
+retains both requested and admitted controls and all independently reached
+representation facts.
 
 No expected Pack Identity means Derive. Human and machine results show the
 derived identity and `internal_validity_only`; they never imply substitution
@@ -246,7 +381,7 @@ empty collection without mutation, while stdout delivery fails.
 | `--package-path <DIR>` | `TYPST_PACKAGE_PATH`. |
 | `--package-cache-path <DIR>` | `TYPST_PACKAGE_CACHE_PATH`; authority-private content cache, not result cache. |
 | `--offline` | No attempt facility performs network I/O; later delivery is separate. |
-| `-j`, `--jobs <N>` | Engine Runtime Domain width `W` only. Omitted/0 is admitted auto; 1 sequential; positive exact. |
+| `-j`, `--jobs <N>` | Engine Runtime Domain width `W` only. Omitted is `omitted_automatic`; explicit `0` is `explicit_zero_automatic`; positive is `exact_positive`. |
 | `--isolation <in-process|worker>` | in-process; worker adds killability/resource placement, not Hostile. |
 | `--deadline <DURATION>` | Attempt through terminal commitment; native default none. |
 
@@ -256,14 +391,53 @@ in declaration order. Ignore flags remove sources before catalog freeze. Only
 `unavailable` permits fallback; denial, invalid content, wrong identity, and
 integrity failure stop.
 
-Jobs never aliases acquisition `D`, facility `K/Q`, transport `T`, or isolated
-workers `P`. Managed processes remove `RAYON_NUM_THREADS`. Unavailable positive
-width or prior incompatible initialization is admission failure, not silent
-lowering. The profiles expose distinct creation and compilation `D/K/Q` role
-views, with `P` only where the compilation role permits it. Those views reserve
-against one adapter-owned execution pool; equal numbers do not create independent
-capacity or make the role contracts interchangeable. Complete numeric behavior
-is in the profile artifacts.
+The lexical jobs record is adapter inventory outside every core Creation Report
+and Compilation Report, and its shape is identical for `create` and `compile` in
+both first-party adapters. It retains exactly one lexical class:
+`omitted_automatic`, `explicit_zero_automatic`, or `exact_positive`. The first
+two normalize to `EngineWidthRequest::Automatic`; the third normalizes to
+`EngineWidthRequest::Exact(N)`. A negative value, sign-only value, overflow, or
+other non-unsigned spelling rejects before lifecycle admission. The normalized
+`EngineWidthRequest` is always retained after successful lexical parsing.
+
+The operation envelope correlates that adapter record with the existing final
+Rust request/admission sources rather than adding another semantic copy. An
+Admission Refusal exposes the core request at
+`admission_refusal.operation_request.engine_width`. An admitted Creation Report
+or Compilation Report exposes the same core request through the existing
+`report.operational_inventory.role_execution.engine_width.requested` member of
+`EngineWidthAdmission`; its admitted `W` and selected domain are adjacent in the
+same `role_execution` inventory. The report branches therefore do not add a
+duplicate outer `operation_request`. Schema validation requires both automatic
+lexical classes to have normalized `automatic` and core requested `automatic`,
+and requires `exact_positive` to have normalized `exact` and core requested
+`exact`, for both refusal and report branches.
+
+For every admitted report, `adapter_jobs.admitted`,
+`report.operational_inventory.role_execution.engine_width.admitted`, and
+`report.operational_inventory.role_execution.domain.width` are the same admitted
+`W`. For `exact_positive`, those three values must additionally equal
+`adapter_jobs.normalized.width` and
+`report.operational_inventory.role_execution.engine_width.requested.width`.
+On Admission Refusal, the applicable exact equality is between normalized width
+and `admission_refusal.operation_request.engine_width.width`; there is no
+admitted or selected-domain value. These dynamic equalities are mandatory
+semantic invariants for both create and compile harness paths because Draft
+2020-12 cannot compare independently encoded values. Exact positive width is an
+exact admission request: it may not be lowered, rounded, clamped, or replaced by
+automatic width. If that exact width cannot be admitted, operation admission
+refuses; when width availability is the deciding failure its closed reason is
+`engine_width`. Refusal never fabricates an admitted width or report.
+
+Jobs never alters or aliases acquisition `D`, facility `K/Q`, isolated worker
+capacity `P`, or transport `T`. Managed processes remove `RAYON_NUM_THREADS`.
+Unavailable exact positive width or prior incompatible initialization is
+admission refusal, not silent lowering. The profiles expose separate creation
+and compilation role ceilings over one adapter-owned pool. Native `P` is
+applicable only when `--isolation worker` is selected and is otherwise reported
+not applicable from the execution branch. Dagger always uses its managed worker
+topology, so admitted Dagger creation and compilation inventories report their
+actual requested/admitted `P`; no profile value is copied into a report.
 
 #### Reporting And Publication
 
@@ -286,6 +460,18 @@ states are `not_requested`, `complete`, `redacted`, `limited`, or `unavailable`.
 Human renderers neutralize control characters and never interpret untrusted
 diagnostic text as ANSI/markup; color decorates only trusted adapter framing.
 
+Outer adapter channels are separate from those report disclosure channels and
+use one reason/failure rule everywhere they occur: compile `adapter_input`,
+create post-commit timings, and compile post-commit dependencies, timings, and
+viewer. `not_requested`, `succeeded`, and `complete` require null `reason` and
+null `failure`. `not_attempted` requires a nonempty `reason` naming the earlier
+terminal or inapplicability that prevented an attempt, and requires null
+`failure`. `redacted`, `limited`, and `unavailable` require a nonempty reason and
+null failure; `failed` requires both a nonempty reason and the typed failure.
+The standalone `not_attempted_channel` definition has the same nonempty-reason
+rule. Report disclosure channels have no `not_attempted` state and are
+unchanged.
+
 Stable `report_projection` is exactly the public `CompilationReportProjection`:
 the semantic-result status and document or operation phase and cause;
 Compilation Identity; optional Result Identity; artifact role, Artifact
@@ -296,9 +482,12 @@ stable report projection has no telemetry records. Requested/actual timing
 status remains only in Attempt Operational Inventory; CLI `--timings` is a
 post-commit experimental rendering outside stable report projection.
 
-The operation/report wrapper may separately serialize accepted
-`request_inventory`, `attempt_inventory`, and disabled cache provenance from the
-public `CompilationReport` accessors. Those metadata fields are not nested into
+The operation/report wrapper separately and mandatorily serializes accepted
+`request_inventory`, all six sections of `attempt_inventory`, and cache
+provenance from the public `CompilationReport` accessors. `attempt_inventory` is
+the wire projection of `CompilationOperationalInventoryView`; its strict final
+section name is `role_execution`. The adapter lexical jobs record is a sibling,
+not part of either core inventory. These metadata fields are not nested into
 `report_projection` and cannot be presented as disclosure-projector output.
 Complete message/hint/span records appear only in `canonical_diagnostics`.
 `request_values` entries expose only key and raw Typst input value. An
@@ -315,9 +504,10 @@ credentials, backing locators, or raw request values. `complete`, `redacted`,
 and `limited` require a non-null evidence array that resolves every report-local
 reference. When originating evidence is absent, the channel is `unavailable`
 with null value rather than a trace with a fabricated or missing table.
-The first-party Compilation Report always records Semantic Result Cache as
-disabled; Dagger graph reuse remains outside the attempt and never emits a cache
-hit.
+The first-party Compilation operation request, admission, and Report preserve
+the disabled Semantic Result Cache state defined above. Dagger graph reuse
+remains outside the attempt and never emits a descriptor, isolation domain,
+lookup, admission, or hit.
 
 Dependency JSON remains `{"inputs":[...],"outputs":[...]}`. Inputs are named
 Pack representation members, override/control sources, then causal external
@@ -330,9 +520,11 @@ for committed empty delivery, and absent after failed delivery.
 Post-commit order is artifact delivery, dependencies, timings, one initial
 viewer launch, then report publication. Failure does not suppress later
 evidence-producing steps; viewer requires nonempty filesystem delivery. Skips
-record `not_attempted` plus reason. Every requested failure contributes exit 1
-without changing the terminal/report. Report publication is last and cannot
-describe its own write.
+record `not_attempted` plus a nonempty reason identifying the earlier terminal
+or inapplicability. Every requested failure contributes exit 1 without changing
+the terminal/report. Report publication is last and cannot describe its own
+write. `not_attempted` belongs only to these outer adapter sidecar outcomes; it
+is never a Transport Receipt branch.
 
 `auto` commit is complete-collection atomic for one file, each-object atomic for
 several template files, and streaming for stdout. Stronger unsupported requests
@@ -396,7 +588,12 @@ has no selector. Successful first-party archive encoding and archive publication
 use exactly
 `typst-pack:archive-encoding:1:sha256:4e338d8a54d234ca28392ecf79386944757e0e4adf750192e21311d6b2491170`.
 Archive reader assertions remain open to any typed Archive Encoding Identity.
-Issuance, encoding, and publication remain separate outcomes.
+Issuance, encoding, and publication remain separate outcomes. The create
+operation's archive-encoding member is the complete Pack Archive Encoding Report,
+not a flattened receipt: it always retains its independent
+`PackArchiveEncodingFormatReceipt` and retains the separate
+`SpoolTransportReceipt` whenever a spool operation was attempted. Absence of a
+spool attempt is null, never a synthesized successful spool receipt.
 Metadata is non-identifying. Annotation files use `.ann` and opaque payloads.
 Generic semantic extensions require a separately typed first-party interface.
 
@@ -406,16 +603,37 @@ reports that fixed choice and uses it to construct `FontCatalogAcquisition`.
 The core Creation Report has no Font Scan Policy accessor; it retains only the
 resulting ordered diagnostics.
 
-The Creation Report is a core terminal, not an adapter failure bag. It records
-the reached creation phases, ordered safe diagnostics, requested and admitted
-trust and limits, resource profile, acquisition concurrency, creation execution
-role view, deadline, reporting reach, and one closed typed failure when issuance
-fails. `source_changed`, `revalidation_failed`, and
-`insufficient_evidence_capability` serialize only their closed variant kind;
-they expose no payload accessor or invented safe code. The operation envelope
-keeps request, adapter-owned Font Scan Policy, Creation Report, archive encoding,
-publication, and post-commit timing as separate siblings; a pre-core adapter
-failure fabricates no core report.
+Creation request construction is a separate outer terminal. Project Snapshot,
+variant, override, inclusion, embedding-policy, metadata, annotation, and final
+Creation Request builders aggregate their bounded issues into one
+`CreationRequestRejection`. Its wire projection comes directly from
+`resource_profile`, requested limits, admitted limits, and the ordered
+`CreationRequestIssueView` values with code, role, and optional declaration
+ordinal. It occurs before Creation Operation admission and therefore has no
+Creation Admission record, Creation Report, phase ledger, authority access,
+discovery, encoding, or publication. It must not be flattened to
+`adapter_failed` or inserted into a Creation Report.
+
+The strict creation operation union is `adapter_failed`, `request_rejected`,
+`admission_refused`, or `creation_report`.
+Admission refusal serializes the complete `CreationOperationRequest`, requested
+trust, profile and requested limits, the safe bound Creation Evidence, Package
+Authority, Font Authority, and optional Creation Execution Facility descriptors,
+and the closed refusal reason. It has no report. Only successful operation
+admission may produce a Creation Report.
+
+The Creation Report is a core terminal, not an adapter failure bag. It serializes
+the reached creation phases, ordered safe diagnostics, all six
+`CreationOperationalInventoryView` sections, reporting channels, and one closed
+typed failure when issuance fails. Failure detail is serialized only when the
+Rust branch exposes it: authority class/code/safe message, Source Changed or
+Revalidation Failed safe code, Insufficient Evidence Capability required and
+available projections, or the closed resource/interruption/execution/replay/
+integrity branch. The operation envelope keeps lexical jobs, adapter-owned Font
+Scan Policy, typed construction/admission terminal, Creation Report, complete
+archive-encoding report with its format/spool receipts, publication, and
+post-commit timing as separate siblings. No earlier terminal fabricates a core
+report.
 
 ### `inspect`
 
@@ -442,9 +660,13 @@ typst-pack c [OPTIONS] <PACK> [OUTPUT]
 
 Named Pack plus omitted output replaces the Pack extension with selected format;
 stdin requires output. Document output is file/stdout; page output is a template.
-Compilation first obtains an immutable terminal, then delivers. Any rejection,
-operation, delivery, or requested auxiliary failure exits nonzero. Delivery
-cannot rewrite a succeeded result. Persistent result-cache controls are absent.
+Compilation first creates its non-null outer operation envelope. Adapter failure
+or Compilation Operation admission refusal ends there with no Compilation
+Terminal or Report. After admission, preparation yields Request Rejection or an
+admitted execution yields an immutable Compilation Report; only the latter can
+be delivered. Any rejection, operation, delivery, or requested auxiliary failure
+exits nonzero. Delivery cannot rewrite a succeeded result. Persistent
+result-cache controls are absent.
 
 Every accepted Compilation Report retains a nonempty complete accepted
 Compilation Request Inventory in Pack, override, Typst input, document time,
@@ -453,9 +675,14 @@ Identity order. Every status-bearing accepted node is exactly `effective`; it
 contains no `supplied_canonical`, invalid-declaration, or rejected-safe marker.
 Semantic validation requires Pack, Compilation Document Time, target, output,
 diagnostics, Engine, and Exporter entries plus canonical ordering and uniqueness.
-It also retains a separate six-part Attempt Operational Inventory for admission,
-resources, dependency execution, attempt control, kernel execution, and
-reporting.
+The serializer preserves the Rust-provided origin on every node, including
+Engine and Exporter Identity, and preserves the separate origin, status, and
+optional declaration ordinal of every output and Canonical Diagnostic Policy
+leaf. It does not replace those origins with one adapter-level default. The
+report also retains the six-part Attempt Operational Inventory for admission,
+resources, dependency execution, attempt control, role execution, and reporting,
+including the bound role descriptors and requested/admitted/reached distinctions
+defined above.
 
 A Request Rejection uses a different frozen safe inventory union and ordered
 issue list. It never invents Engine or Exporter entries. The only
@@ -466,8 +693,13 @@ Override always carries its Compilation Request Commitment. Invalid markers are
 limited to `pack_override`, `typst_input`, `document_time`, `feature`,
 `page_selection`, `pdf_control`, `png_pixels_per_inch`, `format_control`,
 `diagnostics` (the adapter spelling of diagnostic-policy), and `request_limit`.
-A rejection always contains at least one issue and has no Compilation Identity
-or report.
+Each invalid marker preserves role, declaration ordinal, origin, status, ordered
+issue codes, and its optional join to exactly one safe supplied inventory
+ordinal. Each request issue likewise preserves its optional referenced inventory
+ordinal. Canonical Diagnostic Policy declarations retain per-leaf origins even
+when rejected. A rejection always contains at least one issue and has no
+Compilation Identity or report; because attestation was not reached it invents
+no Engine or Exporter entry.
 
 Compilation Access Trace request kinds are exactly `typst-source` and
 `raw-file`. Its closed observation union distinguishes baseline read, override
@@ -514,55 +746,115 @@ rebinds the pointer. Current plus one previous generation is retained; older or
 abandoned state is boundedly cleaned after commit. Cleanup failure does not roll
 back the pointer. Startup cleans only schema-owned unreferenced state.
 
-Watch covers the Pack representation, every override/control source, and every
-causal external dependency fact. Equal Pack preserves session; changed identity
-replaces it. Change/gap/downgrade immediately stales publication and Last
-Successful Compilation before replacement work. Only latest revision publishes.
-Rejection, operation, delivery, or ingestion failure publishes state and retains
-last success. Startup/admission failure, strict coverage loss, fatal watcher
-failure, or requested sidecar failure exits 1. There is no automatic terminal
-retry or HTTP/live-reload server. `--open` launches only once after initial
-nonempty success; empty output is a no-op.
+Watch is one CLI composition over the final Rust `CompilationSession`; Dagger
+still exposes no watch or session API. A session is constructed with and bound
+to one validated Pack. Re-reading equal Pack Identity may feed the same session,
+but a changed Pack Identity starts a new Session Instance, revision namespace,
+publication, Last Successful Compilation, and subscription namespace. There is
+no Pack-change session event.
 
-Every attempt and fence is tokened. Only a matching `AttemptFinished` may retain
-the immutable terminal candidate and emit `ReadFence`. Complete push coverage
-then follows `AttemptFinished -> ReadFence -> ArmSubscriptions -> ConfirmFence
--> Publish`; retirement is an orthogonal exact-token activity. A newly armed
-subscription generation does not become active until publication. Accepting or
-otherwise superseding a revision queues any candidate generation before clearing
-it; publishing a replacement queues the old active generation. Pack-session
-replacement queues both. The ordered unique `retirementGenerations` collection
-therefore never orphans an active or candidate generation. An exact retirement
-event may remove its named generation while another attempt or fence is active,
-without reordering the generations that remain.
+Each accepted stabilized request state becomes a new Session Revision whose
+`SessionPolicy` owns the exact requested/admitted preparation limits. `Accept`
+performs bounded semantic preparation synchronously inside the reducer. Success
+creates a Prepared Compilation and may create an attempt token. Compilation
+Request Rejection becomes a tokenless candidate. Adapter ingestion failure is
+also tokenless, retains its failed request-source scopes and policy, and never
+calls preparation. Neither branch fabricates a report or occupies the attempt
+slot.
 
-Notifications observed while closing the read-to-subscribe gap, a detected
-notification gap, or any dirty scope force equal revalidation and a fresh fence.
-`RECONCILED_EQUAL` requires a non-null event token, the matching non-null retained
-fence token, and a retained candidate. A notification gap on an idle active
-generation first accepts a new revision and starts its attempt; it cannot use
-direct reconciliation before that attempt retains a candidate and emits a fence.
-Stale attempt completions, duplicate completions, stale fence tokens, and
-retired-generation events produce an ignored transition and cannot mutate a
-candidate or committed publication. Events carry the exact attempt token, fence
-token, subscription generation, or delivery token they complete. Reconciled
-fences use a monotonic session-local sequence and never reuse a token. Equal
-revalidation clears only scopes named by the matching event and preserves the
-candidate's actual Result Identity; changed semantic output carries a distinct
-explicit Result Identity independent of the session revision.
+The latest-only scheduler permits at most one active-or-draining attempt and at
+most one latest pending Prepared Compilation. A newer prepared revision replaces
+an older pending one and synchronously revokes the older attempt's supersession
+permit before `InterruptAttempt` is emitted. A late matching completion still
+clears its active/draining slot and activates the latest pending revision even
+when that completion cannot publish. `Retry` creates a new Session Evaluation in
+the same Session Revision; it does not create a revision or mutate the prepared
+semantic request. There is no automatic terminal retry.
 
-Accepting or publishing a newer revision never resets delivery. Each delivery is
-keyed by publication revision, Result Identity, and its own token, so an older
-in-flight delivery may still commit and advance Last Successful Delivery after a
-newer revision publishes. A changed Pack Identity instead starts a new
-Compilation Session and subscription namespace rather than retaining the prior
-session's publication state.
+The event and effect vocabularies are exact and independent; rows do not imply a
+one-to-one event/effect mapping.
 
-Complete polling publishes only `current_as_of_poll` after one coherent fence.
-Incomplete coverage blocks publication by default; `--allow-incomplete-watch`
-permits only `unverified` currentness with the uncovered scopes named. An
-ingestion failure may publish only as `stale` or `unverified`, never as known
-current.
+| Session events |
+| --- |
+| `Accept(AcceptedSessionInput::Stabilized | AcceptedSessionInput::IngestionFailure)` |
+| `DependencyChanged { generation, change }` |
+| `NotificationGap { generation, scope }` |
+| `Refresh` |
+| `Retry` |
+| `AttemptFinished { token, report }` |
+| `AttemptReleased { token, release }` |
+| `FenceReadFinished { token, outcome }` |
+| `SubscriptionsArmed { token, outcome }` |
+| `FenceConfirmed { token, outcome }` |
+| `Shutdown` |
+
+| Session effects |
+| --- |
+| `StartAttempt { token, plan }` |
+| `InterruptAttempt { token }` |
+| `ReadFence { token, plan }` |
+| `ArmSubscriptions { token, plan }` |
+| `ConfirmFence { token, plan }` |
+| `RetireSubscriptions { generation }` |
+| `Publish { publication }` |
+
+There are no equal-reconciliation, preparation-completed,
+publication-completed, retirement-completed, or Pack-change events. Publication
+and subscription retirement are effects with no completion event. Old-session
+completions, superseded revisions, stale attempts or fences, old subscription
+notifications, and duplicate completions return the exact ignored transition
+and cannot mutate current state. Malformed tokens and impossible adapter
+transitions remain typed event rejections.
+
+Currentness follows `ReadFence -> ArmSubscriptions -> ConfirmFence -> Publish`.
+The read and confirmation outcomes themselves report equality or dirtiness;
+notification gaps and observations during confirmation dirty the candidate and
+restart the ordinary fence sequence. Request-source scopes and dependency scopes
+remain distinct in every affected-scope value. Read and confirmation plans route
+by provider identity and may carry zero, one, or many provider observations and
+cursors; no provider or cursor is privileged or invented for an empty set.
+Dependency evidence may be absent when preparation rejected before dependency
+resolution.
+
+Complete push publishes `current_through_push`; one coherent complete poll
+publishes `current_as_of_poll`. Incomplete coverage blocks publication by
+default; `--allow-incomplete-watch` permits only `unverified` with exact uncovered
+request and dependency scopes. Dirt produces `stale` with exact dirty scopes. A
+tokenless ingestion failure may publish only as stale or unverified, never as
+known current.
+
+The public Rust lifecycle is exactly `SessionLifecycle::Running`,
+`SessionLifecycle::Retiring`, or `SessionLifecycle::Retired`, serialized as
+`running`, `retiring`, or `retired`. Its view independently exposes latest
+revision/evaluation, active or draining attempt, latest pending prepared
+revision, Session Publication, and Last Successful Compilation. Shutdown rejects
+new input and retries, revokes
+unpublished work, retires proposed and active subscriptions, and interrupts live
+work. Retirement reaches `retired` only after attempt/arming resources return,
+are reaped, or are abandoned with proof that no live resource remains.
+
+Session Publication, Last Successful Compilation, current delivery, and Last
+Successful Delivery are independent adapter state. A newer rejection, Operation
+Outcome, ingestion failure, or delivery failure may publish without replacing
+Last Successful Compilation. The completed Current Delivery wrapper and Last
+Successful Delivery wrapper each retain the exact Session Instance, Revision,
+Evaluation, Publication Sequence, Result Identity, and immutable
+`CompilationDeliveryOutcome` for the publication they attempted. Those fence
+fields are captured from that publication and result; completion never rekeys an
+older outcome to the session's latest values. Delivery may therefore finish
+after a newer publication while remaining attributable to its original fence.
+Only a committed delivery of a succeeded Result advances Last Successful
+Delivery. Dagger's one-shot container staging is independent again: it never
+becomes Session Publication or delivery and remains absent from the CLI session
+reducer.
+
+Watch covers the Pack representation, every override/control request source,
+and every causal dependency fact. Change or gap immediately stales Session
+Publication and Last Successful Compilation before replacement work. Startup or
+operation admission failure, strict coverage loss, fatal watcher failure, or a
+requested sidecar failure exits 1. There is no HTTP/live-reload server.
+`--open` launches only once after initial nonempty success; empty output is a
+no-op.
 
 `--report PATH` atomically replaces `org.typst-pack.watch-state/1` on each
 publication and immediate stale/unverified transition. No implicit sidecar.
@@ -587,9 +879,15 @@ accepts publication deadline and report.
 Project Materialization owns a `ProjectMaterializationReport` whose terminal is
 either succeeded or exactly `admission`, `resource_limit`, `encoding`,
 `spooling`, `cancelled`, `deadline`, or `internal_integrity`. Its projection
-receipt contains only the exact Pack Identity, file count, aggregate bytes, and
-ordered Project Path file inventory. It has no request-rejection terminal.
-Publication, when requested after a succeeded plan, is a separate outer
+receipt is a role-specific `ProjectMaterializationProjectionReceipt` with the
+same common Format Receipt contract-version, role, terminal, stage, counters,
+exposure/completion, timing, adapter class, refused-or-admitted controls,
+publication, cleanup, and failure semantics as every other Format Receipt. Its
+role payload additionally contains the exact Pack Identity, file count,
+aggregate bytes, and ordered Project Path, exact-byte, and Content Identity file
+inventory. It has no request-rejection terminal. Its format publication state is
+not applicable because publication, when requested after a succeeded plan, is a
+separate `ProjectMaterializationPublicationTransportReceipt` and outer
 `TransportOutcome`.
 
 ### `convert`
@@ -629,14 +927,17 @@ Automation consumes JSON status, not a new exit taxonomy.
 
 ## Auxiliary Inputs And Stable JSON
 
-The JSON Schema companion is normative for every serialized structure, closed
-branch, enum, and nullability rule. Cross-field equality, sorted-uniqueness,
-profile tightening, receipt stage monotonicity, and the accepted Format Receipt
-Contract v1 role/terminal matrix remain semantic validation rules because JSON
-Schema cannot compare their independently encoded values. Inputs are UTF-8 JSON,
-at most 1 MiB before payloads, reject BOM, duplicate keys, unknown fields,
-unknown major, and trailing data. Relative source paths resolve from control-file
-parent. It defines:
+The strict issue-69 schema target is normative for every serialized structure,
+closed branch, enum, and nullability rule. A checked companion schema is a
+planning target, not a claim that an implementation already emits conforming
+documents.
+Cross-field equality, sorted uniqueness, profile tightening, receipt-stage
+legality, and the Format Receipt Contract v1 role/terminal matrix remain semantic
+validation rules because JSON Schema cannot compare independently encoded
+values. Inputs are UTF-8 JSON, at most 1 MiB before payloads, reject BOM,
+duplicate keys, unknown fields, unknown major, compatibility aliases, and
+trailing data. Relative source paths resolve from the control-file parent. The
+regenerated strict schema defines:
 
 - `org.typst-pack.discovery-variant/1`, including absent/unix time;
 - `org.typst-pack.override-set/1`;
@@ -645,8 +946,10 @@ parent. It defines:
 - `org.typst-pack.pack-metadata/1` and `.ann` annotation input;
 - `org.typst-pack.operation-limits/1`;
 - `org.typst-pack.adapter-resource-profile/1`, with role-specific creation and
-  compilation execution capacities over one shared adapter pool plus the fixed
-  first-party `warn_and_omit` Font Scan Policy; and
+  compilation execution capacities over one shared adapter pool, creation
+  package-file/largest-member/Font Catalog candidate limits, isolated creation
+  worker capacity, and the fixed first-party `warn_and_omit` Font Scan Policy;
+  and
 - all ingress, inspection, creation, compilation, representation, staging,
   transport, watch-state, and watch-pointer output documents.
 
@@ -662,7 +965,8 @@ increase is a pre-preparation adapter outcome.
 
 Operation Limits and resource profiles remain schema version 1 and replace their
 earlier prototype shapes in place. These unreleased artifacts have no persisted
-or external v1 consumer requiring a compatibility branch.
+or external v1 consumer requiring a compatibility branch. Profiles are adapter
+inputs to admission and are never serializer fallback values for a report.
 
 Every first-party creation, compilation, Format Receipt, and Transport Receipt
 view has a non-null profile owned by its producer discriminator. `cli` requires
@@ -687,6 +991,9 @@ Stable output rules:
   Minor may add fields or open-registry codes. Consumers reject unknown major,
   accept newer minor, ignore unknown object members, and reject unknown closed
   terminal kinds.
+- Major 1 has one current spelling for every field and branch. Producers never
+  emit, and consumers never accept, a compatibility alias from an earlier
+  unreleased prototype.
 - Stable codes are contracts; `safe_message` is not. No Rust/Dagger debug layout,
   credential, Dagger ID, or undisclosed raw host path appears.
 
@@ -698,18 +1005,28 @@ records are also role-specific: diagnostic entries, diagnostic source bytes,
 Typst request values, Pack Override bytes and equality detail, backing locators,
 and adapter detail cannot be interchanged through a generic record bag.
 
-Compilation operation preserves three layers:
+Compilation operation preserves four layers:
 
 1. Pre-core adapter failure: `adapter_outcome` non-null, terminal/report/identities
    null.
-2. Core Compilation Terminal: Request Rejection or Compilation Report.
-3. Post-commit delivery and sidecars: sibling outcomes retaining a report.
+2. Compilation Operation admission refusal: operation request, appraised bound
+   descriptors, and typed refusal are non-null; terminal/report/identities are
+   null.
+3. Core Compilation Terminal after admission: Request Rejection has no report;
+   admitted execution has one Compilation Report.
+4. Post-commit delivery and sidecars: sibling outcomes retaining a report.
 
-Creation has the same phase ownership: a pre-core adapter outcome may precede a
-Creation Report; request, report, archive encoding receipt, and publication
-receipt are nullable siblings with discriminated coherence. Representation
-operations name their source Pack Identity and make composed ingress optional,
-so a Dagger Pack created in-memory never fabricates an ingress receipt.
+Creation preserves four pre/post boundaries: adapter ingestion, typed Creation
+Request construction, Creation Operation admission, and an admitted Creation
+Report. The operation union discriminates adapter failure,
+`CreationRequestRejection`, `CreationAdmissionRefusal`, and `CreationReport`;
+only the last may be followed by issuance-dependent archive encoding and
+publication. The lexical jobs record, request/rejection, admission refusal,
+report, complete archive-encoding report with independent format/spool receipts,
+and publication receipt are coherent siblings, not nullable hints from which a
+terminal is inferred. Representation operations
+name their source Pack Identity and make composed ingress optional, so a Dagger
+Pack created in memory never fabricates an ingress receipt.
 Container-local Dagger staging is never embedded in a representation,
 materialization, or compilation operation envelope: each `stagingReceipt` is a
 separate `representation-staging` or `compilation-staging` document and cannot
@@ -720,65 +1037,106 @@ Tree Content Identity and Closure Export paths, and `project_directory` uses Pac
 Identity and Project Path inventory. The branches cannot exchange source
 identity or path types.
 
-| Core state | Compilation ID | Report | Result ID | Semantic artifacts |
+| Outer/core state | Compilation ID | Report | Result ID | Semantic artifacts |
 | --- | --- | --- | --- | --- |
 | Adapter failed | null | null | null | null |
+| Compilation admission refused | null | null | null | null |
 | Request rejected | null | null | null | null |
 | Operation outcome | non-null | non-null | null | null |
 | Rejected result | non-null | non-null | non-null | null |
 | Succeeded result | non-null | non-null | non-null | complete list, possibly empty |
 
-Format Receipt Contract v1 has six role-specific stable views:
+Format Receipt Contract v1 has seven role-specific stable views:
 `pack_archive_encode`, `pack_archive_read`, `closure_export_project`,
-`closure_export_import`, `pack_archive_publish`, and
-`closure_export_publish`. They share only the contract version, role, terminal,
-stage, counters, exposure/completion, timing, adapter class, requested/admitted
-controls, publication, cleanup, failure, and ordered validation-rule envelope.
-The first-party JSON document adds only the standard schema/producer header
-around that common projection.
-Each view then exposes only its legal typed Pack, archive, control-record,
-Archive Encoding, Closure Export Tree, verification/assertion, and file fields.
+`project_materialization`, `closure_export_import`, `pack_archive_publish`, and
+`closure_export_publish`. They share the exact `FormatReceiptCommonView`:
+contract version, role, terminal, stage, counters, Pack exposure, stable-value
+completion, timing, adapter class, admission, publication, cleanup, failure
+class/cause, and ordered validation rules. The first-party JSON document adds
+only the standard schema/producer header around that common projection. Each
+view then exposes only its legal typed Pack, archive, control-record, Archive
+Encoding, Closure Export Tree, verification/assertion, and file fields.
+
+Format admission is always discriminated. `refused` carries the complete
+requested `FormatReceiptControlsView` and one
+`RepresentationAdmissionRefusalReason`, but no admitted or reached facts.
+`admitted` carries separate requested and admitted controls; counters,
+identities, exposure, completion, timing, publication, cleanup, and failure are
+then serialized only as reached by their Rust accessors. Unsupported archive
+encoding recipes remain typed admission refusals rather than generic adapter
+failure.
+
 The role/terminal matrix, stage monotonicity, counter coherence, identity
 coherence, and fixed-precedence validation rules are semantic validation rules.
-The schema locally fixes every success counter's applicability, using null rather
-than zero for inapplicable counters, and fixes the construction,
-encoding-or-projection, representation-framing, and admission stages for the
-three mismatch/refusal terminals. Numeric equality and ordering between counters,
-identities, and file arrays remain semantic validation.
-Archive encode/read and Closure Export project/import success always report
-publication state `not_applicable`; archive and Closure Export publication
-success always report `committed`. No success role may report `not_started`.
+The schema fixes every success counter's applicability, using null rather than
+zero for inapplicable counters. Numeric equality and ordering between counters,
+identities, and file arrays remain semantic validation. Archive encode/read,
+Closure Export project/import, and Project Materialization success report
+publication `not_applicable`; archive and Closure Export publication success
+report `committed`. No success role may report `not_started`.
 
-Project Materialization uses the exact Rust projection receipt, with Pack
-Identity, `file_count`, aggregate bytes, and ordered files, rather than inventing
-a Format Receipt role. The enclosing adapter document supplies schema versioning;
-the Rust receipt itself does not. Cleanup never replaces primary failure.
+Pack Archive Read always preserves every supplied expectation: expected Archive
+Content Identity, expected Pack Identity/verification mode, and asserted Archive
+Encoding Identity. Expected-match booleans remain null until comparison is
+reached. An asserted recipe is `supplied_but_unevaluated` until supported exact
+re-encoding and byte comparison is reached, including on an earlier refusal or
+terminal; only that comparison can produce verified or mismatched status.
+Archive encoding always preserves the selected Archive Encoding Identity and
+source Pack Identity even when later work fails.
+
+Every Pack Archive Encoding operation projects the final Rust
+`PackArchiveEncodingReport` without folding its receipts together. The
+`PackArchiveEncodingFormatReceipt` is mandatory and records the representation
+operation. The separately typed `SpoolTransportReceipt` is present whenever the
+spool role was attempted, including refusal or failure, and absent only when no
+spool role ran. Format success cannot imply a spool receipt, and spool success or
+failure cannot replace the Format Receipt.
+
+Project Materialization uses its exact Rust
+`ProjectMaterializationProjectionReceipt`, including the common Format Receipt
+semantics and its Pack/file payload. Its projection receipt reports format
+publication `not_applicable`; optional publication is a distinct transport
+operation. Cleanup never replaces primary failure.
 
 Archive and Closure Export publication outcomes carry two closed projections of
 the same operation: the role-refined Format Receipt Contract v1 publication
-receipt required by the format contract and a role-refined `TransportOutcome`
-containing its terminal and Transport Receipt. Their success/failure status,
-role, committed state, and registered Archive Encoding Identity are constrained
-locally. Identity and count equality between the two receipts remains semantic
-validation because JSON Schema cannot compare independently encoded fields.
-Encoding/projection receipts never double as publication receipts. Project
-Materialization has no Format Receipt role and therefore carries its exact
-projection report plus an optional outer publication `TransportOutcome`.
+receipt and a role-refined `TransportOutcome` containing its Transport Receipt.
+Their success/failure status, role, committed state, and registered Archive
+Encoding Identity are constrained locally. Identity and count equality between
+the two receipts remains semantic validation because JSON Schema cannot compare
+independently encoded fields. Encoding/projection receipts never double as
+publication receipts. Project Materialization carries its projection Format
+Receipt plus an optional outer `TransportOutcome` and
+`ProjectMaterializationPublicationTransportReceipt`.
 
-Transport Receipt has six closed role/subject pairs:
-Spool, Pack Archive acquisition, Pack Archive publication, Project
-Materialization publication, Closure Export publication, and Compilation
-Delivery. The receipt serializes only the Rust `TransportReceipt` accessors:
-stage/status, requested and admitted non-Hostile trust, required producer-owned
-first-party resource profile, role-specific requested/admitted limits, requested commit and cleanup
-strengths, deadline, actual commit, exact counts and bytes, optional content
-identity, ordered typed identities, adapter class, timing, subject, and cleanup.
-The standard schema/producer document header is adapter metadata outside that
-Rust accessor projection.
-First-party outcomes always name `native-cli/1` or `dagger-ci/1`. Primary failure
-belongs to the typed outer `SpoolOutcome` or `TransportOutcome`, never the
-receipt; each outcome repeats cleanup so outcome/receipt cleanup equality is a
-semantic coherence rule.
+Transport Receipt has six closed role/subject pairs: Spool, Pack Archive
+acquisition, Pack Archive publication, Project Materialization publication,
+Closure Export publication, and Compilation Delivery. Each has its own bound
+capability descriptor and opaque receipt type; there is no generic public payload
+union.
+
+The receipt state is exactly `refused` or `admitted`. `refused` serializes the
+complete operation request, safe role descriptor projection, and one admission
+reason, with no admission record, stage ledger, actual commit, cleanup outcome,
+residual, exposure, transferred count, or timing reached fact. `admitted`
+serializes the role-specific admission record and complete role-legal stage
+ledger over `admission`, `plan_freeze`, `reference_resolution`, `acquisition`,
+`spooling`, `transfer`, `verification`, `commit`, `cleanup`, and `complete`.
+Roles serialize only legal reached stages. Core orchestration contributes
+admission, plan-freeze, and complete; an adapter cannot claim those stages from
+a success flag. There is no `not_attempted` Transport Receipt; an unattempted
+role has no receipt.
+
+Requested commit, admitted commit, actual commit, requested cleanup, admitted
+cleanup, cleanup outcome, residual locator, exposed bytes, structural-network
+enforcement reached, general enforcement reached, and interruption winner are
+independent leaves. Actual commit appears only if commit was reached. Cleanup
+failure may coexist with exposed bytes and a residual; cleanup never rewrites the
+primary outcome. First-party outcomes always name `native-cli/1` or
+`dagger-ci/1`. Primary failure belongs to the typed outer `SpoolOutcome` or
+`TransportOutcome`, never the receipt. The standard schema/producer header is
+adapter metadata outside the Rust accessor projection.
+
 Subjects bind receipt facts to the exact expected/actual spool bytes, acquired
 archive, encoded archive, Pack, Closure Export tree, or Compilation Result and
 artifacts. Residual cleanup exposes only a safe summary in the receipt. Raw
@@ -789,25 +1147,37 @@ its own explicit capability, never in Compilation Report `adapter_detail`.
 Watch currentness is `current_through_push`, `current_as_of_poll`, `unverified`,
 or `stale`, never boolean. Publication currentness and Last Successful
 Compilation currentness are separate. Last Successful Delivery is separate
-again and may name another revision. Session Publication is a closed union of a
-Compilation Terminal and an adapter-owned ingestion failure, each carrying its
-revision and currentness. The current delivery outcome is a sibling in Watch
-State, not part of Session Publication; only a committed delivery of a succeeded
-Result advances Last Successful Delivery.
+again and may name another revision. Session Publication is a closed union of
+Request Rejection, Compilation Report, and adapter-owned ingestion failure, each
+carrying Session Instance, Revision, Evaluation, Publication Sequence, and
+currentness. Watch State also preserves `running`, `retiring`, `retired`, active
+or draining attempt, and latest pending prepared revision. Current Delivery and
+Last Successful Delivery are sibling wrappers, not part of Session Publication;
+each carries Session Instance, Revision, Evaluation, Publication Sequence,
+Result Identity, and its immutable `CompilationDeliveryOutcome`. Only a committed
+delivery of a succeeded Result advances Last Successful Delivery.
 
 ## Dagger Contract
 
 ### Generated Surface
 
-The GraphQL fixture is the normative desired generated structure for
-names/kinds/nullability. This planning artifact is not a claim that absent
-implementation source has already passed Dagger generation; the structural
-comparison and generated-client compile below are implementation gates. The pinned engine
-puts main functions directly on `Query` and constructor arguments on
+The GraphQL fixture is a desired generated-structure planning target for
+names/kinds/nullability and must be validated against the corrected version-1
+branches. It is not evidence that actual Dagger implementation source
+exists or that Dagger generation, introspection, and generated-client compilation
+already pass. Exact parity with actual generated output is an implementation
+gate below, not a prototype claim. The pinned engine puts main functions
+directly on `Query` and constructor arguments on
 `Query.with`; it does not generate `Query.typstPack`. Defaulted source args are
 nullable in GraphQL. Required File/Directory/custom inputs are non-null IDs;
 optional values are nullable IDs. Lists have non-null elements. Dagger CLI/Shell
 render lower-camel fields as kebab-case.
+
+The planning GraphQL fixture's `Compilation.terminal` nullability follows the
+outer operation branch: it is null for adapter failure and Compilation Admission
+Refusal, non-null for Request Rejection and every admitted report branch. A null
+terminal never implies which outer failure occurred; callers inspect the
+non-null operation envelope.
 
 Object graph:
 
@@ -851,9 +1221,11 @@ Pack
   disclosure with all seven `reportDisclosure` booleans false, Partially
   Trusted, 600s, auto jobs.
 
-The first-party Compilation Attempt inventory and Compilation Report cache view
-both always report Semantic Result Cache as disabled; Dagger graph reuse changes
-neither field.
+Every Dagger Compilation operation uses the first-party disabled Semantic Result
+Cache contract above: the operation request and operational admission bind the
+disabled cache branch, the descriptor is null, isolation-domain presence is
+false, and lookup and report provenance are disabled. Dagger graph reuse changes
+none of those fields.
 
 Dagger rejects duplicate input keys, features, and standards rather than using
 positional last-wins. Unix times and u64 values are decimal strings because
@@ -862,9 +1234,14 @@ the pinned Dang SDK cannot reliably expose Float. An override Directory maps
 every regular file by root-relative path; links/special nodes reject. Package
 and font Directory lists preserve authority priority; no ambient host sources.
 
-Jobs null/0 means admitted auto, 1 sequential, positive exact. Every uncached
-lifecycle bundle runs in a fresh managed process with one fixed domain and no
-`RAYON_NUM_THREADS`; K/Q/T/P remain profile controls. Dagger may graph-cache the
+Jobs null is `omitted_automatic`, integer `0` is
+`explicit_zero_automatic`, and a positive decimal is `exact_positive`, using the
+same adapter jobs record and normalization as CLI create/compile. Negative and
+malformed values are GraphQL argument failures before lifecycle admission. Every
+uncached lifecycle bundle runs in a fresh managed worker process with one fixed
+domain and no `RAYON_NUM_THREADS`; its creation and compilation requests admit
+actual `K/Q/W/P`, while each transport request separately admits `T`. The
+`dagger-ci/1` profile only caps those admissions. Dagger may graph-cache the
 complete immutable bundle; reuse is outer graph behavior, not a fresh attempt.
 Sibling fields evaluate one lazy bundle once; `require*` never reruns it.
 
@@ -872,10 +1249,14 @@ Sibling fields evaluate one lazy bundle once; `require*` never reruns it.
 
 | Object/state | Evidence | Nullable value |
 | --- | --- | --- |
-| PackCreation issued/failed | operation report | Pack non-null only issued |
+| PackCreation adapter failed | operation envelope; no rejection/admission/report | Pack null |
+| PackCreation request rejected | typed Creation Request Rejection; no admission/report | Pack null |
+| PackCreation admission refused | typed Creation Admission Refusal; no report | Pack null |
+| PackCreation report failed/issued | Creation Report | Pack non-null only issued |
 | PackIngress validated/other | receipt | Pack non-null only validated |
 | Representation adapter/core outcome | operation receipt; staging receipt | File/Directory non-null only after immutable representation and container-local staging both succeed |
 | Compilation adapter failed | operation; terminal/report null | all identities/artifacts null |
+| Compilation admission refused | operation with typed refusal; terminal/report null | all identities/artifacts null |
 | Request rejected | operation+terminal; report null | all identities/artifacts null |
 | Operation failed | operation+terminal+report | Compilation ID only |
 | Result rejected | operation+terminal+report | compilation/result IDs; artifacts null |
@@ -883,12 +1264,23 @@ Sibling fields evaluate one lazy bundle once; `require*` never reruns it.
 
 Creation `report`, representation `receipt`, and materialization `receipt` are
 complete operation envelopes, not their nested Rust report or receipt alone.
-Compilation `operation` is always present. `terminal` is null only on adapter
-failure; `report` exists only on report branch. Staging status/receipt describes
-complete container-local artifact materialization. `requireSuccess` requires a
-succeeded result and staging. Ordinary modeled outcomes do not become GraphQL
-errors before `require*`; malformed GraphQL, protocol failure, or impossible
-internal coherence may raise.
+Compilation `operation` is always present. `terminal` is null on adapter failure
+and Compilation Admission Refusal; the latter remains a typed branch in the
+operation envelope and never fabricates a terminal. Request Rejection has a
+terminal but no report. Admitted execution has both terminal and report.
+Staging status/receipt describes complete container-local artifact
+materialization. `requireSuccess` requires a succeeded result and staging.
+Ordinary modeled outcomes do not become GraphQL errors before `require*`;
+malformed GraphQL, protocol failure, or impossible internal coherence may raise.
+
+This rule is exhaustive: adapter failure, Creation Request Rejection, Creation
+Admission Refusal, failed Creation Report, Representation Admission Refusal,
+invalid or unsupported representation, Compilation Admission Refusal,
+Compilation Request Rejection, Compilation Operation Outcome, rejected
+Compilation Result, transport refusal, transport failure, and Dagger staging
+failure are modeled data. Only the corresponding `requirePack`, `requireArchive`,
+`requireTree`, `requireProject`, or `requireSuccess` accessor turns a modeled
+outcome into a GraphQL error.
 
 Staging is a separate one-shot operation and cannot select or rewrite a
 Compilation Terminal. A succeeded zero-artifact Result stages successfully as an
@@ -904,19 +1296,28 @@ two-layer rule: `status` describes the immutable format/projection operation,
 while `stagingStatus` and `stagingReceipt` describe container-local File or
 Directory construction. A staging failure never rewrites a succeeded core
 receipt; `requireArchive`, `requireTree`, and `requireProject` require both.
+For archive encoding, the immutable-operation layer itself contains the
+independent mandatory `PackArchiveEncodingFormatReceipt` and nullable
+`SpoolTransportReceipt`; Dagger staging is a third, later fact and cannot absorb
+either receipt.
 
-Status mappings are exact: `PackCreation.ADAPTER_FAILED` iff the operation failed
-before a Creation Report, and `PackCreation.PACK_ISSUED` iff its Creation Report
-issued a Pack; `PackIngress.ADAPTER_FAILED` iff the common operation envelope has
-`kind: adapter_failed`, and `PackIngress.VALIDATED` iff its nested Format Receipt
-succeeded and exposed a Pack. `TypstPackRepresentationStatus.SUCCEEDED` iff the
-immutable encoding/projection report succeeded, regardless of later staging.
-Pre-core preparation maps to `ADAPTER_FAILED`; a non-resource representation or
-projection terminal maps to `ENCODING_FAILED`, while a stable-value spool
-terminal maps to `SPOOLING_FAILED`. Resource, cancellation, deadline, admission,
-and integrity terminals map by the same named receipt terminal. Representation
-has no request-rejection status, and staging status never participates in these
-mappings.
+Status mappings are exact closed derivations from the discriminated source
+branch. `PackCreation.ADAPTER_FAILED`, `REQUEST_REJECTED`,
+`ADMISSION_REFUSED`, `CREATION_FAILED`, and `PACK_ISSUED` correspond one-to-one
+to the four operation branches and the failed/issued Creation Report terminal;
+none is inferred from Pack nullability. `PackIngress.ADAPTER_FAILED` iff the
+common operation envelope has `kind: adapter_failed`, and
+`PackIngress.VALIDATED` iff its admitted Format Receipt succeeded and exposed a
+Pack. A refused Format Receipt maps to `ADMISSION_REFUSED` and retains the
+refusal. `TypstPackRepresentationStatus.SUCCEEDED` iff the immutable admitted
+encoding/projection report succeeded, regardless of later staging. Resource,
+spooling, cancellation, deadline, admission, encoding, and integrity statuses
+map from their exact Representation terminal. Representation has no request
+rejection, and staging status never participates in these mappings.
+`TypstPackCompilationStatus.ADAPTER_FAILED`, `ADMISSION_REFUSED`, and
+`REQUEST_REJECTED` map directly from their distinct outer/terminal branches;
+`RESULT_SUCCEEDED`, `RESULT_REJECTED`, and `OPERATION_FAILED` require an admitted
+report and map from its exact report terminal.
 
 Deterministic files:
 
@@ -925,9 +1326,9 @@ Deterministic files:
 | PackCreation.report | `creation-operation.json`, the complete creation operation envelope |
 | PackIngress.receipt | `pack-ingress-operation.json`, the common operation envelope with nested role receipt |
 | Pack.inspect | `pack-inspection.json` |
-| PackArchiveEncoding | `pack.typk` plus complete `archive-encoding-operation.json` envelope and `archive-staging.json` |
+| PackArchiveEncoding | `pack.typk` plus complete `archive-encoding-operation.json` with independent Pack Archive Encoding Format and optional Spool Transport receipts, plus `archive-staging.json` |
 | Compilation.operation | `compile-operation.json` |
-| Compilation.terminal/report | `compilation-terminal.json` / nullable `compilation-report.json` |
+| Compilation.terminal/report | `compilation-terminal.json` only for Request Rejection or admitted execution; `compilation-report.json` only for the admitted report branch |
 | Compilation.stagingReceipt | `compilation-staging.json` |
 | ClosureExport / materialization | pure tree plus complete operation envelope and staging receipt |
 
@@ -944,25 +1345,46 @@ generic semantic extensions, and format-inapplicable controls.
 
 ## Failure Precedence
 
+Commands skip inapplicable steps. For `create`, request construction and Creation
+Operation admission/execution precede issuance-dependent representation work;
+for Pack ingress, the creation steps do not run.
+
 1. Parse argument shape and trust token without files.
 2. Refuse trust or pre-parse enforcement capability.
 3. Resolve/validate limits and side-effect-free profiles.
-4. Normalize and statically collision-check plans.
-5. Boundedly stabilize raw inputs.
-6. Check expected Pack Archive Content Identity when archive ingress requested it.
-7. Validate safe framing, canonical control, objects, whole Pack, and unsupported
-   state in Epoch 2 order.
-8. Check expected Pack Identity after complete derivation.
-9. Verify asserted archive recipe by supported exact re-encoding.
-10. Stabilize overrides and resolve adapter defaults.
-11. Request Rejection occurs before Compilation Identity/authority/report.
-12. Deterministic compiler/exporter rejection is Result; dynamic pre-commit
+4. Normalize jobs/default inputs and statically collision-check plans.
+5. Admit each requested acquisition/spool/transport role before its effects.
+6. Boundedly stabilize raw inputs.
+7. For create, construct the bounded Creation Request; return typed
+   `CreationRequestRejection` before Creation Operation admission/report.
+8. Admit the Creation Operation against the bound descriptors, refusing rather
+   than lowering an unavailable exact-positive engine width; refusal has no
+   Creation Report.
+9. Run an admitted creation to its Creation Report; failure exposes no Pack and
+   prevents issuance-dependent representation or publication.
+10. Admit the representation role, including support for every requested or
+   asserted archive recipe; preserve typed refusal and supplied-but-unevaluated
+   assertions.
+11. Check expected Pack Archive Content Identity when archive ingress requested it.
+12. Validate safe framing, canonical control, objects, whole Pack, and unsupported
+    state in Epoch 2 order.
+13. Check expected Pack Identity after complete derivation.
+14. Verify an admitted asserted archive recipe by supported exact re-encoding.
+15. Stabilize overrides and resolve adapter defaults.
+16. Admit the Compilation Operation against the bound descriptors, the exact
+    requested engine width, and the explicitly disabled Semantic Result Cache
+    branch; an unavailable exact-positive width is refused rather than lowered,
+    and refusal remains in the operation envelope with no terminal or report.
+17. Compilation Request Rejection occurs before Compilation
+    Identity/authority/report.
+18. Deterministic compiler/exporter rejection is Result; dynamic pre-commit
     authority/resource/deadline/execution/isolation failure is Operation Outcome.
-13. Cancellation/deadline/supersession before terminal commitment wins under the
+19. Cancellation/deadline/supersession before terminal commitment wins under the
     core ordering; later signals cannot mutate it.
-14. Cache admission, encoding, publication, dependencies, timing, rendering,
-    viewer, and response are post-commit siblings.
-15. Commit wins over later cancellation/deadline; cleanup never replaces primary
+20. Archive encoding, publication, dependencies, timing, rendering, viewer, and
+    response are later siblings of the immutable semantic terminal they consume;
+    first-party Semantic Result Cache admission is absent.
+21. Commit wins over later cancellation/deadline; cleanup never replaces primary
     transfer/commit failure.
 
 ## Reconciliations
@@ -972,11 +1394,13 @@ generic semantic extensions, and format-inapplicable controls.
 - [Freeze Pack Format Epoch 2 normative contract](https://github.com/sagikazarmark/typst-pack/issues/57)
   controls over the stale Deflate-named Rust fixture helper; the implementation
   renames it to all-Stored v1.
-- Pack Override limits already required by variation are explicit despite their
-  omission from the Rust fixture limit record.
-- Stable Pack Inspection is complete logical state despite the Rust fixture's
-  subset of accessors; implementation extends projection without exposing the
-  Pack Control Record.
+- Final Rust fixture `00cfca1` controls creation construction rejection,
+  operation-bound descriptors and inventories, request-inventory origins,
+  representation/transport admission, receipts, and session semantics over the
+  prior adapter baseline `43f2af9`.
+- The final Rust Creation Resource Limits, Pack Inspection, request inventory,
+  and receipt accessors are serialized without adapter-created semantic fields
+  or omissions.
 
 The clean break removes current `extract`, Resource Slot/provider flags,
 `--embed-fonts`, `--include-typst-embedded-fonts`, `--no-vendor-packages`, direct
@@ -985,22 +1409,123 @@ create/compile, and ignored Rayon initialization error. ADR-0002's one private
 whole-Pack seam remains. Resource Slot parts of ADR-0004/0005 are historical;
 Typst parity parts remain input.
 
+## Prototype Validation
+
+The validation harness checks the hand-authored planning artifacts; it is not
+evidence of actual adapter or generated-Dagger parity. Run these commands from
+`PROTOTYPE-first-party-cli-dagger-validation`:
+
+```console
+$ cargo fmt --all -- --check
+$ cargo check --locked --all-targets
+$ cargo run --locked
+$ jq empty fixtures/cases.json ../PROTOTYPE-first-party-cli-dagger-schemas.json ../PROTOTYPE-native-cli-profile.json ../PROTOTYPE-dagger-ci-profile.json
+$ diff -u <(jq -S '[.schema_cases[], .generated_schema_cases[], .semantic_generated_cases[]] | map(.id) | sort' fixtures/cases.json) <(jq -S '[.schema_cases[], .generated_schema_cases[], .semantic_generated_cases[]] | map(.id) | sort | unique' fixtures/cases.json)
+$ diff -u <(jq -S '[.capability_constants[] | ["org.typst-pack/native-cli/\(.role)/1", "org.typst-pack/dagger/\(.role)/1"]]' fixtures/cases.json) <(jq -S --slurpfile schema ../PROTOTYPE-first-party-cli-dagger-schemas.json '[.capability_constants[] | .definition as $definition | $schema[0]."$defs"[$definition].enum]' fixtures/cases.json)
+$ diff -u <(jq -S '[del(.engine_runtime_domain) | paths | map(tostring) | join("/")] | sort' ../PROTOTYPE-native-cli-profile.json) <(jq -S '[del(.engine_runtime_domain) | paths | map(tostring) | join("/")] | sort' ../PROTOTYPE-dagger-ci-profile.json)
+$ git -C .. diff --check -- PROTOTYPE-first-party-cli-dagger-validation PROTOTYPE-first-party-cli-dagger-contracts.md
+```
+
+`cargo fmt`, all three `jq`/`diff` checks, the profile-path comparison, and
+`git diff --check` exit 0 with no output. `cargo check --locked --all-targets`
+exits 0 after compiling the final interface, prior consumer, serializer probe,
+and harness. The deterministic `cargo run --locked` summary is:
+
+```text
+issue-69 validation: ok
+json-schema: Draft 2020-12, 355 definitions, 1411 local refs, 40 direct + 45 generated cases
+profiles: 2 valid; issue-69 limits and tightening relationships verified
+capabilities: 16 producer-correlated constants and first-party trust/cache constraints verified
+graphql: 27 types; hand-authored target topology, statuses, and nullability verified
+html: 6 scenarios; 8/11 allowed events covered, 7 allowed effects, 6 publish fences and 2 delivery wrappers structurally verified
+serializer sources: 15 mechanically linked leaves; 12 poison derivations declared; 20 semantic cases checked
+dagger generated parity: DEFERRED (implementation gate not executed)
+```
+
+Every source-manifest leaf is mechanically tied either to a compile-probed Rust
+accessor marker or to a schema pointer checked by the harness. This proves the
+listed representative links, not exhaustive coverage of every schema leaf or a
+serializer implementation. The poison derivations are audited declarations;
+where no forbidden implementation exists, they are not claimed as executed
+rejections. Schema-negative fixtures and the 20 cross-field semantic cases are
+executed separately.
+
+The exact-positive create and compile cases compare normalized width, the core
+exact Engine Width Request, outer admitted jobs, admitted Engine Width, and the
+selected managed-domain width, with one independent mismatch case per value. A
+separate exact-positive admission-refusal case compares normalized width with the
+refused operation request and requires outer admitted jobs to remain null.
+
+HTML delivery validation structurally inspects the embedded helper and immutable
+snapshot source for complete, coherent Current Delivery and Last Successful
+Delivery wrappers. It does not parse a complete JavaScript AST or execute the
+script.
+
+The harness targets duplicate JSON keys, a UTF-8 BOM, noncanonical numeric
+strings, and bytes after the one newline-terminated JSON document, but validates
+planning fixtures only. No `dagger check` or clippy gate was run or claimed.
+Actual generated Dagger parity remains deferred: generation, introspection,
+structural comparison, and generated-client compilation are not reported as
+passing.
+
 ## Implementation Verification Gate
 
 - Snapshot parsed options, defaults, conflicts, environment fallbacks, six
   commands, and aliases against Typst 0.15.0. Help prose/wrapping is not stable.
-- Validate all auxiliary schemas including duplicate-key/unknown-field failures.
+- Regenerate and validate every strict major-1 auxiliary schema, including
+  duplicate-key, unknown-field, old-alias, and unknown-branch failures.
 - Golden-test JSON names, branches, nullability, versions, and precedence.
-- Compare a canonical structural generated schema, sorting types/fields/args/
-  enum members while checking names/kinds/type references/nullability; compile a
-  generated client.
+- Generate the GraphQL schema from actual Dagger implementation source, compare
+  a canonical structural form while checking names, kinds, type references and
+  nullability, and compile a generated client. The checked planning fixture alone
+  does not satisfy this gate.
 - Exercise every Dagger nullable branch and prove sibling reuse/require no rerun.
-- Prove adapter failure and request rejection lack reports; delivery preserves one.
+- Prove every modeled Dagger failure remains queryable and only `require*`
+  accessors raise.
+- Prove adapter failure, Creation Request Rejection, Creation Admission Refusal,
+  Compilation Admission Refusal, and Compilation Request Rejection lack reports;
+  prove adapter and Compilation Admission Refusal also lack a terminal, while
+  Request Rejection retains one.
+- Prove first-party Semantic Result Cache is disabled coherently in operation
+  request, admission/refusal, dependency inventory, and report provenance, with
+  no inferred descriptor, isolation domain, lookup, admission, or hit.
+- Audit every wire leaf against the serializer source rule, including exact
+  capability classes and descriptors, all six creation/compilation inventory
+  sections, lexical jobs, and explicit `D/K/Q/W/P/T` applicability and reach.
+  For both create and compile, schema-test automatic and exact lexical/core
+  request kind correlation on Admission Refusal and admitted report branches.
+- Extend the locked semantic harness for both create and compile to compare
+  exact-positive normalized width, core requested exact width, outer admitted
+  `W`, `EngineWidthAdmission.admitted`, and selected managed-domain width; poison
+  each independently and prove exact admission refuses instead of lowering when
+  the requested width is unavailable.
+- Exercise representation refusal, every archive expectation/assertion state,
+  all seven Format Receipt roles, both Transport Receipt branches, complete legal
+  stage ledgers, and independent commit/cleanup/residual/exposure facts.
+- Prove every Pack Archive Encoding Report retains its mandatory independent
+  Pack Archive Encoding Format Receipt and its independent Spool Transport
+  Receipt exactly when the spool role was attempted.
 - Reproduce independent Epoch 2 all-Stored corpus vectors.
 - Test stdout exclusivity, dynamic collisions, commit refusal, cleanup precedence,
-  and latest-only watch publication.
-- Test push, poll, unverified, stale, Last Successful Compilation, and distinct
-  Last Successful Delivery.
-- Verify every `native-cli/1` and `dagger-ci/1` field at its first observable seam.
+  and latest-only watch publication. For every outer adapter channel usage,
+  reject null/empty reasons on `not_attempted`, require the reason to identify an
+  earlier terminal or inapplicability, and reject non-null reasons on
+  `not_requested`, `succeeded`, and `complete`.
+- Test the exact final-Rust session events/effects, synchronous Accept
+  preparation, tokenless rejection/ingestion, same-revision retry, active/draining
+  and pending bounds, push, poll, zero-provider observations, scope separation,
+  retirement, Last Successful Compilation, and distinct Last Successful
+  Delivery. Assert the removed event names are not accepted.
+- Prove Current Delivery and Last Successful Delivery each retain Session
+  Instance, Revision, Evaluation, Publication Sequence, Result Identity, and the
+  immutable delivery outcome from the same publication fence.
+- Rerun the locked validation harness from the parent, record exact direct and
+  generated case counts, and either mechanically link the source manifest and
+  poison list to schema/accessor coverage or continue labeling them audited
+  declarations plus compile probes.
+- Verify every `native-cli/1` and `dagger-ci/1` profile field at its admission
+  seam, including creation package files, largest package file, Font Catalog
+  candidates, and isolated worker capacity, and prove no report copies profile
+  values without a Rust admission/reached source.
 
 No implementation or release work belongs to this prototype branch.

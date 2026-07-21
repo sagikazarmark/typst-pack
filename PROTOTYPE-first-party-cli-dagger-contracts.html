@@ -1,458 +1,1261 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-fixture-id="issue-69-cli-watch-traces-v2" data-source-commit="00cfca1987559586066b726c6257d8dd664c3a3c">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>PROTOTYPE: issue 63 first-party adapter reconciliation</title>
+  <title>PROTOTYPE: issue 69 CLI watch traces</title>
   <style>
     :root {
       color-scheme: light;
-      --paper: #f1ede3;
-      --panel: #fffdf7;
-      --ink: #1f2927;
-      --muted: #65706d;
-      --line: #d6d0c3;
-      --accent: #086f68;
-      --accent-soft: #d9ece8;
-      --warning: #a04426;
-      --warning-soft: #f4ddd3;
-      font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+      --paper: #f3f0e8;
+      --panel: #fffdf8;
+      --ink: #1d2928;
+      --muted: #64706d;
+      --line: #d6d0c4;
+      --accent: #12635e;
+      --accent-soft: #dcece8;
+      --warn: #8a452e;
+      --warn-soft: #f2dfd6;
+      --code: #15211f;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
     }
     * { box-sizing: border-box; }
     body { margin: 0; background: var(--paper); color: var(--ink); line-height: 1.5; }
-    main { width: min(1120px, calc(100% - 28px)); margin: auto; padding: 36px 0 70px; }
-    h1 { max-width: 900px; margin: 8px 0 12px; font-size: clamp(2rem, 5vw, 4rem); line-height: 1.05; letter-spacing: -0.04em; }
-    h2 { margin: 0 0 13px; font-size: 1.35rem; }
-    h3 { margin: 0 0 7px; color: var(--muted); font-size: .78rem; text-transform: uppercase; letter-spacing: .07em; }
-    p { max-width: 900px; }
-    a { color: var(--accent); }
+    button, select { font: inherit; }
+    button:focus-visible, select:focus-visible { outline: 3px solid rgb(18 99 94 / 28%); outline-offset: 2px; }
+    button:disabled { cursor: not-allowed; opacity: .48; }
+    main { width: min(1180px, calc(100% - 28px)); margin: 0 auto; padding: 34px 0 64px; }
+    h1 { max-width: 940px; margin: 10px 0 12px; font-size: clamp(2.1rem, 5vw, 4.6rem); line-height: 1.02; letter-spacing: -.045em; }
+    h2 { margin: 0 0 12px; font-size: 1.3rem; }
+    h3 { margin: 0 0 7px; font-size: .75rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+    p { max-width: 920px; }
     code, pre { font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; }
-    pre { margin: 0; padding: 14px; overflow: auto; border-radius: 8px; background: #172321; color: #edf7f4; font-size: .8rem; }
-    button { padding: 8px 11px; border: 1px solid var(--line); border-radius: 7px; background: white; color: var(--ink); font: inherit; font-size: .84rem; font-weight: 650; cursor: pointer; }
-    button:hover, button:focus-visible { border-color: var(--accent); outline: none; }
-    button.active { background: var(--accent); border-color: var(--accent); color: white; }
-    button.danger { color: var(--warning); }
-    ul { margin: 7px 0 0; padding-left: 20px; }
-    li + li { margin-top: 5px; }
-    .eyebrow { display: inline-block; padding: 5px 9px; border: 1px solid var(--warning); border-radius: 999px; color: var(--warning); font-size: .7rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
-    .lede { color: var(--muted); font-size: 1.05rem; }
-    .section { margin-top: 27px; }
-    .panel { padding: 20px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); box-shadow: 0 10px 28px rgb(43 53 49 / 5%); }
-    .intro { display: grid; grid-template-columns: 1.15fr .85fr; gap: 17px; }
-    .links { padding: 17px; border-radius: 9px; background: var(--accent-soft); }
-    .toolbar, .tabs { display: flex; flex-wrap: wrap; gap: 7px; }
-    .state-head { display: flex; justify-content: space-between; gap: 15px; align-items: start; }
-    .state-head p { margin: 4px 0 0; color: var(--muted); }
-    .badge { flex: 0 0 auto; padding: 6px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: .72rem; font-weight: 800; text-transform: uppercase; }
-    .badge.failed { background: var(--warning-soft); color: var(--warning); }
-    .facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; margin-top: 16px; }
-    .fact { padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: white; min-width: 0; }
-    .fact b { display: block; margin-bottom: 3px; color: var(--muted); font-size: .68rem; text-transform: uppercase; }
-    .state-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 13px; margin-top: 14px; }
-    .wide { grid-column: 1 / -1; }
-    .steps { display: grid; gap: 8px; margin-top: 11px; }
-    .step { display: grid; grid-template-columns: 29px 1fr auto; gap: 9px; align-items: center; padding: 8px; border: 1px solid var(--line); border-radius: 8px; }
-    .step span:first-child { display: grid; place-items: center; width: 26px; height: 26px; border-radius: 50%; background: var(--accent-soft); color: var(--accent); font-weight: 800; }
-    .history { margin-top: 11px; color: var(--muted); font-size: .8rem; }
-    @media (max-width: 780px) {
-      main { width: min(100% - 18px, 1120px); padding-top: 22px; }
-      .intro, .state-grid { grid-template-columns: 1fr; }
-      .wide { grid-column: auto; }
+    .eyebrow { display: inline-flex; gap: 8px; align-items: center; padding: 5px 9px; border: 1px solid var(--warn); border-radius: 999px; color: var(--warn); font-size: .7rem; font-weight: 800; letter-spacing: .08em; text-transform: uppercase; }
+    .lede { margin: 0; color: var(--muted); font-size: 1.08rem; }
+    .section { margin-top: 24px; }
+    .panel { padding: 20px; border: 1px solid var(--line); border-radius: 11px; background: var(--panel); box-shadow: 0 9px 24px rgb(44 54 51 / 5%); }
+    .question { display: grid; grid-template-columns: 1.25fr .75fr; gap: 14px; }
+    .answer { border-left: 4px solid var(--accent); }
+    .answer strong { display: block; margin-bottom: 5px; color: var(--accent); font-size: 1.08rem; }
+    .assumption { background: var(--accent-soft); }
+    .assumption p, .answer p { margin: 0; }
+    .metadata { margin-top: 10px; color: var(--muted); font-size: .8rem; overflow-wrap: anywhere; }
+    .controls { display: grid; grid-template-columns: minmax(210px, 1.6fr) repeat(3, auto) minmax(190px, 1fr); gap: 9px; align-items: end; }
+    label { display: grid; gap: 5px; color: var(--muted); font-size: .75rem; font-weight: 750; letter-spacing: .04em; text-transform: uppercase; }
+    select, button { min-height: 42px; border: 1px solid var(--line); border-radius: 7px; background: white; color: var(--ink); }
+    select { width: 100%; padding: 8px 10px; }
+    button { padding: 8px 13px; cursor: pointer; font-weight: 700; }
+    button:hover:not(:disabled) { border-color: var(--accent); }
+    .primary { background: var(--accent); border-color: var(--accent); color: white; }
+    .trace-head { display: flex; justify-content: space-between; gap: 18px; align-items: start; }
+    .trace-head p { margin: 4px 0 0; color: var(--muted); }
+    .counter { flex: 0 0 auto; padding: 6px 10px; border-radius: 999px; background: var(--accent-soft); color: var(--accent); font-size: .72rem; font-weight: 800; }
+    .step-name { margin: 17px 0 4px; font-size: 1.65rem; line-height: 1.15; }
+    .step-note { margin: 0; color: var(--muted); }
+    .io-grid { display: grid; grid-template-columns: .9fr 1.1fr; gap: 12px; margin-top: 16px; }
+    .io { min-width: 0; padding: 14px; border: 1px solid var(--line); border-radius: 8px; background: white; }
+    .token { display: inline-block; padding: 4px 8px; border-radius: 5px; background: var(--accent-soft); color: var(--accent); font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; font-size: .79rem; font-weight: 750; }
+    .token.none { background: #ebe8df; color: var(--muted); }
+    .effect-list { display: grid; gap: 7px; }
+    .effect { padding: 8px; border-left: 3px solid var(--accent); background: var(--accent-soft); font-size: .84rem; overflow-wrap: anywhere; }
+    .event-detail { margin: 9px 0 0; color: var(--muted); font-size: .78rem; overflow-wrap: anywhere; }
+    .facts { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 9px; margin-top: 14px; }
+    .fact { min-width: 0; padding: 10px; border: 1px solid var(--line); border-radius: 8px; background: white; overflow-wrap: anywhere; }
+    .fact b { display: block; margin-bottom: 3px; color: var(--muted); font-size: .67rem; letter-spacing: .05em; text-transform: uppercase; }
+    .fact span { font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; font-size: .78rem; }
+    .detail-grid { display: grid; grid-template-columns: 1.2fr .8fr; gap: 12px; margin-top: 14px; }
+    pre { margin: 0; max-height: 610px; padding: 14px; overflow: auto; border-radius: 8px; background: var(--code); color: #edf5f2; font-size: .77rem; line-height: 1.48; tab-size: 2; }
+    .ownership { display: grid; gap: 7px; margin: 0; }
+    .ownership div { padding-bottom: 7px; border-bottom: 1px solid var(--line); }
+    .ownership dt { font-family: "IBM Plex Mono", "SFMono-Regular", Consolas, monospace; font-size: .75rem; font-weight: 750; }
+    .ownership dd { margin: 2px 0 0; color: var(--muted); font-size: .78rem; }
+    .timeline { display: grid; gap: 6px; margin-top: 12px; }
+    .timeline button { display: grid; grid-template-columns: 28px 1fr; gap: 8px; align-items: center; width: 100%; min-height: 38px; padding: 7px 9px; text-align: left; font-weight: 600; }
+    .timeline button[aria-current="step"] { border-color: var(--accent); background: var(--accent-soft); }
+    .number { display: grid; place-items: center; width: 24px; height: 24px; border-radius: 50%; background: #ebe8df; color: var(--muted); font-size: .72rem; }
+    .timeline button[aria-current="step"] .number { background: var(--accent); color: white; }
+    .method { color: var(--muted); font-size: .87rem; }
+    .method ul { margin-bottom: 0; padding-left: 20px; }
+    .method li + li { margin-top: 5px; }
+    @media (max-width: 880px) {
+      .question, .detail-grid { grid-template-columns: 1fr; }
+      .controls { grid-template-columns: 1fr 1fr 1fr; }
+      .controls label:first-child, .controls label:last-child { grid-column: 1 / -1; }
       .facts { grid-template-columns: 1fr 1fr; }
-      .state-head { display: block; }
-      .badge { display: inline-block; margin-top: 9px; }
     }
-    @media (max-width: 460px) { .facts { grid-template-columns: 1fr; } }
+    @media (max-width: 640px) {
+      main { width: min(100% - 18px, 1180px); padding-top: 20px; }
+      .panel { padding: 15px; }
+      .io-grid, .facts { grid-template-columns: 1fr; }
+      .controls { grid-template-columns: 1fr 1fr; }
+      .controls label:first-child, .controls label:last-child { grid-column: 1 / -1; }
+      .trace-head { display: block; }
+      .counter { display: inline-block; margin-top: 9px; }
+    }
   </style>
 </head>
 <body>
 <main>
-  <span class="eyebrow">Issue 63 reconciliation prototype</span>
-  <h1>Keep the terminal true when adapters add work</h1>
-  <p class="lede">Question: do CLI and Dagger preserve role-specific Pack ingress, pre-core failure, request rejection, Compilation Reports, disclosure, staging, delivery, and watch currentness without flattening them? Under the no-external-v1 premise, issue 63 supersedes the unreleased issue-56 prototype in place.</p>
+  <span class="eyebrow">Throwaway logic prototype / issue 69</span>
+  <h1>Can CLI watch serialize the Rust-reachable session?</h1>
+  <p class="lede">Question: can CLI watch serialize the final Rust-reachable Pack-bound session lifecycle without inventing adapter state?</p>
 
-  <section class="intro section">
-    <article class="panel">
-      <h2>Verdict under test</h2>
-      <ul>
-        <li>Pre-core adapter failure has an operation envelope but no Compilation Terminal.</li>
-        <li>Archive Content Identity expectation never leaks onto Closure Export ingress.</li>
-        <li>Request rejection has no Compilation Report or Compilation Identity.</li>
-        <li>A report owns one Result or Operation Outcome.</li>
-        <li>Canonical evidence is capability-gated and serializes only its trace and evidence table.</li>
-        <li>First-party font scans warn and omit invalid or unreadable candidates outside the core Creation Report.</li>
-        <li>Dagger staging and CLI delivery cannot rewrite the semantic result.</li>
-        <li>Superseded subscription generations retire exactly through one ordered unique collection, even during active attempts.</li>
-        <li>Watch dirtiness stales the existing publication and retained success immediately.</li>
-      </ul>
+  <section class="question section">
+    <article class="panel answer">
+      <h2>Answer under test</h2>
+      <strong>Yes, if the boundary stays explicit.</strong>
+      <p>The Rust session owns lifecycle, revisions, evaluations, attempts, fences, generations, publication, and last success. CLI separately owns the Pack-to-session binding, Current Delivery, and Last Successful Delivery. A different Pack ends the old session and creates another session outside the reducer.</p>
     </article>
-    <aside class="links">
-      <strong>Normative artifacts</strong>
-      <p><a href="PROTOTYPE-first-party-cli-dagger-contracts.md">Adapter contract</a><br><a href="PROTOTYPE-first-party-cli-dagger-generated.graphql">Generated schema fixture</a><br><a href="PROTOTYPE-first-party-cli-dagger-schemas.json">JSON schemas</a></p>
+    <aside class="panel assumption">
+      <h2>Assumption</h2>
+      <p><code>00cfca1</code> is the final reachable Rust interface. These are immutable expected traces, not an implementation of <code>CompilationSession::apply</code>.</p>
+      <div class="metadata" id="source-metadata"></div>
     </aside>
   </section>
 
-  <section class="section panel">
-    <h2>Free play</h2>
-    <div class="toolbar" id="actions"></div>
+  <section class="section panel" aria-label="Trace navigation">
+    <div class="controls">
+      <label>Scenario<select id="scenario"></select></label>
+      <button type="button" id="reset">Reset</button>
+      <button type="button" id="previous">Previous</button>
+      <button type="button" class="primary" id="next">Next</button>
+      <label>Jump to named step<select id="jump"></select></label>
+    </div>
   </section>
 
   <section class="section panel" aria-live="polite">
-    <div class="state-head">
-      <div><h2 id="title"></h2><p id="summary"></p></div>
-      <span class="badge" id="badge"></span>
+    <div class="trace-head">
+      <div>
+        <h2 id="scenario-title"></h2>
+        <p id="scenario-description"></p>
+      </div>
+      <span class="counter" id="counter"></span>
     </div>
+    <h2 class="step-name" id="step-name"></h2>
+    <p class="step-note" id="step-note"></p>
+
+    <div class="io-grid">
+      <article class="io">
+        <h3>Input event</h3>
+        <span class="token" id="event-name"></span>
+        <div class="event-detail" id="event-detail"></div>
+      </article>
+      <article class="io">
+        <h3>Emitted effects</h3>
+        <div class="effect-list" id="effects"></div>
+      </article>
+    </div>
+
     <div class="facts" id="facts"></div>
-    <div class="state-grid">
-      <div><h3>State sketch (non-wire)</h3><pre id="json"></pre></div>
-      <div><h3>Dagger nullability</h3><pre id="dagger"></pre></div>
-      <div class="wide"><h3>Invariants exercised</h3><ul id="invariants"></ul></div>
+
+    <div class="detail-grid">
+      <article>
+        <h3>Full serialized state and effects</h3>
+        <pre id="full-state"></pre>
+      </article>
+      <article>
+        <h3>Source ownership</h3>
+        <dl class="ownership" id="ownership"></dl>
+      </article>
     </div>
-    <div class="history" id="history"></div>
   </section>
 
   <section class="section panel">
-    <h2>Guided walkthroughs</h2>
-    <div class="tabs" id="tabs"></div>
-    <h3 id="walk-title" style="margin-top:14px"></h3>
-    <p id="walk-description"></p>
-    <div class="steps" id="steps"></div>
+    <h2>Scenario trace</h2>
+    <div class="timeline" id="timeline"></div>
+  </section>
+
+  <section class="section panel method">
+    <h2>How to read this prototype</h2>
+    <ul>
+      <li>Navigation only selects an embedded snapshot. It computes no lifecycle transition.</li>
+      <li>Every step includes the complete inspected state, emitted effects, and any ignored stale input.</li>
+      <li>Polling observations are collections, so empty and multi-provider observations remain distinct.</li>
+      <li>Fixture metadata distinguishes the Rust-allowed event vocabulary from events exercised by these six traces.</li>
+      <li><code>RetireSubscriptions</code> and <code>Publish</code> are effects. No adapter callback is added for either one.</li>
+      <li>Delivery never appears inside the Rust session-owned publication or last-success value. Every non-idle adapter delivery is a complete publication-fenced wrapper with its immutable outcome and transport-receipt subject.</li>
+    </ul>
   </section>
 </main>
 
-<script>
-const AdapterModel = (() => {
-  const PACK_A = `typst-pack:pack:1:sha256:${"a".repeat(64)}`;
-  const PACK_B = `typst-pack:pack:1:sha256:${"b".repeat(64)}`;
-  const RESULT_A = `typst-pack:compilation-result:1:sha256:${"1".repeat(64)}`;
-  const RESULT_B = `typst-pack:compilation-result:1:sha256:${"2".repeat(64)}`;
-  const emptyStaging = Object.freeze({ status: "not_applicable", value: null });
-  const initial = Object.freeze({
-    title: "Validated Pack Archive, no compilation",
-    summary: "The ingress operation owns a successful Pack Archive Read receipt; no Compilation Terminal has committed.",
-    pack: "validated", inputKind: "archive", ingressKind: "format_terminal", ingressTerminal: "validated", ingressAdapterOutcome: null, formatReceiptRole: "pack_archive_read", acquisition: "transferred",
-    adapterOutcome: null, terminal: null, terminalRecord: null, reportBranch: null, result: null, artifactCount: null, canonicalEvidence: "not_requested",
-    compilationStaging: emptyStaging, representationStatus: null, representationStaging: emptyStaging, staticDelivery: Object.freeze({ status: "not_attempted", token: null }),
-    packIdentity: PACK_A, sessionSequence: 1, sessionInstance: "session-1", desiredRevision: 0, attemptSequence: 0, attemptToken: null, completedAttemptTokens: [],
-    fenceSequence: 0, fenceToken: null, previousFenceToken: null, subscriptionSequence: 0, candidateSubscriptionGeneration: null, activeSubscriptionGeneration: null, retirementGenerations: [], lastRetiredGeneration: null,
-    sessionStep: "idle", candidate: null, candidateCurrentness: null, coverage: "complete_push", coveragePolicy: "strict", dirtyScopes: [], gapScopes: [], publication: null, lastSuccess: null,
-    deliverySequence: 0, deliveryAttempts: [], lastDelivery: null, ignored: null, history: ["reset"]
-  });
-
-  const actions = Object.freeze({
-    RESET: ["Reset or fork", false], ARCHIVE_CONTENT_MISMATCH: ["Archive content mismatch", true], PACK_ID_MISMATCH: ["Pack ID mismatch", true], INGRESS_ADAPTER_FAILED: ["Ingress adapter fails", true], ADMIT_PACK: ["Validate archive", false], ADMIT_CLOSURE: ["Validate closure", false],
-    ADAPTER_FAILED: ["Adapter fails", true], REQUEST_REJECTED: ["Commit request rejection", true], RESULT_SUCCEEDED: ["Commit result (1 artifact)", false], RESULT_EMPTY_SUCCEEDED: ["Commit result (0 artifacts)", false], RESULT_REJECTED: ["Commit rejected result", true], OPERATION_FAILED: ["Commit operation outcome", true], EVIDENCE_DISCLOSED: ["Disclose evidence", false],
-    REPRESENTATION_SUCCEEDED: ["Commit representation", false], REPRESENTATION_ENCODING_FAILED: ["Encoding fails", true], REPRESENTATION_SPOOLING_FAILED: ["Spooling fails", true],
-    COMPILATION_STAGING_START: ["Start compilation staging", false], COMPILATION_STAGING_SUCCEEDED: ["Compilation staging succeeds", false], COMPILATION_STAGING_FAILED: ["Compilation staging fails", true], REPRESENTATION_STAGING_START: ["Start representation staging", false], REPRESENTATION_STAGING_SUCCEEDED: ["Representation staging succeeds", false], REPRESENTATION_STAGING_FAILED: ["Representation staging fails", true],
-    DELIVERY_START: ["Start delivery", false], DELIVERY_COMMITTED: ["Delivery commits", false], DELIVERY_FAILED: ["Delivery fails", true],
-    WATCH_ACCEPT: ["Accept revision / StartAttempt", false], WATCH_ATTEMPT_RESULT: ["AttemptFinished: equal result", false], WATCH_CHANGED_RESULT: ["AttemptFinished: changed result", false], WATCH_ATTEMPT_REJECTION: ["AttemptFinished: rejection", true], WATCH_ATTEMPT_OUTCOME: ["AttemptFinished: outcome", true], WATCH_INGEST_FAILED: ["Candidate ingestion failure", true],
-    WATCH_FENCE_READ: ["ReadFence finished", false], WATCH_SUBSCRIPTIONS_ARMED: ["ArmSubscriptions finished", false], WATCH_FENCE_CONFIRMED: ["ConfirmFence finished", false], WATCH_PUBLISH: ["Publish candidate", false], WATCH_RETIRE_SUBSCRIPTIONS: ["Retire subscriptions", false], WATCH_GAP: ["Notification gap", true], WATCH_RECONCILED: ["Equal revalidation", false],
-    WATCH_INCOMPLETE: ["Incomplete coverage", true], WATCH_ALLOW_UNVERIFIED: ["Allow unverified", true], WATCH_POLL_MODE: ["Use coherent polling", false], WATCH_DELIVERY_START: ["Start watch delivery", false], WATCH_DELIVERY_COMMITTED: ["Commit oldest in-flight delivery", false], WATCH_DELIVERY_FAILED: ["Fail oldest in-flight delivery", true], WATCH_PACK_CHANGED: ["Change Pack Identity", true],
-    WATCH_STALE_ATTEMPT: ["Stale attempt token", true], WATCH_DUPLICATE_FINISH: ["Duplicate completion token", true], WATCH_STALE_FENCE: ["Stale fence token", true], WATCH_OLD_SUBSCRIPTION: ["Old subscription generation", true], WATCH_STALE_DELIVERY: ["Stale delivery token", true]
-  });
-
-  const eventName = event => event.type;
-  const history = (state, event, detail = null) => [...state.history, detail ? `${event.type}(${detail})` : event.type].slice(-18);
-  const currentness = (kind, state) => Object.freeze({ kind, cursors: kind === "current_through_push" ? [`provider:${state.sessionInstance}:${state.desiredRevision}`] : null, observation: kind === "current_as_of_poll" ? `poll:${state.sessionInstance}:${state.desiredRevision}` : null, uncovered: kind === "unverified" ? ["scope:external-packages"] : null, dirty: kind === "stale" ? (state.dirtyScopes.length ? state.dirtyScopes : ["scope:request"]) : null });
-  const stale = (value, state) => value ? Object.freeze({ ...value, currentness: currentness("stale", state) }) : null;
-  const appendUnique = (values, value) => value && !values.includes(value) ? [...values, value] : values;
-  const ignored = (state, event, reason) => Object.freeze({ ...state, title: "Ignored event", summary: `SessionTransition::Ignored(${reason}) compared the exact payload token and preserved committed state.`, ignored: reason, history: history(state, event, reason) });
-
-  function event(action, state) {
-    const started = state.deliveryAttempts.find(attempt => attempt.status === "started");
-    const candidateIdentity = state.lastSuccess?.resultIdentity ?? RESULT_A;
-    const events = {
-      WATCH_ACCEPT: () => ({ type: "ACCEPT", packIdentity: state.packIdentity }),
-      WATCH_ATTEMPT_RESULT: () => ({ type: "ATTEMPT_FINISHED", token: state.attemptToken, candidate: { kind: "compilation_terminal", terminalKind: "report", reportBranch: "result", result: "succeeded", artifactCount: 1, resultIdentity: candidateIdentity } }),
-      WATCH_CHANGED_RESULT: () => ({ type: "ATTEMPT_FINISHED", token: state.attemptToken, candidate: { kind: "compilation_terminal", terminalKind: "report", reportBranch: "result", result: "succeeded", artifactCount: 1, resultIdentity: candidateIdentity === RESULT_A ? RESULT_B : RESULT_A } }),
-      WATCH_ATTEMPT_REJECTION: () => ({ type: "ATTEMPT_FINISHED", token: state.attemptToken, candidate: { kind: "compilation_terminal", terminalKind: "request_rejected", reportBranch: null, result: null, resultIdentity: null } }),
-      WATCH_ATTEMPT_OUTCOME: () => ({ type: "ATTEMPT_FINISHED", token: state.attemptToken, candidate: { kind: "compilation_terminal", terminalKind: "report", reportBranch: "operation_outcome", result: null, resultIdentity: null } }),
-      WATCH_INGEST_FAILED: () => ({ type: "INGESTION_FAILED", token: state.attemptToken, candidate: { kind: "ingestion_failure", terminalKind: null, reportBranch: null, result: null, resultIdentity: null } }),
-      WATCH_FENCE_READ: () => ({ type: "FENCE_READ_FINISHED", token: state.fenceToken }),
-      WATCH_SUBSCRIPTIONS_ARMED: () => ({ type: "SUBSCRIPTIONS_ARMED", token: state.fenceToken, generation: `${state.sessionInstance}:g${state.subscriptionSequence + 1}` }),
-      WATCH_FENCE_CONFIRMED: () => ({ type: "FENCE_CONFIRMED", token: state.fenceToken, generation: state.candidateSubscriptionGeneration }),
-      WATCH_PUBLISH: () => ({ type: "PUBLISH", token: state.fenceToken }),
-      WATCH_RETIRE_SUBSCRIPTIONS: () => ({ type: "RETIRE_SUBSCRIPTIONS", generation: state.retirementGenerations[0] }),
-      WATCH_GAP: () => ({ type: "NOTIFICATION_GAP", generation: state.candidateSubscriptionGeneration ?? state.activeSubscriptionGeneration, scope: "scope:provider-gap" }),
-      WATCH_RECONCILED: () => ({ type: "RECONCILED_EQUAL", token: state.fenceToken, provenEqualScopes: [...state.dirtyScopes], resultIdentity: state.candidate?.resultIdentity ?? null }),
-      WATCH_DELIVERY_START: () => ({ type: "WATCH_DELIVERY_START", publicationRevision: state.publication?.revision, resultIdentity: state.publication?.terminal?.resultIdentity, token: `${state.sessionInstance}:delivery:${state.deliverySequence + 1}` }),
-      WATCH_DELIVERY_COMMITTED: () => ({ type: "WATCH_DELIVERY_FINISHED", token: started?.token, status: "committed" }),
-      WATCH_DELIVERY_FAILED: () => ({ type: "WATCH_DELIVERY_FINISHED", token: started?.token, status: "failed" }),
-      WATCH_PACK_CHANGED: () => ({ type: "PACK_CHANGED", previousPackIdentity: state.packIdentity, packIdentity: state.packIdentity === PACK_A ? PACK_B : PACK_A }),
-      WATCH_STALE_ATTEMPT: () => ({ type: "ATTEMPT_FINISHED", token: `${state.sessionInstance}:stale-attempt`, candidate: { kind: "compilation_terminal" } }),
-      WATCH_DUPLICATE_FINISH: () => ({ type: "ATTEMPT_FINISHED", token: state.completedAttemptTokens.at(-1), candidate: state.candidate }),
-      WATCH_STALE_FENCE: () => ({ type: "FENCE_READ_FINISHED", token: state.previousFenceToken ?? `${state.sessionInstance}:f0` }),
-      WATCH_OLD_SUBSCRIPTION: () => ({ type: "NOTIFICATION_GAP", generation: state.lastRetiredGeneration ?? `${state.sessionInstance}:g0`, scope: "scope:old" }),
-      WATCH_STALE_DELIVERY: () => ({ type: "WATCH_DELIVERY_FINISHED", token: `${state.sessionInstance}:delivery:stale`, status: "committed" }),
-      DELIVERY_START: () => ({ type: "DELIVERY_START", token: "static-delivery:1" }),
-      DELIVERY_COMMITTED: () => ({ type: "DELIVERY_FINISHED", token: state.staticDelivery.token, status: "committed" }),
-      DELIVERY_FAILED: () => ({ type: "DELIVERY_FINISHED", token: state.staticDelivery.token, status: "failed" })
-    };
-    return events[action] ? events[action]() : { type: action };
-  }
-
-  function commitTerminal(state, event, record) {
-    if (state.terminal || state.adapterOutcome) return ignored(state, event, "immutable_terminal");
-    const succeeded = record.kind === "report" && record.reportBranch === "result" && record.result === "succeeded";
-    return Object.freeze({ ...state, title: record.title, summary: record.summary, terminal: record.kind, terminalRecord: Object.freeze(record), reportBranch: record.reportBranch ?? null, result: record.result ?? null, artifactCount: record.artifactCount ?? null, compilationStaging: Object.freeze({ status: succeeded ? "not_started" : "not_applicable", value: null }), staticDelivery: Object.freeze({ status: succeeded ? "not_attempted" : "not_applicable", token: null }), ignored: null, history: history(state, event) });
-  }
-
-  function finishAttempt(state, event) {
-    if (state.completedAttemptTokens.includes(event.token)) return ignored(state, event, "duplicate_completion");
-    if (state.sessionStep !== "attempt_running" || !event.token || event.token !== state.attemptToken) return ignored(state, event, "stale_attempt");
-    const fenceSequence = state.fenceSequence + 1;
-    const fenceToken = `${state.sessionInstance}:f${fenceSequence}`;
-    return Object.freeze({ ...state, title: "Attempt terminal retained as candidate", summary: "AttemptFinished matched its exact token and emitted a new monotonic ReadFence token.", completedAttemptTokens: [...state.completedAttemptTokens, event.token], attemptToken: null, previousFenceToken: state.fenceToken, fenceSequence, fenceToken, sessionStep: "read_fence", candidate: Object.freeze(event.candidate), candidateCurrentness: null, ignored: null, history: history(state, event, `ReadFence ${fenceToken}`) });
-  }
-
-  function reduce(state, event) {
-    const type = eventName(event);
-    if (type === "RESET") return initial;
-    if (type === "ARCHIVE_CONTENT_MISMATCH") return Object.freeze({ ...initial, title: "Expected Pack Archive Content Identity mismatch", summary: "Acquisition retained expected and actual archive identities; parsing did not start and no Pack is exposed.", pack: "not_exposed", ingressTerminal: "input_content_identity_mismatch", history: history(state, event) });
-    if (type === "PACK_ID_MISMATCH") return Object.freeze({ ...initial, title: "Expected Pack Identity mismatch", summary: "Validation retained the derived identity without exposing a Pack.", pack: "not_exposed", ingressTerminal: "expected_pack_identity_mismatch", history: history(state, event) });
-    if (type === "INGRESS_ADAPTER_FAILED") return Object.freeze({ ...initial, title: "Outer admission or ingress adapter failure", summary: "No Format Receipt was fabricated.", pack: "not_exposed", inputKind: "unclassified", ingressKind: "adapter_failed", ingressTerminal: "adapter_failed", ingressAdapterOutcome: "input_reference", formatReceiptRole: null, acquisition: null, history: history(state, event) });
-    if (type === "ADMIT_PACK") return Object.freeze({ ...initial, history: history(state, event) });
-    if (type === "ADMIT_CLOSURE") return Object.freeze({ ...initial, title: "Validated Closure Export, no compilation", summary: "Closure Export Import derives Tree Content Identity and accepts no content-identity expectation.", inputKind: "closure_export", formatReceiptRole: "closure_export_import", acquisition: null, history: history(state, event) });
-    if (state.pack !== "validated") return ignored(state, event, "pack_not_exposed");
-
-    if (type === "ADAPTER_FAILED") {
-      if (state.terminal || state.adapterOutcome) return ignored(state, event, "immutable_terminal");
-      return Object.freeze({ ...state, title: "Pre-core adapter outcome", summary: "No Compilation Terminal, report, or identity was fabricated.", adapterOutcome: "input_stabilization", history: history(state, event) });
-    }
-    if (type === "REQUEST_REJECTED") return commitTerminal(state, event, { kind: "request_rejected", title: "Compilation Request Rejection", summary: "Typed safe inventory and nonempty ordered issues committed without a report or Compilation Identity." });
-    if (type === "RESULT_SUCCEEDED") return commitTerminal(state, event, { kind: "report", reportBranch: "result", result: "succeeded", artifactCount: 1, resultIdentity: RESULT_A, title: "Succeeded Compilation Result", summary: "The immutable report committed before staging or delivery." });
-    if (type === "RESULT_EMPTY_SUCCEEDED") return commitTerminal(state, event, { kind: "report", reportBranch: "result", result: "succeeded", artifactCount: 0, resultIdentity: RESULT_A, title: "Succeeded zero-artifact Compilation Result", summary: "The explicit Result Identity owns an empty artifact set." });
-    if (type === "RESULT_REJECTED") return commitTerminal(state, event, { kind: "report", reportBranch: "result", result: "rejected", artifactCount: null, resultIdentity: RESULT_A, title: "Rejected Compilation Result", summary: "Deterministic compiler/exporter rejection committed as a Result." });
-    if (type === "OPERATION_FAILED") return commitTerminal(state, event, { kind: "report", reportBranch: "operation_outcome", title: "Compilation Operation Outcome", summary: "A dynamic pre-commit cause committed inside an immutable report." });
-    if (type === "EVIDENCE_DISCLOSED" && state.terminal === "report") return Object.freeze({ ...state, title: "Canonical evidence disclosed", summary: "The projected terminal selects the applicable trace; the serialized value contains only trace and evidence.", canonicalEvidence: "complete", history: history(state, event) });
-
-    if (["REPRESENTATION_SUCCEEDED", "REPRESENTATION_ENCODING_FAILED", "REPRESENTATION_SPOOLING_FAILED"].includes(type)) {
-      if (state.representationStatus) return ignored(state, event, "immutable_representation_terminal");
-      const status = type === "REPRESENTATION_SUCCEEDED" ? "SUCCEEDED" : type === "REPRESENTATION_ENCODING_FAILED" ? "ENCODING_FAILED" : "SPOOLING_FAILED";
-      return Object.freeze({ ...state, title: `Representation ${status.toLowerCase()}`, summary: "Representation and compilation own separate staging records.", representationStatus: status, representationStaging: Object.freeze({ status: status === "SUCCEEDED" ? "not_started" : "not_applicable", value: null }), history: history(state, event) });
-    }
-    if (type.startsWith("COMPILATION_STAGING_")) {
-      const target = state.compilationStaging;
-      if (type.endsWith("START")) return target.status === "not_started" ? Object.freeze({ ...state, compilationStaging: Object.freeze({ status: "started", value: null }), title: "Compilation staging started", history: history(state, event) }) : ignored(state, event, "compilation_staging_not_startable");
-      if (target.status !== "started") return ignored(state, event, "compilation_staging_not_started");
-      const succeeded = type.endsWith("SUCCEEDED");
-      const value = succeeded ? (state.artifactCount === 0 ? "empty_directory" : "artifact_directory") : null;
-      return Object.freeze({ ...state, compilationStaging: Object.freeze({ status: succeeded ? "succeeded" : "failed", value }), title: succeeded ? "Compilation staging succeeded" : "Compilation staging failed", history: history(state, event) });
-    }
-    if (type.startsWith("REPRESENTATION_STAGING_")) {
-      const target = state.representationStaging;
-      if (type.endsWith("START")) return target.status === "not_started" ? Object.freeze({ ...state, representationStaging: Object.freeze({ status: "started", value: null }), title: "Representation staging started", history: history(state, event) }) : ignored(state, event, "representation_staging_not_startable");
-      if (target.status !== "started") return ignored(state, event, "representation_staging_not_started");
-      const succeeded = type.endsWith("SUCCEEDED");
-      return Object.freeze({ ...state, representationStaging: Object.freeze({ status: succeeded ? "succeeded" : "failed", value: succeeded ? "representation_value" : null }), title: succeeded ? "Representation staging succeeded" : "Representation staging failed", history: history(state, event) });
-    }
-    if (type === "DELIVERY_START") {
-      if (state.reportBranch !== "result" || state.result !== "succeeded" || state.staticDelivery.status !== "not_attempted") return ignored(state, event, "delivery_not_startable");
-      return Object.freeze({ ...state, staticDelivery: Object.freeze({ status: "started", token: event.token }), title: "Delivery started", history: history(state, event, event.token) });
-    }
-    if (type === "DELIVERY_FINISHED") {
-      if (state.staticDelivery.status !== "started" || event.token !== state.staticDelivery.token) return ignored(state, event, "stale_delivery");
-      return Object.freeze({ ...state, staticDelivery: Object.freeze({ status: event.status, token: event.token }), title: `Delivery ${event.status}`, history: history(state, event, event.token) });
-    }
-
-    if (type === "PACK_CHANGED") {
-      if (event.previousPackIdentity !== state.packIdentity || event.packIdentity === state.packIdentity) return ignored(state, event, "previous_session_instance");
-      const sessionSequence = state.sessionSequence + 1;
-      const retirementGenerations = appendUnique(appendUnique(state.retirementGenerations, state.candidateSubscriptionGeneration), state.activeSubscriptionGeneration);
-      return Object.freeze({ ...initial, packIdentity: event.packIdentity, sessionSequence, sessionInstance: `session-${sessionSequence}`, retirementGenerations, title: "Pack Identity changed", summary: "A different Pack Identity created a new Compilation Session and queued every old subscription generation for retirement.", history: history(state, event, event.packIdentity) });
-    }
-    if (type === "ACCEPT") {
-      if (event.packIdentity !== state.packIdentity) return ignored(state, event, "previous_session_instance");
-      const desiredRevision = state.desiredRevision + 1;
-      const attemptSequence = state.attemptSequence + 1;
-      const attemptToken = `${state.sessionInstance}:r${desiredRevision}:a${attemptSequence}`;
-      const dirtyScopes = [...new Set([...state.dirtyScopes, "scope:request"])];
-      const retirementGenerations = appendUnique(state.retirementGenerations, state.candidateSubscriptionGeneration);
-      const dirtyState = { ...state, desiredRevision, dirtyScopes, retirementGenerations };
-      return Object.freeze({ ...dirtyState, title: "Watch revision accepted", summary: "StartAttempt received a revision-bound token; superseded candidate subscriptions were queued for retirement and independent deliveries were not reset.", attemptSequence, attemptToken, fenceToken: null, candidateSubscriptionGeneration: null, sessionStep: "attempt_running", candidate: null, candidateCurrentness: null, publication: stale(state.publication, dirtyState), lastSuccess: stale(state.lastSuccess, dirtyState), ignored: null, history: history(state, event, attemptToken) });
-    }
-    if (type === "ATTEMPT_FINISHED" || type === "INGESTION_FAILED") return finishAttempt(state, event);
-    if (type === "FENCE_READ_FINISHED") {
-      if (state.sessionStep !== "read_fence" || !event.token || event.token !== state.fenceToken) return ignored(state, event, "stale_fence");
-      if (state.gapScopes.length) return Object.freeze({ ...state, title: "Fence blocked by notification gap", sessionStep: "reconcile_gap", history: history(state, event, "gap") });
-      if (state.coverage === "incomplete") {
-        if (state.coveragePolicy === "strict") return Object.freeze({ ...state, title: "Strict coverage blocked publication", sessionStep: "blocked_incomplete", candidateCurrentness: null, history: history(state, event) });
-        return Object.freeze({ ...state, title: "Unverified candidate ready", sessionStep: "publish_ready", candidateCurrentness: currentness("unverified", state), dirtyScopes: [], history: history(state, event, "Publish") });
-      }
-      if (state.coverage === "complete_poll") {
-        const kind = state.candidate.kind === "ingestion_failure" ? "stale" : "current_as_of_poll";
-        return Object.freeze({ ...state, title: "Coherent poll candidate ready", sessionStep: "publish_ready", candidateCurrentness: currentness(kind, state), dirtyScopes: kind === "stale" ? state.dirtyScopes : [], history: history(state, event, "Publish") });
-      }
-      return Object.freeze({ ...state, title: "Fence read completed", sessionStep: "arm_subscriptions", history: history(state, event, `ArmSubscriptions ${event.token}`) });
-    }
-    if (type === "SUBSCRIPTIONS_ARMED") {
-      const expected = `${state.sessionInstance}:g${state.subscriptionSequence + 1}`;
-      if (state.sessionStep !== "arm_subscriptions" || event.token !== state.fenceToken || event.generation !== expected) return ignored(state, event, "stale_fence");
-      return Object.freeze({ ...state, title: "Subscriptions armed", subscriptionSequence: state.subscriptionSequence + 1, candidateSubscriptionGeneration: event.generation, sessionStep: "confirm_fence", history: history(state, event, `${event.token}/${event.generation}`) });
-    }
-    if (type === "FENCE_CONFIRMED") {
-      if (state.sessionStep !== "confirm_fence" || event.token !== state.fenceToken || event.generation !== state.candidateSubscriptionGeneration) return ignored(state, event, "stale_fence");
-      if (state.gapScopes.length || state.dirtyScopes.some(scope => scope !== "scope:request")) return Object.freeze({ ...state, title: "Dirty confirmation blocked publication", sessionStep: "reconcile_gap", history: history(state, event, "dirty") });
-      const kind = state.candidate.kind === "ingestion_failure" ? "stale" : "current_through_push";
-      return Object.freeze({ ...state, title: "Fence confirmed clean", sessionStep: "publish_ready", candidateCurrentness: currentness(kind, state), dirtyScopes: kind === "stale" ? state.dirtyScopes : [], history: history(state, event, "Publish") });
-    }
-    if (type === "PUBLISH") {
-      if (state.sessionStep !== "publish_ready" || event.token !== state.fenceToken || !state.candidate || !state.candidateCurrentness) return ignored(state, event, "stale_fence");
-      if (state.gapScopes.length || (state.candidateCurrentness.kind !== "stale" && state.dirtyScopes.length)) return ignored(state, event, "dirty_fence");
-      const publication = Object.freeze({ revision: state.desiredRevision, kind: state.candidate.kind, terminal: state.candidate, currentness: state.candidateCurrentness });
-      const successful = state.candidate.kind === "compilation_terminal" && state.candidate.reportBranch === "result" && state.candidate.result === "succeeded";
-      const lastSuccess = successful ? Object.freeze({ revision: state.desiredRevision, resultIdentity: state.candidate.resultIdentity, artifactCount: state.candidate.artifactCount, currentness: state.candidateCurrentness }) : state.lastSuccess;
-      const retirements = appendUnique(state.retirementGenerations, state.candidateSubscriptionGeneration ? state.activeSubscriptionGeneration : null);
-      return Object.freeze({ ...state, title: "Session Publication committed", summary: "Publication queued the replaced active generation for independent retirement without mutating delivery attempts.", publication, lastSuccess, activeSubscriptionGeneration: state.candidateSubscriptionGeneration ?? state.activeSubscriptionGeneration, retirementGenerations: retirements, candidate: null, candidateCurrentness: null, candidateSubscriptionGeneration: null, fenceToken: null, sessionStep: "idle", ignored: null, history: history(state, event, retirements.length ? `RetireSubscriptions ${retirements.join(",")}` : "published") });
-    }
-    if (type === "RETIRE_SUBSCRIPTIONS") {
-      if (!event.generation || !state.retirementGenerations.includes(event.generation)) return ignored(state, event, "old_subscription");
-      const retirementGenerations = state.retirementGenerations.filter(generation => generation !== event.generation);
-      return Object.freeze({ ...state, title: "Prior subscriptions retired", lastRetiredGeneration: event.generation, retirementGenerations, history: history(state, event, event.generation) });
-    }
-    if (type === "NOTIFICATION_GAP") {
-      if (!event.generation || ![state.activeSubscriptionGeneration, state.candidateSubscriptionGeneration].includes(event.generation)) return ignored(state, event, "old_subscription");
-      const dirtyScopes = [...new Set([...state.dirtyScopes, event.scope])];
-      const gapScopes = [...new Set([...state.gapScopes, event.scope])];
-      const next = { ...state, dirtyScopes, gapScopes };
-      if (!state.candidate) {
-        const desiredRevision = state.desiredRevision + 1;
-        const attemptSequence = state.attemptSequence + 1;
-        const attemptToken = `${state.sessionInstance}:r${desiredRevision}:a${attemptSequence}`;
-        const accepted = { ...next, desiredRevision, attemptSequence, dirtyScopes: [...new Set([...dirtyScopes, "scope:request"])] };
-        return Object.freeze({ ...accepted, title: "Active subscription gap started revalidation", summary: "An idle gap accepted a new revision and StartAttempt token; direct reconciliation has no retained candidate or fence.", attemptToken, fenceToken: null, candidateSubscriptionGeneration: null, sessionStep: "attempt_running", candidateCurrentness: null, publication: stale(state.publication, accepted), lastSuccess: stale(state.lastSuccess, accepted), ignored: null, history: history(state, event, `${event.generation}/${event.scope}/${attemptToken}`) });
-      }
-      return Object.freeze({ ...next, title: "Notification gap recorded", publication: stale(state.publication, next), lastSuccess: stale(state.lastSuccess, next), sessionStep: "reconcile_gap", history: history(state, event, `${event.generation}/${event.scope}`) });
-    }
-    if (type === "RECONCILED_EQUAL") {
-      if (state.sessionStep !== "reconcile_gap" || !event.token || !state.fenceToken || event.token !== state.fenceToken || !state.candidate) return ignored(state, event, "stale_fence");
-      if (state.candidate?.resultIdentity && event.resultIdentity !== state.candidate.resultIdentity) return ignored(state, event, "adapter_contract_violation");
-      if (!event.provenEqualScopes.every(scope => state.dirtyScopes.includes(scope))) return ignored(state, event, "adapter_contract_violation");
-      const dirtyScopes = state.dirtyScopes.filter(scope => !event.provenEqualScopes.includes(scope));
-      const gapScopes = state.gapScopes.filter(scope => !event.provenEqualScopes.includes(scope));
-      if (dirtyScopes.length) return Object.freeze({ ...state, title: "Partial reconciliation retained dirty scopes", dirtyScopes, gapScopes, history: history(state, event, dirtyScopes.join(",")) });
-      const fenceSequence = state.fenceSequence + 1;
-      const fenceToken = `${state.sessionInstance}:f${fenceSequence}`;
-      return Object.freeze({ ...state, title: "Equal revalidation preserved Result Identity", summary: "Only proven-equal scopes cleared; the superseded candidate subscription was queued for retirement and a distinct monotonic fence token was emitted.", dirtyScopes, gapScopes, previousFenceToken: state.fenceToken, fenceSequence, fenceToken, retirementGenerations: appendUnique(state.retirementGenerations, state.candidateSubscriptionGeneration), candidateSubscriptionGeneration: null, sessionStep: "read_fence", history: history(state, event, `ReadFence ${fenceToken}`) });
-    }
-    if (type === "WATCH_INCOMPLETE") {
-      const next = { ...state, coverage: "incomplete", dirtyScopes: [...new Set([...state.dirtyScopes, "scope:external-packages"])] };
-      return Object.freeze({ ...next, title: "Coverage is incomplete", publication: stale(state.publication, next), lastSuccess: stale(state.lastSuccess, next), history: history(state, event) });
-    }
-    if (type === "WATCH_ALLOW_UNVERIFIED") {
-      if (state.desiredRevision || state.candidate) return ignored(state, event, "policy_change_requires_reset");
-      return Object.freeze({ ...state, coveragePolicy: "permissive", title: "Permissive policy selected", ignored: null, history: history(state, event) });
-    }
-    if (type === "WATCH_POLL_MODE") {
-      if (state.desiredRevision || state.candidate) return ignored(state, event, "policy_change_requires_reset");
-      return Object.freeze({ ...state, coverage: "complete_poll", title: "Complete polling selected", ignored: null, history: history(state, event) });
-    }
-    if (type === "WATCH_DELIVERY_START") {
-      const terminal = state.publication?.terminal;
-      if (!terminal || terminal.result !== "succeeded" || terminal.resultIdentity !== event.resultIdentity || state.publication.revision !== event.publicationRevision) return ignored(state, event, "delivery_not_startable");
-      const expected = `${state.sessionInstance}:delivery:${state.deliverySequence + 1}`;
-      if (event.token !== expected) return ignored(state, event, "stale_delivery");
-      const attempt = Object.freeze({ token: event.token, revision: event.publicationRevision, resultIdentity: event.resultIdentity, status: "started" });
-      return Object.freeze({ ...state, title: "Published Result delivery started", deliverySequence: state.deliverySequence + 1, deliveryAttempts: [...state.deliveryAttempts, attempt], history: history(state, event, event.token) });
-    }
-    if (type === "WATCH_DELIVERY_FINISHED") {
-      const index = state.deliveryAttempts.findIndex(attempt => attempt.token === event.token);
-      if (index < 0) return ignored(state, event, "stale_delivery");
-      if (state.deliveryAttempts[index].status !== "started") return ignored(state, event, "duplicate_completion");
-      const attempt = Object.freeze({ ...state.deliveryAttempts[index], status: event.status });
-      const deliveryAttempts = state.deliveryAttempts.map((value, current) => current === index ? attempt : value);
-      const lastDelivery = event.status === "committed" ? Object.freeze({ revision: attempt.revision, resultIdentity: attempt.resultIdentity, token: attempt.token }) : state.lastDelivery;
-      return Object.freeze({ ...state, title: `Watch delivery ${event.status}`, summary: "The token may name an older publication; Session Publication remains untouched.", deliveryAttempts, lastDelivery, history: history(state, event, event.token) });
-    }
-    return ignored(state, event, "impossible_transition");
-  }
-
-  function projection(state) {
-    const hasReport = state.terminal === "report";
-    const hasResult = hasReport && state.reportBranch === "result";
-    return { prototype: "non-wire lifecycle sketch; normative JSON is in the schema fixture", ingress: { kind: state.ingressKind, input_kind: state.inputKind, adapter_outcome: state.ingressAdapterOutcome, terminal: state.ingressTerminal, acquisition: state.acquisition, format_receipt_role: state.formatReceiptRole }, adapter_outcome: state.adapterOutcome, compilation_terminal: state.terminalRecord, disclosure: { canonical_evidence: state.canonicalEvidence }, staging: { compilation: state.compilationStaging, representation: state.representationStaging }, delivery_attempts: state.deliveryAttempts, session: { instance: state.sessionInstance, pack_identity: state.packIdentity, desired_revision: state.desiredRevision, step: state.sessionStep, attempt_token: state.attemptToken, fence_token: state.fenceToken, candidate_subscription_generation: state.candidateSubscriptionGeneration, active_subscription_generation: state.activeSubscriptionGeneration, retirement_generations: state.retirementGenerations, candidate: state.candidate, coverage: state.coverage, policy: state.coveragePolicy, dirty_scopes: state.dirtyScopes, gap_scopes: state.gapScopes, publication: state.publication, last_successful_compilation: state.lastSuccess, last_successful_delivery: state.lastDelivery, ignored: state.ignored }, ownership: { immutable_terminal: Boolean(state.terminalRecord), report: hasReport, result_identity: hasResult ? state.terminalRecord.resultIdentity : null } };
-  }
-
-  function dagger(state) {
-    const hasReport = state.terminal === "report";
-    const hasResult = hasReport && state.reportBranch === "result";
-    const succeeded = hasResult && state.result === "succeeded";
-    const compilationStatus = state.adapterOutcome ? "ADAPTER_FAILED" : state.terminal === "request_rejected" ? "REQUEST_REJECTED" : state.reportBranch === "operation_outcome" ? "OPERATION_FAILED" : state.result === "rejected" ? "RESULT_REJECTED" : succeeded ? "RESULT_SUCCEEDED" : null;
-    const finalStagingStatus = status => ({ not_applicable: "NOT_APPLICABLE", succeeded: "SUCCEEDED", failed: "FAILED" })[status] ?? null;
-    return { packIngress: { status: state.ingressAdapterOutcome ? "ADAPTER_FAILED" : state.ingressTerminal.toUpperCase(), receipt: "File! complete operation envelope", pack: state.pack === "validated" ? "TypstPackPack" : null }, compilation: { status: compilationStatus, operation: "File!", terminal: state.adapterOutcome || !state.terminal ? null : "File", report: hasReport ? "File" : null, compilationIdentity: hasReport ? "String" : null, resultIdentity: hasResult ? "String" : null, stagingStatus: finalStagingStatus(state.compilationStaging.status), artifacts: succeeded && state.compilationStaging.status === "succeeded" ? `Directory (${state.compilationStaging.value})` : null }, representation: state.representationStatus ? { status: state.representationStatus, receipt: "File! complete operation envelope", stagingReceipt: "File!", stagingStatus: finalStagingStatus(state.representationStaging.status), value: state.representationStatus === "SUCCEEDED" && state.representationStaging.status === "succeeded" ? "File or Directory" : null } : null };
-  }
-
-  function invariants(state) {
-    const out = [];
-    if (state.inputKind === "unclassified") out.push("Outer admission/ingress failure owns no Format Receipt.");
-    if (state.terminalRecord) out.push("Compilation Terminal is immutable; alternatives require reset/fork.");
-    if (state.compilationStaging.status !== "not_applicable" && state.representationStaging.status !== "not_applicable") out.push("Compilation and representation staging remain separate one-shot records.");
-    if (state.publication) out.push("Session Publication contains no delivery state and never resets delivery attempts.");
-    if (state.retirementGenerations.length) out.push("Retirement remains ordered, unique, token-exact, and independent from active attempts and fences.");
-    if (state.gapScopes.length) out.push("Only scopes named by equal revalidation may clear gap dirtiness.");
-    if (state.lastSuccess) out.push("Request Rejection, Operation Outcome, ingestion failure, and delivery failure do not replace Last Successful Compilation.");
-    if (state.lastDelivery) out.push("A matching committed delivery token alone advances Last Successful Delivery, even after a newer publication.");
-    if (state.ignored) out.push(`Exact token comparison produced Ignored(${state.ignored}).`);
-    if (!out.length) out.push("No compilation branch exists before an exact request is prepared.");
-    return out;
-  }
-
-  return Object.freeze({ initial, actions, event, reduce, projection, dagger, invariants, constants: Object.freeze({ PACK_A, PACK_B, RESULT_A, RESULT_B }) });
-})();
+<script id="fixture-metadata" type="application/json">
+{
+  "fixture_id": "issue-69-cli-watch-traces-v2",
+  "prototype_kind": "throwaway-trace-driven-logic",
+  "source_commit": "00cfca1987559586066b726c6257d8dd664c3a3c",
+  "source_refs": [
+    "PROTOTYPE-rust-lifecycle-adapter-interfaces.rs:8759-8829",
+    "PROTOTYPE-rust-lifecycle-adapter-interfaces.rs:8944-9373",
+    "PROTOTYPE-rust-lifecycle-adapter-interfaces.md:Compilation Session"
+  ],
+  "allowed_event_names": ["Accept", "DependencyChanged", "NotificationGap", "Refresh", "Retry", "AttemptFinished", "AttemptReleased", "FenceReadFinished", "SubscriptionsArmed", "FenceConfirmed", "Shutdown"],
+  "covered_event_names": ["Accept", "Retry", "AttemptFinished", "AttemptReleased", "FenceReadFinished", "SubscriptionsArmed", "FenceConfirmed", "Shutdown"],
+  "allowed_effect_names": ["StartAttempt", "InterruptAttempt", "ReadFence", "ArmSubscriptions", "ConfirmFence", "RetireSubscriptions", "Publish"],
+  "required_scenario_ids": [
+    "superseded-drain-tokenless-rejection",
+    "late-superseded-completion",
+    "poll-provider-observation-cardinality",
+    "same-revision-new-evaluation",
+    "shutdown-retiring-retired",
+    "pack-identity-session-boundary"
+  ],
+  "required_state_fields": [
+    "session_instance",
+    "pack_identity",
+    "lifecycle",
+    "latest_revision",
+    "latest_evaluation",
+    "active_or_draining_attempt",
+    "latest_pending_prepared_revision",
+    "candidate",
+    "fence",
+    "subscription_generation",
+    "publication",
+    "last_successful_compilation",
+    "delivery",
+    "last_delivery",
+    "emitted_effects",
+    "ignored_stale_input",
+    "source_ownership"
+  ]
+}
 </script>
 
 <script>
-let state = AdapterModel.initial;
-let activeWalkthrough = "terminal";
-const walkthroughs = [
-  { id: "terminal", title: "Terminal tree", description: "Compare alternatives only across explicit reset/fork boundaries; each committed terminal remains immutable.", steps: ["ADAPTER_FAILED", "RESET", "REQUEST_REJECTED", "RESET", "RESULT_REJECTED", "RESET", "OPERATION_FAILED"] },
-  { id: "transport", title: "Staging and delivery", description: "Stage a zero-artifact success as an empty Directory, then fail independent CLI delivery without rewriting the result.", steps: ["RESULT_EMPTY_SUCCEEDED", "COMPILATION_STAGING_START", "COMPILATION_STAGING_SUCCEEDED", "DELIVERY_START", "DELIVERY_FAILED"] },
-  { id: "representation", title: "Representation layers", description: "Compare immutable representation alternatives across resets, then exercise representation-only one-shot staging.", steps: ["REPRESENTATION_ENCODING_FAILED", "RESET", "REPRESENTATION_SPOOLING_FAILED", "RESET", "REPRESENTATION_SUCCEEDED", "REPRESENTATION_STAGING_START", "REPRESENTATION_STAGING_FAILED"] },
-  { id: "families", title: "Staging isolation", description: "Compilation and representation staging use separate records and cannot overwrite each other.", steps: ["RESULT_EMPTY_SUCCEEDED", "COMPILATION_STAGING_START", "COMPILATION_STAGING_SUCCEEDED", "REPRESENTATION_SUCCEEDED", "REPRESENTATION_STAGING_START", "REPRESENTATION_STAGING_FAILED"] },
-  { id: "evidence", title: "Evidence boundary", description: "Identity-only reporting becomes canonical evidence only through its named capability.", steps: ["RESULT_SUCCEEDED", "EVIDENCE_DISCLOSED"] },
-  { id: "watch", title: "Fenced watch", description: "Exercise exact tokens, monotonic reconciled fences, changed Result Identity, and an older in-flight delivery committing after a newer publication.", steps: ["WATCH_ACCEPT", "WATCH_ATTEMPT_RESULT", "WATCH_FENCE_READ", "WATCH_SUBSCRIPTIONS_ARMED", "WATCH_GAP", "WATCH_RECONCILED", "WATCH_FENCE_READ", "WATCH_SUBSCRIPTIONS_ARMED", "WATCH_FENCE_CONFIRMED", "WATCH_PUBLISH", "WATCH_RETIRE_SUBSCRIPTIONS", "WATCH_DELIVERY_START", "WATCH_ACCEPT", "WATCH_CHANGED_RESULT", "WATCH_FENCE_READ", "WATCH_SUBSCRIPTIONS_ARMED", "WATCH_FENCE_CONFIRMED", "WATCH_PUBLISH", "WATCH_RETIRE_SUBSCRIPTIONS", "WATCH_DELIVERY_COMMITTED", "WATCH_STALE_ATTEMPT", "WATCH_DUPLICATE_FINISH", "WATCH_STALE_FENCE", "WATCH_OLD_SUBSCRIPTION", "WATCH_STALE_DELIVERY"] },
-  { id: "retirement", title: "Ordered retirement", description: "A superseded candidate generation and the replaced active generation both retire in deterministic order.", steps: ["WATCH_ACCEPT", "WATCH_ATTEMPT_RESULT", "WATCH_FENCE_READ", "WATCH_SUBSCRIPTIONS_ARMED", "WATCH_FENCE_CONFIRMED", "WATCH_PUBLISH", "WATCH_ACCEPT", "WATCH_ATTEMPT_RESULT", "WATCH_FENCE_READ", "WATCH_SUBSCRIPTIONS_ARMED", "WATCH_GAP", "WATCH_RECONCILED", "WATCH_FENCE_READ", "WATCH_SUBSCRIPTIONS_ARMED", "WATCH_FENCE_CONFIRMED", "WATCH_PUBLISH", "WATCH_RETIRE_SUBSCRIPTIONS", "WATCH_RETIRE_SUBSCRIPTIONS"] },
-  { id: "supersession", title: "Candidate supersession", description: "Accepting a newer revision queues a candidate subscription, and exact retirement proceeds during the replacement attempt.", steps: ["WATCH_ACCEPT", "WATCH_ATTEMPT_RESULT", "WATCH_FENCE_READ", "WATCH_SUBSCRIPTIONS_ARMED", "WATCH_ACCEPT", "WATCH_RETIRE_SUBSCRIPTIONS"] },
-  { id: "idle-gap", title: "Idle active gap", description: "A gap on the active generation starts a new revision and attempt before any candidate-bound reconciliation.", steps: ["WATCH_ACCEPT", "WATCH_ATTEMPT_RESULT", "WATCH_FENCE_READ", "WATCH_SUBSCRIPTIONS_ARMED", "WATCH_FENCE_CONFIRMED", "WATCH_PUBLISH", "WATCH_GAP", "WATCH_ATTEMPT_RESULT", "WATCH_FENCE_READ", "WATCH_RECONCILED", "WATCH_FENCE_READ", "WATCH_SUBSCRIPTIONS_ARMED", "WATCH_FENCE_CONFIRMED", "WATCH_PUBLISH", "WATCH_RETIRE_SUBSCRIPTIONS"] },
-  { id: "coverage", title: "Coverage policy", description: "Strict incomplete coverage blocks publication; a new permissive session yields Unverified, while coherent polling yields current-as-of-poll.", steps: ["WATCH_INCOMPLETE", "WATCH_ACCEPT", "WATCH_ATTEMPT_RESULT", "WATCH_FENCE_READ", "RESET", "WATCH_INCOMPLETE", "WATCH_ALLOW_UNVERIFIED", "WATCH_ACCEPT", "WATCH_ATTEMPT_RESULT", "WATCH_FENCE_READ", "WATCH_PUBLISH", "RESET", "WATCH_POLL_MODE", "WATCH_ACCEPT", "WATCH_ATTEMPT_RESULT", "WATCH_FENCE_READ", "WATCH_PUBLISH"] },
-  { id: "branches", title: "Current failure branches", description: "Request Rejection and Operation Outcome publish as current terminal alternatives without replacing success.", steps: ["WATCH_POLL_MODE", "WATCH_ACCEPT", "WATCH_ATTEMPT_REJECTION", "WATCH_FENCE_READ", "WATCH_PUBLISH", "RESET", "WATCH_POLL_MODE", "WATCH_ACCEPT", "WATCH_ATTEMPT_OUTCOME", "WATCH_FENCE_READ", "WATCH_PUBLISH"] },
-  { id: "ingestion", title: "Watch ingestion failure", description: "Publish a fenced ingestion failure as stale while retaining the prior successful compilation and delivery.", steps: ["WATCH_ACCEPT", "WATCH_ATTEMPT_RESULT", "WATCH_FENCE_READ", "WATCH_SUBSCRIPTIONS_ARMED", "WATCH_FENCE_CONFIRMED", "WATCH_PUBLISH", "WATCH_DELIVERY_START", "WATCH_DELIVERY_COMMITTED", "WATCH_ACCEPT", "WATCH_INGEST_FAILED", "WATCH_FENCE_READ", "WATCH_SUBSCRIPTIONS_ARMED", "WATCH_FENCE_CONFIRMED", "WATCH_PUBLISH", "WATCH_RETIRE_SUBSCRIPTIONS"] },
-  { id: "pack", title: "Pack session replacement", description: "A changed Pack Identity starts a new session and subscription namespace rather than retaining prior session state.", steps: ["WATCH_POLL_MODE", "WATCH_ACCEPT", "WATCH_ATTEMPT_RESULT", "WATCH_FENCE_READ", "WATCH_PUBLISH", "WATCH_PACK_CHANGED"] },
-  { id: "ingress", title: "Role-specific ingress", description: "Archive content expectation, Pack verification, adapter failure, and Closure Export derivation remain distinct.", steps: ["ARCHIVE_CONTENT_MISMATCH", "PACK_ID_MISMATCH", "INGRESS_ADAPTER_FAILED", "ADMIT_CLOSURE", "ADMIT_PACK"] }
-];
+const deepFreeze = value => {
+  if (value && typeof value === "object" && !Object.isFrozen(value)) {
+    Object.freeze(value);
+    Object.values(value).forEach(deepFreeze);
+  }
+  return value;
+};
 
-function dispatch(action) { state = AdapterModel.reduce(state, AdapterModel.event(action, state)); render(); }
+const metadata = deepFreeze(JSON.parse(document.getElementById("fixture-metadata").textContent));
+const PACK_A = `typst-pack:pack:1:sha256:${"a".repeat(64)}`;
+const PACK_B = `typst-pack:pack:1:sha256:${"b".repeat(64)}`;
+const COMPILATION_A = `typst-pack:compilation:1:sha256:${"c".repeat(64)}`;
+const RESULT_A = `typst-pack:compilation-result:1:sha256:${"1".repeat(64)}`;
+const RESULT_B = `typst-pack:compilation-result:1:sha256:${"2".repeat(64)}`;
+
+const SOURCE_OWNERSHIP = deepFreeze({
+  session_instance: "Rust CompilationSession",
+  pack_identity: "CLI Pack binding, compared before CompilationSession::apply",
+  lifecycle: "Rust CompilationSession",
+  latest_revision: "Rust CompilationSession",
+  latest_evaluation: "Rust CompilationSession",
+  active_or_draining_attempt: "Rust CompilationSession",
+  latest_pending_prepared_revision: "Rust CompilationSession",
+  candidate: "Rust CompilationSession, retained only during the fence sequence",
+  fence: "Rust CompilationSession; observations supplied by CLI providers",
+  subscription_generation: "Rust CompilationSession tokens; handles stay in CLI",
+  publication: "Rust CompilationSession",
+  last_successful_compilation: "Rust CompilationSession",
+  delivery: "CLI delivery adapter; explicit Idle is adapter-only, otherwise this is a complete watch_delivery wrapper separate from SessionPublication",
+  last_delivery: "CLI delivery adapter; complete last_successful_delivery wrapper separate from Last Successful Compilation",
+  emitted_effects: "Rust SessionTransition::Applied",
+  ignored_stale_input: "Rust SessionTransition::Ignored or explicit none",
+  external_session_boundary: "CLI Pack-to-session coordinator"
+});
+
+const idleDelivery = () => ({ adapter_state: "Idle", watch_delivery: null });
+const routedProviderCursors = cursors => cursors.map(value => {
+  const separator = value.lastIndexOf("@");
+  return { provider: value.slice(0, separator), cursor: value.slice(separator + 1) };
+});
+const providerObservations = cursors => ({ cursors: routedProviderCursors(cursors) });
+const affectedScopes = (requestSources = [], dependencies = []) => ({ request_sources: requestSources, dependencies });
+const emptyFence = () => ({ token: null, evaluation: null, ordinal: null, phase: "Idle", read_outcome: null, arm_outcome: null, confirmation_outcome: null });
+const fenceState = (token, evaluation, ordinal, phase, readOutcome = null, armOutcome = null, confirmationOutcome = null) => ({
+  token,
+  evaluation,
+  ordinal,
+  phase,
+  read_outcome: readOutcome,
+  arm_outcome: armOutcome,
+  confirmation_outcome: confirmationOutcome
+});
+const activeAttempt = (token, revision, evaluation, status = "Active") => ({ token, revision, evaluation, status });
+const pendingRevision = (revision, evaluation, preparedIdentity) => ({ revision, evaluation, prepared_identity: preparedIdentity });
+const requestRejected = code => ({ branch: "RequestRejected", code, report: null, result_identity: null });
+const operationOutcome = code => ({ branch: "Report", report_branch: "OperationOutcome", status: "Failed", code, result_identity: null });
+const successfulResult = resultIdentity => ({ branch: "Report", report_branch: "Result", status: "Succeeded", code: null, result_identity: resultIdentity });
+const candidate = (revision, evaluation, terminal) => ({ revision, evaluation, terminal });
+const readOutcome = ({ requestSources = [], dependencyEvidence = null, observations = [] } = {}) => ({
+  kind: "Read",
+  observation: {
+    request_sources: requestSources,
+    dependency_evidence: dependencyEvidence,
+    provider_observations: providerObservations(observations)
+  }
+});
+const armedOutcome = (coverage, cursors = []) => ({
+  kind: "Armed",
+  armed: { coverage: { kind: coverage }, cursors: routedProviderCursors(cursors) }
+});
+const cleanOutcome = (observations = []) => ({
+  kind: "Clean",
+  confirmation: { provider_observations: providerObservations(observations) }
+});
+const currentPush = observations => ({ kind: "CurrentThroughPush", observations: providerObservations(observations), uncovered: null, dirty: null });
+const currentPoll = observations => ({ kind: "CurrentAsOfPoll", observations: providerObservations(observations), uncovered: null, dirty: null });
+const stale = scopes => ({ kind: "Stale", observations: null, uncovered: null, dirty: scopes });
+const publication = (sequence, revision, evaluation, terminal, currentness) => ({ sequence, revision, evaluation, terminal, currentness });
+const success = (revision, evaluation, sequence, resultIdentity, currentness) => ({ revision, evaluation, publication_sequence: sequence, result_identity: resultIdentity, currentness });
+const sessionRevisionIdentity = (sessionInstance, ordinal) => ({ session_instance: sessionInstance, ordinal: String(ordinal) });
+const sessionEvaluationIdentity = (sessionInstance, revision, ordinal) => ({ session_instance: sessionInstance, revision, ordinal: String(ordinal) });
+const sessionPublicationIdentity = (sessionInstance, sequence) => ({ session_instance: sessionInstance, sequence: String(sequence) });
+const compilationDeliveryOutcome = (reference, compilationIdentity, resultIdentity, receiptStatus) => ({
+  immutable_reference: reference,
+  report: {
+    immutable_reference: `${reference}:report`,
+    report_projection: {
+      terminal: { kind: "semantic_result", status: "succeeded" },
+      compilation_identity: compilationIdentity,
+      result_identity: resultIdentity,
+      artifacts: []
+    }
+  },
+  transport: {
+    terminal: receiptStatus === "committed"
+      ? { status: "succeeded" }
+      : { status: "failed", primary: { kind: "commit" }, cleanup: "not_required" },
+    receipt: {
+      immutable_reference: `${reference}:transport-receipt`,
+      role: "compilation_delivery",
+      status: receiptStatus,
+      identities: [
+        { kind: "compilation", value: compilationIdentity },
+        { kind: "result", value: resultIdentity }
+      ],
+      subject: {
+        kind: "compilation_delivery",
+        compilation: compilationIdentity,
+        result: resultIdentity,
+        artifacts: []
+      }
+    }
+  }
+});
+const watchDelivery = ({ sessionInstance, revisionOrdinal, evaluationOrdinal, publicationSequence, compilationIdentity, resultIdentity, outcomeReference, receiptStatus }) => {
+  const revision = sessionRevisionIdentity(sessionInstance, revisionOrdinal);
+  return {
+    session_instance: sessionInstance,
+    revision,
+    evaluation: sessionEvaluationIdentity(sessionInstance, revision, evaluationOrdinal),
+    publication_sequence: sessionPublicationIdentity(sessionInstance, publicationSequence),
+    result_identity: resultIdentity,
+    outcome: compilationDeliveryOutcome(outcomeReference, compilationIdentity, resultIdentity, receiptStatus)
+  };
+};
+const STOP_CURRENT_DELIVERY = deepFreeze(watchDelivery({
+  sessionInstance: "session-stop-01",
+  revisionOrdinal: 1,
+  evaluationOrdinal: 1,
+  publicationSequence: 7,
+  compilationIdentity: COMPILATION_A,
+  resultIdentity: RESULT_A,
+  outcomeReference: "compilation-delivery-outcome:session-stop-01:7",
+  receiptStatus: "failed"
+}));
+const STOP_LAST_SUCCESSFUL_DELIVERY = deepFreeze(watchDelivery({
+  sessionInstance: "session-stop-01",
+  revisionOrdinal: 0,
+  evaluationOrdinal: 0,
+  publicationSequence: 6,
+  compilationIdentity: COMPILATION_A,
+  resultIdentity: RESULT_A,
+  outcomeReference: "compilation-delivery-outcome:session-stop-01:6",
+  receiptStatus: "committed"
+}));
+const event = (name, detail) => ({ name, detail });
+const effect = (name, detail) => ({ name, detail });
+
+const makeState = ({
+  session = "session-a-01",
+  pack = PACK_A,
+  lifecycle = "Running",
+  revision = null,
+  evaluation = null,
+  attempt = null,
+  pending = null,
+  retainedCandidate = null,
+  fence = emptyFence(),
+  activeGeneration = null,
+  proposedGeneration = null,
+  retirementRequested = [],
+  published = null,
+  lastSuccess = null,
+  delivery = idleDelivery(),
+  lastSuccessfulDelivery = null,
+  boundary = null
+} = {}) => deepFreeze({
+  session_instance: session,
+  pack_identity: pack,
+  lifecycle,
+  latest_revision: revision,
+  latest_evaluation: evaluation,
+  active_or_draining_attempt: attempt,
+  latest_pending_prepared_revision: pending,
+  candidate: retainedCandidate,
+  fence,
+  subscription_generation: {
+    active: activeGeneration,
+    proposed: proposedGeneration,
+    retirement_requested: retirementRequested
+  },
+  publication: published,
+  last_successful_compilation: lastSuccess,
+  delivery,
+  last_delivery: lastSuccessfulDelivery,
+  external_session_boundary: boundary,
+  source_ownership: SOURCE_OWNERSHIP
+});
+
+const traceStep = ({ id, name, note, input = null, effects = [], ignored = null, state }) => deepFreeze({
+  id,
+  name,
+  note,
+  event: input,
+  state: {
+    ...state,
+    emitted_effects: effects,
+    ignored_stale_input: ignored
+  }
+});
+
+const traces = deepFreeze([
+  {
+    id: "superseded-drain-tokenless-rejection",
+    title: "Tokenless rejection while an attempt drains",
+    description: "A newer accepted request rejects synchronously, fences, and publishes while the superseded attempt still occupies the draining slot.",
+    steps: [
+      traceStep({
+        id: "clean-session",
+        name: "Clean Pack-bound session",
+        note: "No attempt, candidate, fence, publication, or delivery exists.",
+        state: makeState()
+      }),
+      traceStep({
+        id: "start-old-attempt",
+        name: "Start revision 1",
+        note: "The stabilized request prepares successfully and receives the only active slot.",
+        input: event("Accept", { branch: "Stabilized", revision: "r1", evaluation: "e1" }),
+        effects: [effect("StartAttempt", { token: "a1", revision: "r1", evaluation: "e1" })],
+        state: makeState({ revision: "r1", evaluation: "e1", attempt: activeAttempt("a1", "r1", "e1") })
+      }),
+      traceStep({
+        id: "accept-tokenless-rejection",
+        name: "Accept revision 2 as request rejection",
+        note: "The old permit is revoked before interruption. The rejection has no attempt token and starts its fence while a1 drains.",
+        input: event("Accept", { branch: "Stabilized", revision: "r2", evaluation: "e2", preparation: "RequestRejected" }),
+        effects: [
+          effect("InterruptAttempt", { token: "a1" }),
+          effect("ReadFence", { token: "f2", revision: "r2", evaluation: "e2", candidate: "RequestRejected" })
+        ],
+        state: makeState({
+          revision: "r2",
+          evaluation: "e2",
+          attempt: activeAttempt("a1", "r1", "e1", "Draining"),
+          retainedCandidate: candidate("r2", "e2", requestRejected("invalid-output-bundle")),
+          fence: fenceState("f2", "e2", 1, "Reading")
+        })
+      }),
+      traceStep({
+        id: "read-rejection-fence",
+        name: "Read a clean push fence",
+        note: "Request-source coverage is complete; the superseded attempt remains draining.",
+        input: event("FenceReadFinished", {
+          token: "f2",
+          outcome: readOutcome({
+            requestSources: [{ scope: "org.typst-pack.request.source.compile-input", identity: "request-input-v2", cursor: "request-provider@21" }],
+            observations: ["request-provider@21"]
+          })
+        }),
+        effects: [effect("ArmSubscriptions", { token: "f2", generation: "g2" })],
+        state: makeState({
+          revision: "r2",
+          evaluation: "e2",
+          attempt: activeAttempt("a1", "r1", "e1", "Draining"),
+          retainedCandidate: candidate("r2", "e2", requestRejected("invalid-output-bundle")),
+          fence: fenceState("f2", "e2", 1, "Arming", readOutcome({
+            requestSources: [{ scope: "org.typst-pack.request.source.compile-input", identity: "request-input-v2", cursor: "request-provider@21" }],
+            observations: ["request-provider@21"]
+          })),
+          proposedGeneration: "g2"
+        })
+      }),
+      traceStep({
+        id: "arm-rejection-subscriptions",
+        name: "Arm generation g2",
+        note: "The generation is proposed, not active, until the clean confirmation installs it.",
+        input: event("SubscriptionsArmed", { token: "f2", outcome: armedOutcome("CompletePush", ["request-provider@21"]) }),
+        effects: [effect("ConfirmFence", { token: "f2", generation: "g2" })],
+        state: makeState({
+          revision: "r2",
+          evaluation: "e2",
+          attempt: activeAttempt("a1", "r1", "e1", "Draining"),
+          retainedCandidate: candidate("r2", "e2", requestRejected("invalid-output-bundle")),
+          fence: fenceState("f2", "e2", 1, "Confirming", readOutcome({
+            requestSources: [{ scope: "org.typst-pack.request.source.compile-input", identity: "request-input-v2", cursor: "request-provider@21" }],
+            observations: ["request-provider@21"]
+          }), armedOutcome("CompletePush", ["request-provider@21"])),
+          proposedGeneration: "g2"
+        })
+      }),
+      traceStep({
+        id: "publish-rejection-during-drain",
+        name: "Publish the request rejection",
+        note: "Publication sequence 1 commits while a1 is still draining. No report or Result Identity is invented.",
+        input: event("FenceConfirmed", { token: "f2", outcome: cleanOutcome(["request-provider@22"]) }),
+        effects: [effect("Publish", { sequence: 1, revision: "r2", evaluation: "e2", terminal: "RequestRejected" })],
+        state: makeState({
+          revision: "r2",
+          evaluation: "e2",
+          attempt: activeAttempt("a1", "r1", "e1", "Draining"),
+          activeGeneration: "g2",
+          published: publication(1, "r2", "e2", requestRejected("invalid-output-bundle"), currentPush(["request-provider@22"]))
+        })
+      }),
+      traceStep({
+        id: "release-old-attempt",
+        name: "Release the superseded attempt",
+        note: "The matching release clears the draining slot and leaves the newer publication unchanged.",
+        input: event("AttemptReleased", { token: "a1", release: "Reaped" }),
+        state: makeState({
+          revision: "r2",
+          evaluation: "e2",
+          activeGeneration: "g2",
+          published: publication(1, "r2", "e2", requestRejected("invalid-output-bundle"), currentPush(["request-provider@22"]))
+        })
+      })
+    ]
+  },
+  {
+    id: "late-superseded-completion",
+    title: "Late superseded report only frees the slot",
+    description: "A matching late report from the draining evaluation is consumed, activates the latest pending prepared revision, and is never eligible for publication.",
+    steps: [
+      traceStep({ id: "empty", name: "Empty session", note: "The attempt slot is available.", state: makeState({ session: "session-a-02" }) }),
+      traceStep({
+        id: "start-r1",
+        name: "Start revision 1 evaluation 1",
+        note: "a1 owns the active slot.",
+        input: event("Accept", { branch: "Stabilized", revision: "r1", evaluation: "e1" }),
+        effects: [effect("StartAttempt", { token: "a1", revision: "r1", evaluation: "e1" })],
+        state: makeState({ session: "session-a-02", revision: "r1", evaluation: "e1", attempt: activeAttempt("a1", "r1", "e1") })
+      }),
+      traceStep({
+        id: "queue-r2",
+        name: "Supersede with prepared revision 2",
+        note: "a1 drains; only the latest prepared revision is retained as pending.",
+        input: event("Accept", { branch: "Stabilized", revision: "r2", evaluation: "e2" }),
+        effects: [effect("InterruptAttempt", { token: "a1" })],
+        state: makeState({
+          session: "session-a-02",
+          revision: "r2",
+          evaluation: "e2",
+          attempt: activeAttempt("a1", "r1", "e1", "Draining"),
+          pending: pendingRevision("r2", "e2", "compilation:r2")
+        })
+      }),
+      traceStep({
+        id: "consume-late-report",
+        name: "Consume the late report from a1",
+        note: "The report clears the exact draining slot. It emits only StartAttempt for a2, not Publish or ReadFence for e1.",
+        input: event("AttemptFinished", { token: "a1", report: "ResultSucceeded", result_identity: RESULT_A }),
+        effects: [effect("StartAttempt", { token: "a2", revision: "r2", evaluation: "e2" })],
+        state: makeState({ session: "session-a-02", revision: "r2", evaluation: "e2", attempt: activeAttempt("a2", "r2", "e2") })
+      }),
+      traceStep({
+        id: "ignore-duplicate-late-report",
+        name: "Ignore a duplicate completion",
+        note: "The duplicate cannot disturb a2 or create a candidate.",
+        input: event("AttemptFinished", { token: "a1", report: "ResultSucceeded", result_identity: RESULT_A }),
+        ignored: { reason: "DuplicateCompletion", token: "a1" },
+        state: makeState({ session: "session-a-02", revision: "r2", evaluation: "e2", attempt: activeAttempt("a2", "r2", "e2") })
+      }),
+      traceStep({
+        id: "finish-current-attempt",
+        name: "Finish the current attempt",
+        note: "Only a2 may retain its report candidate and start a fence.",
+        input: event("AttemptFinished", { token: "a2", report: "ResultSucceeded", result_identity: RESULT_B }),
+        effects: [effect("ReadFence", { token: "f2", revision: "r2", evaluation: "e2" })],
+        state: makeState({
+          session: "session-a-02",
+          revision: "r2",
+          evaluation: "e2",
+          retainedCandidate: candidate("r2", "e2", successfulResult(RESULT_B)),
+          fence: fenceState("f2", "e2", 1, "Reading")
+        })
+      }),
+      traceStep({
+        id: "read-current-poll-fence",
+        name: "Read the coherent poll fence",
+        note: "FenceReadFinished carries a Read observation and emits only ArmSubscriptions.",
+        input: event("FenceReadFinished", { token: "f2", outcome: readOutcome({ observations: [] }) }),
+        effects: [effect("ArmSubscriptions", { token: "f2", generation: "g2" })],
+        state: makeState({
+          session: "session-a-02",
+          revision: "r2",
+          evaluation: "e2",
+          retainedCandidate: candidate("r2", "e2", successfulResult(RESULT_B)),
+          fence: fenceState("f2", "e2", 1, "Arming", readOutcome({ observations: [] })),
+          proposedGeneration: "g2"
+        })
+      }),
+      traceStep({
+        id: "arm-current-poll-fence",
+        name: "Arm complete polling coverage",
+        note: "The armed outcome carries CompletePoll and an empty provider-cursor collection.",
+        input: event("SubscriptionsArmed", { token: "f2", outcome: armedOutcome("CompletePoll", []) }),
+        effects: [effect("ConfirmFence", { token: "f2", generation: "g2" })],
+        state: makeState({
+          session: "session-a-02",
+          revision: "r2",
+          evaluation: "e2",
+          retainedCandidate: candidate("r2", "e2", successfulResult(RESULT_B)),
+          fence: fenceState("f2", "e2", 1, "Confirming", readOutcome({ observations: [] }), armedOutcome("CompletePoll", [])),
+          proposedGeneration: "g2"
+        })
+      }),
+      traceStep({
+        id: "publish-current-attempt",
+        name: "Publish evaluation 2 after confirmation",
+        note: "Only the clean FenceConfirmed event emits Publish for r2/e2.",
+        input: event("FenceConfirmed", { token: "f2", outcome: cleanOutcome([]) }),
+        effects: [effect("Publish", { sequence: 1, revision: "r2", evaluation: "e2", terminal: "Report" })],
+        state: makeState({
+          session: "session-a-02",
+          revision: "r2",
+          evaluation: "e2",
+          activeGeneration: "g2",
+          published: publication(1, "r2", "e2", successfulResult(RESULT_B), currentPoll([])),
+          lastSuccess: success("r2", "e2", 1, RESULT_B, currentPoll([]))
+        })
+      })
+    ]
+  },
+  {
+    id: "poll-provider-observation-cardinality",
+    title: "Polling keeps zero and many provider observations",
+    description: "Complete polling serializes one coherent collection. Empty means no provider cursor was observed; two entries remain two routed observations.",
+    steps: [
+      traceStep({ id: "poll-start", name: "Polling session", note: "No privileged provider cursor exists.", state: makeState({ session: "session-poll-01" }) }),
+      traceStep({
+        id: "accept-r1-rejection",
+        name: "Accept tokenless rejection for revision 1",
+        note: "The candidate goes directly to a polling fence.",
+        input: event("Accept", { branch: "Stabilized", revision: "r1", evaluation: "e1", preparation: "RequestRejected" }),
+        effects: [effect("ReadFence", { token: "pf1", revision: "r1", evaluation: "e1" })],
+        state: makeState({
+          session: "session-poll-01",
+          revision: "r1",
+          evaluation: "e1",
+          retainedCandidate: candidate("r1", "e1", requestRejected("unknown-feature")),
+          fence: fenceState("pf1", "e1", 1, "Reading")
+        })
+      }),
+      traceStep({
+        id: "read-zero-observations",
+        name: "Read with zero provider observations",
+        note: "The empty SessionProviderObservations collection is inside FenceReadObservation.",
+        input: event("FenceReadFinished", { token: "pf1", outcome: readOutcome({ observations: [] }) }),
+        effects: [effect("ArmSubscriptions", { token: "pf1", generation: "pg1" })],
+        state: makeState({
+          session: "session-poll-01",
+          revision: "r1",
+          evaluation: "e1",
+          retainedCandidate: candidate("r1", "e1", requestRejected("unknown-feature")),
+          fence: fenceState("pf1", "e1", 1, "Arming", readOutcome({ observations: [] })),
+          proposedGeneration: "pg1"
+        })
+      }),
+      traceStep({
+        id: "arm-zero-observations",
+        name: "Arm CompletePoll with zero cursors",
+        note: "Coverage and the empty cursor collection belong to ArmedSubscriptions.",
+        input: event("SubscriptionsArmed", { token: "pf1", outcome: armedOutcome("CompletePoll", []) }),
+        effects: [effect("ConfirmFence", { token: "pf1", generation: "pg1" })],
+        state: makeState({
+          session: "session-poll-01",
+          revision: "r1",
+          evaluation: "e1",
+          retainedCandidate: candidate("r1", "e1", requestRejected("unknown-feature")),
+          fence: fenceState("pf1", "e1", 1, "Confirming", readOutcome({ observations: [] }), armedOutcome("CompletePoll", [])),
+          proposedGeneration: "pg1"
+        })
+      }),
+      traceStep({
+        id: "publish-zero-observations",
+        name: "Confirm and publish zero observations",
+        note: "The clean confirmation carries another empty observation collection and alone emits Publish.",
+        input: event("FenceConfirmed", { token: "pf1", outcome: cleanOutcome([]) }),
+        effects: [effect("Publish", { sequence: 1, revision: "r1", evaluation: "e1", terminal: "RequestRejected" })],
+        state: makeState({
+          session: "session-poll-01",
+          revision: "r1",
+          evaluation: "e1",
+          activeGeneration: "pg1",
+          published: publication(1, "r1", "e1", requestRejected("unknown-feature"), currentPoll([]))
+        })
+      }),
+      traceStep({
+        id: "accept-r2-rejection",
+        name: "Accept a second tokenless rejection",
+        note: "The previous publication becomes stale while the new coherent poll runs.",
+        input: event("Accept", { branch: "Stabilized", revision: "r2", evaluation: "e2", preparation: "RequestRejected" }),
+        effects: [effect("ReadFence", { token: "pf2", revision: "r2", evaluation: "e2" })],
+        state: makeState({
+          session: "session-poll-01",
+          revision: "r2",
+          evaluation: "e2",
+          retainedCandidate: candidate("r2", "e2", requestRejected("invalid-page-range")),
+          fence: fenceState("pf2", "e2", 2, "Reading"),
+          activeGeneration: "pg1",
+          published: publication(1, "r1", "e1", requestRejected("unknown-feature"), stale(affectedScopes(["org.typst-pack.request.source.compile-input"], [])))
+        })
+      }),
+      traceStep({
+        id: "read-multiple-observations",
+        name: "Read with two provider observations",
+        note: "Request-source and dependency evidence remain in their role-correct FenceReadObservation fields.",
+        input: event("FenceReadFinished", {
+          token: "pf2",
+          outcome: readOutcome({
+            requestSources: [{ scope: "org.typst-pack.request.source.compile-input", identity: "request-input-v2", cursor: "project-provider@31" }],
+            observations: ["project-provider@31", "metadata-provider@9"]
+          })
+        }),
+        effects: [effect("ArmSubscriptions", { token: "pf2", generation: "pg2" })],
+        state: makeState({
+          session: "session-poll-01",
+          revision: "r2",
+          evaluation: "e2",
+          retainedCandidate: candidate("r2", "e2", requestRejected("invalid-page-range")),
+          fence: fenceState("pf2", "e2", 2, "Arming", readOutcome({
+            requestSources: [{ scope: "org.typst-pack.request.source.compile-input", identity: "request-input-v2", cursor: "project-provider@31" }],
+            observations: ["project-provider@31", "metadata-provider@9"]
+          })),
+          activeGeneration: "pg1",
+          proposedGeneration: "pg2",
+          published: publication(1, "r1", "e1", requestRejected("unknown-feature"), stale(affectedScopes(["org.typst-pack.request.source.compile-input"], [])))
+        })
+      }),
+      traceStep({
+        id: "arm-multiple-observations",
+        name: "Arm CompletePoll with two cursors",
+        note: "ArmedSubscriptions retains CompletePoll plus both routed provider cursors.",
+        input: event("SubscriptionsArmed", { token: "pf2", outcome: armedOutcome("CompletePoll", ["project-provider@31", "metadata-provider@9"]) }),
+        effects: [effect("ConfirmFence", { token: "pf2", generation: "pg2" })],
+        state: makeState({
+          session: "session-poll-01",
+          revision: "r2",
+          evaluation: "e2",
+          retainedCandidate: candidate("r2", "e2", requestRejected("invalid-page-range")),
+          fence: fenceState("pf2", "e2", 2, "Confirming", readOutcome({
+            requestSources: [{ scope: "org.typst-pack.request.source.compile-input", identity: "request-input-v2", cursor: "project-provider@31" }],
+            observations: ["project-provider@31", "metadata-provider@9"]
+          }), armedOutcome("CompletePoll", ["project-provider@31", "metadata-provider@9"])),
+          activeGeneration: "pg1",
+          proposedGeneration: "pg2",
+          published: publication(1, "r1", "e1", requestRejected("unknown-feature"), stale(affectedScopes(["org.typst-pack.request.source.compile-input"], [])))
+        })
+      }),
+      traceStep({
+        id: "publish-multiple-observations",
+        name: "Confirm and publish two observations",
+        note: "The clean confirmation carries both observations; Publish replaces pg1 and retires it.",
+        input: event("FenceConfirmed", { token: "pf2", outcome: cleanOutcome(["project-provider@31", "metadata-provider@9"]) }),
+        effects: [
+          effect("Publish", { sequence: 2, revision: "r2", evaluation: "e2", terminal: "RequestRejected" }),
+          effect("RetireSubscriptions", { generation: "pg1" })
+        ],
+        state: makeState({
+          session: "session-poll-01",
+          revision: "r2",
+          evaluation: "e2",
+          activeGeneration: "pg2",
+          retirementRequested: ["pg1"],
+          published: publication(2, "r2", "e2", requestRejected("invalid-page-range"), currentPoll(["project-provider@31", "metadata-provider@9"]))
+        })
+      })
+    ]
+  },
+  {
+    id: "same-revision-new-evaluation",
+    title: "Retry creates a new evaluation, not a new revision",
+    description: "A terminal operation outcome may be explicitly retried. The revision stays r1, evaluation advances, and the new success receives a new publication sequence.",
+    steps: [
+      traceStep({ id: "retry-start", name: "Empty retryable session", note: "No automatic retry is implied.", state: makeState({ session: "session-retry-01" }) }),
+      traceStep({
+        id: "start-e1",
+        name: "Start r1/e1",
+        note: "The first evaluation receives a1.",
+        input: event("Accept", { branch: "Stabilized", revision: "r1", evaluation: "e1" }),
+        effects: [effect("StartAttempt", { token: "a1", revision: "r1", evaluation: "e1" })],
+        state: makeState({ session: "session-retry-01", revision: "r1", evaluation: "e1", attempt: activeAttempt("a1", "r1", "e1") })
+      }),
+      traceStep({
+        id: "finish-e1-outcome",
+        name: "Finish e1 with an operation outcome",
+        note: "The immutable report candidate enters the ordinary fence.",
+        input: event("AttemptFinished", { token: "a1", report: "OperationOutcome", code: "authority-unavailable" }),
+        effects: [effect("ReadFence", { token: "rf1", revision: "r1", evaluation: "e1" })],
+        state: makeState({
+          session: "session-retry-01",
+          revision: "r1",
+          evaluation: "e1",
+          retainedCandidate: candidate("r1", "e1", operationOutcome("authority-unavailable")),
+          fence: fenceState("rf1", "e1", 1, "Reading")
+        })
+      }),
+      traceStep({
+        id: "read-e1-fence",
+        name: "Read e1 dependency evidence",
+        note: "The Read outcome carries historical dependency evidence and its provider observation.",
+        input: event("FenceReadFinished", { token: "rf1", outcome: readOutcome({ dependencyEvidence: { status: "Present", evidence_set: "package-evidence-e1" }, observations: ["package-provider@40"] }) }),
+        effects: [effect("ArmSubscriptions", { token: "rf1", generation: "rg1" })],
+        state: makeState({
+          session: "session-retry-01",
+          revision: "r1",
+          evaluation: "e1",
+          retainedCandidate: candidate("r1", "e1", operationOutcome("authority-unavailable")),
+          fence: fenceState("rf1", "e1", 1, "Arming", readOutcome({ dependencyEvidence: { status: "Present", evidence_set: "package-evidence-e1" }, observations: ["package-provider@40"] })),
+          proposedGeneration: "rg1"
+        })
+      }),
+      traceStep({
+        id: "arm-e1-poll",
+        name: "Arm e1 CompletePoll coverage",
+        note: "The armed cursor remains provider-routed and confirmation is still required.",
+        input: event("SubscriptionsArmed", { token: "rf1", outcome: armedOutcome("CompletePoll", ["package-provider@40"]) }),
+        effects: [effect("ConfirmFence", { token: "rf1", generation: "rg1" })],
+        state: makeState({
+          session: "session-retry-01",
+          revision: "r1",
+          evaluation: "e1",
+          retainedCandidate: candidate("r1", "e1", operationOutcome("authority-unavailable")),
+          fence: fenceState("rf1", "e1", 1, "Confirming", readOutcome({ dependencyEvidence: { status: "Present", evidence_set: "package-evidence-e1" }, observations: ["package-provider@40"] }), armedOutcome("CompletePoll", ["package-provider@40"])),
+          proposedGeneration: "rg1"
+        })
+      }),
+      traceStep({
+        id: "publish-e1-outcome",
+        name: "Confirm and publish e1",
+        note: "A current operation outcome does not become Last Successful Compilation.",
+        input: event("FenceConfirmed", { token: "rf1", outcome: cleanOutcome(["package-provider@40"]) }),
+        effects: [effect("Publish", { sequence: 1, revision: "r1", evaluation: "e1", terminal: "Report" })],
+        state: makeState({
+          session: "session-retry-01",
+          revision: "r1",
+          evaluation: "e1",
+          activeGeneration: "rg1",
+          published: publication(1, "r1", "e1", operationOutcome("authority-unavailable"), currentPoll(["package-provider@40"]))
+        })
+      }),
+      traceStep({
+        id: "retry-e2",
+        name: "Retry r1 as evaluation 2",
+        note: "Revision identity is unchanged. A new evaluation and attempt token are inspectable.",
+        input: event("Retry", { revision: "r1", previous_evaluation: "e1", evaluation: "e2" }),
+        effects: [effect("StartAttempt", { token: "a2", revision: "r1", evaluation: "e2" })],
+        state: makeState({
+          session: "session-retry-01",
+          revision: "r1",
+          evaluation: "e2",
+          attempt: activeAttempt("a2", "r1", "e2"),
+          activeGeneration: "rg1",
+          published: publication(1, "r1", "e1", operationOutcome("authority-unavailable"), currentPoll(["package-provider@40"]))
+        })
+      }),
+      traceStep({
+        id: "finish-e2-success",
+        name: "Finish e2 successfully",
+        note: "The matching current attempt starts a distinct fence.",
+        input: event("AttemptFinished", { token: "a2", report: "ResultSucceeded", result_identity: RESULT_A }),
+        effects: [effect("ReadFence", { token: "rf2", revision: "r1", evaluation: "e2" })],
+        state: makeState({
+          session: "session-retry-01",
+          revision: "r1",
+          evaluation: "e2",
+          retainedCandidate: candidate("r1", "e2", successfulResult(RESULT_A)),
+          fence: fenceState("rf2", "e2", 2, "Reading"),
+          activeGeneration: "rg1",
+          published: publication(1, "r1", "e1", operationOutcome("authority-unavailable"), currentPoll(["package-provider@40"]))
+        })
+      }),
+      traceStep({
+        id: "read-e2-fence",
+        name: "Read e2 dependency evidence",
+        note: "Retry uses a new fence observation without inventing a dirty scope.",
+        input: event("FenceReadFinished", { token: "rf2", outcome: readOutcome({ dependencyEvidence: { status: "Present", evidence_set: "package-evidence-e2" }, observations: ["package-provider@41"] }) }),
+        effects: [effect("ArmSubscriptions", { token: "rf2", generation: "rg2" })],
+        state: makeState({
+          session: "session-retry-01",
+          revision: "r1",
+          evaluation: "e2",
+          retainedCandidate: candidate("r1", "e2", successfulResult(RESULT_A)),
+          fence: fenceState("rf2", "e2", 2, "Arming", readOutcome({ dependencyEvidence: { status: "Present", evidence_set: "package-evidence-e2" }, observations: ["package-provider@41"] })),
+          activeGeneration: "rg1",
+          proposedGeneration: "rg2",
+          published: publication(1, "r1", "e1", operationOutcome("authority-unavailable"), currentPoll(["package-provider@40"]))
+        })
+      }),
+      traceStep({
+        id: "arm-e2-poll",
+        name: "Arm e2 CompletePoll coverage",
+        note: "The second generation is proposed while rg1 remains active.",
+        input: event("SubscriptionsArmed", { token: "rf2", outcome: armedOutcome("CompletePoll", ["package-provider@41"]) }),
+        effects: [effect("ConfirmFence", { token: "rf2", generation: "rg2" })],
+        state: makeState({
+          session: "session-retry-01",
+          revision: "r1",
+          evaluation: "e2",
+          retainedCandidate: candidate("r1", "e2", successfulResult(RESULT_A)),
+          fence: fenceState("rf2", "e2", 2, "Confirming", readOutcome({ dependencyEvidence: { status: "Present", evidence_set: "package-evidence-e2" }, observations: ["package-provider@41"] }), armedOutcome("CompletePoll", ["package-provider@41"])),
+          activeGeneration: "rg1",
+          proposedGeneration: "rg2",
+          published: publication(1, "r1", "e1", operationOutcome("authority-unavailable"), currentPoll(["package-provider@40"]))
+        })
+      }),
+      traceStep({
+        id: "publish-e2-success",
+        name: "Confirm and publish r1/e2",
+        note: "Publication sequence 2 and Last Successful Compilation retain e2; rg1 is retired.",
+        input: event("FenceConfirmed", { token: "rf2", outcome: cleanOutcome(["package-provider@41"]) }),
+        effects: [
+          effect("Publish", { sequence: 2, revision: "r1", evaluation: "e2", terminal: "Report" }),
+          effect("RetireSubscriptions", { generation: "rg1" })
+        ],
+        state: makeState({
+          session: "session-retry-01",
+          revision: "r1",
+          evaluation: "e2",
+          activeGeneration: "rg2",
+          retirementRequested: ["rg1"],
+          published: publication(2, "r1", "e2", successfulResult(RESULT_A), currentPoll(["package-provider@41"])),
+          lastSuccess: success("r1", "e2", 2, RESULT_A, currentPoll(["package-provider@41"]))
+        })
+      })
+    ]
+  },
+  {
+    id: "shutdown-retiring-retired",
+    title: "Shutdown passes through Retiring",
+    description: "Shutdown revokes unpublished work, emits interruption and subscription retirement, and reaches Retired only after the live attempt is released.",
+    steps: [
+      traceStep({
+        id: "running-with-delivery",
+        name: "Running with a current publication",
+        note: "The failed Current Delivery is fenced to r1/e1 publication 7. The prior committed Last Successful Delivery is fenced to r0/e0 publication 6; both remain adapter-owned siblings of session state.",
+        state: makeState({
+          session: "session-stop-01",
+          revision: "r1",
+          evaluation: "e1",
+          activeGeneration: "g1",
+          published: publication(7, "r1", "e1", successfulResult(RESULT_A), currentPush(["project-provider@70"])),
+          lastSuccess: success("r1", "e1", 7, RESULT_A, currentPush(["project-provider@70"])),
+          delivery: STOP_CURRENT_DELIVERY,
+          lastSuccessfulDelivery: STOP_LAST_SUCCESSFUL_DELIVERY
+        })
+      }),
+      traceStep({
+        id: "start-r2-before-shutdown",
+        name: "Start replacement revision 2",
+        note: "The old publication and last success become stale; delivery remains independent.",
+        input: event("Accept", { branch: "Stabilized", revision: "r2", evaluation: "e2" }),
+        effects: [effect("StartAttempt", { token: "a2", revision: "r2", evaluation: "e2" })],
+        state: makeState({
+          session: "session-stop-01",
+          revision: "r2",
+          evaluation: "e2",
+          attempt: activeAttempt("a2", "r2", "e2"),
+          activeGeneration: "g1",
+          published: publication(7, "r1", "e1", successfulResult(RESULT_A), stale(affectedScopes(["org.typst-pack.request.source.compile-input"], []))),
+          lastSuccess: success("r1", "e1", 7, RESULT_A, stale(affectedScopes(["org.typst-pack.request.source.compile-input"], []))),
+          delivery: STOP_CURRENT_DELIVERY,
+          lastSuccessfulDelivery: STOP_LAST_SUCCESSFUL_DELIVERY
+        })
+      }),
+      traceStep({
+        id: "begin-retiring",
+        name: "Apply shutdown",
+        note: "New input and retry are now rejected. a2 drains and g1 is retired by effects, while adapter delivery state is untouched.",
+        input: event("Shutdown", {}),
+        effects: [
+          effect("InterruptAttempt", { token: "a2" }),
+          effect("RetireSubscriptions", { generation: "g1" })
+        ],
+        state: makeState({
+          session: "session-stop-01",
+          lifecycle: "Retiring",
+          revision: "r2",
+          evaluation: "e2",
+          attempt: activeAttempt("a2", "r2", "e2", "Draining"),
+          retirementRequested: ["g1"],
+          published: publication(7, "r1", "e1", successfulResult(RESULT_A), stale(affectedScopes(["org.typst-pack.request.source.compile-input"], []))),
+          lastSuccess: success("r1", "e1", 7, RESULT_A, stale(affectedScopes(["org.typst-pack.request.source.compile-input"], []))),
+          delivery: STOP_CURRENT_DELIVERY,
+          lastSuccessfulDelivery: STOP_LAST_SUCCESSFUL_DELIVERY
+        })
+      }),
+      traceStep({
+        id: "reach-retired",
+        name: "Release the final live attempt",
+        note: "The proof of reaping clears the last live resource and makes the session Retired.",
+        input: event("AttemptReleased", { token: "a2", release: "Reaped" }),
+        state: makeState({
+          session: "session-stop-01",
+          lifecycle: "Retired",
+          revision: "r2",
+          evaluation: "e2",
+          published: publication(7, "r1", "e1", successfulResult(RESULT_A), stale(affectedScopes(["org.typst-pack.request.source.compile-input"], []))),
+          lastSuccess: success("r1", "e1", 7, RESULT_A, stale(affectedScopes(["org.typst-pack.request.source.compile-input"], []))),
+          delivery: STOP_CURRENT_DELIVERY,
+          lastSuccessfulDelivery: STOP_LAST_SUCCESSFUL_DELIVERY
+        })
+      })
+    ]
+  },
+  {
+    id: "pack-identity-session-boundary",
+    title: "A different Pack creates a different session",
+    description: "CLI compares Pack identity outside the reducer, shuts down the old Pack-bound session, and constructs a fresh session instance for the new Pack.",
+    steps: [
+      traceStep({
+        id: "old-pack-session",
+        name: "Pack A owns the old session",
+        note: "r4 already superseded r3, so the old publication is stale for its exact request-source scope.",
+        state: makeState({
+          session: "session-pack-a",
+          revision: "r4",
+          evaluation: "e4",
+          attempt: activeAttempt("a4", "r4", "e4"),
+          activeGeneration: "g3",
+          published: publication(3, "r3", "e3", successfulResult(RESULT_A), stale(affectedScopes(["org.typst-pack.request.source.compile-input"], []))),
+          lastSuccess: success("r3", "e3", 3, RESULT_A, stale(affectedScopes(["org.typst-pack.request.source.compile-input"], [])))
+        })
+      }),
+      traceStep({
+        id: "compare-pack-identities",
+        name: "CLI observes Pack B",
+        note: "This comparison is outside CompilationSession::apply. No session event rewrites Pack A into Pack B.",
+        state: makeState({
+          session: "session-pack-a",
+          revision: "r4",
+          evaluation: "e4",
+          attempt: activeAttempt("a4", "r4", "e4"),
+          activeGeneration: "g3",
+          published: publication(3, "r3", "e3", successfulResult(RESULT_A), stale(affectedScopes(["org.typst-pack.request.source.compile-input"], []))),
+          lastSuccess: success("r3", "e3", 3, RESULT_A, stale(affectedScopes(["org.typst-pack.request.source.compile-input"], []))),
+          boundary: { phase: "PackIdentityCompared", old_pack: PACK_A, observed_pack: PACK_B, action: "EndOldSession" }
+        })
+      }),
+      traceStep({
+        id: "shutdown-old-pack-session",
+        name: "End the Pack A session",
+        note: "The ordinary shutdown path drains a4 and retires g3.",
+        input: event("Shutdown", {}),
+        effects: [
+          effect("InterruptAttempt", { token: "a4" }),
+          effect("RetireSubscriptions", { generation: "g3" })
+        ],
+        state: makeState({
+          session: "session-pack-a",
+          lifecycle: "Retiring",
+          revision: "r4",
+          evaluation: "e4",
+          attempt: activeAttempt("a4", "r4", "e4", "Draining"),
+          retirementRequested: ["g3"],
+          published: publication(3, "r3", "e3", successfulResult(RESULT_A), stale(affectedScopes(["org.typst-pack.request.source.compile-input"], []))),
+          lastSuccess: success("r3", "e3", 3, RESULT_A, stale(affectedScopes(["org.typst-pack.request.source.compile-input"], []))),
+          boundary: { phase: "EndingOldSession", old_pack: PACK_A, observed_pack: PACK_B, action: "WaitForRelease" }
+        })
+      }),
+      traceStep({
+        id: "retire-old-pack-session",
+        name: "Retire the Pack A session",
+        note: "a4 is reaped; session-pack-a can no longer accept input.",
+        input: event("AttemptReleased", { token: "a4", release: "Reaped" }),
+        state: makeState({
+          session: "session-pack-a",
+          lifecycle: "Retired",
+          revision: "r4",
+          evaluation: "e4",
+          published: publication(3, "r3", "e3", successfulResult(RESULT_A), stale(affectedScopes(["org.typst-pack.request.source.compile-input"], []))),
+          lastSuccess: success("r3", "e3", 3, RESULT_A, stale(affectedScopes(["org.typst-pack.request.source.compile-input"], []))),
+          boundary: { phase: "OldSessionRetired", old_pack: PACK_A, observed_pack: PACK_B, action: "CreateSeparateSession" }
+        })
+      }),
+      traceStep({
+        id: "create-new-pack-session",
+        name: "CLI creates session-pack-b",
+        note: "This is a constructor boundary, not a session event. Revisions, evaluations, publications, and generations restart in a new namespace.",
+        state: makeState({
+          session: "session-pack-b",
+          pack: PACK_B,
+          boundary: {
+            phase: "SeparateSessionCreated",
+            ended_session: "session-pack-a",
+            ended_pack: PACK_A,
+            created_session: "session-pack-b",
+            created_pack: PACK_B,
+            owner: "CLI"
+          }
+        })
+      }),
+      traceStep({
+        id: "accept-new-pack-input",
+        name: "Start Pack B revision 1",
+        note: "The new attempt token belongs only to session-pack-b.",
+        input: event("Accept", { branch: "Stabilized", revision: "r1", evaluation: "e1" }),
+        effects: [effect("StartAttempt", { token: "b-a1", revision: "r1", evaluation: "e1" })],
+        state: makeState({
+          session: "session-pack-b",
+          pack: PACK_B,
+          revision: "r1",
+          evaluation: "e1",
+          attempt: activeAttempt("b-a1", "r1", "e1"),
+          boundary: {
+            phase: "SeparateSessionActive",
+            ended_session: "session-pack-a",
+            created_session: "session-pack-b",
+            owner: "CLI"
+          }
+        })
+      })
+    ]
+  }
+]);
+
+let scenarioIndex = 0;
+let stepIndex = 0;
+
+const scenarioSelect = document.getElementById("scenario");
+const jumpSelect = document.getElementById("jump");
+const previousButton = document.getElementById("previous");
+const nextButton = document.getElementById("next");
+
+const compact = value => {
+  if (value === null) return "none";
+  if (typeof value === "string") return value;
+  return JSON.stringify(value);
+};
+
+const addFact = (label, value) => {
+  const fact = document.createElement("div");
+  fact.className = "fact";
+  const heading = document.createElement("b");
+  heading.textContent = label;
+  const text = document.createElement("span");
+  text.textContent = compact(value);
+  fact.append(heading, text);
+  return fact;
+};
 
 function render() {
-  document.getElementById("title").textContent = state.title;
-  document.getElementById("summary").textContent = state.summary;
-  const latestDelivery = state.deliveryAttempts.at(-1) ?? state.staticDelivery;
-  const failed = state.pack === "not_exposed" || state.ingressAdapterOutcome || state.adapterOutcome || state.terminal === "request_rejected" || state.result === "rejected" || state.reportBranch === "operation_outcome" || state.representationStatus?.endsWith("FAILED") || state.compilationStaging.status === "failed" || state.representationStaging.status === "failed" || latestDelivery?.status === "failed";
-  const badge = document.getElementById("badge");
-  badge.textContent = state.publication?.currentness.kind ?? state.ingressAdapterOutcome ?? state.adapterOutcome ?? state.terminal ?? state.ingressTerminal;
-  badge.className = failed ? "badge failed" : "badge";
-  const facts = { Pack: state.pack, "Pack identity": state.packIdentity.slice(-12), Session: state.sessionInstance, Ingress: `${state.inputKind}: ${state.ingressTerminal}`, "Format role": state.formatReceiptRole ?? "none", Terminal: state.terminal ?? "none", "Report branch": state.reportBranch ?? "none", Result: state.result ?? "none", Evidence: state.canonicalEvidence, Representation: state.representationStatus ?? "none", "Compilation staging": state.compilationStaging.status, "Representation staging": state.representationStaging.status, "Latest delivery": latestDelivery?.status ?? "none", "Desired revision": String(state.desiredRevision), Publication: state.publication ? `r${state.publication.revision} ${state.publication.terminal.resultIdentity?.slice(-8) ?? state.publication.kind}: ${state.publication.currentness.kind}` : "none", "Last success": state.lastSuccess ? `r${state.lastSuccess.revision} ${state.lastSuccess.resultIdentity.slice(-8)}: ${state.lastSuccess.currentness.kind}` : "none", "Last delivery": state.lastDelivery ? `r${state.lastDelivery.revision} ${state.lastDelivery.resultIdentity.slice(-8)}` : "none" };
-  document.getElementById("facts").replaceChildren(...Object.entries(facts).map(([name, value]) => { const box = document.createElement("div"); box.className = "fact"; const label = document.createElement("b"); label.textContent = name; box.append(label, document.createTextNode(value)); return box; }));
-  document.getElementById("json").textContent = JSON.stringify(AdapterModel.projection(state), null, 2);
-  document.getElementById("dagger").textContent = JSON.stringify(AdapterModel.dagger(state), null, 2);
-  document.getElementById("invariants").replaceChildren(...AdapterModel.invariants(state).map(text => { const item = document.createElement("li"); item.textContent = text; return item; }));
-  document.getElementById("history").textContent = `Recent actions: ${state.history.join(" -> ")}`;
+  const scenario = traces[scenarioIndex];
+  const step = scenario.steps[stepIndex];
+  const state = step.state;
+
+  scenarioSelect.value = scenario.id;
+  jumpSelect.replaceChildren(...scenario.steps.map((candidate, index) => {
+    const option = document.createElement("option");
+    option.value = candidate.id;
+    option.textContent = `${index + 1}. ${candidate.name}`;
+    option.selected = index === stepIndex;
+    return option;
+  }));
+
+  document.getElementById("scenario-title").textContent = scenario.title;
+  document.getElementById("scenario-description").textContent = scenario.description;
+  document.getElementById("counter").textContent = `Step ${stepIndex + 1} of ${scenario.steps.length}`;
+  document.getElementById("step-name").textContent = step.name;
+  document.getElementById("step-note").textContent = step.note;
+
+  const eventName = document.getElementById("event-name");
+  eventName.textContent = step.event?.name ?? "No SessionEvent";
+  eventName.classList.toggle("none", !step.event);
+  document.getElementById("event-detail").textContent = step.event ? JSON.stringify(step.event.detail) : "Precomputed baseline or CLI-owned boundary.";
+
+  const effects = document.getElementById("effects");
+  const effectNodes = state.emitted_effects.length
+    ? state.emitted_effects.map(item => {
+        const row = document.createElement("div");
+        row.className = "effect";
+        row.textContent = `${item.name} ${JSON.stringify(item.detail)}`;
+        return row;
+      })
+    : [Object.assign(document.createElement("div"), { className: "effect", textContent: "None" })];
+  effects.replaceChildren(...effectNodes);
+
+  const facts = [
+    ["Session instance", state.session_instance],
+    ["Pack identity", state.pack_identity],
+    ["Lifecycle", state.lifecycle],
+    ["Latest revision / evaluation", `${state.latest_revision ?? "none"} / ${state.latest_evaluation ?? "none"}`],
+    ["Active or draining attempt", state.active_or_draining_attempt],
+    ["Pending prepared revision", state.latest_pending_prepared_revision],
+    ["Fence", state.fence],
+    ["Subscription generation", state.subscription_generation],
+    ["Publication", state.publication && { sequence: state.publication.sequence, terminal: state.publication.terminal.branch, currentness: state.publication.currentness.kind }],
+    ["Last success", state.last_successful_compilation && { publication_sequence: state.last_successful_compilation.publication_sequence, currentness: state.last_successful_compilation.currentness.kind }],
+    ["Current delivery", state.delivery],
+    ["Last successful delivery", state.last_delivery],
+    ["Ignored stale input", state.ignored_stale_input]
+  ];
+  document.getElementById("facts").replaceChildren(...facts.map(([label, value]) => addFact(label, value)));
+  document.getElementById("full-state").textContent = JSON.stringify(state, null, 2);
+
+  document.getElementById("ownership").replaceChildren(...Object.entries(state.source_ownership).map(([field, owner]) => {
+    const row = document.createElement("div");
+    const term = document.createElement("dt");
+    term.textContent = field;
+    const detail = document.createElement("dd");
+    detail.textContent = owner;
+    row.append(term, detail);
+    return row;
+  }));
+
+  document.getElementById("timeline").replaceChildren(...scenario.steps.map((candidate, index) => {
+    const button = document.createElement("button");
+    button.type = "button";
+    button.setAttribute("aria-current", index === stepIndex ? "step" : "false");
+    const number = document.createElement("span");
+    number.className = "number";
+    number.textContent = String(index + 1);
+    const label = document.createElement("span");
+    label.textContent = candidate.name;
+    button.append(number, label);
+    button.addEventListener("click", () => { stepIndex = index; render(); });
+    return button;
+  }));
+
+  previousButton.disabled = stepIndex === 0;
+  nextButton.disabled = stepIndex === scenario.steps.length - 1;
 }
 
-function renderActions() {
-  for (const [action, [label, danger]] of Object.entries(AdapterModel.actions)) { const button = document.createElement("button"); button.type = "button"; button.textContent = label; if (danger) button.className = "danger"; button.addEventListener("click", () => dispatch(action)); document.getElementById("actions").append(button); }
-}
+scenarioSelect.replaceChildren(...traces.map(scenario => {
+  const option = document.createElement("option");
+  option.value = scenario.id;
+  option.textContent = scenario.title;
+  return option;
+}));
 
-function renderWalkthrough() {
-  document.getElementById("tabs").replaceChildren(...walkthroughs.map(w => { const button = document.createElement("button"); button.type = "button"; button.textContent = w.title; button.classList.toggle("active", w.id === activeWalkthrough); button.addEventListener("click", () => { activeWalkthrough = w.id; state = AdapterModel.initial; renderWalkthrough(); render(); }); return button; }));
-  const walk = walkthroughs.find(w => w.id === activeWalkthrough);
-  document.getElementById("walk-title").textContent = walk.title;
-  document.getElementById("walk-description").textContent = walk.description;
-  document.getElementById("steps").replaceChildren(...walk.steps.map((action, index) => { const row = document.createElement("div"); row.className = "step"; const number = document.createElement("span"); number.textContent = String(index + 1); const text = document.createElement("span"); text.textContent = AdapterModel.actions[action][0]; const button = document.createElement("button"); button.type = "button"; button.textContent = "Apply step"; button.addEventListener("click", () => dispatch(action)); row.append(number, text, button); return row; }));
-}
+scenarioSelect.addEventListener("change", () => {
+  scenarioIndex = traces.findIndex(scenario => scenario.id === scenarioSelect.value);
+  stepIndex = 0;
+  render();
+});
+document.getElementById("reset").addEventListener("click", () => { stepIndex = 0; render(); });
+previousButton.addEventListener("click", () => { if (stepIndex > 0) stepIndex -= 1; render(); });
+nextButton.addEventListener("click", () => { if (stepIndex < traces[scenarioIndex].steps.length - 1) stepIndex += 1; render(); });
+jumpSelect.addEventListener("change", () => {
+  stepIndex = traces[scenarioIndex].steps.findIndex(step => step.id === jumpSelect.value);
+  render();
+});
 
-renderActions();
-renderWalkthrough();
+document.getElementById("source-metadata").textContent = `${metadata.fixture_id} / ${metadata.source_commit}`;
 render();
 </script>
 </body>

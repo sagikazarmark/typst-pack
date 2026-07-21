@@ -9,7 +9,7 @@
     "counts": "whole items",
     "concurrency": "simultaneous admitted work"
   },
-  "tightening": "Profile limit objects are complete resolved views; operation-limit inputs are partial tightening overlays. Every numeric override is less than or equal to this profile. Concurrency and ratios must remain positive. Zero is valid only for ready_queue_capacity and count or byte dimensions where admitting none is meaningful. Creation and compilation capacities are distinct views over one adapter-owned execution pool; equal values do not make the role contracts interchangeable.",
+  "tightening": "Profile limit objects are complete resolved admission ceilings; operation-limit inputs are partial tightening overlays. Every numeric override is less than or equal to this profile. Concurrency and ratios must remain positive. Zero is valid only for ready_queue_capacity and count or byte dimensions where admitting none is meaningful. Creation and compilation capacities are distinct views over one adapter-owned execution pool; equal values do not make the role contracts interchangeable. Profile values never prove that a value was requested, admitted, selected, or reached; operation reports serialize those facts only from the bound Rust request, capability, admission, and reached views.",
   "font_scan_policy": {
     "invalid_candidate": "warn_and_omit",
     "unreadable_candidate": "warn_and_omit"
@@ -30,8 +30,11 @@
     "aggregate_project_bytes": "8589934592",
     "largest_project_file_bytes": "536870912",
     "packages": "512",
+    "package_files": "100000",
+    "largest_package_file_bytes": "536870912",
     "package_tree_bytes": "4294967296",
     "font_containers": "512",
+    "font_candidates": "16384",
     "font_faces": "4096",
     "font_bytes": "2147483648",
     "discovery_variants": "64",
@@ -93,6 +96,7 @@
       "ready_queue_capacity": "8",
       "queue_timeout_ms": "120000",
       "latency_target_ms": "60000",
+      "isolated_worker_capacity": "2",
       "forced_terminate_ms": "5000"
     },
     "compilation": {
