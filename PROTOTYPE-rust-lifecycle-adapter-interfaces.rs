@@ -109,8 +109,49 @@ pub enum PreCommitFacilityRole {
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum ExecutionPlacement {
-    InProcess,
-    Worker,
+    CallerThread,
+    InProcessFacility,
+    WorkerFacility,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ReachedExecutionPlacement {
+    NotReached,
+    Reached(ExecutionPlacement),
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum CapabilityProjectionCompleteness {
+    Complete,
+    Redacted,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InProcessIsolationContract {
+    pub claimed_enforcement: Vec<EnforcementClaim>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct WorkerIsolationContract {
+    pub protocol_class: OperationalCapabilityClass,
+    pub protocol_version: std::num::NonZeroU32,
+    pub no_fallback: bool,
+    pub forced_termination_target_ticks: Option<u64>,
+    pub terminate_and_reap: bool,
+    pub parent_verifies_response: bool,
+    pub claimed_enforcement: Vec<EnforcementClaim>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum OperationIsolationRequest {
+    InProcess(InProcessIsolationContract),
+    Worker(WorkerIsolationContract),
+}
+
+pub enum ReachedIsolationView<'a> {
+    NotReached,
+    InProcess(&'a InProcessIsolationContract),
+    Worker(&'a WorkerIsolationContract),
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -151,8 +192,11 @@ pub enum OperationAdmissionRefusalReason {
     ResourceLimit,
     Capacity,
     EngineWidth,
-    ExecutionPlacement,
-    InterruptionStrength,
+    RequiredCapabilityScopeUnavailable,
+    ExecutionPlacementUnavailable,
+    IsolationContractUnavailable,
+    FontScanPolicyUnavailable,
+    InterruptionStrengthUnavailable,
     RequiredReportingUnavailable,
 }
 
@@ -192,7 +236,6 @@ pub struct DependencyConcurrencyAdmission {
 pub struct EnforcementAdmissionView<'a> {
     pub requested: &'a [EnforcementClaim],
     pub admitted: &'a [EnforcementClaim],
-    pub reached: &'a [EnforcementClaim],
 }
 
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
@@ -486,8 +529,34 @@ pub mod transport {
     use std::num::NonZeroUsize;
     use std::sync::Arc;
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum TransportPermittedUse {
+        StableAcquisition,
+        ArchiveAcquisition,
+        ArchivePublication,
+        MaterializationPublication,
+        ClosureExportPublication,
+        CompilationDelivery,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum TransportCoverageClass {
+        OneFrozenSubject,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct TransportCapabilityScopeProjection {
+        pub role: TransportFacilityRole,
+        pub permitted_uses: Vec<TransportPermittedUse>,
+        pub coverage: TransportCoverageClass,
+        pub completeness: crate::CapabilityProjectionCompleteness,
+    }
+
     #[derive(Clone)]
-    pub struct StableByteValue(Arc<crate::private::StableBacking>);
+    pub struct StableByteValue {
+        backing: Arc<crate::private::StableBacking>,
+        occupancy_lease: Option<Arc<crate::private::SpoolOccupancyLeaseState>>,
+    }
 
     impl StableByteValue {
         pub fn from_vec(
@@ -625,9 +694,10 @@ pub mod transport {
         pub transfer_concurrency: NonZeroUsize,
         pub interruption: crate::OperationInterruptionStrength,
         pub deadline: OperationDeadline,
-        pub cleanup: TransportCleanupRequirement,
+        pub cleanup_requirement: TransportCleanupRequirement,
         pub required_enforcement: Vec<crate::EnforcementClaim>,
         pub timing_requested: bool,
+        pub required_scope: TransportCapabilityScopeProjection,
     }
 
     #[derive(Clone, Debug)]
@@ -636,9 +706,10 @@ pub mod transport {
         pub transfer_concurrency: NonZeroUsize,
         pub interruption: crate::OperationInterruptionStrength,
         pub deadline: OperationDeadline,
-        pub cleanup: TransportCleanupRequirement,
+        pub cleanup_requirement: TransportCleanupRequirement,
         pub required_enforcement: Vec<crate::EnforcementClaim>,
         pub timing_requested: bool,
+        pub required_scope: TransportCapabilityScopeProjection,
     }
 
     macro_rules! publication_transport_operation_request {
@@ -650,9 +721,10 @@ pub mod transport {
                 pub interruption: crate::OperationInterruptionStrength,
                 pub deadline: OperationDeadline,
                 pub commit: PublicationCommitStrength,
-                pub cleanup: TransportCleanupRequirement,
+                pub cleanup_requirement: TransportCleanupRequirement,
                 pub required_enforcement: Vec<crate::EnforcementClaim>,
                 pub timing_requested: bool,
+                pub required_scope: TransportCapabilityScopeProjection,
             }
         };
     }
@@ -669,6 +741,7 @@ pub mod transport {
         request: SpoolOperationRequest,
         clock: &'a dyn MonotonicClock,
         interruption: &'a dyn InterruptionSource,
+        occupancy: Arc<crate::private::SpoolOccupancyLedgerState>,
     }
 
     impl<'a> SpoolControls<'a> {
@@ -692,6 +765,7 @@ pub mod transport {
                 request,
                 clock,
                 interruption,
+                occupancy: Arc::new(crate::private::SpoolOccupancyLedgerState),
             })
         }
 
@@ -704,8 +778,8 @@ pub mod transport {
         pub fn expected_identity(&self) -> Option<&ContentIdentity> {
             self.expected_identity.as_ref()
         }
-        pub fn requested_cleanup(&self) -> TransportCleanupRequirement {
-            self.request.cleanup
+        pub fn requested_cleanup_requirement(&self) -> TransportCleanupRequirement {
+            self.request.cleanup_requirement
         }
         pub fn deadline(&self) -> &OperationDeadline {
             &self.request.deadline
@@ -719,6 +793,58 @@ pub mod transport {
         pub fn request(&self) -> &SpoolOperationRequest {
             &self.request
         }
+
+        pub fn reserve_occupancy(
+            &self,
+            _backing: SpoolBackingClass,
+            _stable_spool_bytes: u64,
+            _resident_bytes: u64,
+        ) -> Result<SpoolOccupancyReservation, TransportResourceLimitFailure> {
+            unimplemented!()
+        }
+
+        pub fn occupancy(&self) -> SpoolOccupancyView {
+            unimplemented!()
+        }
+
+        pub(crate) fn with_shared_occupancy(
+            mut self,
+            occupancy: Arc<crate::private::SpoolOccupancyLedgerState>,
+        ) -> Self {
+            self.occupancy = occupancy;
+            self
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum SpoolBackingClass {
+        Memory,
+        Native,
+    }
+
+    pub struct SpoolOccupancyReservation {
+        private: crate::private::SpoolOccupancyReservationState,
+    }
+
+    impl SpoolOccupancyReservation {
+        pub fn transfer_to_stable_value(self, _value: StableByteValue) -> StableByteValue {
+            unimplemented!()
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct SpoolOccupancyView {
+        pub live_stable_spool_bytes: u64,
+        pub live_retained_memory_bytes: u64,
+        pub peak_stable_spool_bytes: u64,
+        pub peak_retained_memory_bytes: u64,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum TransportResourceLimitFailure {
+        StableSpool,
+        RetainedMemory,
+        ArithmeticOverflow,
     }
 
     pub trait SyncSpoolFacility {
@@ -862,19 +988,19 @@ pub mod transport {
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub enum SpoolPrimaryFailure {
-        Admission(TransportAdmissionRefusalReason),
         Source(ByteSourceFailure),
         ExpectedIdentityMismatch,
         ResourceLimit,
         Cancelled,
         Deadline,
+        Cleanup,
         InternalIntegrity,
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub struct SpoolFailure {
         pub primary: SpoolPrimaryFailure,
-        pub cleanup: TransportCleanupOutcome,
+        pub cleanup_outcome: TransportCleanupOutcome,
     }
 
     #[derive(Clone, Debug)]
@@ -972,14 +1098,14 @@ pub mod transport {
         }
 
         pub fn object_count(&self) -> u64 {
-            unimplemented!()
+            self.private.object_count
         }
 
         pub fn transferred_bytes(&self) -> u64 {
             unimplemented!()
         }
 
-        pub fn cleanup(&self) -> &TransportCleanupOutcome {
+        pub fn cleanup_outcome(&self) -> &TransportCleanupOutcome {
             unimplemented!()
         }
         pub fn content_identity(&self) -> Option<&ContentIdentity> {
@@ -1015,6 +1141,7 @@ pub mod transport {
     }
 
     pub struct TransportAdmissionRefusalView<'a> {
+        pub stage: TransportRefusalStage,
         pub requested_trust: crate::DeploymentTrustProfile,
         pub resource_profile: Option<&'a crate::ResourceProfileIdentity>,
         pub requested_limits: TransportOperationLimitsView<'a>,
@@ -1024,7 +1151,7 @@ pub mod transport {
         pub requested_structural_network_enforcement: crate::EnforcementStrength,
         pub requested_concurrency: NonZeroUsize,
         pub requested_commit: Option<PublicationCommitStrength>,
-        pub requested_cleanup: TransportCleanupRequirement,
+        pub requested_cleanup_requirement: TransportCleanupRequirement,
         pub interruption: crate::OperationInterruptionStrength,
         pub cancellation_present: bool,
         pub monotonic_domain: &'a crate::MonotonicTimeDomain,
@@ -1032,6 +1159,7 @@ pub mod transport {
         pub timing_requested: bool,
         pub deadline: &'a OperationDeadline,
         pub reason: TransportAdmissionRefusalReason,
+        pub requested_scope: &'a TransportCapabilityScopeProjection,
     }
 
     pub struct TransportAdmissionRecordView<'a> {
@@ -1051,8 +1179,8 @@ pub mod transport {
         pub concurrency_constraints: &'a [crate::AdmissionConstraint],
         pub requested_commit: Option<PublicationCommitStrength>,
         pub admitted_commit: Option<PublicationCommitStrength>,
-        pub requested_cleanup: TransportCleanupRequirement,
-        pub admitted_cleanup: TransportCleanupRequirement,
+        pub requested_cleanup_requirement: TransportCleanupRequirement,
+        pub admitted_cleanup_requirement: TransportCleanupRequirement,
         pub requested_interruption: crate::OperationInterruptionStrength,
         pub admitted_interruption: crate::OperationInterruptionStrength,
         pub cancellation_present: bool,
@@ -1061,6 +1189,8 @@ pub mod transport {
         pub timing_requested: bool,
         pub timing_reporting_admitted: bool,
         pub deadline: &'a OperationDeadline,
+        pub requested_scope: &'a TransportCapabilityScopeProjection,
+        pub admitted_scope: &'a TransportCapabilityScopeProjection,
     }
 
     pub(crate) enum TransportAdmissionDispositionView<'a> {
@@ -1079,6 +1209,10 @@ pub mod transport {
 
         pub fn primary_terminal_stage(&self) -> TransportStage {
             unimplemented!()
+        }
+
+        pub fn object_count(&self) -> u64 {
+            self.private.object_count
         }
 
         pub fn transferred_bytes(&self) -> u64 {
@@ -1116,6 +1250,9 @@ pub mod transport {
         pub fn interruption_winner(&self) -> Option<TransportInterruptionWinner> {
             unimplemented!()
         }
+        pub fn reached_scope(&self) -> &TransportCapabilityScopeProjection {
+            unimplemented!()
+        }
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1133,6 +1270,89 @@ pub mod transport {
         TerminalCommitment,
         Cancellation,
         Deadline,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum TransportRefusalStage {
+        Admission,
+    }
+
+    pub(crate) enum FrozenTransportSubjectCardinality {
+        SingleValue,
+        ClosureExport(u64),
+        ProjectMaterialization(u64),
+        CompilationDelivery(u64),
+    }
+
+    impl FrozenTransportSubjectCardinality {
+        fn object_count(&self) -> u64 {
+            match *self {
+                Self::SingleValue => 1,
+                Self::ClosureExport(entries)
+                | Self::ProjectMaterialization(entries)
+                | Self::CompilationDelivery(entries) => entries,
+            }
+        }
+    }
+
+    #[cfg(test)]
+    mod object_count_tests {
+        use super::{FrozenTransportSubjectCardinality, TransportStageLedgerView};
+
+        #[test]
+        fn public_ledger_accessor_uses_frozen_subject_cardinality() {
+            for (subject, expected) in [
+                (FrozenTransportSubjectCardinality::SingleValue, 1),
+                (
+                    FrozenTransportSubjectCardinality::ClosureExport(200_000),
+                    200_000,
+                ),
+                (
+                    FrozenTransportSubjectCardinality::ProjectMaterialization(7),
+                    7,
+                ),
+                (FrozenTransportSubjectCardinality::CompilationDelivery(0), 0),
+            ] {
+                let state = crate::private::TransportReceiptState {
+                    object_count: subject.object_count(),
+                };
+                let view = TransportStageLedgerView { private: &state };
+                assert_eq!(view.object_count(), expected);
+            }
+        }
+    }
+
+    #[cfg(feature = "prototype-validation")]
+    pub mod prototype_validation {
+        use super::{FrozenTransportSubjectCardinality, TransportStageLedgerView};
+
+        pub enum FrozenTransportSubject {
+            SingleValue,
+            ClosureExport { entries: u64 },
+            ProjectMaterialization { files: u64 },
+            CompilationDelivery { artifacts: u64 },
+        }
+
+        pub fn object_count(subject: FrozenTransportSubject) -> u64 {
+            let subject = match subject {
+                FrozenTransportSubject::SingleValue => {
+                    FrozenTransportSubjectCardinality::SingleValue
+                }
+                FrozenTransportSubject::ClosureExport { entries } => {
+                    FrozenTransportSubjectCardinality::ClosureExport(entries)
+                }
+                FrozenTransportSubject::ProjectMaterialization { files } => {
+                    FrozenTransportSubjectCardinality::ProjectMaterialization(files)
+                }
+                FrozenTransportSubject::CompilationDelivery { artifacts } => {
+                    FrozenTransportSubjectCardinality::CompilationDelivery(artifacts)
+                }
+            };
+            let state = crate::private::TransportReceiptState {
+                object_count: subject.object_count(),
+            };
+            TransportStageLedgerView { private: &state }.object_count()
+        }
     }
 
     macro_rules! role_transport_receipt {
@@ -1308,7 +1528,7 @@ pub mod transport {
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum TransportStatus {
-        Refused,
+        AdmissionRefused,
         Transferred,
         Committed,
         Failed,
@@ -1469,10 +1689,11 @@ pub mod transport {
                 pub class: crate::OperationalCapabilityClass,
                 pub network: crate::SelectedNetworkContract,
                 pub transfer_concurrency: NonZeroUsize,
-                pub cleanup_requirements: Vec<TransportCleanupRequirement>,
+                pub supported_cleanup_requirements: Vec<TransportCleanupRequirement>,
                 pub interruption: crate::OperationInterruptionStrength,
                 pub enforcement: Vec<crate::EnforcementClaim>,
                 pub timing_reporting: bool,
+                pub offered_scope: TransportCapabilityScopeProjection,
             }
         };
     }
@@ -1485,10 +1706,11 @@ pub mod transport {
                 pub network: crate::SelectedNetworkContract,
                 pub transfer_concurrency: NonZeroUsize,
                 pub commit_strengths: Vec<PublicationCommitStrength>,
-                pub cleanup_requirements: Vec<TransportCleanupRequirement>,
+                pub supported_cleanup_requirements: Vec<TransportCleanupRequirement>,
                 pub interruption: crate::OperationInterruptionStrength,
                 pub enforcement: Vec<crate::EnforcementClaim>,
                 pub timing_reporting: bool,
+                pub offered_scope: TransportCapabilityScopeProjection,
             }
         };
     }
@@ -1528,7 +1750,7 @@ pub mod transport {
                     unimplemented!()
                 }
 
-                pub fn cleanup_requirements(&self) -> &[TransportCleanupRequirement] {
+                pub fn supported_cleanup_requirements(&self) -> &[TransportCleanupRequirement] {
                     unimplemented!()
                 }
 
@@ -1541,6 +1763,9 @@ pub mod transport {
                 }
 
                 pub fn timing_reporting(&self) -> bool {
+                    unimplemented!()
+                }
+                pub fn offered_scope(&self) -> &TransportCapabilityScopeProjection {
                     unimplemented!()
                 }
             }
@@ -1650,6 +1875,7 @@ pub mod transport {
                     Transfer,
                     ResourceLimit,
                     Commit,
+                    Cleanup,
                     Cancelled,
                     Deadline,
                     AdapterContractViolation,
@@ -1671,7 +1897,7 @@ pub mod transport {
                 terminal: Result<$terminal, $failure>,
                 stages: Vec<TransportAdapterStage>,
                 transferred_bytes: u64,
-                cleanup: TransportCleanupOutcome,
+                cleanup_outcome: TransportCleanupOutcome,
                 residual: Option<ResidualTransportLocator>,
                 exposed_bytes: Option<u64>,
                 timing: TransportAdapterTimingInput,
@@ -1701,7 +1927,7 @@ pub mod transport {
                 stages: Vec<TransportAdapterStage>,
                 transferred_bytes: u64,
                 actual_commit: Option<PublicationCommitStrength>,
-                cleanup: TransportCleanupOutcome,
+                cleanup_outcome: TransportCleanupOutcome,
                 residual: Option<ResidualTransportLocator>,
                 exposed_bytes: Option<u64>,
                 timing: TransportAdapterTimingInput,
@@ -1859,8 +2085,8 @@ pub mod transport {
         pub fn expected_identity(&self) -> Option<&ContentIdentity> {
             self.expected_identity.as_ref()
         }
-        pub fn requested_cleanup(&self) -> TransportCleanupRequirement {
-            self.request.cleanup
+        pub fn requested_cleanup_requirement(&self) -> TransportCleanupRequirement {
+            self.request.cleanup_requirement
         }
         pub fn deadline(&self) -> &OperationDeadline {
             &self.request.deadline
@@ -1956,8 +2182,8 @@ pub mod transport {
                 pub fn requested_commit(&self) -> PublicationCommitStrength {
                     self.request.commit
                 }
-                pub fn requested_cleanup(&self) -> TransportCleanupRequirement {
-                    self.request.cleanup
+                pub fn requested_cleanup_requirement(&self) -> TransportCleanupRequirement {
+                    self.request.cleanup_requirement
                 }
                 pub fn deadline(&self) -> &OperationDeadline {
                     &self.request.deadline
@@ -2058,19 +2284,19 @@ pub mod transport {
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub enum TransportOutcomeRejection {
         SuccessBeforeRequiredStage,
-        FailureAfterCommit,
+        CommittedResultRewrite,
         IncoherentCleanup,
         WrongReport,
     }
 
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub enum TransportPrimaryFailure {
-        Admission(TransportAdmissionRefusalReason),
         Acquisition,
         Transfer,
         ExpectedIdentityMismatch,
         ResourceLimit,
         Commit,
+        Cleanup,
         Cancelled,
         Deadline,
         AdapterContractViolation,
@@ -2079,7 +2305,7 @@ pub mod transport {
     #[derive(Clone, Debug, Eq, PartialEq)]
     pub struct TransportFailure {
         pub primary: TransportPrimaryFailure,
-        pub cleanup: TransportCleanupOutcome,
+        pub cleanup_outcome: TransportCleanupOutcome,
     }
 
     pub struct CompilationDeliveryOutcome {
@@ -2122,8 +2348,7 @@ pub mod transport {
     }
 
     pub struct PackArchivePublicationOutcome {
-        format: crate::representation::PackArchivePublicationFormatReceipt,
-        transport: PackArchivePublicationTransportOutcome,
+        record: Arc<crate::private::PackArchivePublicationOperationRecordState>,
     }
 
     impl PackArchivePublicationOutcome {
@@ -2134,16 +2359,15 @@ pub mod transport {
             unimplemented!()
         }
         pub fn format(&self) -> &crate::representation::PackArchivePublicationFormatReceipt {
-            &self.format
+            unimplemented!()
         }
         pub fn transport(&self) -> &PackArchivePublicationTransportOutcome {
-            &self.transport
+            unimplemented!()
         }
     }
 
     pub struct ClosureExportPublicationOutcome {
-        format: crate::representation::ClosureExportPublicationFormatReceipt,
-        transport: ClosureExportPublicationTransportOutcome,
+        record: Arc<crate::private::ClosureExportPublicationOperationRecordState>,
     }
 
     impl ClosureExportPublicationOutcome {
@@ -2154,10 +2378,10 @@ pub mod transport {
             unimplemented!()
         }
         pub fn format(&self) -> &crate::representation::ClosureExportPublicationFormatReceipt {
-            &self.format
+            unimplemented!()
         }
         pub fn transport(&self) -> &ClosureExportPublicationTransportOutcome {
-            &self.transport
+            unimplemented!()
         }
     }
 
@@ -2848,6 +3072,8 @@ pub mod pack {
         pub epoch: NonZeroU32,
         pub canonical_payload: &'a [u8],
         pub required_objects: &'a [IdentityObjectInspection<'a>],
+        pub logical_reference_count: u64,
+        pub logical_decoded_bytes: u64,
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2868,9 +3094,8 @@ pub mod pack {
         pub fn prepare(
             &self,
             _admission: &OrdinaryAdmission,
-            _limits: &crate::AdmittedOperationResourceLimits<
-                crate::compilation::CompilationResourceLimits,
-            >,
+            _policy: &crate::compilation::CompilationPreparationPolicy,
+            _limits: &crate::compilation::CompilationPreparationLimits,
             _request: crate::compilation::CompilationRequest,
         ) -> Result<crate::PreparedCompilation, crate::compilation::CompilationRequestRejection>
         {
@@ -3238,7 +3463,7 @@ pub mod authority {
         pub fn snapshot(&self) -> &FontCatalogSnapshot {
             unimplemented!()
         }
-        pub fn scan_policy(&self) -> &FontScanPolicy {
+        pub fn applied_scan_policy(&self) -> &FontScanPolicy {
             unimplemented!()
         }
         pub fn diagnostics(&self) -> impl ExactSizeIterator<Item = &FontScanDiagnostic> {
@@ -3516,14 +3741,59 @@ pub mod authority {
         pub network: crate::SelectedNetworkContract,
         pub resolution_cache: AuthorityCachePolicy,
         pub private_caches: Vec<AuthorityPrivateCacheCapabilityProjection>,
+        pub offered_scope: PackageAuthorityCapabilityScopeProjection,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct FontAuthorityCapabilitySpec {
+        pub class: crate::OperationalCapabilityClass,
+        pub ordered_source_classes: Vec<AcquisitionSourceClass>,
+        pub evidence: AuthorityEvidenceCapabilities,
+        pub network: crate::SelectedNetworkContract,
+        pub resolution_cache: AuthorityCachePolicy,
+        pub private_caches: Vec<AuthorityPrivateCacheCapabilityProjection>,
+        pub supported_font_scan_policies: Vec<FontScanPolicy>,
+        pub offered_scope: FontAuthorityCapabilityScopeProjection,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum AuthorityPermittedUse {
+        Resolution,
+        Acquisition,
+        Revalidation,
+        Subscription,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum PackageAuthorityCoverageClass {
+        DeclaredDependencyRequirements,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum FontAuthorityCoverageClass {
+        DeclaredDependencyRequirements,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct PackageAuthorityCapabilityScopeProjection {
+        pub permitted_uses: Vec<AuthorityPermittedUse>,
+        pub coverage: PackageAuthorityCoverageClass,
+        pub completeness: crate::CapabilityProjectionCompleteness,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct FontAuthorityCapabilityScopeProjection {
+        pub permitted_uses: Vec<AuthorityPermittedUse>,
+        pub coverage: FontAuthorityCoverageClass,
+        pub completeness: crate::CapabilityProjectionCompleteness,
     }
 
     macro_rules! authority_descriptor {
-        ($name:ident) => {
+        ($name:ident, $spec:ty) => {
             impl $name {
                 pub fn try_new(
                     _instance: AuthorityInstanceIdentity,
-                    _spec: AuthorityCapabilitySpec,
+                    _spec: $spec,
                 ) -> Result<Self, AuthorityCapabilityDescriptorRejection> {
                     unimplemented!()
                 }
@@ -3561,8 +3831,32 @@ pub mod authority {
         };
     }
 
-    authority_descriptor!(PackageAuthorityCapabilityDescriptor);
-    authority_descriptor!(FontAuthorityCapabilityDescriptor);
+    authority_descriptor!(
+        PackageAuthorityCapabilityDescriptor,
+        AuthorityCapabilitySpec
+    );
+    authority_descriptor!(
+        FontAuthorityCapabilityDescriptor,
+        FontAuthorityCapabilitySpec
+    );
+
+    impl FontAuthorityCapabilityDescriptor {
+        pub fn supported_font_scan_policies(&self) -> &[FontScanPolicy] {
+            unimplemented!()
+        }
+    }
+
+    impl PackageAuthorityCapabilityDescriptor {
+        pub fn offered_scope(&self) -> &PackageAuthorityCapabilityScopeProjection {
+            unimplemented!()
+        }
+    }
+
+    impl FontAuthorityCapabilityDescriptor {
+        pub fn offered_scope(&self) -> &FontAuthorityCapabilityScopeProjection {
+            unimplemented!()
+        }
+    }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum AuthorityCapabilityDescriptorRejection {
@@ -3977,7 +4271,7 @@ pub mod creation {
     impl ProjectSnapshot {
         pub fn try_from_files(
             _admission: &OrdinaryAdmission,
-            _limits: &AdmittedOperationResourceLimits<CreationResourceLimits>,
+            _resources: &CreationResourceLedger,
             _entrypoint: ProjectPath,
             _files: impl IntoIterator<Item = (ProjectPath, StableByteValue)>,
         ) -> Result<Self, CreationRequestRejection> {
@@ -4001,7 +4295,7 @@ pub mod creation {
         }
 
         pub fn try_new(
-            _limits: &AdmittedOperationResourceLimits<CreationResourceLimits>,
+            _resources: &CreationResourceLedger,
             _overrides: impl IntoIterator<Item = (ProjectPath, StableByteValue)>,
         ) -> Result<Self, CreationRequestRejection> {
             unimplemented!()
@@ -4314,6 +4608,7 @@ pub mod creation {
             _provider: super::AuthorityInstanceIdentity,
             _class: crate::OperationalCapabilityClass,
             _capabilities: CreationEvidenceCapabilityProjection,
+            _offered_scope: CreationEvidenceCapabilityScopeProjection,
         ) -> Result<Self, CreationEvidenceValueRejection> {
             unimplemented!()
         }
@@ -4327,6 +4622,9 @@ pub mod creation {
         }
 
         pub fn capabilities(&self) -> CreationEvidenceCapabilityProjection {
+            unimplemented!()
+        }
+        pub fn offered_scope(&self) -> &CreationEvidenceCapabilityScopeProjection {
             unimplemented!()
         }
     }
@@ -4427,6 +4725,8 @@ pub mod creation {
         override_count: u64,
         largest_override_bytes: u64,
         aggregate_override_bytes: u64,
+        aggregate_file_bindings: u64,
+        aggregate_logical_bytes: u64,
         stable_spool_bytes: u64,
         retained_memory_bytes: u64,
     }
@@ -4450,6 +4750,8 @@ pub mod creation {
                 override_count: spec.override_count,
                 largest_override_bytes: spec.largest_override_bytes,
                 aggregate_override_bytes: spec.aggregate_override_bytes,
+                aggregate_file_bindings: spec.aggregate_file_bindings,
+                aggregate_logical_bytes: spec.aggregate_logical_bytes,
                 stable_spool_bytes: spec.stable_spool_bytes,
                 retained_memory_bytes: spec.retained_memory_bytes,
             };
@@ -4475,6 +4777,8 @@ pub mod creation {
                 override_count: self.override_count,
                 largest_override_bytes: self.largest_override_bytes,
                 aggregate_override_bytes: self.aggregate_override_bytes,
+                aggregate_file_bindings: self.aggregate_file_bindings,
+                aggregate_logical_bytes: self.aggregate_logical_bytes,
                 stable_spool_bytes: self.stable_spool_bytes,
                 retained_memory_bytes: self.retained_memory_bytes,
             }
@@ -4499,8 +4803,173 @@ pub mod creation {
         pub override_count: u64,
         pub largest_override_bytes: u64,
         pub aggregate_override_bytes: u64,
+        pub aggregate_file_bindings: u64,
+        pub aggregate_logical_bytes: u64,
         pub stable_spool_bytes: u64,
         pub retained_memory_bytes: u64,
+    }
+
+    pub struct CreationResourceLedger {
+        private: Arc<crate::private::CreationResourceLedgerState>,
+    }
+
+    impl CreationResourceLedger {
+        pub fn try_new(
+            _limits: AdmittedOperationResourceLimits<CreationResourceLimits>,
+        ) -> Result<Self, crate::AdmissionRefusal> {
+            unimplemented!()
+        }
+        pub fn limits(&self) -> &AdmittedOperationResourceLimits<CreationResourceLimits> {
+            unimplemented!()
+        }
+        pub fn debit_project_binding(
+            &self,
+            _path: &ProjectPath,
+            _exact_bytes: u64,
+        ) -> Result<(), CreationResourceLimitExceeded> {
+            unimplemented!()
+        }
+        pub fn debit_package_member(
+            &self,
+            _specification: &crate::PackageSpecification,
+            _path: &crate::PackagePath,
+            _exact_bytes: u64,
+        ) -> Result<(), CreationResourceLimitExceeded> {
+            unimplemented!()
+        }
+        pub fn debit_selected_font_container(
+            &self,
+            _identity: &crate::ContentIdentity,
+            _exact_bytes: u64,
+        ) -> Result<(), CreationResourceLimitExceeded> {
+            unimplemented!()
+        }
+        pub fn debit_discovery_override(
+            &self,
+            _path: &ProjectPath,
+            _exact_bytes: u64,
+        ) -> Result<(), CreationResourceLimitExceeded> {
+            unimplemented!()
+        }
+        pub fn reserve_spool_and_memory(
+            &self,
+            _spool_bytes: u64,
+            _retained_memory_bytes: u64,
+        ) -> Result<CreationOccupancyReservation, CreationResourceLimitExceeded> {
+            unimplemented!()
+        }
+        pub fn reached(&self) -> CreationResourceReachedView {
+            unimplemented!()
+        }
+    }
+
+    pub struct CreationOccupancyReservation {
+        private: crate::private::CreationOccupancyReservationState,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum CreationResourceLimitExceeded {
+        Category,
+        AggregateFileBindings,
+        AggregateLogicalBytes,
+        OverrideCount,
+        LargestOverrideBytes,
+        AggregateOverrideBytes,
+        StableSpoolOccupancy,
+        RetainedMemoryOccupancy,
+        ArithmeticOverflow,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum CreationEvidencePermittedUse {
+        Stabilization,
+        Revalidation,
+        Subscription,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum CreationEvidenceCoverageClass {
+        ExactOperationInputs,
+        DeclaredEvidenceScopes,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct CreationEvidenceCapabilityScopeProjection {
+        pub permitted_uses: Vec<CreationEvidencePermittedUse>,
+        pub coverage: CreationEvidenceCoverageClass,
+        pub completeness: crate::CapabilityProjectionCompleteness,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum CreationExecutionPermittedUse {
+        Queue,
+        InProcessDispatch,
+        WorkerDispatch,
+        WorkerControl,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum CreationExecutionCoverageClass {
+        ReadyJobs,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct CreationExecutionCapabilityScopeProjection {
+        pub permitted_uses: Vec<CreationExecutionPermittedUse>,
+        pub coverage: CreationExecutionCoverageClass,
+        pub completeness: crate::CapabilityProjectionCompleteness,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct CreationRequiredCapabilityScopes {
+        pub evidence: CreationEvidenceCapabilityScopeProjection,
+        pub packages: super::authority::PackageAuthorityCapabilityScopeProjection,
+        pub fonts: super::authority::FontAuthorityCapabilityScopeProjection,
+        pub execution: Option<CreationExecutionCapabilityScopeProjection>,
+        pub reporting: crate::compilation::ReportingCapabilityScopeProjection,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct CreationRequiredCapabilityGrants {
+        private: Arc<crate::private::CreationCapabilityGrantsState>,
+    }
+
+    impl CreationRequiredCapabilityGrants {
+        pub fn bind_sync<E: ?Sized, P: ?Sized, F: ?Sized>(
+            _evidence: &E,
+            _packages: &P,
+            _fonts: &F,
+            _reporting: &crate::compilation::ReportingCapabilityDescriptor,
+            _scopes: CreationRequiredCapabilityScopes,
+        ) -> Self
+        where
+            E: SyncCreationEvidence,
+            P: SyncPackageAuthority,
+            F: SyncFontAuthority,
+        {
+            unimplemented!()
+        }
+
+        pub fn bind_async<E: ?Sized, P: ?Sized, F: ?Sized, X: ?Sized>(
+            _evidence: &E,
+            _packages: &P,
+            _fonts: &F,
+            _execution: &X,
+            _reporting: &crate::compilation::ReportingCapabilityDescriptor,
+            _scopes: CreationRequiredCapabilityScopes,
+        ) -> Self
+        where
+            E: AsyncCreationEvidence,
+            P: AsyncPackageAuthority,
+            F: AsyncFontAuthority,
+            X: CreationExecutionFacility,
+        {
+            unimplemented!()
+        }
+
+        pub fn requested_scopes(&self) -> &CreationRequiredCapabilityScopes {
+            unimplemented!()
+        }
     }
 
     #[derive(Clone, Debug)]
@@ -4511,7 +4980,10 @@ pub mod creation {
         pub requested_ready_jobs: Option<NonZeroUsize>,
         pub requested_queue: Option<usize>,
         pub requested_workers: Option<NonZeroUsize>,
-        pub placement: crate::ExecutionPlacement,
+        pub font_scan_policy: super::authority::FontScanPolicy,
+        pub required_capabilities: CreationRequiredCapabilityGrants,
+        pub requested_execution_placement: crate::ExecutionPlacement,
+        pub requested_isolation: crate::OperationIsolationRequest,
         pub interruption: crate::OperationInterruptionStrength,
         pub required_enforcement: Vec<crate::EnforcementClaim>,
         pub deadline: OperationDeadline,
@@ -4526,6 +4998,9 @@ pub mod creation {
     }
 
     impl CreationAdmissionRefusal {
+        pub fn stage(&self) -> CreationAdmissionStage {
+            CreationAdmissionStage::Admission
+        }
         pub fn operation_request(&self) -> &CreationOperationRequest {
             unimplemented!()
         }
@@ -4550,10 +5025,18 @@ pub mod creation {
         pub fn execution(&self) -> Option<&CreationExecutionFacilityCapabilityDescriptor> {
             unimplemented!()
         }
+        pub fn reporting(&self) -> &crate::compilation::ReportingCapabilityDescriptor {
+            unimplemented!()
+        }
 
         pub fn reason(&self) -> crate::OperationAdmissionRefusalReason {
             unimplemented!()
         }
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum CreationAdmissionStage {
+        Admission,
     }
 
     pub struct SyncCreationControls<'a, E: ?Sized, P: ?Sized, F: ?Sized> {
@@ -4572,7 +5055,7 @@ pub mod creation {
         #[allow(clippy::too_many_arguments)]
         pub fn try_admit(
             _admission: OrdinaryAdmission,
-            _limits: AdmittedOperationResourceLimits<CreationResourceLimits>,
+            _resources: CreationResourceLedger,
             _evidence: &'a E,
             _packages: &'a P,
             _fonts: &'a F,
@@ -4606,7 +5089,7 @@ pub mod creation {
         #[allow(clippy::too_many_arguments)]
         pub fn try_admit(
             _admission: OrdinaryAdmission,
-            _limits: AdmittedOperationResourceLimits<CreationResourceLimits>,
+            _resources: CreationResourceLedger,
             _evidence: &'a E,
             _packages: &'a P,
             _fonts: &'a F,
@@ -4698,12 +5181,14 @@ pub mod creation {
         pub worker_control_network: Option<crate::SelectedNetworkContract>,
         pub interruption: crate::OperationInterruptionStrength,
         pub worker_protocol: Option<crate::OperationalCapabilityClass>,
+        pub worker_protocol_version: Option<std::num::NonZeroU32>,
         pub parent_verifies_response: bool,
         pub parent_withholds_output: bool,
         pub no_in_process_fallback: bool,
         pub terminate_and_reap: bool,
         pub forced_termination_target_ticks: Option<u64>,
         pub enforcement: Vec<crate::EnforcementClaim>,
+        pub offered_scope: CreationExecutionCapabilityScopeProjection,
     }
 
     pub struct CreationExecutionFacilityCapabilityView<'a> {
@@ -4718,12 +5203,14 @@ pub mod creation {
         pub worker_control_network: Option<crate::SelectedNetworkContract>,
         pub interruption: crate::OperationInterruptionStrength,
         pub worker_protocol: Option<&'a crate::OperationalCapabilityClass>,
+        pub worker_protocol_version: Option<std::num::NonZeroU32>,
         pub parent_verifies_response: bool,
         pub parent_withholds_output: bool,
         pub no_in_process_fallback: bool,
         pub terminate_and_reap: bool,
         pub forced_termination_target_ticks: Option<u64>,
         pub enforcement: &'a [crate::EnforcementClaim],
+        pub offered_scope: &'a CreationExecutionCapabilityScopeProjection,
     }
 
     impl CreationExecutionFacilityCapabilityDescriptor {
@@ -4769,7 +5256,6 @@ pub mod creation {
 
         pub fn into_worker_request(
             self,
-            _parent_assigned_domain: crate::compilation::EngineRuntimeDomainIdentity,
         ) -> (CreationWorkerRequest, CreationWorkerResponseVerifier) {
             unimplemented!()
         }
@@ -4780,6 +5266,12 @@ pub mod creation {
     }
 
     impl CreationWorkerRequest {
+        pub fn assign_domain(
+            self,
+            _parent_assigned_domain: crate::compilation::EngineRuntimeDomainIdentity,
+        ) -> Self {
+            unimplemented!()
+        }
         pub fn encode(self) -> StableByteValue {
             unimplemented!()
         }
@@ -4893,12 +5385,36 @@ pub mod creation {
         pub contractual_no_network: bool,
         pub structural_network_enforcement: crate::EnforcementStrength,
         pub enforcement: crate::EnforcementAdmissionView<'a>,
+        pub requested_capability_scopes: &'a CreationRequiredCapabilityScopes,
+        pub admitted_capability_scopes: &'a CreationRequiredCapabilityScopes,
+        pub requested_execution_placement: crate::ExecutionPlacement,
+        pub admitted_execution_placement: crate::ExecutionPlacement,
+        pub requested_isolation: &'a crate::OperationIsolationRequest,
+        pub admitted_isolation: &'a crate::OperationIsolationRequest,
     }
 
     pub struct CreationResourcesInventoryView<'a> {
         pub profile: Option<&'a crate::ResourceProfileIdentity>,
         pub requested: &'a CreationResourceLimits,
         pub admitted: &'a CreationResourceLimits,
+        pub reached: CreationResourceReachedView,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct CreationResourceReachedView {
+        pub project_files: u64,
+        pub aggregate_project_bytes: u64,
+        pub package_files: u64,
+        pub package_tree_bytes: u64,
+        pub font_containers: u64,
+        pub font_bytes: u64,
+        pub aggregate_file_bindings: u64,
+        pub aggregate_logical_bytes: u64,
+        pub override_count: u64,
+        pub largest_override_bytes: u64,
+        pub aggregate_override_bytes: u64,
+        pub peak_stable_spool_bytes: u64,
+        pub peak_retained_memory_bytes: u64,
     }
 
     pub struct CreationDependencyExecutionInventoryView<'a> {
@@ -4907,6 +5423,26 @@ pub mod creation {
         pub fonts: &'a super::authority::FontAuthorityCapabilityDescriptor,
         pub offline_roles_covered: &'a [crate::PreCommitFacilityRole],
         pub concurrency: crate::DependencyConcurrencyAdmission,
+        pub font_scan_policy: FontScanPolicyInventoryView<'a>,
+        pub reached_evidence_scope: Option<&'a CreationEvidenceCapabilityScopeProjection>,
+        pub reached_package_scope:
+            Option<&'a super::authority::PackageAuthorityCapabilityScopeProjection>,
+        pub reached_font_scope:
+            Option<&'a super::authority::FontAuthorityCapabilityScopeProjection>,
+    }
+
+    pub enum FontScanPolicyReachedView<'a> {
+        NotReached,
+        Applied {
+            policy: &'a super::authority::FontScanPolicy,
+            diagnostics: &'a [super::authority::FontScanDiagnostic],
+        },
+    }
+
+    pub struct FontScanPolicyInventoryView<'a> {
+        pub requested: &'a super::authority::FontScanPolicy,
+        pub admitted: &'a super::authority::FontScanPolicy,
+        pub reached: FontScanPolicyReachedView<'a>,
     }
 
     pub struct CreationAttemptControlInventoryView<'a> {
@@ -4932,6 +5468,8 @@ pub mod creation {
         CallerThread {
             domain: crate::compilation::EngineRuntimeDomainSelectionView<'a>,
             engine_width: crate::EngineWidthAdmission,
+            reached_placement: crate::ReachedExecutionPlacement,
+            reached_isolation: crate::ReachedIsolationView<'a>,
         },
         Facility {
             descriptor: &'a CreationExecutionFacilityCapabilityDescriptor,
@@ -4942,6 +5480,9 @@ pub mod creation {
             dispatch_reached: bool,
             worker_terminated: bool,
             worker_reaped: bool,
+            reached_scope: Option<&'a CreationExecutionCapabilityScopeProjection>,
+            reached_placement: crate::ReachedExecutionPlacement,
+            reached_isolation: crate::ReachedIsolationView<'a>,
         },
     }
 
@@ -5502,9 +6043,25 @@ pub mod compilation {
         },
     }
 
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct CompilationPreparationPolicy {
+        pub reject_unknown_engine_features: bool,
+        pub require_canonical_diagnostic_policy: bool,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct CompilationPreparationLimits {
+        pub override_count: u64,
+        pub largest_override_bytes: u64,
+        pub aggregate_override_bytes: u64,
+        pub diagnostic_entries: u64,
+        pub diagnostic_entry_bytes: u64,
+    }
+
     pub fn prepare(
         _admission: &OrdinaryAdmission,
-        _limits: &AdmittedOperationResourceLimits<CompilationResourceLimits>,
+        _policy: &CompilationPreparationPolicy,
+        _limits: &CompilationPreparationLimits,
         _pack: &Pack,
         _request: CompilationRequest,
     ) -> Result<PreparedCompilation, CompilationRequestRejection> {
@@ -5542,13 +6099,10 @@ pub mod compilation {
     }
 
     impl CompilationRequestRejection {
-        pub fn resource_profile(&self) -> Option<&crate::ResourceProfileIdentity> {
+        pub fn preparation_policy(&self) -> &CompilationPreparationPolicy {
             unimplemented!()
         }
-        pub fn requested_limits(&self) -> &CompilationResourceLimits {
-            unimplemented!()
-        }
-        pub fn admitted_limits(&self) -> &CompilationResourceLimits {
+        pub fn preparation_limits(&self) -> &CompilationPreparationLimits {
             unimplemented!()
         }
         pub fn request_inventory(&self) -> CompilationRequestInventoryView<'_> {
@@ -5857,6 +6411,12 @@ pub mod compilation {
         pub contractual_no_network: bool,
         pub structural_network_enforcement: crate::EnforcementStrength,
         pub enforcement: crate::EnforcementAdmissionView<'a>,
+        pub requested_capability_scopes: &'a CompilationRequiredCapabilityScopes,
+        pub admitted_capability_scopes: &'a CompilationRequiredCapabilityScopes,
+        pub requested_execution_placement: crate::ExecutionPlacement,
+        pub admitted_execution_placement: crate::ExecutionPlacement,
+        pub requested_isolation: &'a crate::OperationIsolationRequest,
+        pub admitted_isolation: &'a crate::OperationIsolationRequest,
     }
 
     pub struct CompilationResourcesInventoryView<'a> {
@@ -5874,6 +6434,11 @@ pub mod compilation {
         pub cache_isolation_domain_present: bool,
         pub offline_roles_covered: &'a [crate::PreCommitFacilityRole],
         pub concurrency: crate::DependencyConcurrencyAdmission,
+        pub reached_package_scope:
+            Option<&'a super::authority::PackageAuthorityCapabilityScopeProjection>,
+        pub reached_font_scope:
+            Option<&'a super::authority::FontAuthorityCapabilityScopeProjection>,
+        pub reached_cache_scope: Option<&'a SemanticCacheCapabilityScopeProjection>,
     }
 
     pub struct CompilationAttemptControlInventoryView<'a> {
@@ -5907,6 +6472,8 @@ pub mod compilation {
         CallerThread {
             domain: EngineRuntimeDomainSelectionView<'a>,
             engine_width: crate::EngineWidthAdmission,
+            reached_placement: crate::ReachedExecutionPlacement,
+            reached_isolation: crate::ReachedIsolationView<'a>,
         },
         Facility {
             descriptor: &'a CompilationExecutionFacilityCapabilityDescriptor,
@@ -5917,6 +6484,9 @@ pub mod compilation {
             dispatch_reached: bool,
             worker_terminated: bool,
             worker_reaped: bool,
+            reached_scope: Option<&'a CompilationExecutionCapabilityScopeProjection>,
+            reached_placement: crate::ReachedExecutionPlacement,
+            reached_isolation: crate::ReachedIsolationView<'a>,
         },
     }
 
@@ -5928,6 +6498,7 @@ pub mod compilation {
         pub timing: ReportingChannelStatus,
         pub fine_engine_timing: ReportingChannelStatus,
         pub fine_timing_lease_reached: bool,
+        pub reached_scope: Option<&'a ReportingCapabilityScopeProjection>,
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -6497,6 +7068,7 @@ pub mod compilation {
         pub authenticated_records: bool,
         pub required_availability: bool,
         pub continue_on_unavailable: bool,
+        pub offered_scope: SemanticCacheCapabilityScopeProjection,
     }
 
     impl SemanticResultCacheCapabilityDescriptor {
@@ -6532,6 +7104,7 @@ pub mod compilation {
         pub authenticated_records: bool,
         pub required_availability: bool,
         pub continue_on_unavailable: bool,
+        pub offered_scope: &'a SemanticCacheCapabilityScopeProjection,
     }
 
     pub enum SyncSemanticCacheLookup<'a, C: ?Sized> {
@@ -6552,6 +7125,136 @@ pub mod compilation {
         pub fine_engine_timing: bool,
     }
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum SemanticCachePermittedUse {
+        Lookup,
+        Admission,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum SemanticCacheCoverageClass {
+        OneIsolationDomain,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct SemanticCacheCapabilityScopeProjection {
+        pub permitted_uses: Vec<SemanticCachePermittedUse>,
+        pub coverage: SemanticCacheCoverageClass,
+        pub completeness: crate::CapabilityProjectionCompleteness,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum CompilationExecutionPermittedUse {
+        Queue,
+        InProcessDispatch,
+        WorkerDispatch,
+        WorkerControl,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum CompilationExecutionCoverageClass {
+        ReadyJobs,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct CompilationExecutionCapabilityScopeProjection {
+        pub permitted_uses: Vec<CompilationExecutionPermittedUse>,
+        pub coverage: CompilationExecutionCoverageClass,
+        pub completeness: crate::CapabilityProjectionCompleteness,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum ReportingPermittedUse {
+        DiagnosticProjection,
+        DiagnosticSourceBundle,
+        Timing,
+        FineEngineTiming,
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct ReportingCapabilityScopeProjection {
+        pub permitted_uses: Vec<ReportingPermittedUse>,
+        pub coverage: ReportingCoverageClass,
+        pub completeness: crate::CapabilityProjectionCompleteness,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum ReportingCoverageClass {
+        SelectedReportChannels,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct ReportingCapabilityDescriptor {
+        private: crate::private::ReportingCapabilityDescriptorState,
+    }
+
+    impl ReportingCapabilityDescriptor {
+        pub fn try_new(
+            _class: crate::OperationalCapabilityClass,
+            _offered_scope: ReportingCapabilityScopeProjection,
+        ) -> Result<Self, crate::OperationAdmissionRefusalReason> {
+            unimplemented!()
+        }
+        pub fn offered_scope(&self) -> &ReportingCapabilityScopeProjection {
+            unimplemented!()
+        }
+        pub fn class(&self) -> &crate::OperationalCapabilityClass {
+            unimplemented!()
+        }
+    }
+
+    #[derive(Clone, Debug, Eq, PartialEq)]
+    pub struct CompilationRequiredCapabilityScopes {
+        pub packages: super::authority::PackageAuthorityCapabilityScopeProjection,
+        pub fonts: super::authority::FontAuthorityCapabilityScopeProjection,
+        pub cache: Option<SemanticCacheCapabilityScopeProjection>,
+        pub execution: Option<CompilationExecutionCapabilityScopeProjection>,
+        pub reporting: ReportingCapabilityScopeProjection,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct CompilationRequiredCapabilityGrants {
+        private: Arc<crate::private::CompilationCapabilityGrantsState>,
+    }
+
+    impl CompilationRequiredCapabilityGrants {
+        pub fn bind_sync<P: ?Sized, F: ?Sized, C: ?Sized>(
+            _packages: &P,
+            _fonts: &F,
+            _cache: &SyncSemanticCacheLookup<'_, C>,
+            _reporting: &ReportingCapabilityDescriptor,
+            _scopes: CompilationRequiredCapabilityScopes,
+        ) -> Self
+        where
+            P: SyncPackageAuthority,
+            F: SyncFontAuthority,
+            C: SyncSemanticResultCache,
+        {
+            unimplemented!()
+        }
+
+        pub fn bind_async<P: ?Sized, F: ?Sized, C: ?Sized, X: ?Sized>(
+            _packages: &P,
+            _fonts: &F,
+            _cache: &AsyncSemanticCacheLookup<'_, C>,
+            _execution: &X,
+            _reporting: &ReportingCapabilityDescriptor,
+            _scopes: CompilationRequiredCapabilityScopes,
+        ) -> Self
+        where
+            P: AsyncPackageAuthority,
+            F: AsyncFontAuthority,
+            C: AsyncSemanticResultCache,
+            X: CompilationExecutionFacility,
+        {
+            unimplemented!()
+        }
+
+        pub fn requested_scopes(&self) -> &CompilationRequiredCapabilityScopes {
+            unimplemented!()
+        }
+    }
+
     #[derive(Clone, Debug)]
     pub struct CompilationOperationRequest {
         pub network: crate::OperationNetworkPolicy,
@@ -6561,7 +7264,9 @@ pub mod compilation {
         pub requested_ready_jobs: Option<NonZeroUsize>,
         pub requested_queue: Option<usize>,
         pub requested_workers: Option<NonZeroUsize>,
-        pub placement: crate::ExecutionPlacement,
+        pub required_capabilities: CompilationRequiredCapabilityGrants,
+        pub requested_execution_placement: crate::ExecutionPlacement,
+        pub requested_isolation: crate::OperationIsolationRequest,
         pub interruption: crate::OperationInterruptionStrength,
         pub deadline: OperationDeadline,
         pub queue_timeout_ticks: Option<u64>,
@@ -6576,6 +7281,15 @@ pub mod compilation {
     }
 
     impl CompilationAdmissionRefusal {
+        pub fn stage(&self) -> CompilationAdmissionStage {
+            CompilationAdmissionStage::Admission
+        }
+        pub fn prepared(&self) -> &PreparedCompilation {
+            unimplemented!()
+        }
+        pub fn compilation_identity(&self) -> &CompilationIdentity {
+            self.prepared().identity()
+        }
         pub fn operation_request(&self) -> &CompilationOperationRequest {
             unimplemented!()
         }
@@ -6600,13 +7314,22 @@ pub mod compilation {
         pub fn execution(&self) -> Option<&CompilationExecutionFacilityCapabilityDescriptor> {
             unimplemented!()
         }
+        pub fn reporting(&self) -> &ReportingCapabilityDescriptor {
+            unimplemented!()
+        }
 
         pub fn reason(&self) -> crate::OperationAdmissionRefusalReason {
             unimplemented!()
         }
     }
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum CompilationAdmissionStage {
+        Admission,
+    }
+
     pub struct SyncCompilationControls<'a, P: ?Sized, F: ?Sized, C: ?Sized> {
+        prepared: PreparedCompilation,
         admission: OrdinaryAdmission,
         limits: AdmittedOperationResourceLimits<CompilationResourceLimits>,
         packages: &'a P,
@@ -6621,6 +7344,7 @@ pub mod compilation {
     impl<'a, P: ?Sized, F: ?Sized, C: ?Sized> SyncCompilationControls<'a, P, F, C> {
         #[allow(clippy::too_many_arguments)]
         pub fn try_admit(
+            _prepared: PreparedCompilation,
             _admission: OrdinaryAdmission,
             _limits: AdmittedOperationResourceLimits<CompilationResourceLimits>,
             _packages: &'a P,
@@ -6648,6 +7372,7 @@ pub mod compilation {
     }
 
     pub struct AsyncCompilationControls<'a, P: ?Sized, F: ?Sized, C: ?Sized, X: ?Sized> {
+        prepared: PreparedCompilation,
         admission: OrdinaryAdmission,
         limits: AdmittedOperationResourceLimits<CompilationResourceLimits>,
         packages: &'a P,
@@ -6663,6 +7388,7 @@ pub mod compilation {
     impl<'a, P: ?Sized, F: ?Sized, C: ?Sized, X: ?Sized> AsyncCompilationControls<'a, P, F, C, X> {
         #[allow(clippy::too_many_arguments)]
         pub fn try_admit(
+            _prepared: PreparedCompilation,
             _admission: OrdinaryAdmission,
             _limits: AdmittedOperationResourceLimits<CompilationResourceLimits>,
             _packages: &'a P,
@@ -6692,7 +7418,6 @@ pub mod compilation {
     }
 
     pub fn run_sync<P: ?Sized, F: ?Sized, C: ?Sized>(
-        _prepared: &PreparedCompilation,
         _controls: SyncCompilationControls<'_, P, F, C>,
     ) -> CompilationReport
     where
@@ -6704,7 +7429,6 @@ pub mod compilation {
     }
 
     pub async fn run_async<P: ?Sized, F: ?Sized, C: ?Sized, X: ?Sized>(
-        _prepared: &PreparedCompilation,
         _controls: AsyncCompilationControls<'_, P, F, C, X>,
     ) -> CompilationReport
     where
@@ -6714,23 +7438,6 @@ pub mod compilation {
         X: CompilationExecutionFacility,
     {
         unimplemented!()
-    }
-
-    pub fn compile_sync<P: ?Sized, F: ?Sized, C: ?Sized>(
-        admission: &OrdinaryAdmission,
-        pack: &Pack,
-        request: CompilationRequest,
-        controls: SyncCompilationControls<'_, P, F, C>,
-    ) -> CompilationTerminal
-    where
-        P: SyncPackageAuthority,
-        F: SyncFontAuthority,
-        C: SyncSemanticResultCache,
-    {
-        match prepare(admission, &controls.limits, pack, request) {
-            Ok(prepared) => CompilationTerminal::Report(run_sync(&prepared, controls)),
-            Err(rejection) => CompilationTerminal::RequestRejected(rejection),
-        }
     }
 
     pub trait SyncSemanticResultCache {
@@ -7086,10 +7793,10 @@ pub mod compilation {
 
     #[derive(Clone, Copy)]
     pub enum EngineRuntimeDomainSelectionView<'a> {
+        NotSelected,
         InheritedUnmanaged,
         Managed {
             identity: &'a EngineRuntimeDomainIdentity,
-            placement: crate::ExecutionPlacement,
             width: NonZeroUsize,
             fine_timing_lease_reached: bool,
         },
@@ -7133,12 +7840,14 @@ pub mod compilation {
         pub worker_control_network: Option<crate::SelectedNetworkContract>,
         pub interruption: crate::OperationInterruptionStrength,
         pub worker_protocol: Option<crate::OperationalCapabilityClass>,
+        pub worker_protocol_version: Option<std::num::NonZeroU32>,
         pub parent_verifies_response: bool,
         pub parent_withholds_output: bool,
         pub no_in_process_fallback: bool,
         pub terminate_and_reap: bool,
         pub forced_termination_target_ticks: Option<u64>,
         pub enforcement: Vec<crate::EnforcementClaim>,
+        pub offered_scope: CompilationExecutionCapabilityScopeProjection,
     }
 
     pub struct CompilationExecutionFacilityCapabilityView<'a> {
@@ -7153,12 +7862,14 @@ pub mod compilation {
         pub worker_control_network: Option<crate::SelectedNetworkContract>,
         pub interruption: crate::OperationInterruptionStrength,
         pub worker_protocol: Option<&'a crate::OperationalCapabilityClass>,
+        pub worker_protocol_version: Option<std::num::NonZeroU32>,
         pub parent_verifies_response: bool,
         pub parent_withholds_output: bool,
         pub no_in_process_fallback: bool,
         pub terminate_and_reap: bool,
         pub forced_termination_target_ticks: Option<u64>,
         pub enforcement: &'a [crate::EnforcementClaim],
+        pub offered_scope: &'a CompilationExecutionCapabilityScopeProjection,
     }
 
     impl CompilationExecutionFacilityCapabilityDescriptor {
@@ -7214,7 +7925,6 @@ pub mod compilation {
 
         pub fn into_worker_request(
             self,
-            _parent_assigned_domain: EngineRuntimeDomainIdentity,
         ) -> (CompilationWorkerRequest, CompilationWorkerResponseVerifier) {
             unimplemented!()
         }
@@ -7225,6 +7935,9 @@ pub mod compilation {
     }
 
     impl CompilationWorkerRequest {
+        pub fn assign_domain(self, _parent_assigned_domain: EngineRuntimeDomainIdentity) -> Self {
+            unimplemented!()
+        }
         pub fn encode(self) -> StableByteValue {
             unimplemented!()
         }
@@ -7613,11 +8326,13 @@ pub mod representation {
     #[derive(Clone, Debug)]
     pub struct PackIngressResourceLimitSpec {
         pub archive_bytes: u64,
+        pub closure_export_payload_bytes: u64,
         pub control_record_bytes: u64,
-        pub decoded_closure_bytes: u64,
-        pub largest_file_bytes: u64,
-        pub archive_entries: u64,
-        pub files: u64,
+        pub logical_file_bindings: u64,
+        pub logical_decoded_bytes: u64,
+        pub physical_blob_bytes: u64,
+        pub largest_physical_blob_bytes: u64,
+        pub representation_entries: u64,
         pub maximum_expansion_ratio: u64,
         pub stable_spool_bytes: u64,
         pub retained_memory_bytes: u64,
@@ -7861,6 +8576,8 @@ pub mod representation {
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
     pub enum FormatReceiptTerminal {
         Success,
+        EncodingFailure,
+        ProjectionFailure,
         Invalid,
         Unsupported,
         ExpectedPackIdentityMismatch,
@@ -7925,15 +8642,53 @@ pub mod representation {
         Unavailable,
     }
 
-    #[derive(Clone, Debug, Default, Eq, PartialEq)]
-    pub struct FormatReceiptCounters {
-        pub input_bytes: Option<u64>,
-        pub output_bytes: Option<u64>,
-        pub control_record_bytes: Option<u64>,
-        pub planned_objects: Option<u64>,
-        pub verified_objects: Option<u64>,
-        pub aggregate_decoded_bytes: Option<u64>,
-        pub file_count: Option<u64>,
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct PackLogicalAccounting {
+        pub file_bindings: u64,
+        pub decoded_bytes: u64,
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct PhysicalRepresentationAccounting {
+        pub control_record_bytes: u64,
+        pub blob_count: u64,
+        pub blob_bytes: u64,
+        pub largest_blob_bytes: u64,
+        pub representation_entries: u64,
+    }
+
+    #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+    pub struct PeakOccupancy {
+        pub peak_stable_spool_bytes: u64,
+        pub peak_retained_memory_bytes: u64,
+    }
+
+    pub enum FormatReceiptAccountingView<'a> {
+        PackArchive {
+            logical: &'a PackLogicalAccounting,
+            physical: &'a PhysicalRepresentationAccounting,
+            occupancy: &'a PeakOccupancy,
+            input_bytes: Option<u64>,
+            planned_output_bytes: Option<u64>,
+            produced_output_bytes: Option<u64>,
+            completed_output_bytes: Option<u64>,
+        },
+        ClosureExport {
+            logical: &'a PackLogicalAccounting,
+            physical: &'a PhysicalRepresentationAccounting,
+            occupancy: &'a PeakOccupancy,
+            planned_payload_bytes: u64,
+            produced_payload_bytes: Option<u64>,
+            completed_payload_bytes: Option<u64>,
+        },
+        ProjectMaterialization {
+            file_count: u64,
+            planned_output_bytes: u64,
+            produced_output_bytes: Option<u64>,
+            completed_output_bytes: Option<u64>,
+            occupancy: &'a PeakOccupancy,
+        },
+        Publication,
     }
 
     pub struct FormatReceiptCommonView<'a> {
@@ -7953,7 +8708,7 @@ pub mod representation {
         pub fn stage(&self) -> FormatReceiptStage {
             unimplemented!()
         }
-        pub fn counters(&self) -> &FormatReceiptCounters {
+        pub fn accounting(&self) -> FormatReceiptAccountingView<'_> {
             unimplemented!()
         }
         pub fn pack_exposed(&self) -> bool {
@@ -7968,13 +8723,15 @@ pub mod representation {
         pub fn adapter_class(&self) -> &str {
             unimplemented!()
         }
-        pub fn admission(&self) -> RepresentationAdmissionDispositionView<'_> {
+        pub fn representation_admission(
+            &self,
+        ) -> Option<RepresentationAdmissionDispositionView<'_>> {
             unimplemented!()
         }
         pub fn publication(&self) -> FormatPublicationStatus {
             unimplemented!()
         }
-        pub fn cleanup(&self) -> FormatCleanupStatus {
+        pub fn cleanup_status(&self) -> FormatCleanupStatus {
             unimplemented!()
         }
         pub fn failure_class(&self) -> FormatFailureClass {
@@ -7996,7 +8753,7 @@ pub mod representation {
         pub cancellation_present: bool,
         pub interruption: crate::OperationInterruptionStrength,
         pub publication_strength: Option<crate::transport::PublicationCommitStrength>,
-        pub cleanup_strength: Option<crate::transport::TransportCleanupRequirement>,
+        pub cleanup_requirement: Option<crate::transport::TransportCleanupRequirement>,
         pub limits: FormatReceiptLimitsView<'a>,
         pub enforcement: &'a [crate::EnforcementClaim],
         pub timing_requested: bool,
@@ -8005,7 +8762,9 @@ pub mod representation {
 
     pub enum FormatReceiptLimitsView<'a> {
         PackIngress(&'a PackIngressResourceLimits),
-        Representation(&'a RepresentationResourceLimits),
+        PackArchiveEncoding(&'a PackArchiveEncodingResourceLimits),
+        ClosureExport(&'a ClosureExportResourceLimits),
+        ProjectMaterialization(&'a ProjectMaterializationResourceLimits),
         Transport(&'a crate::transport::TransportResourceLimits),
     }
 
@@ -8032,13 +8791,13 @@ pub mod representation {
     pub enum FormatCleanupStatus {
         NotApplicable,
         NotReached {
-            requested: crate::transport::TransportCleanupRequirement,
-            admitted: crate::transport::TransportCleanupRequirement,
+            requested_cleanup_requirement: crate::transport::TransportCleanupRequirement,
+            admitted_cleanup_requirement: crate::transport::TransportCleanupRequirement,
         },
         Reached {
-            requested: crate::transport::TransportCleanupRequirement,
-            admitted: crate::transport::TransportCleanupRequirement,
-            outcome: crate::transport::TransportCleanupOutcome,
+            requested_cleanup_requirement: crate::transport::TransportCleanupRequirement,
+            admitted_cleanup_requirement: crate::transport::TransportCleanupRequirement,
+            cleanup_outcome: crate::transport::TransportCleanupOutcome,
         },
     }
 
@@ -8101,6 +8860,15 @@ pub mod representation {
     format_receipt!(ProjectMaterializationProjectionReceipt);
     format_receipt!(PackArchivePublicationFormatReceipt);
     format_receipt!(ClosureExportPublicationFormatReceipt);
+
+    pub enum PublicationFormatAdmissionDispositionView<'a> {
+        Refused {
+            transport: crate::transport::TransportAdmissionRefusalView<'a>,
+        },
+        Admitted {
+            transport: crate::transport::TransportAdmissionRecordView<'a>,
+        },
+    }
 
     impl PackArchiveEncodingFormatReceipt {
         pub fn control_record_identity(&self) -> Option<&ContentIdentity> {
@@ -8193,6 +8961,12 @@ pub mod representation {
     }
 
     impl PackArchivePublicationFormatReceipt {
+        pub fn publication_admission(&self) -> PublicationFormatAdmissionDispositionView<'_> {
+            unimplemented!()
+        }
+        pub fn source_pack_identity(&self) -> &PackIdentity {
+            unimplemented!()
+        }
         pub fn source_archive_identity(&self) -> &ContentIdentity {
             unimplemented!()
         }
@@ -8202,9 +8976,18 @@ pub mod representation {
         pub fn archive_encoding_identity(&self) -> &ArchiveEncodingIdentity {
             unimplemented!()
         }
+        pub fn source_tree_identity(&self) -> &ClosureExportTreeContentIdentity {
+            unimplemented!()
+        }
+        pub fn entries(&self) -> &[FormatReceiptFile] {
+            unimplemented!()
+        }
     }
 
     impl ClosureExportPublicationFormatReceipt {
+        pub fn publication_admission(&self) -> PublicationFormatAdmissionDispositionView<'_> {
+            unimplemented!()
+        }
         pub fn source_pack_identity(&self) -> &PackIdentity {
             unimplemented!()
         }
@@ -8261,81 +9044,166 @@ pub mod representation {
         }
     }
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub struct Epoch2ArchiveEntryPlan {
+        pub payload_bytes: u64,
+        pub name_bytes: u16,
+        pub local_header_offset: u64,
+        pub local_zip64_extra_bytes: u16,
+        pub central_zip64_extra_bytes: u16,
+    }
+
     #[derive(Clone, Debug)]
-    pub struct RepresentationResourceLimits {
-        output_bytes: u64,
-        files: u64,
-        stable_spool_bytes: u64,
-        retained_memory_bytes: u64,
+    pub struct Epoch2AllStoredPlan {
+        private: crate::private::Epoch2AllStoredPlanState,
     }
 
-    impl RepresentationResourceLimits {
+    impl Epoch2AllStoredPlan {
         pub fn try_new(
-            output_bytes: u64,
-            files: u64,
-            stable_spool_bytes: u64,
-            retained_memory_bytes: u64,
-        ) -> Result<Self, crate::AdmissionRefusal> {
-            let limits = Self {
-                output_bytes,
-                files,
-                stable_spool_bytes,
-                retained_memory_bytes,
-            };
-            crate::private::SealedLimitSet::validate(&limits)?;
-            Ok(limits)
+            _control_record_bytes: u64,
+            _blob_lengths: impl IntoIterator<Item = u64>,
+        ) -> Result<Self, ArchivePlanRejection> {
+            unimplemented!()
         }
 
-        pub fn output_bytes(&self) -> u64 {
-            self.output_bytes
+        pub fn entries(&self) -> impl ExactSizeIterator<Item = Epoch2ArchiveEntryPlan> {
+            std::iter::empty()
         }
-        pub fn files(&self) -> u64 {
-            self.files
+        pub fn local_records_bytes(&self) -> u64 {
+            unimplemented!()
         }
-        pub fn stable_spool_bytes(&self) -> u64 {
-            self.stable_spool_bytes
+        pub fn central_directory_bytes(&self) -> u64 {
+            unimplemented!()
         }
-        pub fn retained_memory_bytes(&self) -> u64 {
-            self.retained_memory_bytes
+        pub fn zip64_trailer_bytes(&self) -> u64 {
+            unimplemented!()
+        }
+        pub fn exact_archive_bytes(&self) -> u64 {
+            unimplemented!()
         }
     }
 
-    pub struct RepresentationControls<'a> {
-        admission: OrdinaryAdmission,
-        limits: AdmittedOperationResourceLimits<RepresentationResourceLimits>,
-        request: RepresentationOperationRequest,
-        clock: &'a dyn crate::MonotonicClock,
-        interruption: &'a dyn crate::InterruptionSource,
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum ArchivePlanRejection {
+        ArithmeticOverflow,
+        HostSizeUnavailable,
+        FormatCeilingExceeded,
+        ResourceLimit,
     }
 
-    impl<'a> RepresentationControls<'a> {
-        pub fn try_new(
-            admission: OrdinaryAdmission,
-            limits: AdmittedOperationResourceLimits<RepresentationResourceLimits>,
-            request: RepresentationOperationRequest,
-            clock: &'a dyn crate::MonotonicClock,
-            interruption: &'a dyn crate::InterruptionSource,
-        ) -> Result<Self, crate::AdmissionRefusal> {
-            if let OperationDeadline::At(instant) = &request.deadline {
-                if instant.domain() != clock.domain() {
-                    return Err(crate::AdmissionRefusal::MissingEnforcementCapability);
+    macro_rules! representation_resource_limits {
+        ($name:ident { $($field:ident),+ $(,)? }) => {
+            #[derive(Clone, Debug)]
+            pub struct $name {
+                $(pub $field: u64,)+
+                pub stable_spool_bytes: u64,
+                pub retained_memory_bytes: u64,
+            }
+
+            impl $name {
+                pub fn try_new(
+                    $($field: u64,)+
+                    stable_spool_bytes: u64,
+                    retained_memory_bytes: u64,
+                ) -> Result<Self, crate::AdmissionRefusal> {
+                    let limits = Self {
+                        $($field,)+
+                        stable_spool_bytes,
+                        retained_memory_bytes,
+                    };
+                    crate::private::SealedLimitSet::validate(&limits)?;
+                    Ok(limits)
                 }
             }
-            Ok(Self {
-                admission,
-                limits,
-                request,
-                clock,
-                interruption,
-            })
-        }
+        };
     }
+
+    representation_resource_limits!(PackArchiveEncodingResourceLimits {
+        logical_file_bindings,
+        logical_decoded_bytes,
+        control_record_bytes,
+        physical_blob_bytes,
+        largest_physical_blob_bytes,
+        representation_entries,
+        maximum_expansion_ratio,
+        output_bytes,
+    });
+    representation_resource_limits!(ClosureExportResourceLimits {
+        logical_file_bindings,
+        logical_decoded_bytes,
+        control_record_bytes,
+        physical_blob_bytes,
+        largest_physical_blob_bytes,
+        representation_entries,
+        payload_bytes,
+    });
+    representation_resource_limits!(ProjectMaterializationResourceLimits {
+        files,
+        output_bytes,
+    });
+
+    macro_rules! representation_controls {
+        ($name:ident, $limits:ty) => {
+            pub struct $name<'a> {
+                admission: OrdinaryAdmission,
+                limits: AdmittedOperationResourceLimits<$limits>,
+                request: RepresentationOperationRequest,
+                clock: &'a dyn crate::MonotonicClock,
+                interruption: &'a dyn crate::InterruptionSource,
+                occupancy: Arc<crate::private::SpoolOccupancyLedgerState>,
+            }
+
+            impl<'a> $name<'a> {
+                pub fn try_new(
+                    admission: OrdinaryAdmission,
+                    limits: AdmittedOperationResourceLimits<$limits>,
+                    request: RepresentationOperationRequest,
+                    clock: &'a dyn crate::MonotonicClock,
+                    interruption: &'a dyn crate::InterruptionSource,
+                ) -> Result<Self, crate::AdmissionRefusal> {
+                    if let OperationDeadline::At(instant) = &request.deadline {
+                        if instant.domain() != clock.domain() {
+                            return Err(crate::AdmissionRefusal::MissingEnforcementCapability);
+                        }
+                    }
+                    Ok(Self {
+                        admission,
+                        limits,
+                        request,
+                        clock,
+                        interruption,
+                        occupancy: Arc::new(crate::private::SpoolOccupancyLedgerState),
+                    })
+                }
+
+                pub fn limits(&self) -> &$limits {
+                    self.limits.admitted()
+                }
+
+                pub(crate) fn occupancy_ledger(
+                    &self,
+                ) -> Arc<crate::private::SpoolOccupancyLedgerState> {
+                    self.occupancy.clone()
+                }
+            }
+        };
+    }
+
+    representation_controls!(
+        PackArchiveEncodingControls,
+        PackArchiveEncodingResourceLimits
+    );
+    representation_controls!(ClosureExportControls, ClosureExportResourceLimits);
+    representation_controls!(
+        ProjectMaterializationControls,
+        ProjectMaterializationResourceLimits
+    );
 
     pub fn encode_pack_archive<S>(
         _pack: &Pack,
         _encoding: ArchiveEncodingIdentity,
         _spool: &mut S,
-        _controls: RepresentationControls<'_>,
+        _controls: PackArchiveEncodingControls<'_>,
     ) -> PackArchiveEncodingReport
     where
         S: crate::transport::SyncSpoolFacility,
@@ -8361,6 +9229,9 @@ pub mod representation {
             unimplemented!()
         }
         pub fn closure_export_tree_identity(&self) -> &ClosureExportTreeContentIdentity {
+            unimplemented!()
+        }
+        pub fn archive_plan(&self) -> &Epoch2AllStoredPlan {
             unimplemented!()
         }
     }
@@ -8444,14 +9315,14 @@ pub mod representation {
 
     pub fn plan_project_materialization(
         _pack: &Pack,
-        _controls: RepresentationControls<'_>,
+        _controls: ProjectMaterializationControls<'_>,
     ) -> ProjectMaterializationReport {
         unimplemented!()
     }
 
     pub fn plan_closure_export(
         _pack: &Pack,
-        _controls: RepresentationControls<'_>,
+        _controls: ClosureExportControls<'_>,
     ) -> ClosureExportProjectionReport {
         unimplemented!()
     }
@@ -8463,10 +9334,22 @@ pub mod representation {
         pub fn files(&self) -> impl ExactSizeIterator<Item = ProjectMaterializationFile<'_>> {
             std::iter::empty()
         }
+        pub fn file_count(&self) -> u64 {
+            unimplemented!()
+        }
+        pub fn output_bytes(&self) -> u64 {
+            unimplemented!()
+        }
     }
 
     impl ClosureExportPlan {
         pub fn source_pack_identity(&self) -> &PackIdentity {
+            unimplemented!()
+        }
+        pub fn entry_count(&self) -> u64 {
+            unimplemented!()
+        }
+        pub fn payload_bytes(&self) -> u64 {
             unimplemented!()
         }
         pub fn control_record_identity(&self) -> &ContentIdentity {
@@ -8777,6 +9660,10 @@ pub mod session {
             token: SessionAttemptToken,
             report: CompilationReport,
         },
+        AttemptAdmissionRefused {
+            token: SessionAttemptToken,
+            refusal: crate::compilation::CompilationAdmissionRefusal,
+        },
         AttemptReleased {
             token: SessionAttemptToken,
             release: SessionAttemptRelease,
@@ -8858,6 +9745,9 @@ pub mod session {
         pub fn prepared_identity(&self) -> &crate::CompilationIdentity {
             unimplemented!()
         }
+        pub fn prepared(&self) -> &crate::PreparedCompilation {
+            unimplemented!()
+        }
         pub fn supersession_permit(&self) -> &SessionSupersessionPermit {
             unimplemented!()
         }
@@ -8865,7 +9755,7 @@ pub mod session {
         pub fn run_sync<P: ?Sized, F: ?Sized, C: ?Sized>(
             self,
             _controls: crate::compilation::SyncCompilationControls<'_, P, F, C>,
-        ) -> Result<CompilationReport, crate::compilation::CompilationAdmissionRefusal>
+        ) -> CompilationReport
         where
             P: crate::authority::SyncPackageAuthority,
             F: crate::authority::SyncFontAuthority,
@@ -8877,7 +9767,7 @@ pub mod session {
         pub async fn run_async<P: ?Sized, F: ?Sized, C: ?Sized, X: ?Sized>(
             self,
             _controls: crate::compilation::AsyncCompilationControls<'_, P, F, C, X>,
-        ) -> Result<CompilationReport, crate::compilation::CompilationAdmissionRefusal>
+        ) -> CompilationReport
         where
             P: crate::authority::AsyncPackageAuthority,
             F: crate::authority::AsyncFontAuthority,
@@ -9393,7 +10283,9 @@ impl_operation_limits!(
     creation::CreationResourceLimits,
     compilation::CompilationResourceLimits,
     representation::PackIngressResourceLimits,
-    representation::RepresentationResourceLimits,
+    representation::PackArchiveEncodingResourceLimits,
+    representation::ClosureExportResourceLimits,
+    representation::ProjectMaterializationResourceLimits,
 );
 
 mod private {
@@ -9425,8 +10317,16 @@ mod private {
     #[derive(Clone)]
     pub struct NativeStableBacking;
 
+    #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+    pub struct TransportReceiptState {
+        pub(crate) object_count: u64,
+    }
+
     state!(
         NativeSpoolState,
+        SpoolOccupancyLedgerState,
+        SpoolOccupancyReservationState,
+        SpoolOccupancyLeaseState,
         ResidualTransportLocatorState,
         ResidualLocatorDisclosureCapabilityState,
         ValidatedPack,
@@ -9449,6 +10349,9 @@ mod private {
         SourceChangedState,
         CreationEvidenceFailureState,
         CreationEvidenceCapabilityState,
+        CreationCapabilityGrantsState,
+        CreationResourceLedgerState,
+        CreationOccupancyReservationState,
         ReadyCreationJobState,
         CreationWorkerRequestState,
         CreationWorkerResponseVerifierState,
@@ -9482,6 +10385,8 @@ mod private {
         SvgOutputSpecificationState,
         HtmlOutputSpecificationState,
         PreparedCompilationState,
+        CompilationCapabilityGrantsState,
+        ReportingCapabilityDescriptorState,
         CompilationRequestRejectionState,
         CompilationRequestInventoryState,
         CompilationOutputInventoryState,
@@ -9511,11 +10416,13 @@ mod private {
         FormatReceiptState,
         ArchiveEncodingIdentityState,
         EncodedPackArchiveState,
+        Epoch2AllStoredPlanState,
+        PackArchivePublicationOperationRecordState,
+        ClosureExportPublicationOperationRecordState,
         PackIngressResourceLimitsState,
         ProjectMaterializationPlanState,
         ProjectMaterializationProjectionReceiptState,
         ClosureExportPlanState,
-        TransportReceiptState,
         SessionState,
         SessionPolicyState,
         StabilizedSessionInputState,

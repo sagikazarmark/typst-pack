@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="en" data-fixture-id="issue-69-cli-watch-traces-v2" data-source-commit="00cfca1987559586066b726c6257d8dd664c3a3c">
+<html lang="en" data-fixture-id="final-cli-watch-traces-v3" data-source-commit="prototype/final-rust-first-party-adapter-contracts">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>PROTOTYPE: issue 69 CLI watch traces</title>
+  <title>PROTOTYPE: final CLI watch traces</title>
   <style>
     :root {
       color-scheme: light;
@@ -96,7 +96,7 @@
 </head>
 <body>
 <main>
-  <span class="eyebrow">Throwaway logic prototype / issue 69</span>
+  <span class="eyebrow">Throwaway logic prototype / final contract</span>
   <h1>Can CLI watch serialize the Rust-reachable session?</h1>
   <p class="lede">Question: can CLI watch serialize the final Rust-reachable Pack-bound session lifecycle without inventing adapter state?</p>
 
@@ -108,7 +108,7 @@
     </article>
     <aside class="panel assumption">
       <h2>Assumption</h2>
-      <p><code>00cfca1</code> is the final reachable Rust interface. These are immutable expected traces, not an implementation of <code>CompilationSession::apply</code>.</p>
+      <p>The regenerated fixture is the final reachable Rust interface. These are immutable expected traces, not an implementation of <code>CompilationSession::apply</code>.</p>
       <div class="metadata" id="source-metadata"></div>
     </aside>
   </section>
@@ -171,7 +171,7 @@
       <li>Navigation only selects an embedded snapshot. It computes no lifecycle transition.</li>
       <li>Every step includes the complete inspected state, emitted effects, and any ignored stale input.</li>
       <li>Polling observations are collections, so empty and multi-provider observations remain distinct.</li>
-      <li>Fixture metadata distinguishes the Rust-allowed event vocabulary from events exercised by these six traces.</li>
+      <li>Fixture metadata distinguishes the Rust-allowed event vocabulary from events exercised by these seven traces.</li>
       <li><code>RetireSubscriptions</code> and <code>Publish</code> are effects. No adapter callback is added for either one.</li>
       <li>Delivery never appears inside the Rust session-owned publication or last-success value. Every non-idle adapter delivery is a complete publication-fenced wrapper with its immutable outcome and transport-receipt subject.</li>
     </ul>
@@ -180,16 +180,16 @@
 
 <script id="fixture-metadata" type="application/json">
 {
-  "fixture_id": "issue-69-cli-watch-traces-v2",
+  "fixture_id": "final-cli-watch-traces-v3",
   "prototype_kind": "throwaway-trace-driven-logic",
-  "source_commit": "00cfca1987559586066b726c6257d8dd664c3a3c",
+  "source_commit": "prototype/final-rust-first-party-adapter-contracts",
   "source_refs": [
     "PROTOTYPE-rust-lifecycle-adapter-interfaces.rs:8759-8829",
     "PROTOTYPE-rust-lifecycle-adapter-interfaces.rs:8944-9373",
     "PROTOTYPE-rust-lifecycle-adapter-interfaces.md:Compilation Session"
   ],
-  "allowed_event_names": ["Accept", "DependencyChanged", "NotificationGap", "Refresh", "Retry", "AttemptFinished", "AttemptReleased", "FenceReadFinished", "SubscriptionsArmed", "FenceConfirmed", "Shutdown"],
-  "covered_event_names": ["Accept", "Retry", "AttemptFinished", "AttemptReleased", "FenceReadFinished", "SubscriptionsArmed", "FenceConfirmed", "Shutdown"],
+  "allowed_event_names": ["Accept", "DependencyChanged", "NotificationGap", "Refresh", "Retry", "AttemptFinished", "AttemptAdmissionRefused", "AttemptReleased", "FenceReadFinished", "SubscriptionsArmed", "FenceConfirmed", "Shutdown"],
+  "covered_event_names": ["Accept", "Retry", "AttemptFinished", "AttemptAdmissionRefused", "AttemptReleased", "FenceReadFinished", "SubscriptionsArmed", "FenceConfirmed", "Shutdown"],
   "allowed_effect_names": ["StartAttempt", "InterruptAttempt", "ReadFence", "ArmSubscriptions", "ConfirmFence", "RetireSubscriptions", "Publish"],
   "required_scenario_ids": [
     "superseded-drain-tokenless-rejection",
@@ -198,6 +198,7 @@
     "same-revision-new-evaluation",
     "shutdown-retiring-retired",
     "pack-identity-session-boundary"
+    ,"attempt-admission-refusal-starts-pending"
   ],
   "required_state_fields": [
     "session_instance",
@@ -318,7 +319,7 @@ const compilationDeliveryOutcome = (reference, compilationIdentity, resultIdenti
   transport: {
     terminal: receiptStatus === "committed"
       ? { status: "succeeded" }
-      : { status: "failed", primary: { kind: "commit" }, cleanup: "not_required" },
+      : { status: "failed", primary: { kind: "commit" }, cleanup_outcome: "not_required" },
     receipt: {
       immutable_reference: `${reference}:transport-receipt`,
       role: "compilation_delivery",
@@ -1122,6 +1123,54 @@ const traces = deepFreeze([
             created_session: "session-pack-b",
             owner: "CLI"
           }
+        })
+      })
+    ]
+  },
+  {
+    id: "attempt-admission-refusal-starts-pending",
+    title: "Reportless admission refusal advances pending work",
+    description: "A refused admitted-attempt construction clears only its exact token, starts the latest pending prepared revision, and creates no report or publication candidate.",
+    steps: [
+      traceStep({
+        id: "admission-refusal-empty",
+        name: "Empty Pack-bound session",
+        note: "No report, publication, or last-success value exists.",
+        state: makeState({ session: "session-admission-refusal" })
+      }),
+      traceStep({
+        id: "admission-refusal-start-r1",
+        name: "Prepare and start revision 1",
+        note: "a1 owns the active slot, but operation admission has not yet produced a report.",
+        input: event("Accept", { branch: "Stabilized", revision: "r1", evaluation: "e1" }),
+        effects: [effect("StartAttempt", { token: "a1", revision: "r1", evaluation: "e1" })],
+        state: makeState({ session: "session-admission-refusal", revision: "r1", evaluation: "e1", attempt: activeAttempt("a1", "r1", "e1") })
+      }),
+      traceStep({
+        id: "admission-refusal-queue-r2",
+        name: "Keep the latest prepared revision pending",
+        note: "r2 supersedes r1 while a1 still owns the slot.",
+        input: event("Accept", { branch: "Stabilized", revision: "r2", evaluation: "e2" }),
+        effects: [effect("InterruptAttempt", { token: "a1" })],
+        state: makeState({
+          session: "session-admission-refusal",
+          revision: "r2",
+          evaluation: "e2",
+          attempt: activeAttempt("a1", "r1", "e1", "Draining"),
+          pending: pendingRevision("r2", "e2", COMPILATION_A)
+        })
+      }),
+      traceStep({
+        id: "admission-refusal-clear-token",
+        name: "Consume the reportless refusal",
+        note: "The exact a1 token is cleared and a2 starts r2. No AttemptFinished, report candidate, fence, Publish effect, currentness claim, or last-success replacement is fabricated.",
+        input: event("AttemptAdmissionRefused", { token: "a1", stage: "Admission", reason: "execution-placement-unavailable" }),
+        effects: [effect("StartAttempt", { token: "a2", revision: "r2", evaluation: "e2" })],
+        state: makeState({
+          session: "session-admission-refusal",
+          revision: "r2",
+          evaluation: "e2",
+          attempt: activeAttempt("a2", "r2", "e2")
         })
       })
     ]

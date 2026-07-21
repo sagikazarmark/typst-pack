@@ -1,7 +1,7 @@
-# PROTOTYPE - issue 69 corrected target for the generated Dagger GraphQL contract.
+# PROTOTYPE - final issue 78 target for the generated Dagger GraphQL contract.
 #
-# This desired module projection is corrected against final Rust fixture
-# 00cfca1. It freezes names, kinds, references, list shapes, and nullability; it
+# This desired module projection is corrected against the regenerated Rust
+# fixture. It freezes names, kinds, references, list shapes, and nullability; it
 # is still not evidence that implementation source or generated bindings exist.
 # It is not Dang source or the complete Dagger core schema. Minimal File and
 # Directory stubs preserve their actual OBJECT kind. The pinned engine exposes
@@ -115,6 +115,8 @@ type TypstPackCompilationOutput { id: ID! }
 type TypstPackPackCreation {
   id: ID!
   status: TypstPackCreationStatus!
+  # Non-null exactly when status is ADMISSION_REFUSED; stage is non-null inside.
+  admissionRefusal: TypstPackAdmissionRefusal
   # Complete corrected org.typst-pack.create-operation envelope, not an alias
   # for Creation Report. It preserves adapter failure, Creation Request
   # Rejection, Creation Admission Refusal, and admitted Creation Report branches.
@@ -126,6 +128,7 @@ type TypstPackPackCreation {
 type TypstPackPackIngress {
   id: ID!
   status: TypstPackPackIngressStatus!
+  admissionRefusal: TypstPackAdmissionRefusal
   receipt: File!
   pack: TypstPackPack
   requirePack: TypstPackPack!
@@ -182,6 +185,7 @@ type TypstPackPack {
 type TypstPackPackArchiveEncoding {
   id: ID!
   status: TypstPackRepresentationStatus!
+  admissionRefusal: TypstPackAdmissionRefusal
   # Complete corrected org.typst-pack.representation-operation envelope. Its
   # nested Format Receipt retains refusal or reached outcome data.
   receipt: File!
@@ -189,6 +193,8 @@ type TypstPackPackArchiveEncoding {
   stagingStatus: TypstPackStagingStatus!
   # Paired container-local staging receipt; it never rewrites the operation.
   stagingReceipt: File!
+  publicationFormatReceipt: File
+  publicationTransportReceipt: File
   archive: File
   requireArchive: File!
 }
@@ -196,6 +202,7 @@ type TypstPackPackArchiveEncoding {
 type TypstPackClosureExport {
   id: ID!
   status: TypstPackRepresentationStatus!
+  admissionRefusal: TypstPackAdmissionRefusal
   # Complete corrected org.typst-pack.representation-operation envelope. Its
   # nested Format Receipt retains refusal or reached outcome data.
   receipt: File!
@@ -203,6 +210,8 @@ type TypstPackClosureExport {
   stagingStatus: TypstPackStagingStatus!
   # Paired container-local staging receipt; it never rewrites the operation.
   stagingReceipt: File!
+  publicationFormatReceipt: File
+  publicationTransportReceipt: File
   tree: Directory
   requireTree: Directory!
 }
@@ -210,6 +219,7 @@ type TypstPackClosureExport {
 type TypstPackProjectMaterialization {
   id: ID!
   status: TypstPackRepresentationStatus!
+  admissionRefusal: TypstPackAdmissionRefusal
   # Complete corrected org.typst-pack.project-materialization-operation
   # envelope. Its nested projection receipt retains refusal or reached data.
   receipt: File!
@@ -224,6 +234,7 @@ type TypstPackProjectMaterialization {
 type TypstPackCompilation {
   id: ID!
   status: TypstPackCompilationStatus!
+  admissionRefusal: TypstPackAdmissionRefusal
   # Complete corrected org.typst-pack.compilation-operation envelope. It keeps
   # nullable requested jobs distinct from zero, records admitted jobs as an
   # outer adapter fact, and preserves adapter failure, request rejection, and
@@ -236,6 +247,8 @@ type TypstPackCompilation {
   # Report metadata wrapper with exact CompilationReportProjection in
   # report_projection. Null unless terminal is the Compilation Report branch.
   report: File
+  # Present for ADMISSION_REFUSED after pure preparation and for report branches.
+  # Absent only before a Prepared Compilation exists.
   compilationIdentity: String
   resultIdentity: String
   # Final only: NOT_APPLICABLE, SUCCEEDED, or FAILED; reducer intermediates are not wire values.
@@ -252,6 +265,12 @@ enum TypstPackCreationStatus {
   CREATION_FAILED
   PACK_ISSUED
 }
+
+type TypstPackAdmissionRefusal {
+  stage: TypstPackAdmissionStage!
+}
+
+enum TypstPackAdmissionStage { ADMISSION }
 
 enum TypstPackPackIngressStatus {
   ADAPTER_FAILED

@@ -783,7 +783,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "typst-pack-issue-69-validation"
+name = "typst-pack-final-contract-validation"
 version = "0.0.0"
 dependencies = [
  "graphql-parser",

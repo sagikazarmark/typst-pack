@@ -10,17 +10,19 @@
     "concurrency": "simultaneous admitted work"
   },
   "tightening": "Profile limit objects are complete resolved admission ceilings; operation-limit inputs are partial tightening overlays. Every numeric override is less than or equal to this profile. Concurrency and ratios must remain positive. Zero is valid only for ready_queue_capacity and count or byte dimensions where admitting none is meaningful. Creation and compilation capacities are distinct views over one adapter-owned execution pool; equal values do not make the role contracts interchangeable. Profile values never prove that a value was requested, admitted, selected, or reached; operation reports serialize those facts only from the bound Rust request, capability, admission, and reached views.",
-  "font_scan_policy": {
+  "font_scan_policy_default": {
     "invalid_candidate": "warn_and_omit",
     "unreadable_candidate": "warn_and_omit"
   },
   "pack_ingress": {
     "archive_bytes": "1073741824",
+    "closure_export_payload_bytes": "4362076160",
     "control_record_bytes": "67108864",
-    "decoded_closure_bytes": "4294967296",
-    "largest_file_bytes": "536870912",
-    "archive_entries": "200000",
-    "files": "100000",
+    "logical_file_bindings": "100000",
+    "logical_decoded_bytes": "4294967296",
+    "physical_blob_bytes": "4294967296",
+    "largest_physical_blob_bytes": "536870912",
+    "representation_entries": "200000",
     "maximum_expansion_ratio": "128",
     "stable_spool_bytes": "17179869184",
     "retained_memory_bytes": "4294967296"
@@ -42,6 +44,8 @@
     "override_count": "100000",
     "largest_override_bytes": "536870912",
     "aggregate_override_bytes": "4294967296",
+    "aggregate_file_bindings": "100000",
+    "aggregate_logical_bytes": "4294967296",
     "stable_spool_bytes": "17179869184",
     "retained_memory_bytes": "4294967296"
   },
@@ -70,8 +74,12 @@
     "diagnostic_source_metadata_bytes": "67108864"
   },
   "representation": {
-    "output_bytes": "8589934592",
-    "files": "100000",
+    "pack_archive": {"output_bytes": "1073741824"},
+    "closure_export": {"payload_bytes": "4362076160"},
+    "project_materialization": {
+      "files": "100000",
+      "output_bytes": "8589934592"
+    },
     "stable_spool_bytes": "17179869184",
     "retained_memory_bytes": "4294967296"
   },
@@ -82,7 +90,7 @@
     "retained_memory_bytes": "4294967296"
   },
   "transport": {
-    "objects": "100000",
+    "objects": "200000",
     "aggregate_bytes": "8589934592",
     "largest_object_bytes": "2147483648",
     "in_flight_bytes": "67108864",

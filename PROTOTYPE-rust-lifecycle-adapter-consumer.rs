@@ -17,28 +17,28 @@ use tp::authority::{
     AuthorityFailure, AuthorityFailureClass, CompletePackageTree, DependencyAcquisitionOutcome,
     DependencyResolutionEvidence, EvidenceFactKind, EvidenceFactOutcome,
     EvidenceRevalidationOutcome, EvidenceRevalidationRequest, FontAuthorityCapabilityDescriptor,
-    FontAxis, FontAxisValue, FontCatalogAcquisition, FontCatalogCandidate, FontCatalogRequest,
-    FontCatalogSnapshot, FontContainerAcquisitionRequest, FontSelectionFlags, FontStretch,
-    FontStyle, FontWeight, OpenTypeAxisTag, PackageAcquisitionRequest,
-    PackageAuthorityCapabilityDescriptor, SyncFontAuthority, SyncPackageAuthority,
-    UnicodeCodepointRange,
+    FontAuthorityCapabilityScopeProjection, FontAuthorityCapabilitySpec, FontAxis, FontAxisValue,
+    FontCatalogAcquisition, FontCatalogCandidate, FontCatalogRequest, FontCatalogSnapshot,
+    FontContainerAcquisitionRequest, FontSelectionFlags, FontStretch, FontStyle, FontWeight,
+    OpenTypeAxisTag, PackageAcquisitionRequest, PackageAuthorityCapabilityDescriptor,
+    SyncFontAuthority, SyncPackageAuthority, UnicodeCodepointRange,
 };
 use tp::compilation::{
     CanonicalDiagnosticPolicy, CompilationDispatchOutcome, CompilationExecutionFacility,
-    CompilationExecutionFacilityCapabilityDescriptor, CompilationReportTerminalRef,
-    CompilationReportingPolicy, CompilationRequest, CompilationResourceLimitSpec,
-    CompilationResourceLimits, NoSemanticResultCache, ReadyCompilationJob,
-    SemanticCacheAdapterAdmissionOutcome, SemanticCacheAdmissionRequest,
-    SemanticCacheLookupOutcome, SemanticCacheLookupRequest,
+    CompilationExecutionFacilityCapabilityDescriptor, CompilationPreparationLimits,
+    CompilationPreparationPolicy, CompilationReportTerminalRef, CompilationReportingPolicy,
+    CompilationRequest, CompilationResourceLimitSpec, CompilationResourceLimits,
+    NoSemanticResultCache, ReadyCompilationJob, SemanticCacheAdapterAdmissionOutcome,
+    SemanticCacheAdmissionRequest, SemanticCacheLookupOutcome, SemanticCacheLookupRequest,
     SemanticResultCacheCapabilityDescriptor, SyncCompilationControls, SyncSemanticCacheLookup,
     SyncSemanticResultCache,
 };
 use tp::creation::{
     CreationDispatchOutcome, CreationEvidenceCapabilityDescriptor, CreationEvidenceFenceOutcome,
     CreationEvidenceFenceRequest, CreationExecutionFacility, CreationInput, CreationInputEvidence,
-    CreationReportingPolicy, CreationRequest, CreationResourceLimitSpec, CreationResourceLimits,
-    DiscoveryVariant, FontEmbeddingPolicy, PackageEmbeddingPolicy, ProjectSnapshot,
-    ReadyCreationJob, SyncCreationControls, SyncCreationEvidence,
+    CreationReportingPolicy, CreationRequest, CreationResourceLedger, CreationResourceLimitSpec,
+    CreationResourceLimits, DiscoveryVariant, FontEmbeddingPolicy, PackageEmbeddingPolicy,
+    ProjectSnapshot, ReadyCreationJob, SyncCreationControls, SyncCreationEvidence,
 };
 use tp::session::{
     ArmedSubscriptions, FenceConfirmation, FenceConfirmationOutcome, FenceReadObservation,
@@ -422,9 +422,13 @@ fn typecheck_transport_controls(
             transfer_concurrency: NonZeroUsize::new(1).unwrap(),
             interruption: tp::OperationInterruptionStrength::Cooperative,
             deadline: OperationDeadline::None,
-            cleanup: tp::transport::TransportCleanupRequirement::CompleteBeforeReturn,
+            cleanup_requirement: tp::transport::TransportCleanupRequirement::CompleteBeforeReturn,
             required_enforcement: vec![],
             timing_requested: true,
+            required_scope: transport_scope(
+                tp::transport::TransportFacilityRole::Spool,
+                tp::transport::TransportPermittedUse::StableAcquisition,
+            ),
         },
         clock,
         interruption,
@@ -442,9 +446,13 @@ fn typecheck_transport_controls(
             transfer_concurrency: NonZeroUsize::new(1).unwrap(),
             interruption: tp::OperationInterruptionStrength::Cooperative,
             deadline: OperationDeadline::None,
-            cleanup: tp::transport::TransportCleanupRequirement::CompleteBeforeReturn,
+            cleanup_requirement: tp::transport::TransportCleanupRequirement::CompleteBeforeReturn,
             required_enforcement: vec![],
             timing_requested: true,
+            required_scope: transport_scope(
+                tp::transport::TransportFacilityRole::PackArchiveAcquisition,
+                tp::transport::TransportPermittedUse::ArchiveAcquisition,
+            ),
         },
         clock,
         interruption,
@@ -459,9 +467,13 @@ fn typecheck_transport_controls(
             interruption: tp::OperationInterruptionStrength::Cooperative,
             deadline: OperationDeadline::None,
             commit: PublicationCommitStrength::CompleteCollectionAtomic,
-            cleanup: tp::transport::TransportCleanupRequirement::CompleteBeforeReturn,
+            cleanup_requirement: tp::transport::TransportCleanupRequirement::CompleteBeforeReturn,
             required_enforcement: vec![],
             timing_requested: true,
+            required_scope: transport_scope(
+                tp::transport::TransportFacilityRole::PackArchivePublication,
+                tp::transport::TransportPermittedUse::ArchivePublication,
+            ),
         },
         clock,
         interruption,
@@ -476,9 +488,13 @@ fn typecheck_transport_controls(
             interruption: tp::OperationInterruptionStrength::Cooperative,
             deadline: OperationDeadline::None,
             commit: PublicationCommitStrength::CompleteCollectionAtomic,
-            cleanup: tp::transport::TransportCleanupRequirement::CompleteBeforeReturn,
+            cleanup_requirement: tp::transport::TransportCleanupRequirement::CompleteBeforeReturn,
             required_enforcement: vec![],
             timing_requested: true,
+            required_scope: transport_scope(
+                tp::transport::TransportFacilityRole::ProjectMaterializationPublication,
+                tp::transport::TransportPermittedUse::MaterializationPublication,
+            ),
         },
         clock,
         interruption,
@@ -493,9 +509,13 @@ fn typecheck_transport_controls(
             interruption: tp::OperationInterruptionStrength::Cooperative,
             deadline: OperationDeadline::None,
             commit: PublicationCommitStrength::CompleteCollectionAtomic,
-            cleanup: tp::transport::TransportCleanupRequirement::CompleteBeforeReturn,
+            cleanup_requirement: tp::transport::TransportCleanupRequirement::CompleteBeforeReturn,
             required_enforcement: vec![],
             timing_requested: true,
+            required_scope: transport_scope(
+                tp::transport::TransportFacilityRole::ClosureExportPublication,
+                tp::transport::TransportPermittedUse::ClosureExportPublication,
+            ),
         },
         clock,
         interruption,
@@ -510,14 +530,30 @@ fn typecheck_transport_controls(
             interruption: tp::OperationInterruptionStrength::Cooperative,
             deadline: OperationDeadline::None,
             commit: PublicationCommitStrength::CompleteCollectionAtomic,
-            cleanup: tp::transport::TransportCleanupRequirement::CompleteBeforeReturn,
+            cleanup_requirement: tp::transport::TransportCleanupRequirement::CompleteBeforeReturn,
             required_enforcement: vec![],
             timing_requested: true,
+            required_scope: transport_scope(
+                tp::transport::TransportFacilityRole::CompilationDelivery,
+                tp::transport::TransportPermittedUse::CompilationDelivery,
+            ),
         },
         clock,
         interruption,
     )
     .unwrap();
+}
+
+fn transport_scope(
+    role: tp::transport::TransportFacilityRole,
+    permitted_use: tp::transport::TransportPermittedUse,
+) -> tp::transport::TransportCapabilityScopeProjection {
+    tp::transport::TransportCapabilityScopeProjection {
+        role,
+        permitted_uses: vec![permitted_use],
+        coverage: tp::transport::TransportCoverageClass::OneFrozenSubject,
+        completeness: tp::CapabilityProjectionCompleteness::Complete,
+    }
 }
 
 struct EmptyByteSource;
@@ -1001,24 +1037,27 @@ fn typecheck_sync_common_path() {
         override_count: 100_000,
         largest_override_bytes: 512 * 1024 * 1024,
         aggregate_override_bytes: 4 * 1024 * 1024 * 1024,
+        aggregate_file_bindings: 100_000,
+        aggregate_logical_bytes: 512 * 1024 * 1024,
         stable_spool_bytes: 512 * 1024 * 1024,
         retained_memory_bytes: 768 * 1024 * 1024,
     })
     .unwrap();
     let creation_limits =
         AdmittedOperationResourceLimits::try_caller_selected(creation_limits).unwrap();
+    let creation_resources = CreationResourceLedger::try_new(creation_limits).unwrap();
 
     let main = ProjectPath::parse(&admission, "main.typ").unwrap();
     let bytes = StableByteValue::from_static(&admission, b"Hello").unwrap();
     let project = ProjectSnapshot::try_from_files(
         &admission,
-        &creation_limits,
+        &creation_resources,
         main.clone(),
         [(main, bytes)],
     )
     .unwrap();
     let request = CreationRequest::try_new(
-        &creation_limits,
+        creation_resources.limits(),
         project,
         [DiscoveryVariant::paged_explicit_empty()],
         PackageEmbeddingPolicy::embed_all(),
@@ -1052,10 +1091,11 @@ fn typecheck_sync_common_path() {
     let package_trait: &dyn SyncPackageAuthority = &packages;
     let font_trait: &dyn SyncFontAuthority = &fonts;
     let evidence_trait: &dyn SyncCreationEvidence = &evidence;
+    let reporting = reporting_descriptor();
 
     let creation_controls = SyncCreationControls::try_admit(
         admission.clone(),
-        creation_limits,
+        creation_resources,
         evidence_trait,
         package_trait,
         font_trait,
@@ -1066,7 +1106,40 @@ fn typecheck_sync_common_path() {
             requested_ready_jobs: None,
             requested_queue: None,
             requested_workers: None,
-            placement: tp::ExecutionPlacement::InProcess,
+            font_scan_policy: tp::authority::FontScanPolicy {
+                invalid_candidate: tp::authority::InvalidFontCandidateDisposition::WarnAndOmit,
+                unreadable_candidate: tp::authority::InvalidFontCandidateDisposition::WarnAndOmit,
+            },
+            required_capabilities: tp::creation::CreationRequiredCapabilityGrants::bind_sync(
+                evidence_trait,
+                package_trait,
+                font_trait,
+                &reporting,
+                tp::creation::CreationRequiredCapabilityScopes {
+                    evidence: tp::creation::CreationEvidenceCapabilityScopeProjection {
+                        permitted_uses: vec![
+                            tp::creation::CreationEvidencePermittedUse::Stabilization,
+                            tp::creation::CreationEvidencePermittedUse::Revalidation,
+                        ],
+                        coverage: tp::creation::CreationEvidenceCoverageClass::ExactOperationInputs,
+                        completeness: tp::CapabilityProjectionCompleteness::Complete,
+                    },
+                    packages: package_scope(),
+                    fonts: font_scope(),
+                    execution: None,
+                    reporting: tp::compilation::ReportingCapabilityScopeProjection {
+                        permitted_uses: vec![],
+                        coverage: tp::compilation::ReportingCoverageClass::SelectedReportChannels,
+                        completeness: tp::CapabilityProjectionCompleteness::Complete,
+                    },
+                },
+            ),
+            requested_execution_placement: tp::ExecutionPlacement::CallerThread,
+            requested_isolation: tp::OperationIsolationRequest::InProcess(
+                tp::InProcessIsolationContract {
+                    claimed_enforcement: vec![],
+                },
+            ),
             interruption: tp::OperationInterruptionStrength::Cooperative,
             deadline: OperationDeadline::None,
             queue_timeout_ticks: None,
@@ -1093,11 +1166,26 @@ fn typecheck_sync_common_path() {
     let compilation_limits =
         AdmittedOperationResourceLimits::try_caller_selected(compilation_limits).unwrap();
     let prepared = pack
-        .prepare(&admission, &compilation_limits, request)
+        .prepare(
+            &admission,
+            &CompilationPreparationPolicy {
+                reject_unknown_engine_features: true,
+                require_canonical_diagnostic_policy: true,
+            },
+            &CompilationPreparationLimits {
+                override_count: 100_000,
+                largest_override_bytes: 512 * 1024 * 1024,
+                aggregate_override_bytes: 4 * 1024 * 1024 * 1024,
+                diagnostic_entries: 5_000,
+                diagnostic_entry_bytes: 8 * 1024 * 1024,
+            },
+            request,
+        )
         .unwrap();
     let no_cache =
         NoSemanticResultCache::new(CacheIsolationDomain::try_new("test.cache-isolation").unwrap());
     let controls = SyncCompilationControls::try_admit(
+        prepared.clone(),
         admission,
         compilation_limits,
         package_trait,
@@ -1111,7 +1199,29 @@ fn typecheck_sync_common_path() {
             requested_ready_jobs: None,
             requested_queue: None,
             requested_workers: None,
-            placement: tp::ExecutionPlacement::InProcess,
+            required_capabilities: tp::compilation::CompilationRequiredCapabilityGrants::bind_sync(
+                package_trait,
+                font_trait,
+                &SyncSemanticCacheLookup::Disabled::<NoSemanticResultCache>,
+                &reporting,
+                tp::compilation::CompilationRequiredCapabilityScopes {
+                    packages: package_scope(),
+                    fonts: font_scope(),
+                    cache: None,
+                    execution: None,
+                    reporting: tp::compilation::ReportingCapabilityScopeProjection {
+                        permitted_uses: vec![],
+                        coverage: tp::compilation::ReportingCoverageClass::SelectedReportChannels,
+                        completeness: tp::CapabilityProjectionCompleteness::Complete,
+                    },
+                },
+            ),
+            requested_execution_placement: tp::ExecutionPlacement::CallerThread,
+            requested_isolation: tp::OperationIsolationRequest::InProcess(
+                tp::InProcessIsolationContract {
+                    claimed_enforcement: vec![],
+                },
+            ),
             interruption: tp::OperationInterruptionStrength::Cooperative,
             deadline: OperationDeadline::None,
             queue_timeout_ticks: None,
@@ -1129,7 +1239,7 @@ fn typecheck_sync_common_path() {
     )
     .unwrap();
 
-    let report = tp::compilation::run_sync(&prepared, controls);
+    let report = tp::compilation::run_sync(controls);
     if let CompilationReportTerminalRef::Result(result) = report.terminal() {
         let _ = result.diagnostics();
         let _ = result.document_summary();
@@ -1955,19 +2065,14 @@ fn inspect_trace(trace: tp::compilation::CompilationAccessTraceView<'_>) {
 
 fn inspect_domain_selection(selection: tp::compilation::EngineRuntimeDomainSelectionView<'_>) {
     match selection {
+        tp::compilation::EngineRuntimeDomainSelectionView::NotSelected => {}
         tp::compilation::EngineRuntimeDomainSelectionView::InheritedUnmanaged => {}
         tp::compilation::EngineRuntimeDomainSelectionView::Managed {
             identity,
-            placement,
             width,
             fine_timing_lease_reached,
         } => {
-            let _ = (
-                identity.as_str(),
-                placement,
-                width,
-                fine_timing_lease_reached,
-            );
+            let _ = (identity.as_str(), width, fine_timing_lease_reached);
         }
     }
 }
@@ -1996,6 +2101,12 @@ fn inspect_compilation_contract(
         admission.contractual_no_network,
         admission.structural_network_enforcement,
         admission.enforcement,
+        admission.requested_capability_scopes,
+        admission.admitted_capability_scopes,
+        admission.requested_execution_placement,
+        admission.admitted_execution_placement,
+        admission.requested_isolation,
+        admission.admitted_isolation,
     );
     let resources = operational.resources();
     let _ = (resources.profile, resources.requested, resources.admitted);
@@ -2009,6 +2120,9 @@ fn inspect_compilation_contract(
         dependencies.cache_isolation_domain_present,
         dependencies.offline_roles_covered,
         dependencies.concurrency,
+        dependencies.reached_package_scope,
+        dependencies.reached_font_scope,
+        dependencies.reached_cache_scope,
     );
     let attempt = operational.attempt_control();
     let _ = (
@@ -2026,9 +2140,11 @@ fn inspect_compilation_contract(
         tp::compilation::CompilationExecutionInventoryView::CallerThread {
             domain,
             engine_width,
+            reached_placement,
+            reached_isolation,
         } => {
             inspect_domain_selection(domain);
-            let _ = engine_width;
+            let _ = (engine_width, reached_placement, reached_isolation);
         }
         tp::compilation::CompilationExecutionInventoryView::Facility {
             descriptor,
@@ -2039,6 +2155,9 @@ fn inspect_compilation_contract(
             worker_terminated,
             worker_reaped,
             engine_width,
+            reached_scope,
+            reached_placement,
+            reached_isolation,
         } => {
             let _ = descriptor.class();
             inspect_domain_selection(domain);
@@ -2049,6 +2168,9 @@ fn inspect_compilation_contract(
                 worker_terminated,
                 worker_reaped,
                 engine_width,
+                reached_scope,
+                reached_placement,
+                reached_isolation,
             );
         }
     }
@@ -2061,6 +2183,7 @@ fn inspect_compilation_contract(
         reporting.timing,
         reporting.fine_engine_timing,
         reporting.fine_timing_lease_reached,
+        reporting.reached_scope,
     );
     for evidence in report.current_attempt_evidence().entries() {
         let _ = evidence.ordinal.ordinal();
@@ -2203,9 +2326,23 @@ fn inspect_creation_report(report: &tp::creation::CreationReport) {
         admission.contractual_no_network,
         admission.structural_network_enforcement,
         admission.enforcement,
+        admission.requested_capability_scopes,
+        admission.admitted_capability_scopes,
+        admission.requested_execution_placement,
+        admission.admitted_execution_placement,
+        admission.requested_isolation,
+        admission.admitted_isolation,
     );
     let resources = inventory.resources();
-    let _ = (resources.profile, resources.requested, resources.admitted);
+    let _ = (
+        resources.profile,
+        resources.requested,
+        resources.admitted,
+        resources.reached.aggregate_file_bindings,
+        resources.reached.aggregate_logical_bytes,
+        resources.reached.peak_stable_spool_bytes,
+        resources.reached.peak_retained_memory_bytes,
+    );
     let dependencies = inventory.dependency_execution();
     let _ = (
         dependencies.evidence,
@@ -2213,6 +2350,10 @@ fn inspect_creation_report(report: &tp::creation::CreationReport) {
         dependencies.fonts,
         dependencies.offline_roles_covered,
         dependencies.concurrency,
+        dependencies.font_scan_policy,
+        dependencies.reached_evidence_scope,
+        dependencies.reached_package_scope,
+        dependencies.reached_font_scope,
     );
     let attempt = inventory.attempt_control();
     let _ = (
@@ -2229,9 +2370,11 @@ fn inspect_creation_report(report: &tp::creation::CreationReport) {
         tp::creation::CreationExecutionInventoryView::CallerThread {
             domain,
             engine_width,
+            reached_placement,
+            reached_isolation,
         } => {
             inspect_domain_selection(domain);
-            let _ = engine_width;
+            let _ = (engine_width, reached_placement, reached_isolation);
         }
         tp::creation::CreationExecutionInventoryView::Facility {
             descriptor,
@@ -2242,6 +2385,9 @@ fn inspect_creation_report(report: &tp::creation::CreationReport) {
             worker_terminated,
             worker_reaped,
             engine_width,
+            reached_scope,
+            reached_placement,
+            reached_isolation,
         } => {
             let _ = descriptor.class();
             inspect_domain_selection(domain);
@@ -2252,6 +2398,9 @@ fn inspect_creation_report(report: &tp::creation::CreationReport) {
                 worker_terminated,
                 worker_reaped,
                 engine_width,
+                reached_scope,
+                reached_placement,
+                reached_isolation,
             );
         }
     }
@@ -2274,26 +2423,88 @@ fn inspect_format_receipt(common: tp::representation::FormatReceiptCommonView<'_
     let _ = common.role();
     let _ = common.terminal();
     let _ = common.stage();
-    let _ = common.counters();
+    inspect_format_accounting(common.accounting());
     let _ = common.pack_exposed();
     let _ = common.stable_value_completed();
-    match common.admission() {
-        tp::representation::RepresentationAdmissionDispositionView::Refused(refusal) => {
+    match common.representation_admission() {
+        None => {}
+        Some(tp::representation::RepresentationAdmissionDispositionView::Refused(refusal)) => {
             inspect_format_controls(refusal.requested_controls());
             let _ = refusal.reason();
         }
-        tp::representation::RepresentationAdmissionDispositionView::Admitted(record) => {
+        Some(tp::representation::RepresentationAdmissionDispositionView::Admitted(record)) => {
             inspect_format_controls(record.requested);
             inspect_format_controls(record.admitted);
         }
     }
     inspect_format_publication(common.publication());
-    inspect_format_cleanup(common.cleanup());
+    inspect_format_cleanup(common.cleanup_status());
     let _ = common.timing();
     let _ = common.adapter_class();
     let _ = common.failure_class();
     let _ = common.failure_cause();
     let _ = common.validation_rules().count();
+}
+
+fn inspect_format_accounting(accounting: tp::representation::FormatReceiptAccountingView<'_>) {
+    match accounting {
+        tp::representation::FormatReceiptAccountingView::PackArchive {
+            logical,
+            physical,
+            occupancy,
+            input_bytes,
+            planned_output_bytes,
+            produced_output_bytes,
+            completed_output_bytes,
+        } => {
+            let _ = (
+                logical.file_bindings,
+                logical.decoded_bytes,
+                physical.blob_count,
+                physical.blob_bytes,
+                physical.representation_entries,
+                occupancy.peak_stable_spool_bytes,
+                occupancy.peak_retained_memory_bytes,
+                input_bytes,
+                planned_output_bytes,
+                produced_output_bytes,
+                completed_output_bytes,
+            );
+        }
+        tp::representation::FormatReceiptAccountingView::ClosureExport {
+            logical,
+            physical,
+            occupancy,
+            planned_payload_bytes,
+            produced_payload_bytes,
+            completed_payload_bytes,
+        } => {
+            let _ = (
+                logical.file_bindings,
+                physical.blob_count,
+                occupancy.peak_stable_spool_bytes,
+                planned_payload_bytes,
+                produced_payload_bytes,
+                completed_payload_bytes,
+            );
+        }
+        tp::representation::FormatReceiptAccountingView::ProjectMaterialization {
+            file_count,
+            planned_output_bytes,
+            produced_output_bytes,
+            completed_output_bytes,
+            occupancy,
+        } => {
+            let _ = (
+                file_count,
+                planned_output_bytes,
+                produced_output_bytes,
+                completed_output_bytes,
+                occupancy.peak_retained_memory_bytes,
+            );
+        }
+        tp::representation::FormatReceiptAccountingView::Publication => {}
+    }
 }
 
 fn inspect_format_publication(status: tp::representation::FormatPublicationStatus) {
@@ -2326,17 +2537,21 @@ fn inspect_format_cleanup(status: tp::representation::FormatCleanupStatus) {
     match status {
         tp::representation::FormatCleanupStatus::NotApplicable => {}
         tp::representation::FormatCleanupStatus::NotReached {
-            requested,
-            admitted,
+            requested_cleanup_requirement,
+            admitted_cleanup_requirement,
         } => {
-            let _ = (requested, admitted);
+            let _ = (requested_cleanup_requirement, admitted_cleanup_requirement);
         }
         tp::representation::FormatCleanupStatus::Reached {
-            requested,
-            admitted,
-            outcome,
+            requested_cleanup_requirement,
+            admitted_cleanup_requirement,
+            cleanup_outcome,
         } => {
-            let _ = (requested, admitted, outcome);
+            let _ = (
+                requested_cleanup_requirement,
+                admitted_cleanup_requirement,
+                cleanup_outcome,
+            );
         }
     }
 }
@@ -2350,7 +2565,7 @@ fn inspect_format_controls(controls: tp::representation::FormatReceiptControlsVi
         controls.cancellation_present,
         controls.interruption,
         controls.publication_strength,
-        controls.cleanup_strength,
+        controls.cleanup_requirement,
         controls.enforcement,
         controls.timing_requested,
         controls.timing_reporting,
@@ -2359,8 +2574,14 @@ fn inspect_format_controls(controls: tp::representation::FormatReceiptControlsVi
         tp::representation::FormatReceiptLimitsView::PackIngress(value) => {
             let _ = value.spec();
         }
-        tp::representation::FormatReceiptLimitsView::Representation(value) => {
-            let _ = value.output_bytes();
+        tp::representation::FormatReceiptLimitsView::PackArchiveEncoding(value) => {
+            let _ = value.output_bytes;
+        }
+        tp::representation::FormatReceiptLimitsView::ClosureExport(value) => {
+            let _ = value.payload_bytes;
+        }
+        tp::representation::FormatReceiptLimitsView::ProjectMaterialization(value) => {
+            let _ = (value.files, value.output_bytes);
         }
         tp::representation::FormatReceiptLimitsView::Transport(value) => {
             let _ = value.aggregate_bytes();
@@ -2424,6 +2645,7 @@ fn inspect_representation_reports(
 
 fn inspect_transport_refusal(value: tp::transport::TransportAdmissionRefusalView<'_>) {
     let _ = (
+        value.stage,
         value.requested_trust,
         value.resource_profile,
         value.requested_limits,
@@ -2433,7 +2655,7 @@ fn inspect_transport_refusal(value: tp::transport::TransportAdmissionRefusalView
         value.requested_structural_network_enforcement,
         value.requested_concurrency,
         value.requested_commit,
-        value.requested_cleanup,
+        value.requested_cleanup_requirement,
         value.interruption,
         value.cancellation_present,
         value.monotonic_domain,
@@ -2462,8 +2684,8 @@ fn inspect_transport_admission(value: tp::transport::TransportAdmissionRecordVie
         value.concurrency_constraints,
         value.requested_commit,
         value.admitted_commit,
-        value.requested_cleanup,
-        value.admitted_cleanup,
+        value.requested_cleanup_requirement,
+        value.admitted_cleanup_requirement,
         value.requested_interruption,
         value.admitted_interruption,
         value.cancellation_present,
@@ -2524,6 +2746,7 @@ role_transport_state_inspector!(
 fn inspect_transport_ledger(ledger: tp::transport::TransportStageLedgerView<'_>) {
     let _ = ledger.stages().count();
     let _ = ledger.primary_terminal_stage();
+    let _ = ledger.object_count();
     let _ = ledger.transferred_bytes();
     let _ = ledger.actual_commit_strength();
     let _ = ledger.cleanup_outcome();
@@ -2545,9 +2768,9 @@ fn typecheck_representation_operations(
     archive_controls: tp::representation::PackIngressControls<'_>,
     closure_controls: tp::representation::PackIngressControls<'_>,
     pack: &tp::Pack,
-    encode_controls: tp::representation::RepresentationControls<'_>,
-    closure_projection_controls: tp::representation::RepresentationControls<'_>,
-    materialization_controls: tp::representation::RepresentationControls<'_>,
+    encode_controls: tp::representation::PackArchiveEncodingControls<'_>,
+    closure_projection_controls: tp::representation::ClosureExportControls<'_>,
+    materialization_controls: tp::representation::ProjectMaterializationControls<'_>,
     spool: &mut MemorySpool,
 ) {
     let unregistered = tp::representation::ArchiveEncodingIdentity::parse(
@@ -2590,6 +2813,7 @@ fn typecheck_representation_operations(
     let closure = tp::representation::plan_closure_export(pack, closure_projection_controls);
     inspect_format_receipt(closure.receipt().common());
     if let Ok(plan) = closure.terminal() {
+        let _ = (plan.entry_count(), plan.payload_bytes());
         for entry in plan.entries() {
             match entry.role {
                 tp::representation::ClosureExportEntryRole::ControlRecord
@@ -2600,6 +2824,9 @@ fn typecheck_representation_operations(
     let materialization =
         tp::representation::plan_project_materialization(pack, materialization_controls);
     let _ = materialization.receipt().files().count();
+    if let Ok(plan) = materialization.terminal() {
+        let _ = (plan.file_count(), plan.output_bytes());
+    }
     let _ = admission;
 }
 
@@ -2607,7 +2834,7 @@ fn typecheck_unsupported_archive_encode(
     admission: &OrdinaryAdmission,
     pack: &tp::Pack,
     spool: &mut MemorySpool,
-    controls: tp::representation::RepresentationControls<'_>,
+    controls: tp::representation::PackArchiveEncodingControls<'_>,
 ) {
     let encoding = tp::representation::ArchiveEncodingIdentity::parse(
         admission,
@@ -2624,9 +2851,20 @@ fn inspect_publication_composition(
     materialization: &tp::transport::ProjectMaterializationPublicationOutcome,
 ) {
     inspect_format_receipt(archive.format().common());
+    match archive.format().publication_admission() {
+        tp::representation::PublicationFormatAdmissionDispositionView::Refused { transport } => {
+            inspect_transport_refusal(transport);
+        }
+        tp::representation::PublicationFormatAdmissionDispositionView::Admitted { transport } => {
+            inspect_transport_admission(transport);
+        }
+    }
+    let _ = archive.format().source_pack_identity();
     let _ = archive.format().source_archive_identity();
     let _ = archive.format().output_archive_identity();
     let _ = archive.format().archive_encoding_identity();
+    let _ = archive.format().source_tree_identity();
+    let _ = archive.format().entries();
     let archive_receipt = archive.transport().receipt();
     let _ = archive_receipt.status();
     inspect_archive_publication_transport_state(archive_receipt.state());
@@ -2634,6 +2872,14 @@ fn inspect_publication_composition(
     let _ = archive_receipt.output_archive_identity();
     let _ = archive_receipt.archive_encoding_identity();
     inspect_format_receipt(closure.format().common());
+    match closure.format().publication_admission() {
+        tp::representation::PublicationFormatAdmissionDispositionView::Refused { transport } => {
+            inspect_transport_refusal(transport);
+        }
+        tp::representation::PublicationFormatAdmissionDispositionView::Admitted { transport } => {
+            inspect_transport_admission(transport);
+        }
+    }
     let _ = closure.format().source_pack_identity();
     let _ = closure.format().source_tree_identity();
     let _ = closure.format().output_tree_identity();
@@ -2764,6 +3010,30 @@ fn capability_class(value: &str) -> tp::OperationalCapabilityClass {
     tp::OperationalCapabilityClass::try_new(value).unwrap()
 }
 
+fn package_scope() -> tp::authority::PackageAuthorityCapabilityScopeProjection {
+    tp::authority::PackageAuthorityCapabilityScopeProjection {
+        permitted_uses: vec![
+            tp::authority::AuthorityPermittedUse::Resolution,
+            tp::authority::AuthorityPermittedUse::Acquisition,
+            tp::authority::AuthorityPermittedUse::Revalidation,
+        ],
+        coverage: tp::authority::PackageAuthorityCoverageClass::DeclaredDependencyRequirements,
+        completeness: tp::CapabilityProjectionCompleteness::Complete,
+    }
+}
+
+fn font_scope() -> FontAuthorityCapabilityScopeProjection {
+    FontAuthorityCapabilityScopeProjection {
+        permitted_uses: vec![
+            tp::authority::AuthorityPermittedUse::Resolution,
+            tp::authority::AuthorityPermittedUse::Acquisition,
+            tp::authority::AuthorityPermittedUse::Revalidation,
+        ],
+        coverage: tp::authority::FontAuthorityCoverageClass::DeclaredDependencyRequirements,
+        completeness: tp::CapabilityProjectionCompleteness::Complete,
+    }
+}
+
 fn authority_capability_spec(class: &str) -> tp::authority::AuthorityCapabilitySpec {
     tp::authority::AuthorityCapabilitySpec {
         class: capability_class(class),
@@ -2779,6 +3049,7 @@ fn authority_capability_spec(class: &str) -> tp::authority::AuthorityCapabilityS
         network: tp::SelectedNetworkContract::NoNetwork,
         resolution_cache: tp::authority::AuthorityCachePolicy::Disabled,
         private_caches: vec![],
+        offered_scope: package_scope(),
     }
 }
 
@@ -2797,8 +3068,24 @@ fn font_descriptor(
     identity: &AuthorityInstanceIdentity,
     class: &str,
 ) -> FontAuthorityCapabilityDescriptor {
-    FontAuthorityCapabilityDescriptor::try_new(identity.clone(), authority_capability_spec(class))
-        .unwrap()
+    let base = authority_capability_spec(class);
+    FontAuthorityCapabilityDescriptor::try_new(
+        identity.clone(),
+        FontAuthorityCapabilitySpec {
+            class: base.class,
+            ordered_source_classes: base.ordered_source_classes,
+            evidence: base.evidence,
+            network: base.network,
+            resolution_cache: base.resolution_cache,
+            private_caches: base.private_caches,
+            supported_font_scan_policies: vec![tp::authority::FontScanPolicy {
+                invalid_candidate: tp::authority::InvalidFontCandidateDisposition::WarnAndOmit,
+                unreadable_candidate: tp::authority::InvalidFontCandidateDisposition::WarnAndOmit,
+            }],
+            offered_scope: font_scope(),
+        },
+    )
+    .unwrap()
 }
 
 fn creation_evidence_descriptor(
@@ -2817,6 +3104,15 @@ fn creation_evidence_descriptor(
             cursor_replay: true,
             network: tp::SelectedNetworkContract::NoNetwork,
         },
+        tp::creation::CreationEvidenceCapabilityScopeProjection {
+            permitted_uses: vec![
+                tp::creation::CreationEvidencePermittedUse::Stabilization,
+                tp::creation::CreationEvidencePermittedUse::Revalidation,
+                tp::creation::CreationEvidencePermittedUse::Subscription,
+            ],
+            coverage: tp::creation::CreationEvidenceCoverageClass::ExactOperationInputs,
+            completeness: tp::CapabilityProjectionCompleteness::Complete,
+        },
     )
     .unwrap()
 }
@@ -2826,10 +3122,27 @@ fn engine_domain_policy() -> tp::compilation::EngineRuntimeDomainPolicyDescripto
         tp::compilation::EngineRuntimeDomainPolicySpec {
             class: capability_class("org.example/engine-domain/1"),
             managed: true,
-            supported_placements: vec![tp::ExecutionPlacement::InProcess],
+            supported_placements: vec![tp::ExecutionPlacement::InProcessFacility],
             width_policy: tp::EngineWidthRequest::Exact(NonZeroUsize::new(1).unwrap()),
             sharing_scope: capability_class("org.example/engine-sharing/1"),
             exclusive_fine_timing_lease: true,
+        },
+    )
+    .unwrap()
+}
+
+fn reporting_descriptor() -> tp::compilation::ReportingCapabilityDescriptor {
+    tp::compilation::ReportingCapabilityDescriptor::try_new(
+        capability_class("org.example/reporting/1"),
+        tp::compilation::ReportingCapabilityScopeProjection {
+            permitted_uses: vec![
+                tp::compilation::ReportingPermittedUse::DiagnosticProjection,
+                tp::compilation::ReportingPermittedUse::DiagnosticSourceBundle,
+                tp::compilation::ReportingPermittedUse::Timing,
+                tp::compilation::ReportingPermittedUse::FineEngineTiming,
+            ],
+            coverage: tp::compilation::ReportingCoverageClass::SelectedReportChannels,
+            completeness: tp::CapabilityProjectionCompleteness::Complete,
         },
     )
     .unwrap()
@@ -2843,11 +3156,7 @@ fn typecheck_capability_descriptors() {
     )
     .unwrap();
     let fonts_identity = AuthorityInstanceIdentity::try_new("test.font-authority").unwrap();
-    let fonts = FontAuthorityCapabilityDescriptor::try_new(
-        fonts_identity,
-        authority_capability_spec("org.example/font-authority/1"),
-    )
-    .unwrap();
+    let fonts = font_descriptor(&fonts_identity, "org.example/font-authority/1");
     let evidence = CreationEvidenceCapabilityDescriptor::try_new(
         AuthorityInstanceIdentity::try_new("test.creation-evidence").unwrap(),
         capability_class("org.example/creation-evidence/1"),
@@ -2861,6 +3170,15 @@ fn typecheck_capability_descriptors() {
             cursor_replay: true,
             network: tp::SelectedNetworkContract::NoNetwork,
         },
+        tp::creation::CreationEvidenceCapabilityScopeProjection {
+            permitted_uses: vec![
+                tp::creation::CreationEvidencePermittedUse::Stabilization,
+                tp::creation::CreationEvidencePermittedUse::Revalidation,
+                tp::creation::CreationEvidencePermittedUse::Subscription,
+            ],
+            coverage: tp::creation::CreationEvidenceCoverageClass::ExactOperationInputs,
+            completeness: tp::CapabilityProjectionCompleteness::Complete,
+        },
     )
     .unwrap();
     let cache = SemanticResultCacheCapabilityDescriptor::try_new(
@@ -2872,6 +3190,14 @@ fn typecheck_capability_descriptors() {
             authenticated_records: false,
             required_availability: true,
             continue_on_unavailable: true,
+            offered_scope: tp::compilation::SemanticCacheCapabilityScopeProjection {
+                permitted_uses: vec![
+                    tp::compilation::SemanticCachePermittedUse::Lookup,
+                    tp::compilation::SemanticCachePermittedUse::Admission,
+                ],
+                coverage: tp::compilation::SemanticCacheCoverageClass::OneIsolationDomain,
+                completeness: tp::CapabilityProjectionCompleteness::Complete,
+            },
         },
     )
     .unwrap();
@@ -2880,7 +3206,7 @@ fn typecheck_capability_descriptors() {
             class: capability_class("org.example/creation-facility/1"),
             capacity_scope_class: capability_class("org.example/shared-engine-pool/1"),
             shared_with_compilation: true,
-            supported_placements: vec![tp::ExecutionPlacement::InProcess],
+            supported_placements: vec![tp::ExecutionPlacement::InProcessFacility],
             ready_job_capacity: NonZeroUsize::new(2).unwrap(),
             queue_capacity: 2,
             worker_capacity: None,
@@ -2890,12 +3216,20 @@ fn typecheck_capability_descriptors() {
             worker_control_network: None,
             interruption: tp::OperationInterruptionStrength::Cooperative,
             worker_protocol: None,
+            worker_protocol_version: None,
             parent_verifies_response: true,
             parent_withholds_output: true,
             no_in_process_fallback: true,
             terminate_and_reap: false,
             forced_termination_target_ticks: None,
             enforcement: vec![],
+            offered_scope: tp::creation::CreationExecutionCapabilityScopeProjection {
+                permitted_uses: vec![
+                    tp::creation::CreationExecutionPermittedUse::InProcessDispatch,
+                ],
+                coverage: tp::creation::CreationExecutionCoverageClass::ReadyJobs,
+                completeness: tp::CapabilityProjectionCompleteness::Complete,
+            },
         },
     )
     .unwrap();
@@ -2904,7 +3238,7 @@ fn typecheck_capability_descriptors() {
             class: capability_class("org.example/compilation-facility/1"),
             capacity_scope_class: capability_class("org.example/shared-engine-pool/1"),
             shared_with_creation: true,
-            supported_placements: vec![tp::ExecutionPlacement::InProcess],
+            supported_placements: vec![tp::ExecutionPlacement::InProcessFacility],
             ready_job_capacity: NonZeroUsize::new(2).unwrap(),
             queue_capacity: 2,
             worker_capacity: None,
@@ -2914,12 +3248,20 @@ fn typecheck_capability_descriptors() {
             worker_control_network: None,
             interruption: tp::OperationInterruptionStrength::Cooperative,
             worker_protocol: None,
+            worker_protocol_version: None,
             parent_verifies_response: true,
             parent_withholds_output: true,
             no_in_process_fallback: true,
             terminate_and_reap: false,
             forced_termination_target_ticks: None,
             enforcement: vec![],
+            offered_scope: tp::compilation::CompilationExecutionCapabilityScopeProjection {
+                permitted_uses: vec![
+                    tp::compilation::CompilationExecutionPermittedUse::InProcessDispatch,
+                ],
+                coverage: tp::compilation::CompilationExecutionCoverageClass::ReadyJobs,
+                completeness: tp::CapabilityProjectionCompleteness::Complete,
+            },
         },
     )
     .unwrap();
@@ -2928,12 +3270,16 @@ fn typecheck_capability_descriptors() {
             class: capability_class("org.example/archive-acquirer/1"),
             network: tp::SelectedNetworkContract::NoNetwork,
             transfer_concurrency: NonZeroUsize::new(1).unwrap(),
-            cleanup_requirements: vec![
+            supported_cleanup_requirements: vec![
                 tp::transport::TransportCleanupRequirement::CompleteBeforeReturn,
             ],
             interruption: tp::OperationInterruptionStrength::Cooperative,
             enforcement: vec![],
             timing_reporting: true,
+            offered_scope: transport_scope(
+                tp::transport::TransportFacilityRole::PackArchiveAcquisition,
+                tp::transport::TransportPermittedUse::ArchiveAcquisition,
+            ),
         },
     )
     .unwrap();
@@ -2943,12 +3289,16 @@ fn typecheck_capability_descriptors() {
             network: tp::SelectedNetworkContract::NoNetwork,
             transfer_concurrency: NonZeroUsize::new(1).unwrap(),
             commit_strengths: vec![PublicationCommitStrength::CompleteCollectionAtomic],
-            cleanup_requirements: vec![
+            supported_cleanup_requirements: vec![
                 tp::transport::TransportCleanupRequirement::CompleteBeforeReturn,
             ],
             interruption: tp::OperationInterruptionStrength::Cooperative,
             enforcement: vec![],
             timing_reporting: true,
+            offered_scope: transport_scope(
+                tp::transport::TransportFacilityRole::PackArchivePublication,
+                tp::transport::TransportPermittedUse::ArchivePublication,
+            ),
         },
     )
     .unwrap();
@@ -2958,12 +3308,16 @@ fn typecheck_capability_descriptors() {
             network: tp::SelectedNetworkContract::NoNetwork,
             transfer_concurrency: NonZeroUsize::new(1).unwrap(),
             commit_strengths: vec![PublicationCommitStrength::CompleteCollectionAtomic],
-            cleanup_requirements: vec![
+            supported_cleanup_requirements: vec![
                 tp::transport::TransportCleanupRequirement::CompleteBeforeReturn,
             ],
             interruption: tp::OperationInterruptionStrength::Cooperative,
             enforcement: vec![],
             timing_reporting: true,
+            offered_scope: transport_scope(
+                tp::transport::TransportFacilityRole::ClosureExportPublication,
+                tp::transport::TransportPermittedUse::ClosureExportPublication,
+            ),
         },
     )
     .unwrap();
@@ -2974,12 +3328,16 @@ fn typecheck_capability_descriptors() {
                 network: tp::SelectedNetworkContract::NoNetwork,
                 transfer_concurrency: NonZeroUsize::new(1).unwrap(),
                 commit_strengths: vec![PublicationCommitStrength::CompleteCollectionAtomic],
-                cleanup_requirements: vec![
+                supported_cleanup_requirements: vec![
                     tp::transport::TransportCleanupRequirement::CompleteBeforeReturn,
                 ],
                 interruption: tp::OperationInterruptionStrength::Cooperative,
                 enforcement: vec![],
                 timing_reporting: true,
+                offered_scope: transport_scope(
+                    tp::transport::TransportFacilityRole::ProjectMaterializationPublication,
+                    tp::transport::TransportPermittedUse::MaterializationPublication,
+                ),
             },
         )
         .unwrap();
@@ -2989,12 +3347,16 @@ fn typecheck_capability_descriptors() {
             network: tp::SelectedNetworkContract::NoNetwork,
             transfer_concurrency: NonZeroUsize::new(1).unwrap(),
             commit_strengths: vec![PublicationCommitStrength::CompleteCollectionAtomic],
-            cleanup_requirements: vec![
+            supported_cleanup_requirements: vec![
                 tp::transport::TransportCleanupRequirement::CompleteBeforeReturn,
             ],
             interruption: tp::OperationInterruptionStrength::Cooperative,
             enforcement: vec![],
             timing_reporting: true,
+            offered_scope: transport_scope(
+                tp::transport::TransportFacilityRole::CompilationDelivery,
+                tp::transport::TransportPermittedUse::CompilationDelivery,
+            ),
         },
     )
     .unwrap();
@@ -3003,12 +3365,16 @@ fn typecheck_capability_descriptors() {
             class: capability_class("org.example/spool/1"),
             network: tp::SelectedNetworkContract::NoNetwork,
             transfer_concurrency: NonZeroUsize::new(1).unwrap(),
-            cleanup_requirements: vec![
+            supported_cleanup_requirements: vec![
                 tp::transport::TransportCleanupRequirement::CompleteBeforeReturn,
             ],
             interruption: tp::OperationInterruptionStrength::Cooperative,
             enforcement: vec![],
             timing_reporting: true,
+            offered_scope: transport_scope(
+                tp::transport::TransportFacilityRole::Spool,
+                tp::transport::TransportPermittedUse::StableAcquisition,
+            ),
         },
     )
     .unwrap();
@@ -3046,7 +3412,9 @@ fn typecheck_capability_descriptors() {
         archive_acquirer.descriptor().class(),
         archive_acquirer.descriptor().network(),
         archive_acquirer.descriptor().transfer_concurrency(),
-        archive_acquirer.descriptor().cleanup_requirements(),
+        archive_acquirer
+            .descriptor()
+            .supported_cleanup_requirements(),
         archive_acquirer.descriptor().interruption(),
         archive_acquirer.descriptor().enforcement(),
         archive_acquirer.descriptor().timing_reporting(),

@@ -1,13 +1,15 @@
-# PROTOTYPE: Reconciled Rust Lifecycle Implementability
+# PROTOTYPE: Final Rust Lifecycle And Adapter Interfaces
 
 > Throwaway design artifact for
-> [Reconcile Rust lifecycle implementability](https://github.com/sagikazarmark/typst-pack/issues/73),
+> [Regenerate the final Rust and first-party adapter contracts](https://github.com/sagikazarmark/typst-pack/issues/78),
 > correcting the accepted baseline from
 > [Complete the Rust lifecycle and receipt interfaces](https://github.com/sagikazarmark/typst-pack/issues/65)
 > with the decisions in
 > [Define session preparation and pre-attempt terminal semantics](https://github.com/sagikazarmark/typst-pack/issues/68),
 > [Freeze operational capability and execution-report inputs](https://github.com/sagikazarmark/typst-pack/issues/71), and
-> [Define pre-admission representation and transport receipt semantics](https://github.com/sagikazarmark/typst-pack/issues/70).
+> [Define pre-admission representation and transport receipt semantics](https://github.com/sagikazarmark/typst-pack/issues/70),
+> [Define aggregate creation and representation resource accounting](https://github.com/sagikazarmark/typst-pack/issues/76), and
+> [Reconcile residual lifecycle and receipt semantics](https://github.com/sagikazarmark/typst-pack/issues/77).
 > This freezes the recommended public contract for implementation planning. It
 > is not production code or a compatibility promise for the current 0.3 crate.
 
@@ -19,11 +21,10 @@ traits, and visibility without implementing the destination.
 
 ## Question
 
-What corrected Rust 1.92 contract and external-consumer probe make every
-accepted session, bounded builder, creation rejection, semantic and operational
-inventory, execution, representation, and receipt state constructible and
-inspectable through exactly seven deep modules without adding generic seams or
-changing accepted semantics?
+What regenerated Rust 1.92 lifecycle fixture and external-consumer probe make
+every accepted lifecycle, receipt, terminal, resource, and publication-fence
+state constructible, inspectable, lossless, and cross-artifact coherent without
+adapter-invented facts?
 
 ## Verdict
 
@@ -50,8 +51,10 @@ with the following concrete refinements:
 6. Use operation-specific resource-limit records wrapped in one reusable
    `AdmittedOperationResourceLimits<L>`. Configuration may be cloned and reused;
    every operation allocates fresh counters and reservations.
-7. Preserve the exact terminal tree. Preparation yields a Prepared Compilation
-   or Compilation Request Rejection. An attempt yields one Compilation Report,
+7. Preserve the exact terminal tree. Pure preparation, under an explicit
+   preparation policy and limits, yields a Prepared Compilation or Compilation
+   Request Rejection before operational facilities are appraised. Only a
+   Prepared Compilation may enter attempt admission. An admitted attempt yields one Compilation Report,
    which contains one Compilation Result or Compilation Operation Outcome.
 8. Let a Semantic Result Cache participate in pre-commit lookup, but make cache
    admission a distinct post-commit operation whose failure cannot change the
@@ -112,12 +115,21 @@ with the following concrete refinements:
     Instance, Evaluation, Attempt, Fence, Subscription Generation, and
     Publication Sequence values are opaque but inspectable, and attempt plans
     carry a synchronously revocable supersession permit.
-24. Model representation and transport admission as discriminated refusal or
+24. A reportless `AttemptAdmissionRefused` session event consumes the exact
+    attempt token, starts eligible latest pending work, and cannot create an
+    `AttemptFinished`, report, publication candidate, currentness claim, or Last
+    Successful Compilation.
+25. Model representation and transport admission as discriminated refusal or
     admitted branches. A well-formed unsupported archive recipe retains its
     selected or asserted identity; archive assertions record
     `supplied-but-unevaluated` until exact comparison is reached. Transport uses
     six role-specific opaque receipts and a complete stage ledger; cleanup,
-    residual state, and exposure are independent.
+    residual state, and exposure are independent. Publication Format and
+    Transport Receipts are sibling projections of one private publication record
+    and preserve the same transport refusal reason and explicit admission stage.
+26. Keep requested, admitted, and reached role-specific capability scopes,
+    execution placement, and isolation orthogonal. Domain selection adds
+    `NotSelected`; worker setup can be reached before any domain is assigned.
 
 This is the recommended answer for every design branch. It favors semantic
 depth and honest guarantees over a smaller but leaky facade.
@@ -266,9 +278,11 @@ public contract uses operation-specific records rather than one universal bag:
 
 | Record | Owned dimensions |
 | --- | --- |
-| `creation::CreationResourceLimits` | Project inventory, variants, package trees and files, largest package member, Font Containers, Font Catalog candidates and faces, discovery restarts, overrides, stable spool, retained memory |
-| `representation::PackIngressResourceLimits` | Archive/control/decoded bytes, entries, files, expansion, spool, retained memory |
-| `representation::RepresentationResourceLimits` | Encoded/projected objects and bytes, spool, retained memory |
+| `creation::CreationResourceLimits` | Category limits plus aggregate file bindings `F_create`, aggregate logical bytes `L_create`, stable-spool peak, and retained-memory peak |
+| `representation::PackIngressResourceLimits` | Archive and Closure Export input, logical `F_pack/L_pack`, physical control/blob/entry `C/P/N`, largest blob, expansion, spool, and retained memory |
+| `representation::PackArchiveEncodingResourceLimits` | `F_pack/L_pack`, `C/P/N`, largest blob, Stored expansion, exact archive output `A`, stable-spool peak, retained-memory peak |
+| `representation::ClosureExportResourceLimits` | `F_pack/L_pack`, `C/P/N`, largest blob, exact payload `C + P`, stable-spool peak, retained-memory peak |
+| `representation::ProjectMaterializationResourceLimits` | Per-path files `M`, output bytes `J`, stable-spool peak, retained-memory peak |
 | `compilation::CompilationResourceLimits` | Dependencies, dependency bytes, pages, artifacts, raster work, spool, retained memory, reporting channels |
 | `transport::SpoolResourceLimits` | Source, stable spool, in-flight and retained-memory bytes |
 | `transport::TransportResourceLimits` | Object count, aggregate/largest/in-flight bytes and transfer concurrency |
@@ -283,19 +297,30 @@ generic caller, so the core records its frozen
 `caller-selected-format-receipt-v1` identity when no adapter profile exists;
 general creation and compilation inventories continue to report profile absent.
 The immutable record may be shared across calls, but each operation creates a
-new private budget ledger. Counters, reservations, pinned bytes, queue places,
-and deadlines are never reused.
+new private budget ledger. Logical and physical distinct-set counters are
+monotonic; spool and retained memory are peak-live occupancy whose reservations
+release only after bounded cleanup or ownership transfer. Counters,
+reservations, pinned bytes, queue places, and deadlines are never reused.
 
-Limits reach the first observable seam. Project Snapshot and Creation Request
-construction receive Creation Resource Limits before consuming caller
-collections. Package and Font Authorities receive an operation-private
-`AcquisitionBudget` through inspectable Acquisition Controls and reserve each
-package file, largest member, Font Catalog candidate, face, downloaded byte,
-expanded byte, spool byte, and retained byte before retaining it. Iterators do
-not need an honest size hint. Cache adapters receive an equivalent
+Limits reach the first observable seam. `CreationResourceLedger` atomically
+debits every Project Snapshot binding, `(Package Specification, Package Path)`
+binding, and selected Font Container against its category and aggregate limits
+before retention. Repeated observations within an attempt do not recharge one
+binding, while equal bytes under different logical bindings do. Package and Font
+Authorities receive the same operation-private accounting through inspectable
+Acquisition Controls. Iterators do not need an honest size hint. Cache adapters receive an equivalent
 `CacheBudget`. Spool, transport, acquisition, and cache controls expose
 immutable views of their admitted limits, expected identities, deadlines,
 clocks, interruption sources, and role-specific commit or cleanup requirements.
+Nested representation spools receive the representation operation's shared
+occupancy ledger through private orchestration. `SpoolControls::reserve_occupancy`
+charges stable backing and resident memory before allocation; Memory Spool
+charges both dimensions, while native spool charges resident buffers and
+metadata separately from stable backing. Releasing a reservation lowers live
+occupancy without lowering the reached peak. Successful spooling consumes
+`SpoolOccupancyReservation::transfer_to_stable_value`, attaching the occupancy
+lease to the completed backing so ownership transfer neither releases early nor
+double-charges it.
 
 These controls remain separate:
 
@@ -314,6 +339,15 @@ does not consume attempt limits. Every execution of a reusable Prepared
 Compilation performs fresh operational admission; a stricter attempt limit can
 produce `CompilationOperationCause::ResourceLimit` before effects without
 invalidating the Prepared Compilation or changing Compilation Identity.
+
+Whole-Pack accounting keeps logical and physical dimensions separate. External
+requirements charge `F_pack/L_pack` even when their bytes are absent. Physical
+blobs deduplicate only by full typed Content Identity; `B` is their count, `P`
+their exact bytes, `C` the canonical control-record bytes, and `N = B + 1` the
+representation entry count. Epoch 2 all-Stored planning computes each local and
+central ZIP64 extra and checked `R/D/Z/A` before effects; under first-party caps
+`A = C + P + 138 + 252B + (76 when N >= 65,535 else 0)`. Successful archive and
+Closure Export output preflights every same-profile static ingress ceiling.
 
 ## Creation And Evidence
 
@@ -484,9 +518,13 @@ the core derives and verifies exact Font Container Content Identity after a
 selected container is acquired. Acquisition Budget and Acquisition Controls
 construction is private to the driver; authority adapters reserve file count,
 largest file, candidate, face, and byte dimensions through the supplied ledger
-but cannot substitute a different one. Font Catalog success
-also returns the exact Font Scan Policy and every deterministic scan diagnostic,
-so omit/warn/reject behavior is never silent. Dependency Evidence Keys and
+but cannot substitute a different one. Font Scan Policy is an explicit Creation
+Operation request fact admitted unchanged against the exact Font Authority
+descriptor before catalog work. Font Catalog success returns the applied policy
+and deterministic diagnostics; core compares that policy with the admitted
+value and fails closed on mismatch. Creation dependency inventory exposes
+requested, admitted, and `not-reached` or `applied` policy facts, so
+omit/warn/reject behavior is never silent. Dependency Evidence Keys and
 Dependency Resolution Evidence use an authority-bound builder. Acquisition
 Provenance and failure details accept only sanitized namespaced codes. Evidence
 fences, provider cursors, transport receipts, and session fence observations
@@ -502,14 +540,16 @@ validated Pack + exact semantic request
 └── preparation
     ├── Compilation Request Rejection
     └── Prepared Compilation
-        └── Compilation Attempt
-            └── Compilation Report
-                ├── Compilation Result
-                └── Compilation Operation Outcome
-                    └── Compilation Terminal Commitment
-                        ├── optional cache admission outcome
-                        ├── optional delivery outcome
-                        └── optional session publication
+        └── Compilation Operation admission
+            ├── Compilation Admission Refusal (reportless)
+            └── admitted Compilation Attempt
+                └── Compilation Report
+                    ├── Compilation Result
+                    └── Compilation Operation Outcome
+                        └── Compilation Terminal Commitment
+                            ├── optional cache admission outcome
+                            ├── optional delivery outcome
+                            └── optional session publication
 ```
 
 `CompilationTerminal` names only the outer one-shot union:
@@ -694,20 +734,26 @@ The bound descriptor supplies class, capacity-scope class and sharing relation,
 supported placement, maximum `K/Q/P`, worker overlap, Engine Runtime Domain
 policy, interruption, worker protocol, parent verification and output
 withholding, no-fallback, selected execution and optional worker-control network
-contracts, and enforcement. The operation request separately
+contracts, enforcement, and the role-specific offered capability scope. Worker
+protocol class and positive protocol version are an inseparable descriptor pair.
+Package, Font, Creation Evidence, cache, execution, and reporting descriptors
+likewise expose the exact use/coverage scope admission can appraise. The operation request separately
 states requested `K/Q/P/W`; admission records requested, admitted, constrained,
 and not-applicable positions. Caller-thread execution makes `K/Q/P` not
 applicable, and in-process facility execution makes `P` not applicable.
 
-Engine Runtime Domain policy and reached selection are separate. Inherited
-unmanaged selection carries neither an invented identity nor width. Managed
-selection carries the parent-attested exact domain identity, placement, positive
-`W`, and whether an exclusive fine-timing lease was reached. Exact width is
+Engine Runtime Domain policy and reached selection are separate. `NotSelected`
+is required for cache hits and every pre-dispatch terminal and carries no
+identity, actual width, placement, or timing lease. Inherited unmanaged
+selection carries neither an invented identity nor width. Managed selection
+carries the parent-attested exact domain identity, positive `W`, and whether an
+exclusive fine-timing lease was reached; placement and isolation remain separate
+requested, admitted, and reached facts. Exact width is
 admitted unchanged or refused; automatic width resolves before managed engine
 work.
 
 The facility may call `ReadyCompilationJob::run_in_process`, or use
-`into_worker_request(parent_assigned_domain)` and the paired response verifier for an ordinary isolated
+`into_worker_request()` and later parent-only domain assignment with the paired response verifier for an ordinary isolated
 worker. It cannot construct a ready job, Compilation Dependency Snapshot,
 successful completion, report, result, Engine Identity, or Exporter Identity.
 
@@ -753,10 +799,13 @@ tree mismatch would require a new Format Receipt contract version. Invalid and
 unsupported terminals carry stable validation rule codes in fixed precedence.
 Core-owned role-specific Format Receipts expose a shared contract-v1 envelope
 plus only the identity, verification, and file payload legal for their role.
-Their admission view is discriminated: Refused owns the complete requested
+Non-publication admission is discriminated: Refused owns the complete requested
 controls and one reason but no admitted or reached facts; Admitted owns one
 requested/admitted record and permits reached counters, identities, timing,
-publication, cleanup, exposure, and structured failure facts.
+publication, cleanup, exposure, and structured failure facts. Publication uses
+a transport-typed admission view instead: its Format Receipt and Transport
+Receipt retain the same exact transport refusal reason and stage `admission`,
+with no representation-reason coercion or reached fields.
 
 Representation owns validated Pack Archive ingress, validated Closure Export
 import, registered Archive Encoding Identity selection, deterministic Pack
@@ -778,7 +827,7 @@ operation functions admit the request and construct exactly one of six opaque
 subject-bound receipt types.
 
 Each receipt has a discriminated Refused or Admitted branch. Refused retains the
-complete request, safe descriptor projection, and one reason, with no admission
+complete request, safe descriptor projection, explicit stage `admission`, and one reason, with no admission
 record or actual fact. Admitted retains one Operation Admission Record and one
 sealed role-legal stage ledger over `admission`, `plan-freeze`,
 `reference-resolution`, `acquisition`, `spooling`, `transfer`, `verification`,
@@ -787,6 +836,16 @@ Adapters return only role-specific reached-stage inputs. Their stage vocabulary
 excludes core-owned `admission`, `plan-freeze`, and `complete`; core orchestration
 validates role legality and composes those stages into the sealed receipt ledger.
 Adapter timing uses the same restricted adapter-stage vocabulary.
+
+Transport request, exact bound descriptor, admission, and reached ledger each
+carry a role-specific use/coverage/completeness scope over one frozen subject.
+Admission checks requested scope against that descriptor; reached scope is a
+subset of admitted scope and cannot be inferred from class, role, or success.
+
+Every admitted stage ledger exposes `object_count` from the immutable subject
+frozen at plan-freeze: one for an Archive or single-value spool, `N` for Closure
+Export, `M` for materialization, and the exact artifact count for delivery. It is
+not completed-object count and partial transfer cannot change it.
 
 Requested cleanup requirement, cleanup outcome, residual locator, and exposed
 bytes are independent, so exposure and cleanup failure may coexist. Requested,
@@ -823,6 +882,11 @@ revision is pending. Newer input replaces an older pending revision. A matching
 late completion still clears the active slot and activates the latest pending
 revision even when the old evaluation cannot publish. Request rejection and
 ingestion failure need no slot and may reconcile while older work drains.
+A reportless attempt-admission refusal uses
+`AttemptAdmissionRefused { token, refusal }`: the reducer validates and clears
+only that token and starts latest eligible pending work. It emits no
+`AttemptFinished`, fence, or publication and leaves currentness and Last
+Successful Compilation untouched.
 
 The reducer protocol is explicit:
 
@@ -843,7 +907,7 @@ The frozen event/effect vocabulary appears in the fixture:
 | Events | Effects |
 | --- | --- |
 | `Accept(Stabilized or IngestionFailure)` | `StartAttempt`, `InterruptAttempt` |
-| `AttemptFinished`, `AttemptReleased` | `ReadFence` |
+| `AttemptFinished`, `AttemptAdmissionRefused`, `AttemptReleased` | `ReadFence` only for a report candidate; refusal only frees the slot and may `StartAttempt` |
 | `FenceReadFinished` | `ArmSubscriptions` |
 | `SubscriptionsArmed` | `ConfirmFence` |
 | `FenceConfirmed` | `Publish`, then `RetireSubscriptions` |
@@ -989,8 +1053,24 @@ let pack = creation::create_sync(input, creation_controls)
     .into_pack()
     .map_err(CreateError::from_report)?;
 
-let prepared = pack.prepare(&admission, &compilation_limits, compilation_request)?;
-let report = compilation::run_sync(&prepared, compilation_controls);
+let prepared = pack.prepare(
+    &admission,
+    &preparation_policy,
+    &preparation_limits,
+    compilation_request,
+)?;
+let compilation_controls = compilation::SyncCompilationControls::try_admit(
+    prepared.clone(),
+    admission,
+    admitted_compilation_limits,
+    &package_authority,
+    &font_authority,
+    semantic_cache,
+    compilation_operation_request,
+    &clock,
+    Some(&interruption),
+)?;
+let report = compilation::run_sync(compilation_controls);
 ```
 
 An asynchronous browser worker uses the same authority contracts with local,

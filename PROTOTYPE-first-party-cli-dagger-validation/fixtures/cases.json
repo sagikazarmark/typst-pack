@@ -17,8 +17,8 @@
     {"id": "currentness-multiple-observations", "definition": "currentness", "valid": true, "instance": {"kind": "current_as_of_poll", "observations": [{"provider": "project-provider", "cursor_base64": "MQ"}, {"provider": "font-provider", "cursor_base64": "Mg"}]}},
     {"id": "archive-assertion-supplied-unevaluated", "definition": "format_receipt_request_facts", "valid": true, "instance": {"kind": "pack_archive_read", "input_archive_identity": "typst-pack:exact-content:1:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "expected_archive_identity": null, "verification": {"kind": "derive"}, "asserted_archive_encoding_identity": "typst-pack:archive-encoding:1:sha256:4e338d8a54d234ca28392ecf79386944757e0e4adf750192e21311d6b2491170", "encoding_assertion": "supplied_but_unevaluated"}},
     {"id": "archive-assertion-prematurely-verified-poison", "definition": "format_receipt_request_facts", "valid": false, "instance": {"kind": "pack_archive_read", "input_archive_identity": "typst-pack:exact-content:1:sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "expected_archive_identity": null, "verification": {"kind": "derive"}, "asserted_archive_encoding_identity": "typst-pack:archive-encoding:1:sha256:4e338d8a54d234ca28392ecf79386944757e0e4adf750192e21311d6b2491170", "encoding_assertion": "externally_asserted_and_byte_verified"}},
-    {"id": "transport-ledger-admitted", "definition": "transport_stage_ledger", "valid": true, "instance": {"stages": ["admission", "plan_freeze", "spooling", "transfer", "complete"], "primary_terminal": "complete", "object_count": "1", "transferred_bytes": "8", "actual_commit": null, "cleanup": "not_required", "residual_locator": null, "exposed_bytes": "8", "timing": {"status": "not_requested", "phases": []}, "structural_network_enforcement_reached": "not_claimed", "enforcement_reached": [], "interruption_winner": "terminal_commitment"}},
-    {"id": "transport-ledger-order-semantic-poison", "definition": "transport_stage_ledger", "valid": true, "instance": {"stages": ["admission", "transfer", "plan_freeze", "complete"], "primary_terminal": "complete", "object_count": "1", "transferred_bytes": "8", "actual_commit": null, "cleanup": "not_required", "residual_locator": null, "exposed_bytes": "8", "timing": {"status": "not_requested", "phases": []}, "structural_network_enforcement_reached": "not_claimed", "enforcement_reached": [], "interruption_winner": "terminal_commitment"}},
+    {"id": "transport-ledger-admitted", "definition": "transport_stage_ledger", "valid": true, "instance": {"stages": ["admission", "plan_freeze", "spooling", "transfer", "complete"], "primary_terminal": "complete", "object_count": "1", "transferred_bytes": "8", "actual_commit": null, "cleanup_outcome": "not_required", "residual_locator": null, "exposed_bytes": "8", "timing": {"status": "not_requested", "phases": []}, "structural_network_enforcement_reached": "not_claimed", "enforcement_reached": [], "interruption_winner": "terminal_commitment", "reached_scope": {"role": "spool", "permitted_uses": ["stable_acquisition"], "coverage": "one_frozen_subject", "completeness": "complete"}}},
+    {"id": "transport-ledger-order-semantic-poison", "definition": "transport_stage_ledger", "valid": false, "instance": {"stages": ["admission", "transfer", "plan_freeze", "complete"], "primary_terminal": "complete", "object_count": "1", "transferred_bytes": "8", "actual_commit": null, "cleanup_outcome": "not_required", "residual_locator": null, "exposed_bytes": "8", "timing": {"status": "not_requested", "phases": []}, "structural_network_enforcement_reached": "not_claimed", "enforcement_reached": [], "interruption_winner": "terminal_commitment", "reached_scope": {"role": "spool", "permitted_uses": ["stable_acquisition"], "coverage": "one_frozen_subject", "completeness": "complete"}}},
     {"id": "managed-width-automatic-positive", "definition": "managed_engine_width_admission", "valid": true, "instance": {"symbol": "W", "kind": "exact", "requested": {"kind": "automatic"}, "admitted": "2", "constraints": ["verified_available_capacity"]}},
     {"id": "managed-width-exact-positive", "definition": "managed_engine_width_admission", "valid": true, "instance": {"symbol": "W", "kind": "exact", "requested": {"kind": "exact", "width": "4"}, "admitted": "4", "constraints": []}},
     {"id": "managed-width-inherited-poison", "definition": "managed_engine_width_admission", "valid": false, "instance": {"symbol": "W", "kind": "inherited_unmanaged"}},
@@ -140,7 +140,8 @@
     {"definition": "pack_archive_publisher_capability_class", "role": "pack-archive-publisher"},
     {"definition": "project_materialization_publisher_capability_class", "role": "project-materialization-publisher"},
     {"definition": "closure_export_publisher_capability_class", "role": "closure-export-publisher"},
-    {"definition": "compilation_delivery_capability_class", "role": "compilation-delivery"}
+    {"definition": "compilation_delivery_capability_class", "role": "compilation-delivery"},
+    {"definition": "reporting_capability_class", "role": "reporting"}
   ],
   "source_manifest": [
     {"leaf": "compilation.operational_inventory.admission.admitted_network", "source_class": "rust_accessor", "source": "Compilation operational admission view", "probe_marker": "compilation.operational_inventory.admission.admitted_network"},
@@ -157,7 +158,23 @@
     {"leaf": "transport.receipt.refused", "source_class": "rust_accessor", "source": "role transport receipt Refused state", "probe_marker": "transport.receipt.refused"},
     {"leaf": "adapter.jobs.lexical", "source_class": "adapter_input", "source": "CLI or GraphQL jobs spelling", "schema_pointer": "/$defs/adapter_jobs/properties/lexical"},
     {"leaf": "dagger.creation.status", "source_class": "adapter_derivation", "source": "closed creation operation branch mapping", "schema_pointer": "/$defs/create_operation/oneOf"},
-    {"leaf": "schema.major", "source_class": "constant", "source": "adapter schema major 1", "schema_pointer": "/$defs/output_schema/properties/major/const"}
+    {"leaf": "schema.major", "source_class": "constant", "source": "adapter schema major 1", "schema_pointer": "/$defs/output_schema/properties/major/const"},
+    {"leaf": "creation.request.font_scan_policy", "source_class": "rust_accessor", "source": "CreationOperationRequest::font_scan_policy", "probe_marker": "creation.request.font_scan_policy"},
+    {"leaf": "creation.resources.aggregate", "source_class": "rust_accessor", "source": "CreationResourceReachedView", "probe_marker": "creation.resources.aggregate"},
+    {"leaf": "operation.capability_scopes", "source_class": "rust_accessor", "source": "role-specific requested/admitted/reached scope projections", "probe_marker": "operation.capability_scopes"},
+    {"leaf": "compilation.domain.not_selected", "source_class": "rust_accessor", "source": "EngineRuntimeDomainSelectionView::NotSelected", "probe_marker": "compilation.domain.not_selected"},
+    {"leaf": "compilation.admission.prepared_identity", "source_class": "rust_accessor", "source": "CompilationAdmissionRefusal::compilation_identity", "probe_marker": "compilation.admission.prepared_identity"},
+    {"leaf": "session.attempt_admission_refused", "source_class": "rust_accessor", "source": "SessionEvent::AttemptAdmissionRefused", "probe_marker": "session.attempt_admission_refused"},
+    {"leaf": "publication.format.transport_refusal.reason", "source_class": "rust_accessor", "source": "PublicationFormatAdmissionDispositionView::Refused", "probe_marker": "publication.format.transport_refusal.reason"},
+    {"leaf": "transport.receipt.refusal.stage", "source_class": "rust_accessor", "source": "TransportAdmissionRefusalView::stage", "probe_marker": "transport.receipt.refusal.stage"},
+    {"leaf": "transport.receipt.stage_ledger.object_count", "source_class": "rust_accessor", "source": "TransportStageLedgerView::object_count", "probe_marker": "transport.receipt.stage_ledger.object_count"},
+    {"leaf": "transport.cleanup_requirement", "source_class": "rust_accessor", "source": "requested and admitted cleanup requirement views", "probe_marker": "transport.cleanup_requirement"},
+    {"leaf": "transport.cleanup_outcome", "source_class": "rust_accessor", "source": "TransportStageLedgerView::cleanup_outcome", "probe_marker": "transport.cleanup_outcome"},
+    {"leaf": "representation.occupancy.shared_spool", "source_class": "rust_accessor", "source": "SpoolControls shared occupancy reservation and view", "probe_marker": "representation.occupancy.shared_spool"},
+    {"leaf": "representation.limits.role_specific", "source_class": "rust_accessor", "source": "role-specific representation resource limits", "probe_marker": "representation.limits.role_specific"},
+    {"leaf": "creation.admission_refusal.stage", "source_class": "rust_accessor", "source": "CreationAdmissionRefusal::stage", "probe_marker": "creation.admission_refusal.stage"},
+    {"leaf": "compilation.admission_refusal.stage", "source_class": "rust_accessor", "source": "CompilationAdmissionRefusal::stage", "probe_marker": "compilation.admission_refusal.stage"},
+    {"leaf": "transport.capability_scope", "source_class": "rust_accessor", "source": "transport request, descriptor, admission, and reached scope views", "probe_marker": "transport.capability_scope"}
   ],
   "poison_inference_cases": [
     {"id": "offline-from-cache-hit", "target_leaf": "compilation.operational_inventory.admission.admitted_network", "attempted_source": "semantic cache hit"},
@@ -171,10 +188,15 @@
     {"id": "archive-recipe-from-zip-method", "target_leaf": "format.request.selected_archive_encoding_identity", "attempted_source": "observed ZIP member method"},
     {"id": "request-rejection-with-attempt-token", "target_leaf": "session.publication.request_rejected", "attempted_source": "fabricated attempt token"},
     {"id": "ingestion-failure-with-attempt-token", "target_leaf": "session.publication.ingestion_failure", "attempted_source": "fabricated attempt token"},
-    {"id": "refused-transport-with-admitted-reached-fields", "target_leaf": "transport.receipt.refused", "attempted_source": "requested values copied into admission or stage ledger"}
+    {"id": "refused-transport-with-admitted-reached-fields", "target_leaf": "transport.receipt.refused", "attempted_source": "requested values copied into admission or stage ledger"},
+    {"id": "object-count-from-role-literal", "target_leaf": "transport.receipt.stage_ledger.object_count", "attempted_source": "adapter role literal"},
+    {"id": "font-policy-from-profile", "target_leaf": "creation.request.font_scan_policy", "attempted_source": "adapter profile default"},
+    {"id": "domain-from-worker-placement", "target_leaf": "compilation.domain.not_selected", "attempted_source": "worker placement"},
+    {"id": "publication-reason-coercion", "target_leaf": "publication.format.transport_refusal.reason", "attempted_source": "Representation Admission Refusal reason"},
+    {"id": "cleanup-outcome-from-requirement", "target_leaf": "transport.cleanup_outcome", "attempted_source": "requested cleanup requirement"}
   ],
   "html_contract": {
     "forbidden_protocol_tokens": ["ReconciledEqual", "CompilationFinished", "AttemptCompleted", "FencePassed", "SubscriptionsReady"],
-    "required_scenario_ids": ["superseded-drain-tokenless-rejection", "late-superseded-completion", "poll-provider-observation-cardinality", "same-revision-new-evaluation", "shutdown-retiring-retired", "pack-identity-session-boundary"]
+    "required_scenario_ids": ["superseded-drain-tokenless-rejection", "late-superseded-completion", "poll-provider-observation-cardinality", "same-revision-new-evaluation", "shutdown-retiring-retired", "pack-identity-session-boundary", "attempt-admission-refusal-starts-pending"]
   }
 }

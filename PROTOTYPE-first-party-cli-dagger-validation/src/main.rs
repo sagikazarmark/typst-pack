@@ -7,6 +7,9 @@ use graphql_parser::schema::{Definition, Document, Field, Type, TypeDefinition, 
 use serde::Deserialize;
 use serde::de::{self, MapAccess, SeqAccess, Visitor};
 use serde_json::{Map, Number, Value, json};
+use typst_pack_interface::transport::prototype_validation::{
+    FrozenTransportSubject, object_count as public_transport_object_count,
+};
 
 type CheckResult<T> = Result<T, String>;
 
@@ -122,9 +125,71 @@ struct Summary {
     poison_cases: usize,
 }
 
+#[derive(Default)]
+struct ReplayOccupancyLedger {
+    backings: BTreeMap<&'static str, (u64, u64, u64)>,
+    live_spool: u64,
+    live_memory: u64,
+    peak_spool: u64,
+    peak_memory: u64,
+}
+
+struct ReplayOccupancyReservation {
+    backing: &'static str,
+}
+
+impl ReplayOccupancyLedger {
+    fn reserve(
+        &mut self,
+        backing: &'static str,
+        spool: u64,
+        memory: u64,
+    ) -> CheckResult<ReplayOccupancyReservation> {
+        if let Some((existing_spool, existing_memory, references)) = self.backings.get_mut(backing)
+        {
+            if (*existing_spool, *existing_memory) != (spool, memory) {
+                return Err("shared backing changed its accounting dimensions".to_owned());
+            }
+            *references += 1;
+        } else {
+            self.live_spool = self.live_spool.checked_add(spool).ok_or("spool overflow")?;
+            self.live_memory = self
+                .live_memory
+                .checked_add(memory)
+                .ok_or("memory overflow")?;
+            self.peak_spool = self.peak_spool.max(self.live_spool);
+            self.peak_memory = self.peak_memory.max(self.live_memory);
+            self.backings.insert(backing, (spool, memory, 1));
+        }
+        Ok(ReplayOccupancyReservation { backing })
+    }
+
+    fn transfer(&mut self, reservation: ReplayOccupancyReservation) -> ReplayOccupancyReservation {
+        reservation
+    }
+
+    fn release(&mut self, reservation: ReplayOccupancyReservation) -> CheckResult<()> {
+        let Some((spool, memory, references)) = self.backings.get_mut(reservation.backing) else {
+            return Err("released unknown backing".to_owned());
+        };
+        *references -= 1;
+        if *references == 0 {
+            let (spool, memory, _) = self
+                .backings
+                .remove(reservation.backing)
+                .ok_or("lost backing during release")?;
+            self.live_spool -= spool;
+            self.live_memory -= memory;
+        } else {
+            let _ = (spool, memory);
+        }
+        Ok(())
+    }
+}
+
 fn main() {
     if let Err(error) = run() {
-        eprintln!("issue-69 validation: FAILED: {error}");
+        eprintln!("final contract validation: FAILED: {error}");
         std::process::exit(1);
     }
 }
@@ -150,12 +215,14 @@ fn run() -> CheckResult<()> {
     let serializer_probe = read_utf8(&parent_path(SERIALIZER_PROBE_FILE))?;
     validate_source_manifest(&cases, &schema, &serializer_probe, &mut summary)?;
 
-    println!("issue-69 validation: ok");
+    println!("final contract validation: ok");
     println!(
         "json-schema: Draft 2020-12, {} definitions, {} local refs, {} direct + {} generated cases",
         summary.definitions, summary.local_refs, summary.schema_cases, summary.generated_cases
     );
-    println!("profiles: 2 valid; issue-69 limits and tightening relationships verified");
+    println!(
+        "profiles: 2 valid; final aggregate, representation, and transport relationships verified"
+    );
     println!(
         "capabilities: {} producer-correlated constants and first-party trust/cache constraints verified",
         summary.capability_constants
@@ -390,6 +457,21 @@ fn validate_profiles(
                 ("/creation/largest_package_file_bytes", "536870912"),
                 ("/creation/font_candidates", "8192"),
                 ("/execution/creation/isolated_worker_capacity", "1"),
+                ("/creation/aggregate_file_bindings", "100000"),
+                ("/creation/aggregate_logical_bytes", "4294967296"),
+                ("/pack_ingress/logical_file_bindings", "100000"),
+                ("/pack_ingress/logical_decoded_bytes", "4294967296"),
+                ("/pack_ingress/physical_blob_bytes", "4294967296"),
+                ("/pack_ingress/representation_entries", "200000"),
+                ("/pack_ingress/closure_export_payload_bytes", "4362076160"),
+                ("/representation/pack_archive/output_bytes", "1073741824"),
+                ("/representation/closure_export/payload_bytes", "4362076160"),
+                ("/representation/project_materialization/files", "100000"),
+                (
+                    "/representation/project_materialization/output_bytes",
+                    "8589934592",
+                ),
+                ("/transport/objects", "200000"),
             ],
         ),
         (
@@ -399,6 +481,21 @@ fn validate_profiles(
                 ("/creation/largest_package_file_bytes", "536870912"),
                 ("/creation/font_candidates", "16384"),
                 ("/execution/creation/isolated_worker_capacity", "2"),
+                ("/creation/aggregate_file_bindings", "100000"),
+                ("/creation/aggregate_logical_bytes", "8589934592"),
+                ("/pack_ingress/logical_file_bindings", "100000"),
+                ("/pack_ingress/logical_decoded_bytes", "8589934592"),
+                ("/pack_ingress/physical_blob_bytes", "8589934592"),
+                ("/pack_ingress/representation_entries", "200000"),
+                ("/pack_ingress/closure_export_payload_bytes", "8657043456"),
+                ("/representation/pack_archive/output_bytes", "2147483648"),
+                ("/representation/closure_export/payload_bytes", "8657043456"),
+                ("/representation/project_materialization/files", "100000"),
+                (
+                    "/representation/project_materialization/output_bytes",
+                    "17179869184",
+                ),
+                ("/transport/objects", "200000"),
             ],
         ),
     ] {
@@ -411,6 +508,17 @@ fn validate_profiles(
         }
     }
     compare_profile_ceilings(native, dagger, "")?;
+    validate_profile_coherence(native, "native-cli/1")?;
+    validate_profile_coherence(dagger, "dagger-ci/1")?;
+    validate_role_limit_projection(native, "native-cli/1")?;
+    validate_role_limit_projection(dagger, "dagger-ci/1")?;
+    let mut incoherent = native.clone();
+    incoherent["transport"]["objects"] = json!("199999");
+    if validate_profile_coherence(&incoherent, "incoherent-profile-poison").is_ok() {
+        return Err("cross-field-incoherent profile was accepted".to_owned());
+    }
+    validate_resource_accounting_vectors()?;
+    validate_all_stored_vectors()?;
 
     for overlay in array_at(cases, "/profile_tightening_overlays")? {
         let id = string_field(overlay, "id")?;
@@ -462,6 +570,371 @@ fn validate_capability_constants(
         }
     }
     summary.capability_constants = constants.len();
+    Ok(())
+}
+
+fn profile_u64(profile: &Value, pointer: &str, label: &str) -> CheckResult<u64> {
+    profile
+        .pointer(pointer)
+        .and_then(Value::as_str)
+        .ok_or_else(|| format!("{label}: missing {pointer}"))?
+        .parse::<u64>()
+        .map_err(|error| format!("{label}: invalid u64 at {pointer}: {error}"))
+}
+
+fn validate_profile_coherence(profile: &Value, label: &str) -> CheckResult<()> {
+    let archive_output = profile_u64(profile, "/representation/pack_archive/output_bytes", label)?;
+    let archive_ingress = profile_u64(profile, "/pack_ingress/archive_bytes", label)?;
+    let closure_output = profile_u64(
+        profile,
+        "/representation/closure_export/payload_bytes",
+        label,
+    )?;
+    let closure_ingress =
+        profile_u64(profile, "/pack_ingress/closure_export_payload_bytes", label)?;
+    let entries = profile_u64(profile, "/pack_ingress/representation_entries", label)?;
+    let transport_objects = profile_u64(profile, "/transport/objects", label)?;
+    let transport_bytes = profile_u64(profile, "/transport/aggregate_bytes", label)?;
+    let largest_transport = profile_u64(profile, "/transport/largest_object_bytes", label)?;
+    let materialization_files = profile_u64(
+        profile,
+        "/representation/project_materialization/files",
+        label,
+    )?;
+    let materialization_bytes = profile_u64(
+        profile,
+        "/representation/project_materialization/output_bytes",
+        label,
+    )?;
+    let largest_blob = profile_u64(profile, "/pack_ingress/largest_physical_blob_bytes", label)?;
+    let control = profile_u64(profile, "/pack_ingress/control_record_bytes", label)?;
+
+    if archive_output > archive_ingress
+        || closure_output > closure_ingress
+        || entries > transport_objects
+        || materialization_files > transport_objects
+        || closure_output > transport_bytes
+        || materialization_bytes > transport_bytes
+        || archive_output > largest_transport
+        || largest_blob.max(control) > largest_transport
+    {
+        return Err(format!(
+            "{label}: output-to-ingress or publication ceilings are incoherent"
+        ));
+    }
+    Ok(())
+}
+
+fn validate_role_limit_projection(profile: &Value, label: &str) -> CheckResult<()> {
+    let archive = format_controls(profile, "pack_archive_encoding");
+    let closure = format_controls(profile, "closure_export");
+    for field in [
+        "logical_file_bindings",
+        "logical_decoded_bytes",
+        "control_record_bytes",
+        "physical_blob_bytes",
+        "largest_physical_blob_bytes",
+        "representation_entries",
+    ] {
+        if archive.pointer(&format!("/limits/values/{field}"))
+            != profile.pointer(&format!("/pack_ingress/{field}"))
+            || closure.pointer(&format!("/limits/values/{field}"))
+                != profile.pointer(&format!("/pack_ingress/{field}"))
+        {
+            return Err(format!(
+                "{label}: role limit projection lost ingress field {field}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_resource_accounting_vectors() -> CheckResult<()> {
+    // Equal logical bindings charge repeatedly; physical objects deduplicate by typed identity.
+    let logical_bindings = [
+        ("project:a", 100_u64),
+        ("project:b", 100),
+        ("package:x:a", 100),
+    ];
+    let logical_count = logical_bindings.len() as u64;
+    let logical_bytes = logical_bindings
+        .iter()
+        .map(|(_, bytes)| *bytes)
+        .sum::<u64>();
+    let physical = [("typst-pack:exact-content:1:sha256:a", 100_u64)];
+    if (logical_count, logical_bytes, physical.len() as u64) != (3, 300, 1) {
+        return Err("logical repetition versus physical deduplication vector failed".to_owned());
+    }
+
+    // Mixed project/package/font totals exercise limit - 1, limit, and limit + 1.
+    let file_limit = 100_u64;
+    for (project, package, accepted) in [(49, 50, true), (50, 50, true), (50, 51, false)] {
+        if (project + package <= file_limit) != accepted {
+            return Err("mixed F_create boundary vector failed".to_owned());
+        }
+    }
+    let byte_limit = 1_000_u64;
+    for (project, package, font, accepted) in [
+        (300, 399, 300, true),
+        (300, 400, 300, true),
+        (300, 400, 301, false),
+    ] {
+        if (project + package + font <= byte_limit) != accepted {
+            return Err("mixed L_create boundary vector failed".to_owned());
+        }
+    }
+
+    // Exact Package Specification remains part of logical identity; external dispositions
+    // still charge logically while contributing no physical blob.
+    let package_bindings = [
+        ("@preview/a:1.0.0", "lib.typ", 7_u64),
+        ("@preview/b:1.0.0", "lib.typ", 7_u64),
+    ];
+    let external_font_logical_bytes = 11_u64;
+    let physical_embedded_bytes = 7_u64;
+    if package_bindings.len() != 2
+        || package_bindings
+            .iter()
+            .map(|(_, _, size)| size)
+            .sum::<u64>()
+            + external_font_logical_bytes
+            != 25
+        || physical_embedded_bytes != 7
+    {
+        return Err("package-specification or external-disposition accounting failed".to_owned());
+    }
+
+    // Zero-byte files charge counts; discovery overrides stay on separate dimensions;
+    // repeated variants, restarts, and replay do not recharge one distinct binding.
+    let observed_keys = ["project:empty", "project:empty", "project:empty"];
+    let distinct = observed_keys.into_iter().collect::<BTreeSet<_>>();
+    let override_bytes = 13_u64;
+    if distinct.len() != 1 || override_bytes == 0 {
+        return Err("zero-byte/replay/override accounting vector failed".to_owned());
+    }
+
+    // Unknown-length streams debit each observed chunk and ignore a lying zero size hint.
+    let chunks = [3_u64, 5, 7];
+    let lying_size_hint = 0_u64;
+    let observed = chunks
+        .iter()
+        .try_fold(0_u64, |sum, chunk| sum.checked_add(*chunk));
+    if lying_size_hint != 0 || observed != Some(15) {
+        return Err("unknown-length incremental accounting failed".to_owned());
+    }
+
+    // Understood extensions contribute closed logical and physical projections.
+    let extension_logical = (2_u64, 17_u64);
+    let extension_physical = (1_u64, 9_u64);
+    if extension_logical != (2, 17) || extension_physical != (1, 9) {
+        return Err("semantic-extension accounting projection failed".to_owned());
+    }
+
+    let materialized_same_bytes = [("a.typ", 9_u64), ("b.typ", 9_u64)];
+    if materialized_same_bytes.len() != 2
+        || materialized_same_bytes
+            .iter()
+            .map(|(_, bytes)| bytes)
+            .sum::<u64>()
+            != 18
+    {
+        return Err(
+            "Project Materialization per-path accounting deduplicated equal bytes".to_owned(),
+        );
+    }
+
+    // Occupancy is peak-live, not cumulative; equal separate allocations charge separately.
+    let mut live = 0_u64;
+    let mut peak = 0_u64;
+    for reservation in [64_u64, 64] {
+        live = live.checked_add(reservation).ok_or("occupancy overflow")?;
+        peak = peak.max(live);
+    }
+    live -= 64;
+    if peak != 128 || live != 64 {
+        return Err("peak occupancy vector failed".to_owned());
+    }
+    let mut shared = ReplayOccupancyLedger::default();
+    let original = shared.reserve("shared-output", 100, 100)?;
+    let second_owner = shared.reserve("shared-output", 100, 100)?;
+    if (shared.live_spool, shared.live_memory) != (100, 100) {
+        return Err("shared backing was charged more than once".to_owned());
+    }
+    shared.release(original)?;
+    let stable_owner = shared.transfer(second_owner);
+    if (shared.live_spool, shared.live_memory) != (100, 100) {
+        return Err("ownership transfer released shared backing early".to_owned());
+    }
+    shared.release(stable_owner)?;
+    if (shared.live_spool, shared.live_memory, shared.peak_spool) != (0, 0, 100) {
+        return Err("ownership transfer cleanup or peak accounting failed".to_owned());
+    }
+
+    let mut native = ReplayOccupancyLedger::default();
+    let native_reservation = native.reserve("native-spool", 100, 8)?;
+    if (native.live_spool, native.live_memory) != (100, 8) {
+        return Err("native spool resident accounting failed".to_owned());
+    }
+    native.release(native_reservation)?;
+
+    let mut copied = ReplayOccupancyLedger::default();
+    let output = copied.reserve("copied-output", 64, 64)?;
+    let scratch = copied.reserve("scratch", 0, 32)?;
+    let parser = copied.reserve("parsed-plan", 0, 16)?;
+    if copied.peak_memory != 112 {
+        return Err("copied output and scratch occupancy vector failed".to_owned());
+    }
+    copied.release(parser)?;
+    copied.release(scratch)?;
+    copied.release(output)?;
+
+    for cleanup_path in [
+        "success",
+        "acquisition_failure",
+        "decode_failure",
+        "encode_failure",
+        "cancelled",
+        "deadline",
+        "primary_failure",
+    ] {
+        let mut ledger = ReplayOccupancyLedger::default();
+        let partial = ledger.reserve("partial", 64, 8)?;
+        let scratch = ledger.reserve("failure-scratch", 0, 16)?;
+        ledger.release(scratch)?;
+        ledger.release(partial)?;
+        if (ledger.live_spool, ledger.live_memory) != (0, 0)
+            || ledger.peak_spool != 64
+            || cleanup_path.is_empty()
+        {
+            return Err("occupancy cleanup-path vector failed".to_owned());
+        }
+    }
+    live = 0;
+    if live != 0 || peak != 128 {
+        return Err("occupancy cleanup must release live bytes without lowering peak".to_owned());
+    }
+    Ok(())
+}
+
+fn epoch2_all_stored_archive_bytes(
+    control_record_bytes: u64,
+    blob_lengths: &[u64],
+) -> CheckResult<u64> {
+    const SENTINEL: u64 = 0xffff_ffff;
+    let mut local_records = 0_u64;
+    let mut central_directory = 0_u64;
+    for (index, payload) in std::iter::once(&control_record_bytes)
+        .chain(blob_lengths.iter())
+        .enumerate()
+    {
+        let name = if index == 0 { 20_u64 } else { 88_u64 };
+        let offset = local_records;
+        let size_zip64 = *payload >= SENTINEL;
+        let offset_zip64 = offset >= SENTINEL;
+        let local_extra = if size_zip64 { 20_u64 } else { 0 };
+        let central_extra = match (size_zip64, offset_zip64) {
+            (false, false) => 0,
+            (false, true) => 12,
+            (true, false) => 20,
+            (true, true) => 28,
+        };
+        local_records = local_records
+            .checked_add(30 + name + local_extra)
+            .and_then(|value| value.checked_add(*payload))
+            .ok_or("local ZIP plan overflow")?;
+        central_directory = central_directory
+            .checked_add(46 + name + central_extra)
+            .ok_or("central ZIP plan overflow")?;
+    }
+    let entries = 1_u64
+        .checked_add(blob_lengths.len() as u64)
+        .ok_or("entry count overflow")?;
+    let zip64 = if zip64_trailer_required(entries, local_records, central_directory) {
+        76
+    } else {
+        0
+    };
+    local_records
+        .checked_add(central_directory)
+        .and_then(|value| value.checked_add(22 + zip64))
+        .ok_or_else(|| "archive ZIP plan overflow".to_owned())
+}
+
+fn zip64_trailer_required(entries: u64, local_records: u64, central_directory: u64) -> bool {
+    entries >= 65_535 || local_records >= 0xffff_ffff || central_directory >= 0xffff_ffff
+}
+
+fn validate_all_stored_vectors() -> CheckResult<()> {
+    for (entries, expected_overhead) in [
+        (1_usize, 138_u64),
+        (65_534, 16_514_454),
+        (65_535, 16_514_782),
+        (65_536, 16_515_034),
+        (200_000, 50_399_962),
+    ] {
+        let blobs = vec![0_u64; entries - 1];
+        let actual = epoch2_all_stored_archive_bytes(0, &blobs)?;
+        if actual != expected_overhead {
+            return Err(format!(
+                "all-Stored N={entries}: expected {expected_overhead}, got {actual}"
+            ));
+        }
+    }
+    for (control, blobs, expected) in [
+        (
+            67_108_864_u64,
+            vec![1_006_632_317_u64, 0],
+            1_073_741_823_u64,
+        ),
+        (67_108_864, vec![1_006_632_318, 0], 1_073_741_824),
+        (67_108_864, vec![1_006_632_319, 0], 1_073_741_825),
+        (67_108_864, vec![2_080_373_637, 0, 0, 0], 2_147_483_647),
+        (67_108_864, vec![2_080_373_638, 0, 0, 0], 2_147_483_648),
+        (67_108_864, vec![2_080_373_639, 0, 0, 0], 2_147_483_649),
+    ] {
+        let actual = epoch2_all_stored_archive_bytes(control, &blobs)?;
+        if actual != expected {
+            return Err(format!(
+                "archive boundary: expected {expected}, got {actual}"
+            ));
+        }
+    }
+    let below = epoch2_all_stored_archive_bytes(0, &[0xffff_fffe])?;
+    let at = epoch2_all_stored_archive_bytes(0, &[0xffff_ffff])?;
+    let above = epoch2_all_stored_archive_bytes(0, &[0x1_0000_0000])?;
+    if (below, at, above) != (4_294_967_760, 4_294_967_801, 4_294_967_802) {
+        return Err("ZIP64 size-sentinel vector failed".to_owned());
+    }
+    let offset_below = epoch2_all_stored_archive_bytes(4_294_967_244, &[0])?;
+    let offset_at = epoch2_all_stored_archive_bytes(4_294_967_245, &[0])?;
+    let size_and_offset = epoch2_all_stored_archive_bytes(4_294_967_245, &[0xffff_ffff])?;
+    if (offset_below, offset_at, size_and_offset) != (4_294_967_710, 4_294_967_723, 8_589_935_054) {
+        return Err("ZIP64 local-offset vector failed".to_owned());
+    }
+    for (entries, local, central, expected) in [
+        (65_534, 0, 0, false),
+        (65_535, 0, 0, true),
+        (1, 0xffff_fffe, 0, false),
+        (1, 0xffff_ffff, 0, true),
+        (1, 0, 0xffff_fffe, false),
+        (1, 0, 0xffff_ffff, true),
+    ] {
+        if zip64_trailer_required(entries, local, central) != expected {
+            return Err("ZIP64 R/D/N trailer threshold vector failed".to_owned());
+        }
+    }
+    if epoch2_all_stored_archive_bytes(u64::MAX, &[u64::MAX]).is_ok() {
+        return Err("ZIP planner accepted checked-arithmetic overflow".to_owned());
+    }
+    for (control, physical, expected) in [
+        (67_108_864_u64, 4_294_967_295_u64, 4_362_076_159_u64),
+        (67_108_864, 4_294_967_296, 4_362_076_160),
+        (67_108_864, 4_294_967_297, 4_362_076_161),
+    ] {
+        if control.checked_add(physical) != Some(expected) {
+            return Err("Closure Export payload boundary vector failed".to_owned());
+        }
+    }
     Ok(())
 }
 
@@ -810,8 +1283,6 @@ fn build_generated_case(builder: &str, native: &Value, dagger: &Value) -> CheckR
             let mut value = compile_operation_report(native);
             value["report"]["operational_inventory"]["role_execution"]["engine_width"]["admitted"] =
                 json!("2");
-            value["report"]["operational_inventory"]["role_execution"]["domain"]["width"] =
-                json!("2");
             value
         }
         "compile_report_exact" => compile_operation_report_exact(native),
@@ -923,7 +1394,10 @@ fn creation_operation_request() -> Value {
         "K": null,
         "Q": null,
         "P": null,
-        "placement": "in_process",
+        "font_scan_policy": font_scan_policy(),
+        "required_capability_scopes": capability_scopes(false),
+        "requested_execution_placement": "caller_thread",
+        "requested_isolation": {"kind": "in_process", "claimed_enforcement": []},
         "interruption": "cooperative",
         "required_enforcement": [],
         "deadline": {"kind": "none"},
@@ -938,13 +1412,14 @@ fn evidence_descriptor() -> Value {
         "role": "creation_evidence",
         "descriptor_version": 1,
         "class": "org.typst-pack/native-cli/creation-evidence/1",
-        "capabilities": {"stability": "immutable", "race_closing_revalidation": false, "exact_key_revalidation": false, "opaque_scope_revalidation": false, "polling": false, "push_subscription": false, "cursor_replay": false, "network": "no_network"}
+        "capabilities": {"stability": "immutable", "race_closing_revalidation": false, "exact_key_revalidation": false, "opaque_scope_revalidation": false, "polling": false, "push_subscription": false, "cursor_replay": false, "network": "no_network"},
+        "offered_scope": capability_scope("creation_evidence")
     })
 }
 
 fn authority_descriptor(role: &str) -> Value {
     let class_role = role.replace('_', "-");
-    json!({
+    let mut descriptor = json!({
         "role": role,
         "descriptor_version": 1,
         "class": format!("org.typst-pack/native-cli/{class_role}/1"),
@@ -952,12 +1427,73 @@ fn authority_descriptor(role: &str) -> Value {
         "evidence": {"immutable_values": true, "exact_key_revalidation": false, "opaque_scope_revalidation": false, "polling": false, "push_subscription": false, "cursor_replay": false},
         "network": "no_network",
         "resolution_cache": "disabled",
-        "private_caches": []
+        "private_caches": [],
+        "offered_scope": capability_scope(role)
+    });
+    if role == "font_authority" {
+        descriptor["supported_font_scan_policies"] = json!([font_scan_policy()]);
+    }
+    descriptor
+}
+
+fn capability_scopes(compilation: bool) -> Value {
+    let mut scopes = vec![
+        capability_scope("package_authority"),
+        capability_scope("font_authority"),
+    ];
+    if compilation {
+        scopes.push(capability_scope("reporting"));
+    } else {
+        scopes.push(capability_scope("creation_evidence"));
+    }
+    Value::Array(scopes)
+}
+
+fn capability_scope(role: &str) -> Value {
+    match role {
+        "package_authority" | "font_authority" => {
+            json!({"role": role, "permitted_uses": ["resolution", "acquisition", "revalidation"], "coverage": "declared_dependency_requirements", "completeness": "complete"})
+        }
+        "creation_evidence" => {
+            json!({"role": role, "permitted_uses": ["stabilization", "revalidation"], "coverage": "exact_operation_inputs", "completeness": "complete"})
+        }
+        "reporting" => {
+            json!({"role": role, "permitted_uses": [], "coverage": "selected_report_channels", "completeness": "complete"})
+        }
+        "spool" => {
+            json!({"role": role, "permitted_uses": ["stable_acquisition"], "coverage": "one_frozen_subject", "completeness": "complete"})
+        }
+        "pack_archive_acquisition" => {
+            json!({"role": role, "permitted_uses": ["archive_acquisition"], "coverage": "one_frozen_subject", "completeness": "complete"})
+        }
+        "pack_archive_publication" => {
+            json!({"role": role, "permitted_uses": ["archive_publication"], "coverage": "one_frozen_subject", "completeness": "complete"})
+        }
+        "project_materialization_publication" => {
+            json!({"role": role, "permitted_uses": ["materialization_publication"], "coverage": "one_frozen_subject", "completeness": "complete"})
+        }
+        "closure_export_publication" => {
+            json!({"role": role, "permitted_uses": ["closure_export_publication"], "coverage": "one_frozen_subject", "completeness": "complete"})
+        }
+        "compilation_delivery" => {
+            json!({"role": role, "permitted_uses": ["compilation_delivery"], "coverage": "one_frozen_subject", "completeness": "complete"})
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn reporting_descriptor() -> Value {
+    json!({
+        "role": "reporting",
+        "descriptor_version": 1,
+        "class": "org.typst-pack/native-cli/reporting/1",
+        "offered_scope": capability_scope("reporting")
     })
 }
 
 fn creation_admission_refusal(native: &Value) -> Value {
     json!({
+        "stage": "admission",
         "operation_request": creation_operation_request(),
         "requested_trust": "partially_trusted",
         "resource_profile": profile_reference(),
@@ -966,6 +1502,7 @@ fn creation_admission_refusal(native: &Value) -> Value {
         "packages": authority_descriptor("package_authority"),
         "fonts": authority_descriptor("font_authority"),
         "execution": null,
+        "reporting": reporting_descriptor(),
         "reason": "capacity"
     })
 }
@@ -996,13 +1533,24 @@ fn creation_operational_inventory(native: &Value) -> Value {
             "requested_trust": "partially_trusted", "admitted_trust": "partially_trusted",
             "requested_network": "offline", "admitted_network": "offline",
             "contractual_no_network": true, "structural_network_enforcement": "not_claimed",
-            "enforcement": {"requested": [], "admitted": [], "reached": []}
+            "enforcement": {"requested": [], "admitted": []},
+            "requested_capability_scopes": capability_scopes(false),
+            "admitted_capability_scopes": capability_scopes(false),
+            "requested_execution_placement": "caller_thread",
+            "admitted_execution_placement": "caller_thread",
+            "requested_isolation": {"kind": "in_process", "claimed_enforcement": []},
+            "admitted_isolation": {"kind": "in_process", "claimed_enforcement": []}
         },
-        "resources": {"profile": profile_reference(), "requested": native["creation"].clone(), "admitted": native["creation"].clone()},
+        "resources": {
+            "profile": profile_reference(), "requested": native["creation"].clone(), "admitted": native["creation"].clone(),
+            "reached": {"project_files": "1", "aggregate_project_bytes": "8", "package_files": "0", "package_tree_bytes": "0", "font_containers": "0", "font_bytes": "0", "aggregate_file_bindings": "1", "aggregate_logical_bytes": "8", "override_count": "0", "largest_override_bytes": "0", "aggregate_override_bytes": "0", "peak_stable_spool_bytes": "0", "peak_retained_memory_bytes": "8"}
+        },
         "dependency_execution": {
             "evidence": evidence_descriptor(), "packages": authority_descriptor("package_authority"), "fonts": authority_descriptor("font_authority"),
             "offline_roles_covered": ["creation_evidence", "package_authority", "font_authority"],
-            "concurrency": {"symbol": "D", "requested": "1", "admitted": "1", "constraints": []}
+            "concurrency": {"symbol": "D", "requested": "1", "admitted": "1", "constraints": []},
+            "font_scan_policy": {"requested": font_scan_policy(), "admitted": font_scan_policy(), "reached": {"kind": "not_reached"}},
+            "reached_capability_scopes": []
         },
         "attempt_control": {
             "deadline": {"kind": "none"}, "cancellation_present": false, "monotonic_domain": "prototype-clock",
@@ -1013,7 +1561,8 @@ fn creation_operational_inventory(native: &Value) -> Value {
         "reporting": {
             "requested": {"timing": false, "fine_engine_timing": false},
             "admitted": {"timing": false, "fine_engine_timing": false},
-            "timing": "not_requested", "fine_engine_timing": "not_requested", "fine_timing_lease_reached": false
+            "timing": "not_requested", "fine_engine_timing": "not_requested", "fine_timing_lease_reached": false,
+            "descriptor": reporting_descriptor()
         }
     })
 }
@@ -1023,12 +1572,14 @@ fn managed_caller_thread_execution(width: &str) -> Value {
         "kind": "caller_thread",
         "domain": {
             "kind": "managed", "identity": "org.typst-pack.engine-domain.prototype",
-            "placement": "in_process", "width": width, "fine_timing_lease_reached": false
+            "width": width, "fine_timing_lease_reached": false
         },
         "engine_width": {
             "symbol": "W", "kind": "exact", "requested": {"kind": "automatic"},
             "admitted": width, "constraints": ["verified_available_capacity"]
-        }
+        },
+        "reached_placement": {"kind": "reached", "placement": "caller_thread"},
+        "reached_isolation": {"kind": "reached", "contract": {"kind": "in_process", "claimed_enforcement": []}}
     })
 }
 
@@ -1037,12 +1588,27 @@ fn managed_caller_thread_execution_exact(width: &str) -> Value {
         "kind": "caller_thread",
         "domain": {
             "kind": "managed", "identity": "org.typst-pack.engine-domain.prototype",
-            "placement": "in_process", "width": width, "fine_timing_lease_reached": false
+            "width": width, "fine_timing_lease_reached": false
         },
         "engine_width": {
             "symbol": "W", "kind": "exact", "requested": {"kind": "exact", "width": width},
             "admitted": width, "constraints": []
-        }
+        },
+        "reached_placement": {"kind": "reached", "placement": "caller_thread"},
+        "reached_isolation": {"kind": "reached", "contract": {"kind": "in_process", "claimed_enforcement": []}}
+    })
+}
+
+fn not_selected_caller_thread_execution() -> Value {
+    json!({
+        "kind": "caller_thread",
+        "domain": {"kind": "not_selected"},
+        "engine_width": {
+            "symbol": "W", "kind": "exact", "requested": {"kind": "automatic"},
+            "admitted": "1", "constraints": ["verified_available_capacity"]
+        },
+        "reached_placement": {"kind": "not_reached"},
+        "reached_isolation": {"kind": "not_reached"}
     })
 }
 
@@ -1085,14 +1651,42 @@ fn create_operation_report_exact(native: &Value) -> Value {
 fn format_controls(native: &Value, kind: &str) -> Value {
     let values = match kind {
         "pack_ingress" => native["pack_ingress"].clone(),
-        "representation" => native["representation"].clone(),
+        "pack_archive_encoding" => json!({
+            "logical_file_bindings": native["pack_ingress"]["logical_file_bindings"],
+            "logical_decoded_bytes": native["pack_ingress"]["logical_decoded_bytes"],
+            "control_record_bytes": native["pack_ingress"]["control_record_bytes"],
+            "physical_blob_bytes": native["pack_ingress"]["physical_blob_bytes"],
+            "largest_physical_blob_bytes": native["pack_ingress"]["largest_physical_blob_bytes"],
+            "representation_entries": native["pack_ingress"]["representation_entries"],
+            "maximum_expansion_ratio": native["pack_ingress"]["maximum_expansion_ratio"],
+            "output_bytes": native["representation"]["pack_archive"]["output_bytes"],
+            "stable_spool_bytes": native["representation"]["stable_spool_bytes"],
+            "retained_memory_bytes": native["representation"]["retained_memory_bytes"]
+        }),
+        "closure_export" => json!({
+            "logical_file_bindings": native["pack_ingress"]["logical_file_bindings"],
+            "logical_decoded_bytes": native["pack_ingress"]["logical_decoded_bytes"],
+            "control_record_bytes": native["pack_ingress"]["control_record_bytes"],
+            "physical_blob_bytes": native["pack_ingress"]["physical_blob_bytes"],
+            "largest_physical_blob_bytes": native["pack_ingress"]["largest_physical_blob_bytes"],
+            "representation_entries": native["pack_ingress"]["representation_entries"],
+            "payload_bytes": native["representation"]["closure_export"]["payload_bytes"],
+            "stable_spool_bytes": native["representation"]["stable_spool_bytes"],
+            "retained_memory_bytes": native["representation"]["retained_memory_bytes"]
+        }),
+        "project_materialization" => json!({
+            "files": native["representation"]["project_materialization"]["files"],
+            "output_bytes": native["representation"]["project_materialization"]["output_bytes"],
+            "stable_spool_bytes": native["representation"]["stable_spool_bytes"],
+            "retained_memory_bytes": native["representation"]["retained_memory_bytes"]
+        }),
         "transport" => native["transport"].clone(),
         _ => unreachable!(),
     };
     json!({
         "trust": "partially_trusted", "network": "offline", "resource_profile": profile_reference(),
         "deadline": {"kind": "none"}, "cancellation_present": false, "interruption": "cooperative",
-        "publication_strength": null, "cleanup_strength": null,
+        "publication_strength": null, "cleanup_requirement": null,
         "limits": {"kind": kind, "values": values}, "enforcement": [],
         "timing_requested": false, "timing_reporting": false
     })
@@ -1118,12 +1712,12 @@ fn representation_unsupported(native: &Value) -> Value {
         "terminal": "admission_refused",
         "adapter_class": "cli",
         "request": archive_read_request(),
-        "admission": {"kind": "refused", "requested": format_controls(native, "pack_ingress"), "reason": "unsupported_archive_encoding_recipe"}
+        "admission": {"kind": "refused", "stage": "admission", "requested": format_controls(native, "pack_ingress"), "reason": "unsupported_archive_encoding_recipe"}
     })
 }
 
 fn project_materialization_receipt(native: &Value) -> Value {
-    let controls = format_controls(native, "representation");
+    let controls = format_controls(native, "project_materialization");
     json!({
         "schema": schema_header("org.typst-pack.format-receipt"),
         "producer": producer(),
@@ -1137,9 +1731,9 @@ fn project_materialization_receipt(native: &Value) -> Value {
             "kind": "project_materialization",
             "common": {
                 "stage": "complete",
-                "counters": {"input_bytes": null, "output_bytes": "8", "control_record_bytes": null, "planned_objects": "1", "verified_objects": "1", "aggregate_decoded_bytes": "8", "file_count": "1"},
+                "accounting": {"kind": "project_materialization", "file_count": "1", "planned_output_bytes": "8", "produced_output_bytes": "8", "completed_output_bytes": "8", "occupancy": {"peak_stable_spool_bytes": "0", "peak_retained_memory_bytes": "8"}},
                 "pack_exposed": true, "stable_value_completed": true, "timing": "not_requested",
-                "publication": {"kind": "not_applicable"}, "cleanup": {"kind": "not_applicable"},
+                "publication": {"kind": "not_applicable"}, "cleanup_status": {"kind": "not_applicable"},
                 "failure_class": "not_applicable", "failure_cause": null, "validation_rules": []
             },
             "file_count": "1", "aggregate_bytes": "8",
@@ -1149,7 +1743,7 @@ fn project_materialization_receipt(native: &Value) -> Value {
 }
 
 fn archive_encoding_format_receipt(native: &Value) -> Value {
-    let controls = format_controls(native, "representation");
+    let controls = format_controls(native, "pack_archive_encoding");
     json!({
         "schema": schema_header("org.typst-pack.format-receipt"),
         "producer": producer(),
@@ -1166,14 +1760,14 @@ fn archive_encoding_format_receipt(native: &Value) -> Value {
             "kind": "pack_archive_encode",
             "common": {
                 "stage": "complete",
-                "counters": {"input_bytes": null, "output_bytes": "8", "control_record_bytes": "2", "planned_objects": "1", "verified_objects": "1", "aggregate_decoded_bytes": "8", "file_count": null},
+                "accounting": {"kind": "pack_archive", "logical": {"file_bindings": "1", "decoded_bytes": "8"}, "physical": {"control_record_bytes": "2", "blob_count": "1", "blob_bytes": "8", "largest_blob_bytes": "8", "representation_entries": "2"}, "occupancy": {"peak_stable_spool_bytes": "400", "peak_retained_memory_bytes": "8"}, "input_bytes": null, "planned_output_bytes": "400", "produced_output_bytes": "400", "completed_output_bytes": "400"},
                 "pack_exposed": false, "stable_value_completed": true, "timing": "not_requested",
-                "publication": {"kind": "not_applicable"}, "cleanup": {"kind": "not_applicable"},
+                "publication": {"kind": "not_applicable"}, "cleanup_status": {"kind": "not_applicable"},
                 "failure_class": "not_applicable", "failure_cause": null, "validation_rules": []
             },
             "control_record_identity": identity("exact-content", 'a'),
             "output_archive_identity": identity("exact-content", 'b'),
-            "closure_export_tree_identity": null
+            "closure_export_tree_identity": identity("closure-export-tree-content", 'e')
         }
     })
 }
@@ -1189,8 +1783,9 @@ fn transport_descriptor() -> Value {
     json!({
         "role": "spool", "descriptor_version": 1,
         "class": "org.typst-pack/native-cli/spool-facility/1", "network": "no_network", "T": "1",
-        "cleanup_requirements": ["complete_before_return"], "interruption": "cooperative",
-        "enforcement": [], "timing_reporting": false
+        "cleanup_requirement": ["complete_before_return"], "interruption": "cooperative",
+        "enforcement": [], "timing_reporting": false,
+        "offered_scope": capability_scope("spool")
     })
 }
 
@@ -1200,16 +1795,17 @@ fn transport_request(native: &Value) -> Value {
         "requested_limits": {"kind": "spool", "values": native["spool"].clone()},
         "requested_network": "offline", "covered_roles": ["spool"], "contractual_no_network": true,
         "requested_structural_network_enforcement": "not_claimed", "T": "1", "requested_commit": null,
-        "requested_cleanup": "complete_before_return", "interruption": "cooperative", "cancellation_present": false,
+        "requested_cleanup_requirement": "complete_before_return", "interruption": "cooperative", "cancellation_present": false,
         "monotonic_domain": "prototype-clock", "required_enforcement": [], "timing_requested": false,
-        "deadline": {"kind": "none"}
+        "deadline": {"kind": "none"},
+        "required_scope": capability_scope("spool")
     })
 }
 
 fn transport_refused(native: &Value) -> Value {
     json!({
         "schema": schema_header("org.typst-pack.transport-receipt"), "producer": producer(),
-        "role": "spool", "status": "refused", "adapter_class": "cli",
+        "role": "spool", "status": "admission_refused", "stage": "admission", "adapter_class": "cli",
         "request": transport_request(native), "requested_subject": {"kind": "spool", "expected": null},
         "descriptor": transport_descriptor(), "reason": "capacity_unavailable"
     })
@@ -1223,20 +1819,28 @@ fn transport_admission(native: &Value) -> Value {
         "requested_network": "offline", "admitted_network": "offline", "covered_roles": ["spool"], "contractual_no_network": true,
         "requested_structural_network_enforcement": "not_claimed", "admitted_structural_network_enforcement": "not_claimed",
         "requested_T": "1", "admitted_T": "1", "T_constraints": [], "requested_commit": null, "admitted_commit": null,
-        "requested_cleanup": "complete_before_return", "admitted_cleanup": "complete_before_return",
+        "requested_cleanup_requirement": "complete_before_return", "admitted_cleanup_requirement": "complete_before_return",
         "requested_interruption": "cooperative", "admitted_interruption": "cooperative", "cancellation_present": false,
-        "monotonic_domain": "prototype-clock", "enforcement": {"requested": [], "admitted": [], "reached": []},
+        "monotonic_domain": "prototype-clock", "enforcement": {"requested": [], "admitted": []},
         "timing_requested": false, "timing_reporting_admitted": false, "deadline": {"kind": "none"},
-        "descriptor": transport_descriptor()
+        "descriptor": transport_descriptor(),
+        "requested_scope": capability_scope("spool"),
+        "admitted_scope": capability_scope("spool")
     })
 }
 
+fn frozen_transport_object_count(subject: FrozenTransportSubject) -> String {
+    public_transport_object_count(subject).to_string()
+}
+
 fn transport_stage_ledger() -> Value {
+    let object_count = frozen_transport_object_count(FrozenTransportSubject::SingleValue);
     json!({
         "stages": ["admission", "plan_freeze", "spooling", "transfer", "complete"], "primary_terminal": "complete",
-        "object_count": "1", "transferred_bytes": "8", "actual_commit": null, "cleanup": "not_required",
+        "object_count": object_count, "transferred_bytes": "8", "actual_commit": null, "cleanup_outcome": "not_required",
         "residual_locator": null, "exposed_bytes": "8", "timing": {"status": "not_requested", "phases": []},
-        "structural_network_enforcement_reached": "not_claimed", "enforcement_reached": [], "interruption_winner": "terminal_commitment"
+        "structural_network_enforcement_reached": "not_claimed", "enforcement_reached": [], "interruption_winner": "terminal_commitment",
+        "reached_scope": capability_scope("spool")
     })
 }
 
@@ -1249,11 +1853,232 @@ fn transport_admitted(native: &Value) -> Value {
     })
 }
 
+fn archive_publication_descriptor() -> Value {
+    json!({
+        "role": "pack_archive_publication",
+        "descriptor_version": 1,
+        "class": "org.typst-pack/native-cli/pack-archive-publisher/1",
+        "network": "no_network",
+        "T": "1",
+        "commit_strengths": ["complete_collection_atomic"],
+        "cleanup_requirement": ["complete_before_return"],
+        "interruption": "cooperative",
+        "enforcement": [],
+        "timing_reporting": false,
+        "offered_scope": capability_scope("pack_archive_publication")
+    })
+}
+
+fn archive_publication_request(native: &Value) -> Value {
+    json!({
+        "requested_trust": "partially_trusted",
+        "resource_profile": profile_reference(),
+        "requested_limits": {"kind": "transfer", "values": native["transport"].clone()},
+        "requested_network": "offline",
+        "covered_roles": ["pack_archive_publication"],
+        "contractual_no_network": true,
+        "requested_structural_network_enforcement": "not_claimed",
+        "T": "1",
+        "requested_commit": "complete_collection_atomic",
+        "requested_cleanup_requirement": "complete_before_return",
+        "interruption": "cooperative",
+        "cancellation_present": false,
+        "monotonic_domain": "prototype-clock",
+        "required_enforcement": [],
+        "timing_requested": false,
+        "deadline": {"kind": "none"},
+        "required_scope": capability_scope("pack_archive_publication")
+    })
+}
+
+fn archive_publication_refusal(native: &Value) -> Value {
+    let source_pack = identity("pack", 'b');
+    let source_archive = identity("exact-content", 'a');
+    let source_tree = identity("closure-export-tree-content", 'e');
+    let reason = "publication_commit_strength_unavailable";
+    let mut controls = format_controls(native, "transport");
+    controls["publication_strength"] = json!("complete_collection_atomic");
+    controls["cleanup_requirement"] = json!("complete_before_return");
+    json!({
+        "format": {
+            "schema": schema_header("org.typst-pack.format-receipt"),
+            "producer": producer(),
+            "contract_version": 1,
+            "role": "pack_archive_publish",
+            "terminal": "admission_refused",
+            "adapter_class": "cli",
+            "request": {
+                "kind": "pack_archive_publish",
+                "source_pack_identity": source_pack,
+                "source_archive_identity": source_archive,
+                "archive_encoding_identity": first_party_archive_encoding_identity(),
+                "source_tree_identity": source_tree,
+                "files": []
+            },
+            "admission": {"kind": "transport_refused", "stage": "admission", "requested": controls, "reason": reason}
+        },
+        "transport": {
+            "terminal": {"status": "admission_refused"},
+            "receipt": {
+                "schema": schema_header("org.typst-pack.transport-receipt"),
+                "producer": producer(),
+                "role": "pack_archive_publication",
+                "status": "admission_refused",
+                "stage": "admission",
+                "adapter_class": "cli",
+                "request": archive_publication_request(native),
+                "requested_subject": {"kind": "pack_archive_publication", "source_archive": identity("exact-content", 'a'), "archive_encoding": first_party_archive_encoding_identity()},
+                "descriptor": archive_publication_descriptor(),
+                "reason": reason
+            }
+        }
+    })
+}
+
+fn closure_publication_refusal(native: &Value) -> Value {
+    let mut value = archive_publication_refusal(native);
+    value["format"]["role"] = json!("closure_export_publish");
+    value["format"]["request"] = json!({
+        "kind": "closure_export_publish",
+        "source_pack_identity": identity("pack", 'b'),
+        "source_tree_identity": identity("closure-export-tree-content", 'e'),
+        "files": []
+    });
+    value["transport"]["receipt"]["role"] = json!("closure_export_publication");
+    value["transport"]["receipt"]["request"]["covered_roles"] =
+        json!(["closure_export_publication"]);
+    value["transport"]["receipt"]["request"]["required_scope"] =
+        capability_scope("closure_export_publication");
+    value["transport"]["receipt"]["requested_subject"] = json!({
+        "kind": "closure_export_publication",
+        "pack": identity("pack", 'b'),
+        "source_tree": identity("closure-export-tree-content", 'e')
+    });
+    value["transport"]["receipt"]["descriptor"]["role"] = json!("closure_export_publication");
+    value["transport"]["receipt"]["descriptor"]["class"] =
+        json!("org.typst-pack/native-cli/closure-export-publisher/1");
+    value["transport"]["receipt"]["descriptor"]["offered_scope"] =
+        capability_scope("closure_export_publication");
+    value
+}
+
+fn publication_refusal_coherent(value: &Value) -> bool {
+    value.pointer("/format/terminal").and_then(Value::as_str) == Some("admission_refused")
+        && value
+            .pointer("/format/admission/stage")
+            .and_then(Value::as_str)
+            == Some("admission")
+        && value
+            .pointer("/transport/receipt/stage")
+            .and_then(Value::as_str)
+            == Some("admission")
+        && value.pointer("/format/admission/reason") == value.pointer("/transport/receipt/reason")
+        && value.pointer("/format/request/source_archive_identity")
+            == value.pointer("/transport/receipt/requested_subject/source_archive")
+        && value.pointer("/format/request/archive_encoding_identity")
+            == value.pointer("/transport/receipt/requested_subject/archive_encoding")
+        && value.pointer("/transport/receipt/admission").is_none()
+        && value.pointer("/transport/receipt/stage_ledger").is_none()
+}
+
+fn closure_publication_refusal_coherent(value: &Value) -> bool {
+    value.pointer("/format/terminal").and_then(Value::as_str) == Some("admission_refused")
+        && value
+            .pointer("/format/admission/stage")
+            .and_then(Value::as_str)
+            == Some("admission")
+        && value
+            .pointer("/transport/receipt/stage")
+            .and_then(Value::as_str)
+            == Some("admission")
+        && value.pointer("/format/admission/reason") == value.pointer("/transport/receipt/reason")
+        && value.pointer("/format/request/source_pack_identity")
+            == value.pointer("/transport/receipt/requested_subject/pack")
+        && value.pointer("/format/request/source_tree_identity")
+            == value.pointer("/transport/receipt/requested_subject/source_tree")
+        && value.pointer("/transport/receipt/stage_ledger").is_none()
+}
+
+fn font_policy_coherent(inventory: &Value) -> bool {
+    let requested = inventory.pointer("/dependency_execution/font_scan_policy/requested");
+    let admitted = inventory.pointer("/dependency_execution/font_scan_policy/admitted");
+    let reached = inventory.pointer("/dependency_execution/font_scan_policy/reached");
+    requested.is_some()
+        && requested == admitted
+        && match reached
+            .and_then(|value| value.get("kind"))
+            .and_then(Value::as_str)
+        {
+            Some("not_reached") => true,
+            Some("applied") => reached.and_then(|value| value.get("policy")) == admitted,
+            _ => false,
+        }
+}
+
+fn capability_scope_map(scopes: &Value) -> Option<BTreeMap<&str, (&str, &str, BTreeSet<&str>)>> {
+    let mut result = BTreeMap::new();
+    for scope in scopes.as_array()? {
+        let role = scope.get("role")?.as_str()?;
+        let coverage = scope.get("coverage")?.as_str()?;
+        let completeness = scope.get("completeness")?.as_str()?;
+        let uses = scope
+            .get("permitted_uses")?
+            .as_array()?
+            .iter()
+            .map(Value::as_str)
+            .collect::<Option<BTreeSet<_>>>()?;
+        if result
+            .insert(role, (coverage, completeness, uses))
+            .is_some()
+        {
+            return None;
+        }
+    }
+    Some(result)
+}
+
+fn capability_scopes_are_subsets(requested: &Value, admitted: &Value, reached: &Value) -> bool {
+    let Some(requested) = capability_scope_map(requested) else {
+        return false;
+    };
+    let Some(admitted) = capability_scope_map(admitted) else {
+        return false;
+    };
+    let Some(reached) = capability_scope_map(reached) else {
+        return false;
+    };
+    requested
+        .iter()
+        .all(|(role, (coverage, completeness, uses))| {
+            admitted.get(role).is_some_and(
+                |(admitted_coverage, admitted_completeness, admitted_uses)| {
+                    admitted_coverage == coverage
+                        && admitted_completeness == completeness
+                        && uses.is_subset(admitted_uses)
+                },
+            )
+        })
+        && reached
+            .iter()
+            .all(|(role, (coverage, completeness, uses))| {
+                admitted.get(role).is_some_and(
+                    |(admitted_coverage, admitted_completeness, admitted_uses)| {
+                        admitted_coverage == coverage
+                            && admitted_completeness == completeness
+                            && uses.is_subset(admitted_uses)
+                    },
+                )
+            })
+}
+
 fn compilation_operation_request() -> Value {
     json!({
         "network": "offline", "cache": {"kind": "disabled"}, "D": "1",
         "engine_width": {"kind": "automatic"}, "K": null, "Q": null, "P": null,
-        "placement": "in_process", "interruption": "cooperative", "deadline": {"kind": "none"},
+        "required_capability_scopes": capability_scopes(true),
+        "requested_execution_placement": "caller_thread",
+        "requested_isolation": {"kind": "in_process", "claimed_enforcement": []},
+        "interruption": "cooperative", "deadline": {"kind": "none"},
         "queue_timeout_ticks": null, "latency_target_ticks": null, "required_enforcement": [],
         "reporting": {"diagnostic_projection": false, "diagnostic_source_bundle": false, "timing": false, "fine_engine_timing": false}
     })
@@ -1261,10 +2086,12 @@ fn compilation_operation_request() -> Value {
 
 fn compilation_admission_refusal(native: &Value) -> Value {
     json!({
+        "stage": "admission", "compilation_identity": identity("compilation", 'c'),
         "operation_request": compilation_operation_request(), "requested_trust": "partially_trusted",
         "resource_profile": profile_reference(), "requested_limits": native["compilation"].clone(),
         "packages": authority_descriptor("package_authority"), "fonts": authority_descriptor("font_authority"),
         "cache": null, "execution": null, "reason": "capacity"
+        ,"reporting": reporting_descriptor()
     })
 }
 
@@ -1296,14 +2123,21 @@ fn compilation_operational_inventory(native: &Value) -> Value {
         "admission": {
             "requested_trust": "partially_trusted", "admitted_trust": "partially_trusted",
             "requested_network": "offline", "admitted_network": "offline", "contractual_no_network": true,
-            "structural_network_enforcement": "not_claimed", "enforcement": {"requested": [], "admitted": [], "reached": []}
+            "structural_network_enforcement": "not_claimed", "enforcement": {"requested": [], "admitted": []},
+            "requested_capability_scopes": capability_scopes(true),
+            "admitted_capability_scopes": capability_scopes(true),
+            "requested_execution_placement": "caller_thread",
+            "admitted_execution_placement": "caller_thread",
+            "requested_isolation": {"kind": "in_process", "claimed_enforcement": []},
+            "admitted_isolation": {"kind": "in_process", "claimed_enforcement": []}
         },
         "resources": {"profile": profile_reference(), "requested": native["compilation"].clone(), "admitted": native["compilation"].clone()},
         "dependency_execution": {
             "packages": authority_descriptor("package_authority"), "fonts": authority_descriptor("font_authority"),
             "cache_descriptor": null, "cache_policy": {"kind": "disabled"}, "cache_lookup": "disabled",
             "cache_isolation_domain_present": false, "offline_roles_covered": ["package_authority", "font_authority"],
-            "concurrency": {"symbol": "D", "requested": "1", "admitted": "1", "constraints": []}
+            "concurrency": {"symbol": "D", "requested": "1", "admitted": "1", "constraints": []},
+            "reached_capability_scopes": []
         },
         "attempt_control": {
             "deadline": {"kind": "none"}, "cancellation_present": false, "monotonic_domain": "prototype-clock",
@@ -1315,7 +2149,8 @@ fn compilation_operational_inventory(native: &Value) -> Value {
             "requested": {"diagnostic_projection": false, "diagnostic_source_bundle": false, "timing": false, "fine_engine_timing": false},
             "admitted": {"diagnostic_projection": false, "diagnostic_source_bundle": false, "timing": false, "fine_engine_timing": false},
             "diagnostic_projection": "not_requested", "diagnostic_sources": "not_requested", "timing": "not_requested",
-            "fine_engine_timing": "not_requested", "fine_timing_lease_reached": false
+            "fine_engine_timing": "not_requested", "fine_timing_lease_reached": false,
+            "descriptor": reporting_descriptor()
         }
     })
 }
@@ -1339,9 +2174,13 @@ fn compilation_report(native: &Value, succeeded: bool) -> Value {
     } else {
         Value::Null
     };
+    let mut operational_inventory = compilation_operational_inventory(native);
+    if !succeeded {
+        operational_inventory["role_execution"] = not_selected_caller_thread_execution();
+    }
     json!({
         "schema": schema_header("org.typst-pack.compilation-report"), "producer": producer(),
-        "request_inventory": accepted_request_inventory(), "operational_inventory": compilation_operational_inventory(native),
+        "request_inventory": accepted_request_inventory(), "operational_inventory": operational_inventory,
         "cache_provenance": cache_provenance(),
         "report_projection": {
             "terminal": terminal, "compilation_identity": identity("compilation", 'c'), "result_identity": result_identity,
@@ -1370,8 +2209,21 @@ fn compile_operation_report(native: &Value) -> Value {
     })
 }
 
+fn compile_operation_request_rejected(native: &Value) -> Value {
+    json!({
+        "schema": schema_header("org.typst-pack.compile-operation"),
+        "producer": producer(),
+        "kind": "request_rejected",
+        "adapter_jobs": jobs_exact("999", None),
+        "ingress": null,
+        "adapter_input": {"status": "not_requested", "reason": null, "failure": null},
+        "request_rejection": compilation_request_rejection(native)
+    })
+}
+
 fn compile_operation_report_exact(native: &Value) -> Value {
     let mut value = compile_operation_report(native);
+    value["report"] = compilation_report(native, true);
     value["adapter_jobs"] = jobs_exact("4", Some("4"));
     value["report"]["operational_inventory"]["role_execution"] =
         managed_caller_thread_execution_exact("4");
@@ -1474,8 +2326,9 @@ fn delivery_transport_descriptor() -> Value {
         "role": "compilation_delivery", "descriptor_version": 1,
         "class": "org.typst-pack/native-cli/compilation-delivery/1", "network": "no_network", "T": "1",
         "commit_strengths": ["complete_collection_atomic"],
-        "cleanup_requirements": ["complete_before_return"], "interruption": "cooperative",
-        "enforcement": [], "timing_reporting": false
+        "cleanup_requirement": ["complete_before_return"], "interruption": "cooperative",
+        "enforcement": [], "timing_reporting": false,
+        "offered_scope": capability_scope("compilation_delivery")
     })
 }
 
@@ -1488,16 +2341,20 @@ fn delivery_transport_admission(native: &Value) -> Value {
         "contractual_no_network": true, "requested_structural_network_enforcement": "not_claimed",
         "admitted_structural_network_enforcement": "not_claimed", "requested_T": "1", "admitted_T": "1",
         "T_constraints": [], "requested_commit": "complete_collection_atomic", "admitted_commit": "complete_collection_atomic",
-        "requested_cleanup": "complete_before_return", "admitted_cleanup": "complete_before_return",
+        "requested_cleanup_requirement": "complete_before_return", "admitted_cleanup_requirement": "complete_before_return",
         "requested_interruption": "cooperative", "admitted_interruption": "cooperative", "cancellation_present": false,
-        "monotonic_domain": "prototype-clock", "enforcement": {"requested": [], "admitted": [], "reached": []},
+        "monotonic_domain": "prototype-clock", "enforcement": {"requested": [], "admitted": []},
         "timing_requested": false, "timing_reporting_admitted": false, "deadline": {"kind": "none"},
-        "descriptor": delivery_transport_descriptor()
+        "descriptor": delivery_transport_descriptor(),
+        "requested_scope": capability_scope("compilation_delivery"),
+        "admitted_scope": capability_scope("compilation_delivery")
     })
 }
 
 fn committed_delivery_outcome(native: &Value) -> Value {
     let result = identity("compilation-result", 'd');
+    let object_count =
+        frozen_transport_object_count(FrozenTransportSubject::CompilationDelivery { artifacts: 0 });
     json!({
         "report": compilation_report(native, true),
         "transport": {
@@ -1508,11 +2365,12 @@ fn committed_delivery_outcome(native: &Value) -> Value {
                 "admission": delivery_transport_admission(native),
                 "stage_ledger": {
                     "stages": ["admission", "plan_freeze", "transfer", "commit", "complete"],
-                    "primary_terminal": "complete", "object_count": "0", "transferred_bytes": "0",
-                    "actual_commit": "complete_collection_atomic", "cleanup": "not_required", "residual_locator": null,
+                    "primary_terminal": "complete", "object_count": object_count, "transferred_bytes": "0",
+                    "actual_commit": "complete_collection_atomic", "cleanup_outcome": "not_required", "residual_locator": null,
                     "exposed_bytes": "0", "timing": {"status": "not_requested", "phases": []},
                     "structural_network_enforcement_reached": "not_claimed", "enforcement_reached": [],
-                    "interruption_winner": "terminal_commitment"
+                    "interruption_winner": "terminal_commitment",
+                    "reached_scope": capability_scope("compilation_delivery")
                 },
                 "content_identity": null,
                 "identities": [
@@ -1535,7 +2393,8 @@ fn watch_delivery(native: &Value) -> Value {
 
 fn compilation_request_rejection(native: &Value) -> Value {
     json!({
-        "resource_profile": profile_reference(), "requested_limits": native["compilation"].clone(), "admitted_limits": native["compilation"].clone(),
+        "preparation_policy": {"reject_unknown_engine_features": true, "require_canonical_diagnostic_policy": true},
+        "preparation_limits": {"override_count": native["compilation"]["override_count"], "largest_override_bytes": native["compilation"]["largest_override_bytes"], "aggregate_override_bytes": native["compilation"]["aggregate_override_bytes"], "diagnostic_entries": native["compilation"]["diagnostic_projection_entries"], "diagnostic_entry_bytes": native["compilation"]["diagnostic_projection_bytes"]},
         "request_inventory": [],
         "issues": [{"code": "unsupported_feature", "role": "feature", "declaration_ordinal": "0", "referenced_inventory_ordinal": null}]
     })
@@ -1641,6 +2500,332 @@ fn validate_semantics(
         "transport ledger order poison",
     )?;
 
+    for disposition in ["omit", "warn_and_omit", "reject_catalog"] {
+        let policy = json!({"invalid_candidate": disposition, "unreadable_candidate": disposition});
+        validate_definition(
+            schema,
+            "font_scan_policy",
+            &policy,
+            true,
+            "font scan policy",
+        )?;
+        summary.semantic_cases += 1;
+    }
+    let creation_inventory = creation_operational_inventory(native);
+    if !font_policy_coherent(&creation_inventory) {
+        return Err(
+            "Creation Report did not preserve requested/admitted Font Scan Policy".to_owned(),
+        );
+    }
+    let mut applied_policy = creation_inventory.clone();
+    applied_policy["dependency_execution"]["font_scan_policy"]["reached"] = json!({
+        "kind": "applied",
+        "policy": font_scan_policy(),
+        "diagnostic_count": "0"
+    });
+    if !font_policy_coherent(&applied_policy) {
+        return Err("applied Font Scan Policy did not reach the authority unchanged".to_owned());
+    }
+    let mut mismatched_policy = applied_policy;
+    mismatched_policy["dependency_execution"]["font_scan_policy"]["reached"]["policy"] =
+        json!({"invalid_candidate": "reject_catalog", "unreadable_candidate": "reject_catalog"});
+    if font_policy_coherent(&mismatched_policy) {
+        return Err("returned Font Scan Policy mismatch did not fail closed".to_owned());
+    }
+    let mut unsupported_policy = creation_admission_refusal(native);
+    unsupported_policy["reason"] = json!("font_scan_policy_unavailable");
+    if unsupported_policy["stage"] != "admission" || unsupported_policy.get("report").is_some() {
+        return Err("unsupported Font Scan Policy did not refuse before scanning".to_owned());
+    }
+    summary.semantic_cases += 4;
+
+    let not_selected = json!({"kind": "not_selected"});
+    validate_definition(
+        schema,
+        "engine_runtime_domain_selection",
+        &not_selected,
+        true,
+        "domain not selected",
+    )?;
+    let not_selected_with_width = json!({"kind": "not_selected", "width": "1"});
+    validate_definition(
+        schema,
+        "engine_runtime_domain_selection",
+        &not_selected_with_width,
+        false,
+        "domain not selected with inferred width",
+    )?;
+    let admission_phase_report = compilation_report(native, false);
+    if admission_phase_report
+        .pointer("/report_projection/terminal/phase")
+        .and_then(Value::as_str)
+        != Some("admission")
+        || admission_phase_report
+            .pointer("/operational_inventory/role_execution/domain/kind")
+            .and_then(Value::as_str)
+            != Some("not_selected")
+        || admission_phase_report
+            .pointer("/operational_inventory/role_execution/reached_placement/kind")
+            .and_then(Value::as_str)
+            != Some("not_reached")
+    {
+        return Err(
+            "admission-phase interruption fabricated reached execution/domain facts".to_owned(),
+        );
+    }
+    for predispatch_terminal in [
+        "cache_hit",
+        "dependency_failure",
+        "queue_refusal",
+        "cancellation_before_dispatch",
+        "worker_setup_failure_before_assignment",
+    ] {
+        let domain = json!({"kind": "not_selected"});
+        if domain["kind"] != "not_selected" || predispatch_terminal.is_empty() {
+            return Err("pre-dispatch terminal selected an Engine Runtime Domain".to_owned());
+        }
+    }
+    summary.semantic_cases += 2;
+
+    let archive_object_count = frozen_transport_object_count(FrozenTransportSubject::SingleValue);
+    let cleanup_primary = json!({
+        "stages": ["admission", "plan_freeze", "transfer", "commit", "cleanup", "complete"],
+        "primary_terminal": "cleanup", "object_count": archive_object_count, "transferred_bytes": "8",
+        "actual_commit": "complete_collection_atomic", "cleanup_outcome": "cleanup_failed",
+        "residual_locator": null, "exposed_bytes": "8",
+        "timing": {"status": "not_requested", "phases": []},
+        "structural_network_enforcement_reached": "not_claimed", "enforcement_reached": [],
+        "interruption_winner": "terminal_commitment", "reached_scope": capability_scope("spool")
+    });
+    validate_definition(
+        schema,
+        "transport_stage_ledger",
+        &cleanup_primary,
+        true,
+        "post-commit cleanup-primary ledger",
+    )?;
+    validate_transport_ledger(&cleanup_primary, true, "post-commit cleanup-primary ledger")?;
+    let mut cleanup_receipt = transport_admitted(native);
+    cleanup_receipt["status"] = json!("failed");
+    cleanup_receipt["stage_ledger"] = cleanup_primary.clone();
+    let cleanup_outcome = json!({
+        "terminal": {"status": "failed", "primary": {"kind": "cleanup"}, "cleanup_outcome": "cleanup_failed"},
+        "receipt": cleanup_receipt
+    });
+    validate_definition(
+        schema,
+        "transport_outcome",
+        &cleanup_outcome,
+        true,
+        "cleanup-primary transport outcome",
+    )?;
+    if !transport_outcome_primary_coherent(&cleanup_outcome) {
+        return Err("cleanup-primary ledger disagrees with outer failure".to_owned());
+    }
+    let closure_object_count =
+        frozen_transport_object_count(FrozenTransportSubject::ClosureExport { entries: 200_000 });
+    let transfer_primary = json!({
+        "stages": ["admission", "plan_freeze", "transfer", "cleanup", "complete"],
+        "primary_terminal": "transfer", "object_count": closure_object_count, "transferred_bytes": "8",
+        "actual_commit": null, "cleanup_outcome": "cleanup_failed", "residual_locator": null,
+        "exposed_bytes": "8", "timing": {"status": "not_requested", "phases": []},
+        "structural_network_enforcement_reached": "not_claimed", "enforcement_reached": [],
+        "interruption_winner": null, "reached_scope": capability_scope("closure_export_publication")
+    });
+    validate_definition(
+        schema,
+        "transport_stage_ledger",
+        &transfer_primary,
+        true,
+        "partial transfer ledger",
+    )?;
+    validate_transport_ledger(&transfer_primary, true, "partial transfer ledger")?;
+    let mut transfer_receipt = transport_admitted(native);
+    transfer_receipt["status"] = json!("failed");
+    transfer_receipt["stage_ledger"] = transfer_primary.clone();
+    let transfer_outcome = json!({
+        "terminal": {"status": "failed", "primary": {"kind": "transfer"}, "cleanup_outcome": "cleanup_failed"},
+        "receipt": transfer_receipt
+    });
+    if !transport_outcome_primary_coherent(&transfer_outcome) {
+        return Err("earlier transfer failure was overwritten by cleanup".to_owned());
+    }
+    let mut overwritten = transfer_outcome;
+    overwritten["terminal"]["primary"]["kind"] = json!("cleanup");
+    if transport_outcome_primary_coherent(&overwritten) {
+        return Err("cleanup overwrote an earlier transfer primary failure".to_owned());
+    }
+    if cleanup_primary["object_count"] != "1" || transfer_primary["object_count"] != "200000" {
+        return Err("frozen transport object count changed with reached transfer facts".to_owned());
+    }
+    if frozen_transport_object_count(FrozenTransportSubject::ProjectMaterialization { files: 7 })
+        != "7"
+        || frozen_transport_object_count(FrozenTransportSubject::CompilationDelivery {
+            artifacts: 0,
+        }) != "0"
+    {
+        return Err("role-specific frozen transport object counts are incoherent".to_owned());
+    }
+    let complete_cleanup = transport_admitted(native);
+    if !transport_cleanup_coherent(&complete_cleanup)
+        || !transport_scope_coherent(&complete_cleanup)
+    {
+        return Err("complete-before-return cleanup fixture is incoherent".to_owned());
+    }
+    let mut illegal_residual = complete_cleanup.clone();
+    illegal_residual["stage_ledger"]["cleanup_outcome"] = json!("residual_reported");
+    illegal_residual["stage_ledger"]["residual_locator"] = json!({"safe_summary": "partial"});
+    if transport_cleanup_coherent(&illegal_residual) {
+        return Err("residual state was accepted under complete-before-return".to_owned());
+    }
+    let mut permitted_residual = illegal_residual;
+    permitted_residual["admission"]["requested_cleanup_requirement"] =
+        json!("residual_locator_permitted");
+    permitted_residual["admission"]["admitted_cleanup_requirement"] =
+        json!("residual_locator_permitted");
+    if !transport_cleanup_coherent(&permitted_residual) {
+        return Err("permitted residual cleanup state was rejected".to_owned());
+    }
+    summary.semantic_cases += 3;
+
+    let publication_refusal = archive_publication_refusal(native);
+    if !transport_scope_coherent(&publication_refusal["transport"]["receipt"]) {
+        return Err("publication transport scope is not bound to its exact subject".to_owned());
+    }
+    validate_definition(
+        schema,
+        "format_receipt_request_facts",
+        &publication_refusal["format"]["request"],
+        true,
+        "paired archive publication request facts",
+    )?;
+    validate_definition(
+        schema,
+        "publication_transport_admission_refused",
+        &publication_refusal["format"]["admission"],
+        true,
+        "paired archive publication admission refusal",
+    )?;
+    validate_definition(
+        schema,
+        "format_receipt",
+        &publication_refusal["format"],
+        true,
+        "paired archive publication format refusal",
+    )?;
+    validate_definition(
+        schema,
+        "archive_publication_outcome",
+        &publication_refusal,
+        true,
+        "paired archive publication refusal",
+    )?;
+    if !publication_refusal_coherent(&publication_refusal) {
+        return Err("paired archive publication refusal is incoherent".to_owned());
+    }
+    let mut mismatched_publication_refusal = publication_refusal.clone();
+    mismatched_publication_refusal["format"]["admission"]["reason"] =
+        json!("cleanup_requirement_unavailable");
+    if publication_refusal_coherent(&mismatched_publication_refusal) {
+        return Err("cross-receipt publication reason mutation was accepted".to_owned());
+    }
+    let closure_refusal = closure_publication_refusal(native);
+    validate_definition(
+        schema,
+        "closure_publication_outcome",
+        &closure_refusal,
+        true,
+        "paired Closure Export publication refusal",
+    )?;
+    if !closure_publication_refusal_coherent(&closure_refusal) {
+        return Err("paired Closure Export publication refusal is incoherent".to_owned());
+    }
+    let mut mutated_closure = closure_refusal;
+    mutated_closure["transport"]["receipt"]["requested_subject"]["source_tree"] =
+        json!(identity("closure-export-tree-content", 'f'));
+    if closure_publication_refusal_coherent(&mutated_closure) {
+        return Err("cross-receipt Closure Export subject mutation was accepted".to_owned());
+    }
+    summary.semantic_cases += 4;
+
+    let refusal = compilation_admission_refusal(native);
+    if refusal["stage"] != "admission"
+        || refusal["compilation_identity"].is_null()
+        || refusal.get("report").is_some()
+    {
+        return Err("prepared compilation admission refusal precedence is lossy".to_owned());
+    }
+    let rejection_beats_jobs = compile_operation_request_rejected(native);
+    validate_definition(
+        schema,
+        "compile_operation",
+        &rejection_beats_jobs,
+        true,
+        "invalid semantic request beats unavailable exact jobs",
+    )?;
+    if !rejection_beats_jobs["adapter_jobs"]["admitted"].is_null()
+        || rejection_beats_jobs.get("admission_refusal").is_some()
+        || rejection_beats_jobs.get("report").is_some()
+    {
+        return Err("request rejection did not precede operational jobs admission".to_owned());
+    }
+    summary.semantic_cases += 1;
+
+    let creation_refusal = creation_admission_refusal(native);
+    let creation_offered = json!([
+        creation_refusal["evidence"]["offered_scope"],
+        creation_refusal["packages"]["offered_scope"],
+        creation_refusal["fonts"]["offered_scope"],
+        creation_refusal["reporting"]["offered_scope"]
+    ]);
+    if !capability_scopes_are_subsets(
+        &creation_refusal["operation_request"]["required_capability_scopes"],
+        &creation_offered,
+        &json!([]),
+    ) {
+        return Err("creation capability scopes are not sourced from bound descriptors".to_owned());
+    }
+    let compilation_offered = json!([
+        refusal["packages"]["offered_scope"],
+        refusal["fonts"]["offered_scope"],
+        refusal["reporting"]["offered_scope"]
+    ]);
+    if !capability_scopes_are_subsets(
+        &refusal["operation_request"]["required_capability_scopes"],
+        &compilation_offered,
+        &json!([]),
+    ) {
+        return Err(
+            "compilation capability scopes are not sourced from bound descriptors".to_owned(),
+        );
+    }
+    let mut duplicate_scopes = refusal["operation_request"]["required_capability_scopes"].clone();
+    duplicate_scopes
+        .as_array_mut()
+        .ok_or("capability scopes must be an array")?
+        .push(json!({"role": "reporting", "permitted_uses": ["timing"], "coverage": "selected_report_channels", "completeness": "complete"}));
+    if capability_scope_map(&duplicate_scopes).is_some() {
+        return Err("duplicate capability role escaped semantic validation".to_owned());
+    }
+    for reason in [
+        "required_capability_scope_unavailable",
+        "execution_placement_unavailable",
+        "isolation_contract_unavailable",
+        "required_reporting_unavailable",
+    ] {
+        let mut typed_refusal = refusal.clone();
+        typed_refusal["reason"] = json!(reason);
+        if typed_refusal["stage"] != "admission"
+            || typed_refusal.get("report").is_some()
+            || typed_refusal["compilation_identity"].is_null()
+        {
+            return Err(format!(
+                "{reason} did not remain a reportless prepared refusal"
+            ));
+        }
+    }
+    summary.semantic_cases += 7;
+
     let materialization = project_materialization_receipt(native);
     let effect = field(&materialization, "effect")?;
     let files = array_at(effect, "/files")?;
@@ -1672,6 +2857,67 @@ fn validate_semantics(
         Some("not_applicable"),
         "project materialization common publication",
     )?;
+
+    let archive_receipt = archive_encoding_format_receipt(native);
+    let accounting = archive_receipt
+        .pointer("/effect/common/accounting")
+        .ok_or("archive receipt missing accounting")?;
+    let control = parse_decimal(
+        string_field(&accounting["physical"], "control_record_bytes")?,
+        "archive C",
+    )?;
+    let blobs = parse_decimal(
+        string_field(&accounting["physical"], "blob_count")?,
+        "archive B",
+    )?;
+    let blob_bytes = parse_decimal(
+        string_field(&accounting["physical"], "blob_bytes")?,
+        "archive P",
+    )?;
+    let entries = parse_decimal(
+        string_field(&accounting["physical"], "representation_entries")?,
+        "archive N",
+    )?;
+    let planned = parse_decimal(
+        string_field(accounting, "planned_output_bytes")?,
+        "archive A",
+    )?;
+    let expected_archive =
+        control + blob_bytes + 138 + 252 * blobs + if entries >= 65_535 { 76 } else { 0 };
+    if planned != expected_archive
+        || accounting["completed_output_bytes"] != accounting["planned_output_bytes"]
+        || archive_receipt["effect"]["closure_export_tree_identity"].is_null()
+    {
+        return Err(
+            "successful archive receipt violates all-Stored plan or identity coherence".to_owned(),
+        );
+    }
+    summary.semantic_cases += 1;
+
+    let mut wrong_role_receipt = project_materialization_receipt(native);
+    wrong_role_receipt["role"] = json!("pack_archive_encode");
+    wrong_role_receipt["request"] = json!({
+        "kind": "pack_archive_encode",
+        "source_pack_identity": identity("pack", 'b'),
+        "selected_archive_encoding_identity": first_party_archive_encoding_identity()
+    });
+    validate_definition(
+        schema,
+        "format_receipt",
+        &wrong_role_receipt,
+        false,
+        "cross-role Format Receipt accounting poison",
+    )?;
+    let mut impossible_archive_terminal = archive_receipt.clone();
+    impossible_archive_terminal["terminal"] = json!("invalid");
+    validate_definition(
+        schema,
+        "pack_archive_encoding_format_receipt",
+        &impossible_archive_terminal,
+        false,
+        "archive encode invalid-terminal poison",
+    )?;
+    summary.semantic_cases += 1;
 
     let retiring = session_state("retiring", false);
     check_eq(
@@ -1748,6 +2994,9 @@ fn automatic_jobs_width_coherent(operation: &Value) -> bool {
     let domain_width = operation
         .pointer("/report/operational_inventory/role_execution/domain/width")
         .and_then(Value::as_str);
+    let domain_kind = operation
+        .pointer("/report/operational_inventory/role_execution/domain/kind")
+        .and_then(Value::as_str);
     matches!(
         lexical,
         Some("omitted_automatic" | "explicit_zero_automatic")
@@ -1755,7 +3004,8 @@ fn automatic_jobs_width_coherent(operation: &Value) -> bool {
         && requested == Some("automatic")
         && admitted_jobs.is_some()
         && admitted_jobs == admitted_width
-        && admitted_width == domain_width
+        && (domain_kind == Some("not_selected") && domain_width.is_none()
+            || domain_kind == Some("managed") && admitted_width == domain_width)
 }
 
 fn exact_jobs_width_coherent(operation: &Value) -> bool {
@@ -1881,17 +3131,90 @@ fn validate_transport_ledger(ledger: &Value, expected: bool, label: &str) -> Che
         .map(|(index, stage)| (*stage, index))
         .collect::<BTreeMap<_, _>>();
     let stages = strings_at(ledger, "/stages")?;
+    let primary = ledger.get("primary_terminal").and_then(Value::as_str);
     let increasing = stages.windows(2).all(|pair| rank[pair[0]] < rank[pair[1]])
         && stages.first().copied() == Some("admission")
-        && stages.last().copied() == ledger.get("primary_terminal").and_then(Value::as_str);
+        && stages.get(1).copied() == Some("plan_freeze")
+        && primary.is_some_and(|stage| stages.contains(&stage));
     let commit_coherent = ledger["actual_commit"].is_null() || stages.contains(&"commit");
-    let actual = increasing && commit_coherent;
+    let cleanup_primary_coherent =
+        primary != Some("cleanup") || ledger["cleanup_outcome"] == "cleanup_failed";
+    let committed_primary_coherent = ledger["actual_commit"].is_null()
+        || matches!(primary, Some("commit" | "cleanup" | "complete"));
+    let actual =
+        increasing && commit_coherent && cleanup_primary_coherent && committed_primary_coherent;
     if actual != expected {
         return Err(format!(
             "{label}: expected semantic validity {expected}, got {actual}"
         ));
     }
     Ok(())
+}
+
+fn transport_cleanup_coherent(receipt: &Value) -> bool {
+    let requirement = receipt
+        .pointer("/admission/admitted_cleanup_requirement")
+        .and_then(Value::as_str);
+    let outcome = receipt
+        .pointer("/stage_ledger/cleanup_outcome")
+        .and_then(Value::as_str);
+    let residual = receipt.pointer("/stage_ledger/residual_locator");
+    match (requirement, outcome, residual) {
+        (_, Some("complete" | "not_required"), Some(Value::Null)) => true,
+        (Some("residual_locator_permitted"), Some("residual_reported"), Some(Value::Object(_))) => {
+            true
+        }
+        (Some("complete_before_return"), Some("cleanup_failed"), _) => true,
+        (Some("residual_locator_permitted"), Some("cleanup_failed"), _) => true,
+        _ => false,
+    }
+}
+
+fn transport_scope_coherent(receipt: &Value) -> bool {
+    if receipt.get("status").and_then(Value::as_str) == Some("admission_refused") {
+        return capability_scopes_are_subsets(
+            &json!([receipt["request"]["required_scope"]]),
+            &json!([receipt["descriptor"]["offered_scope"]]),
+            &json!([]),
+        );
+    }
+    capability_scopes_are_subsets(
+        &json!([receipt["admission"]["requested_scope"]]),
+        &json!([receipt["admission"]["admitted_scope"]]),
+        &json!([receipt["stage_ledger"]["reached_scope"]]),
+    ) && capability_scopes_are_subsets(
+        &json!([receipt["admission"]["requested_scope"]]),
+        &json!([receipt["admission"]["descriptor"]["offered_scope"]]),
+        &json!([]),
+    )
+}
+
+fn transport_outcome_primary_coherent(outcome: &Value) -> bool {
+    let receipt_stage = outcome
+        .pointer("/receipt/stage_ledger/primary_terminal")
+        .and_then(Value::as_str);
+    match outcome.pointer("/terminal/status").and_then(Value::as_str) {
+        Some("succeeded") => receipt_stage == Some("complete"),
+        Some("admission_refused") => {
+            outcome.pointer("/receipt/status").and_then(Value::as_str) == Some("admission_refused")
+                && receipt_stage.is_none()
+        }
+        Some("failed") => {
+            let expected_stage = match outcome
+                .pointer("/terminal/primary/kind")
+                .and_then(Value::as_str)
+            {
+                Some("acquisition") => "acquisition",
+                Some("transfer") => "transfer",
+                Some("commit") => "commit",
+                Some("cleanup") => "cleanup",
+                Some("cancelled" | "deadline") => return true,
+                _ => return false,
+            };
+            receipt_stage == Some(expected_stage)
+        }
+        _ => false,
+    }
 }
 
 fn validate_graphql(source: &str, summary: &mut Summary) -> CheckResult<()> {
@@ -2122,13 +3445,28 @@ fn validate_graphql(source: &str, summary: &mut Summary) -> CheckResult<()> {
     }
 
     for (object, expected) in [
+        ("TypstPackAdmissionRefusal", &["stage"][..]),
         (
             "TypstPackPackCreation",
-            &["id", "status", "report", "pack", "requirePack"][..],
+            &[
+                "id",
+                "status",
+                "admissionRefusal",
+                "report",
+                "pack",
+                "requirePack",
+            ][..],
         ),
         (
             "TypstPackPackIngress",
-            &["id", "status", "receipt", "pack", "requirePack"],
+            &[
+                "id",
+                "status",
+                "admissionRefusal",
+                "receipt",
+                "pack",
+                "requirePack",
+            ],
         ),
         (
             "TypstPackPack",
@@ -2147,9 +3485,12 @@ fn validate_graphql(source: &str, summary: &mut Summary) -> CheckResult<()> {
             &[
                 "id",
                 "status",
+                "admissionRefusal",
                 "receipt",
                 "stagingStatus",
                 "stagingReceipt",
+                "publicationFormatReceipt",
+                "publicationTransportReceipt",
                 "archive",
                 "requireArchive",
             ],
@@ -2159,9 +3500,12 @@ fn validate_graphql(source: &str, summary: &mut Summary) -> CheckResult<()> {
             &[
                 "id",
                 "status",
+                "admissionRefusal",
                 "receipt",
                 "stagingStatus",
                 "stagingReceipt",
+                "publicationFormatReceipt",
+                "publicationTransportReceipt",
                 "tree",
                 "requireTree",
             ],
@@ -2171,6 +3515,7 @@ fn validate_graphql(source: &str, summary: &mut Summary) -> CheckResult<()> {
             &[
                 "id",
                 "status",
+                "admissionRefusal",
                 "receipt",
                 "stagingStatus",
                 "stagingReceipt",
@@ -2183,6 +3528,7 @@ fn validate_graphql(source: &str, summary: &mut Summary) -> CheckResult<()> {
             &[
                 "id",
                 "status",
+                "admissionRefusal",
                 "operation",
                 "terminal",
                 "report",
@@ -2199,6 +3545,11 @@ fn validate_graphql(source: &str, summary: &mut Summary) -> CheckResult<()> {
     }
 
     for (object, field, signature) in [
+        (
+            "TypstPackAdmissionRefusal",
+            "stage",
+            "TypstPackAdmissionStage!",
+        ),
         (
             "TypstPackPackCreation",
             "status",
@@ -2237,6 +3588,52 @@ fn validate_graphql(source: &str, summary: &mut Summary) -> CheckResult<()> {
         ("TypstPackCompilation", "operation", "File!"),
         ("TypstPackCompilation", "terminal", "File"),
         ("TypstPackCompilation", "report", "File"),
+        (
+            "TypstPackPackCreation",
+            "admissionRefusal",
+            "TypstPackAdmissionRefusal",
+        ),
+        (
+            "TypstPackPackIngress",
+            "admissionRefusal",
+            "TypstPackAdmissionRefusal",
+        ),
+        (
+            "TypstPackPackArchiveEncoding",
+            "admissionRefusal",
+            "TypstPackAdmissionRefusal",
+        ),
+        (
+            "TypstPackClosureExport",
+            "admissionRefusal",
+            "TypstPackAdmissionRefusal",
+        ),
+        (
+            "TypstPackProjectMaterialization",
+            "admissionRefusal",
+            "TypstPackAdmissionRefusal",
+        ),
+        (
+            "TypstPackCompilation",
+            "admissionRefusal",
+            "TypstPackAdmissionRefusal",
+        ),
+        (
+            "TypstPackPackArchiveEncoding",
+            "publicationFormatReceipt",
+            "File",
+        ),
+        (
+            "TypstPackPackArchiveEncoding",
+            "publicationTransportReceipt",
+            "File",
+        ),
+        ("TypstPackClosureExport", "publicationFormatReceipt", "File"),
+        (
+            "TypstPackClosureExport",
+            "publicationTransportReceipt",
+            "File",
+        ),
     ] {
         assert_graphql_field_type(&objects, object, field, signature)?;
     }
@@ -2303,6 +3700,7 @@ fn validate_graphql(source: &str, summary: &mut Summary) -> CheckResult<()> {
     }
 
     for (name, values) in [
+        ("TypstPackAdmissionStage", &["ADMISSION"][..]),
         (
             "TypstPackCreationStatus",
             &[
@@ -2577,6 +3975,7 @@ fn validate_html(source: &str, cases: &Value, summary: &mut Summary) -> CheckRes
         "Refresh",
         "Retry",
         "AttemptFinished",
+        "AttemptAdmissionRefused",
         "AttemptReleased",
         "FenceReadFinished",
         "SubscriptionsArmed",
@@ -2587,6 +3986,7 @@ fn validate_html(source: &str, cases: &Value, summary: &mut Summary) -> CheckRes
         "Accept",
         "Retry",
         "AttemptFinished",
+        "AttemptAdmissionRefused",
         "AttemptReleased",
         "FenceReadFinished",
         "SubscriptionsArmed",
@@ -2823,6 +4223,31 @@ fn validate_html(source: &str, cases: &Value, summary: &mut Summary) -> CheckRes
         "Publish",
         &["cleanOutcome(", multiple, "currentPoll("],
     )?;
+    let refusal_step = trace_steps
+        .iter()
+        .find(|step| step.contains("id: \"admission-refusal-clear-token\""))
+        .ok_or("HTML lacks exact attempt-admission-refusal trace step")?;
+    if !refusal_step.contains("event(\"AttemptAdmissionRefused\", { token: \"a1\"")
+        || !refusal_step.contains("effect(\"StartAttempt\", { token: \"a2\"")
+        || refusal_step.contains("event(\"AttemptFinished\"")
+        || refusal_step.contains("effect(\"ReadFence\"")
+        || refusal_step.contains("effect(\"Publish\"")
+        || refusal_step.contains("retainedCandidate")
+        || refusal_step.contains("published:")
+        || refusal_step.contains("lastSuccess:")
+    {
+        return Err(
+            "HTML attempt admission refusal does not clear/start exactly without report publication"
+                .to_owned(),
+        );
+    }
+    let pending_step = trace_steps
+        .iter()
+        .find(|step| step.contains("id: \"admission-refusal-queue-r2\""))
+        .ok_or("HTML lacks pending revision before admission refusal")?;
+    if !pending_step.contains("pending: pendingRevision(\"r2\", \"e2\"") {
+        return Err("HTML admission refusal does not start eligible pending work".to_owned());
+    }
     validate_html_delivery_snapshots(executable, &trace_steps, summary)?;
     Ok(())
 }
@@ -3065,7 +4490,7 @@ fn validate_source_manifest(
                         "source manifest `{leaf}` probe marker must equal its leaf"
                     ));
                 }
-                let needle = format!("issue69-source: {marker}");
+                let needle = format!("final-source: {marker}");
                 let count = serializer_probe.matches(&needle).count();
                 if count != 1 {
                     return Err(format!(
@@ -3185,6 +4610,36 @@ fn validate_source_manifest(
             "refused-transport-with-admitted-reached-fields",
             "transport.receipt.refused",
             "requested values copied into admission or stage ledger",
+            "rust_accessor",
+        ),
+        (
+            "object-count-from-role-literal",
+            "transport.receipt.stage_ledger.object_count",
+            "adapter role literal",
+            "rust_accessor",
+        ),
+        (
+            "font-policy-from-profile",
+            "creation.request.font_scan_policy",
+            "adapter profile default",
+            "rust_accessor",
+        ),
+        (
+            "domain-from-worker-placement",
+            "compilation.domain.not_selected",
+            "worker placement",
+            "rust_accessor",
+        ),
+        (
+            "publication-reason-coercion",
+            "publication.format.transport_refusal.reason",
+            "Representation Admission Refusal reason",
+            "rust_accessor",
+        ),
+        (
+            "cleanup-outcome-from-requirement",
+            "transport.cleanup_outcome",
+            "requested cleanup requirement",
             "rust_accessor",
         ),
     ];

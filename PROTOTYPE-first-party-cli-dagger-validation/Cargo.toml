@@ -1,18 +1,22 @@
 [package]
-name = "typst-pack-issue-69-validation"
+name = "typst-pack-final-contract-validation"
 version = "0.0.0"
 edition = "2024"
 rust-version = "1.92"
 publish = false
 autobins = false
-default-run = "issue-69-validator"
+default-run = "final-contract-validator"
+
+[features]
+default = ["prototype-validation"]
+prototype-validation = []
 
 [lib]
 name = "typst_pack_interface"
 path = "../PROTOTYPE-rust-lifecycle-adapter-interfaces.rs"
 
 [[bin]]
-name = "issue-69-validator"
+name = "final-contract-validator"
 path = "src/main.rs"
 
 [[bin]]

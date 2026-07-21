@@ -1,12 +1,13 @@
-# PROTOTYPE: Issue 69 First-Party Adapter Regeneration
+# PROTOTYPE: Final Rust And First-Party Adapter Contract Regeneration
 
 > Throwaway design artifact for
-> [Regenerate first-party adapters and watch semantics](https://github.com/sagikazarmark/typst-pack/issues/69).
+> [Regenerate the final Rust and first-party adapter contracts](https://github.com/sagikazarmark/typst-pack/issues/78).
 > It is an implementation-planning contract, not production code and not a
 > compatibility promise for the current 0.3 surfaces.
 > Under the standing premise that no external or persisted v1 consumer exists,
-> this issue-69 prototype corrects the final issue-63 adapter baseline at
-> `43f2af9` in place against the final Rust narrative and fixture at `00cfca1`.
+> this final prototype corrects the issue-69 adapter baseline in place under
+> [Define aggregate creation and representation resource accounting](https://github.com/sagikazarmark/typst-pack/issues/76)
+> and [Reconcile residual lifecycle and receipt semantics](https://github.com/sagikazarmark/typst-pack/issues/77).
 > The strict adapter contract and every adapter schema remain major/version 1;
 > there are no compatibility aliases, legacy branches, or dual serializers.
 
@@ -30,10 +31,11 @@ Companion planning fixtures:
 
 ## Question
 
-What exact CLI flags, strict version-1 adapter projections, bound capability
-descriptors, Dagger names and nullability, representation and transport
-receipts, report behavior, and final-Rust watch semantics make the accepted
-six-command CLI and typed Dagger object model implementation-ready?
+What regenerated Rust 1.92 lifecycle fixture, strict JSON schemas, desired
+GraphQL structure, first-party profiles, serializer probe, watch model, and
+locked replay harness make every accepted lifecycle, receipt, terminal,
+resource, and publication-fence state constructible, inspectable, lossless, and
+cross-artifact coherent without adapter-invented facts?
 
 ## Verdict
 
@@ -62,6 +64,17 @@ Freeze two first-party adapters over one lifecycle:
 - Compilation Request Rejection has no fabricated Compilation Report,
   Compilation Identity, dependency evidence, or access trace. Post-commit work
   retains and never reclassifies an immutable report.
+- Pure compilation preparation runs before operational admission. Request
+  Rejection therefore wins over unavailable jobs or facilities; only a Prepared
+  Compilation can yield a reportless Admission Refusal or an admitted attempt.
+- Requests, immutable subjects, exact bound descriptors, successful admission,
+  and sealed reached ledgers are the five non-interchangeable fact sources.
+  Role-specific capability scope, execution placement, isolation, and Engine
+  Runtime Domain selection are serialized independently.
+- Creation and Pack resource accounting separates category and aggregate
+  logical dimensions from physical representation and peak occupancy. Archive,
+  Closure Export, and materialization limits are role-specific rather than one
+  representation bag.
 - Epoch 2 writing uses the registered `org.typst-pack.archive.all-stored`
   recipe, exposed as `epoch-2-all-stored-v1` and
   `EPOCH_2_ALL_STORED_V1`. It is the only first-release writer. Stored,
@@ -91,8 +104,8 @@ emits only the corrected spelling and branch; a consumer accepts no old alias.
 
 Each serialized leaf must have exactly one of these sources:
 
-1. A value returned by the corresponding final-Rust accessor or discriminated
-   branch at `00cfca1`.
+1. A value returned by the corresponding regenerated final-Rust accessor or
+   discriminated branch in the companion fixture.
 2. An explicit adapter input retained without semantic reinterpretation, such
    as the lexical jobs class, a destination spelling, or a presentation option.
 3. A closed adapter derivation defined in this document, such as mapping one
@@ -129,6 +142,7 @@ The following Operational Capability Class strings are exact constants:
 | Shared execution capacity scope | `org.typst-pack/native-cli/shared-execution-capacity/1` | `org.typst-pack/dagger/shared-execution-capacity/1` |
 | Creation Execution Facility | `org.typst-pack/native-cli/creation-facility/1` | `org.typst-pack/dagger/creation-facility/1` |
 | Compilation Execution Facility | `org.typst-pack/native-cli/compilation-facility/1` | `org.typst-pack/dagger/compilation-facility/1` |
+| Reporting Facility | `org.typst-pack/native-cli/reporting/1` | `org.typst-pack/dagger/reporting/1` |
 | Ready-job worker protocol, when present | `org.typst-pack/native-cli/ready-job-worker/1` | `org.typst-pack/dagger/ready-job-worker/1` |
 | Spool Facility | `org.typst-pack/native-cli/spool-facility/1` | `org.typst-pack/dagger/spool-facility/1` |
 | Pack Archive Acquirer | `org.typst-pack/native-cli/pack-archive-acquirer/1` | `org.typst-pack/dagger/pack-archive-acquirer/1` |
@@ -165,9 +179,9 @@ the final `role_execution` section.
 
 | Section | Creation source | Compilation source |
 | --- | --- | --- |
-| `admission` | `CreationAdmissionInventoryView`: requested/admitted trust and network, contractual no-network, structural network enforcement, and requested/admitted/reached enforcement | `CompilationAdmissionInventoryView` with the same role-bound distinctions |
-| `resources` | profile plus requested and admitted `CreationResourceLimits` | profile plus requested and admitted `CompilationResourceLimits` |
-| `dependency_execution` | bound Creation Evidence, Package Authority, and Font Authority descriptors; offline roles; requested/admitted `D` | bound Package/Font descriptors; optional cache descriptor, policy, lookup, isolation-domain presence, offline roles, and requested/admitted `D` |
+| `admission` | requested/admitted trust, network, enforcement, role-specific capability scopes, placement, and isolation | the same compilation-specific facts; reached state never lives in admission |
+| `resources` | profile plus requested/admitted limits and sealed reached category, aggregate, and peak-occupancy totals | profile plus requested and admitted `CompilationResourceLimits` |
+| `dependency_execution` | bound Creation Evidence, Package Authority, and Font Authority descriptors; requested/admitted/reached capability scopes; Font Scan Policy; offline roles; requested/admitted `D` | bound Package/Font descriptors; requested/admitted/reached scopes; optional cache descriptor, policy, lookup, isolation-domain presence, offline roles, and requested/admitted `D` |
 | `attempt_control` | deadline, cancellation presence, monotonic domain, queue timeout, latency target, requested/admitted interruption, and reached winner | the same plus explicit session-supersession applicability |
 | `role_execution` | exact caller-thread or facility branch, bound facility/domain descriptors, `K/Q/W/P` request/admission/applicability, domain selection, and reached queue/dispatch/termination/reap facts | the corresponding compilation-specific branch and types |
 | `reporting` | requested/admitted timing policies and reached channel/lease states | requested/admitted diagnostic, source, timing, and fine-timing policies plus reached channel/lease states |
@@ -191,6 +205,53 @@ receipt. Reached state is a separate branch or marker from the final Rust view:
 for example, admitted `T` does not mean transfer was reached, and a reached
 transfer stage does not invent a measured peak concurrency. None of these facts
 is copied from the profile.
+
+Capability grants expose closed role/use/coverage projections with complete or
+redacted status; no credential, root, locator, concrete Rust type, facility
+instance, or extension bag enters ordinary reports. Requested and admitted
+execution placement use `caller_thread`, `in_process_facility`, or
+`worker_facility`; isolation is a separate explicit contract. Reached placement
+or worker setup does not imply a selected Engine Runtime Domain. Cache hits,
+dependency failures, queue refusal, cancellation before dispatch, and worker
+setup failure before assignment serialize domain `not_selected`; only actual
+unmanaged or managed execution selects another branch.
+
+### Resource Accounting
+
+Creation atomically debits category limits together with `F_create`, the number
+of Project Snapshot and `(Package Specification, Package Path)` bindings, and
+`L_create`, their exact bytes plus each selected Font Container once. Discovery
+override bytes remain on their separate override budgets. Issued and ingressed
+Packs report logical `F_pack/L_pack` independently from physical `C/B/P/N`:
+control-record bytes, deduplicated blob count and bytes, and representation entry
+count `N = B + 1`. Equal logical bindings charge repeatedly; physical blobs
+deduplicate only by full typed Content Identity.
+
+Archive, Closure Export, and Project Materialization limits are separate wire
+objects. Epoch 2 all-Stored encoding computes checked local records `R`, central
+directory `D`, ZIP64 trailer `Z`, and exact archive bytes `A` before effects.
+Under first-party ceilings:
+
+```text
+A = C + P + 138 + 252B + (76 when N >= 65,535, otherwise 0)
+```
+
+Stable spool and retained memory are operation-private peak-live occupancy, not
+cumulative content counters. Every successful first-party Archive or Closure
+Export preflights the same unmodified profile's logical, physical, largest,
+entry, exact-output, and expansion ingress ceilings.
+
+| Dimension | `native-cli/1` | `dagger-ci/1` |
+| --- | ---: | ---: |
+| `F_create`, `F_pack` | 100,000 | 100,000 |
+| `L_create`, `L_pack`, `P` | 4 GiB | 8 GiB |
+| `C` | 64 MiB | 64 MiB |
+| `N`, transport objects | 200,000 | 200,000 |
+| Largest blob | 512 MiB | 512 MiB |
+| Archive `A` | 1 GiB | 2 GiB |
+| Closure payload `C + P` | 4,362,076,160 | 8,657,043,456 |
+| Materialization `M/J` | 100,000 / 8 GiB | 100,000 / 16 GiB |
+| Peak spool / retained memory | 16 GiB / 4 GiB | 32 GiB / 8 GiB |
 
 ## CLI Grammar
 
@@ -597,11 +658,13 @@ spool attempt is null, never a synthesized successful spool receipt.
 Metadata is non-identifying. Annotation files use `.ann` and opaque payloads.
 Generic semantic extensions require a separately typed first-party interface.
 
-Both first-party profiles freeze Font Scan Policy to `warn_and_omit` for invalid
-and unreadable candidates. The adapter-owned create-operation policy field
-reports that fixed choice and uses it to construct `FontCatalogAcquisition`.
-The core Creation Report has no Font Scan Policy accessor; it retains only the
-resulting ordered diagnostics.
+Both first-party profiles default Font Scan Policy to `warn_and_omit` for invalid
+and unreadable candidates, but a profile is not report evidence. The resolved
+policy enters `CreationOperationRequest`; creation admission matches it unchanged
+against the exact bound Font Authority descriptor or refuses with
+`font_scan_policy_unavailable` before scanning. The Creation Report dependency
+inventory records requested, admitted, and `not_reached` or `applied` policy plus
+deterministic diagnostics. A returned-policy mismatch fails internal integrity.
 
 Creation request construction is a separate outer terminal. Project Snapshot,
 variant, override, inclusion, embedding-policy, metadata, annotation, and final
@@ -629,7 +692,7 @@ typed failure when issuance fails. Failure detail is serialized only when the
 Rust branch exposes it: authority class/code/safe message, Source Changed or
 Revalidation Failed safe code, Insufficient Evidence Capability required and
 available projections, or the closed resource/interruption/execution/replay/
-integrity branch. The operation envelope keeps lexical jobs, adapter-owned Font
+integrity branch. The operation envelope keeps lexical jobs, request-owned Font
 Scan Policy, typed construction/admission terminal, Creation Report, complete
 archive-encoding report with its format/spool receipts, publication, and
 post-commit timing as separate siblings. No earlier terminal fabricates a core
@@ -660,10 +723,12 @@ typst-pack c [OPTIONS] <PACK> [OUTPUT]
 
 Named Pack plus omitted output replaces the Pack extension with selected format;
 stdin requires output. Document output is file/stdout; page output is a template.
-Compilation first creates its non-null outer operation envelope. Adapter failure
-or Compilation Operation admission refusal ends there with no Compilation
-Terminal or Report. After admission, preparation yields Request Rejection or an
-admitted execution yields an immutable Compilation Report; only the latter can
+Compilation first creates its non-null outer operation envelope and runs pure,
+bounded semantic preparation before any operation facility is appraised.
+Preparation yields Request Rejection or a Prepared Compilation. Only the latter
+enters Compilation Operation admission; refusal retains Compilation Identity but
+has no Compilation Terminal or Report, while admitted execution yields an
+immutable Compilation Report. Only the latter can
 be delivered. Any rejection, operation, delivery, or requested auxiliary failure
 exits nonzero. Delivery cannot rewrite a succeeded result. Persistent
 result-cache controls are absent.
@@ -771,6 +836,12 @@ when that completion cannot publish. `Retry` creates a new Session Evaluation in
 the same Session Revision; it does not create a revision or mutate the prepared
 semantic request. There is no automatic terminal retry.
 
+Attempt admission happens after the reducer emits `StartAttempt`. If admission
+refuses, `AttemptAdmissionRefused { token, refusal }` clears only the exact
+active token and starts the latest eligible pending Prepared Compilation. It is
+reportless: it emits no `AttemptFinished`, creates no publication candidate or
+fence, cannot claim currentness, and cannot replace Last Successful Compilation.
+
 The event and effect vocabularies are exact and independent; rows do not imply a
 one-to-one event/effect mapping.
 
@@ -782,6 +853,7 @@ one-to-one event/effect mapping.
 | `Refresh` |
 | `Retry` |
 | `AttemptFinished { token, report }` |
+| `AttemptAdmissionRefused { token, refusal }` |
 | `AttemptReleased { token, release }` |
 | `FenceReadFinished { token, outcome }` |
 | `SubscriptionsArmed { token, outcome }` |
@@ -927,7 +999,7 @@ Automation consumes JSON status, not a new exit taxonomy.
 
 ## Auxiliary Inputs And Stable JSON
 
-The strict issue-69 schema target is normative for every serialized structure,
+The strict final-contract schema target is normative for every serialized structure,
 closed branch, enum, and nullability rule. A checked companion schema is a
 planning target, not a claim that an implementation already emits conforming
 documents.
@@ -948,7 +1020,7 @@ regenerated strict schema defines:
 - `org.typst-pack.adapter-resource-profile/1`, with role-specific creation and
   compilation execution capacities over one shared adapter pool, creation
   package-file/largest-member/Font Catalog candidate limits, isolated creation
-  worker capacity, and the fixed first-party `warn_and_omit` Font Scan Policy;
+  worker capacity, and the first-party `warn_and_omit` Font Scan Policy default;
   and
 - all ingress, inspection, creation, compilation, representation, staging,
   transport, watch-state, and watch-pointer output documents.
@@ -1005,16 +1077,19 @@ records are also role-specific: diagnostic entries, diagnostic source bytes,
 Typst request values, Pack Override bytes and equality detail, backing locators,
 and adapter detail cannot be interchanged through a generic record bag.
 
-Compilation operation preserves four layers:
+Compilation operation preserves five layers:
 
 1. Pre-core adapter failure: `adapter_outcome` non-null, terminal/report/identities
    null.
-2. Compilation Operation admission refusal: operation request, appraised bound
+2. Pure preparation Request Rejection: preparation policy/limits and safe request
+   inventory are non-null; there is no Prepared Compilation, identity,
+   operational admission, report, or selected domain.
+3. Compilation Operation admission refusal: Prepared Compilation Identity,
+   operation request, appraised bound
    descriptors, and typed refusal are non-null; terminal/report/identities are
-   null.
-3. Core Compilation Terminal after admission: Request Rejection has no report;
-   admitted execution has one Compilation Report.
-4. Post-commit delivery and sidecars: sibling outcomes retaining a report.
+   absent except for the prepared Compilation Identity.
+4. Admitted execution has one immutable Compilation Report.
+5. Post-commit delivery and sidecars are sibling outcomes retaining a report.
 
 Creation preserves four pre/post boundaries: adapter ingestion, typed Creation
 Request construction, Creation Operation admission, and an admitted Creation
@@ -1040,7 +1115,7 @@ identity or path types.
 | Outer/core state | Compilation ID | Report | Result ID | Semantic artifacts |
 | --- | --- | --- | --- | --- |
 | Adapter failed | null | null | null | null |
-| Compilation admission refused | null | null | null | null |
+| Compilation admission refused | non-null Prepared Compilation Identity | null | null | null |
 | Request rejected | null | null | null | null |
 | Operation outcome | non-null | non-null | null | null |
 | Rejected result | non-null | non-null | non-null | null |
@@ -1050,27 +1125,29 @@ Format Receipt Contract v1 has seven role-specific stable views:
 `pack_archive_encode`, `pack_archive_read`, `closure_export_project`,
 `project_materialization`, `closure_export_import`, `pack_archive_publish`, and
 `closure_export_publish`. They share the exact `FormatReceiptCommonView`:
-contract version, role, terminal, stage, counters, Pack exposure, stable-value
+contract version, role, terminal, stage, role-specific accounting, Pack exposure, stable-value
 completion, timing, adapter class, admission, publication, cleanup, failure
 class/cause, and ordered validation rules. The first-party JSON document adds
 only the standard schema/producer header around that common projection. Each
 view then exposes only its legal typed Pack, archive, control-record, Archive
 Encoding, Closure Export Tree, verification/assertion, and file fields.
 
-Format admission is always discriminated. `refused` carries the complete
-requested `FormatReceiptControlsView` and one
-`RepresentationAdmissionRefusalReason`, but no admitted or reached facts.
-`admitted` carries separate requested and admitted controls; counters,
-identities, exposure, completion, timing, publication, cleanup, and failure are
-then serialized only as reached by their Rust accessors. Unsupported archive
-encoding recipes remain typed admission refusals rather than generic adapter
-failure.
+Format admission is always discriminated. Non-publication `refused` carries the
+complete requested `FormatReceiptControlsView` and one
+`RepresentationAdmissionRefusalReason`. Publication instead carries a
+transport-typed refusal or admission projected from the same private record as
+its sibling Transport Receipt. Both refusal receipts require stage `admission`
+and the same exact transport reason, with no admitted or reached facts.
+`admitted` carries separate requested and admitted controls; role-specific
+logical, physical, output, and occupancy accounting, identities, exposure,
+completion, timing, publication, cleanup, and failure are serialized only as
+reached by their Rust accessors.
 
-The role/terminal matrix, stage monotonicity, counter coherence, identity
+The role/terminal matrix, stage monotonicity, accounting coherence, identity
 coherence, and fixed-precedence validation rules are semantic validation rules.
-The schema fixes every success counter's applicability, using null rather than
-zero for inapplicable counters. Numeric equality and ordering between counters,
-identities, and file arrays remain semantic validation. Archive encode/read,
+The schema fixes every role's accounting shape; there is no generic nullable
+counter bag. Numeric equality and ordering between accounting, identities, and
+file arrays remain semantic validation. Archive encode/read,
 Closure Export project/import, and Project Materialization success report
 publication `not_applicable`; archive and Closure Export publication success
 report `committed`. No success role may report `not_started`.
@@ -1115,8 +1192,15 @@ Closure Export publication, and Compilation Delivery. Each has its own bound
 capability descriptor and opaque receipt type; there is no generic public payload
 union.
 
-The receipt state is exactly `refused` or `admitted`. `refused` serializes the
-complete operation request, safe role descriptor projection, and one admission
+Each Transport request carries one required role/use scope over one frozen
+subject; the exact bound descriptor advertises its offered scope, admission
+freezes requested and admitted scopes, and the stage ledger records reached
+scope. Role, use, coverage, and complete/redacted status must agree and obey
+requested-subset-of-offered and reached-subset-of-admitted rules. A transport
+class or successful terminal never substitutes for those facts.
+
+The receipt state is exactly `admission_refused` or admitted. Refusal serializes
+stage `admission`, the complete operation request, safe role descriptor projection, and one admission
 reason, with no admission record, stage ledger, actual commit, cleanup outcome,
 residual, exposure, transferred count, or timing reached fact. `admitted`
 serializes the role-specific admission record and complete role-legal stage
@@ -1127,11 +1211,18 @@ admission, plan-freeze, and complete; an adapter cannot claim those stages from
 a success flag. There is no `not_attempted` Transport Receipt; an unattempted
 role has no receipt.
 
-Requested commit, admitted commit, actual commit, requested cleanup, admitted
-cleanup, cleanup outcome, residual locator, exposed bytes, structural-network
+Every admitted role ledger obtains `object_count` through
+`TransportStageLedgerView::object_count`: one for Archive and spool, exact `N`
+for Closure Export, exact `M` for materialization, and exact artifact inventory
+count for delivery. It is frozen at plan-freeze and partial transfer never
+changes it.
+
+Requested commit, admitted commit, actual commit,
+`requested_cleanup_requirement`, `admitted_cleanup_requirement`,
+`cleanup_outcome`, residual locator, exposed bytes, structural-network
 enforcement reached, general enforcement reached, and interruption winner are
 independent leaves. Actual commit appears only if commit was reached. Cleanup
-failure may coexist with exposed bytes and a residual; cleanup never rewrites the
+failure may coexist with exposed bytes and a residual; cleanup never rewrites an earlier
 primary outcome. First-party outcomes always name `native-cli/1` or
 `dagger-ci/1`. Primary failure belongs to the typed outer `SpoolOutcome` or
 `TransportOutcome`, never the receipt. The standard schema/producer header is
@@ -1256,7 +1347,7 @@ Sibling fields evaluate one lazy bundle once; `require*` never reruns it.
 | PackIngress validated/other | receipt | Pack non-null only validated |
 | Representation adapter/core outcome | operation receipt; staging receipt | File/Directory non-null only after immutable representation and container-local staging both succeed |
 | Compilation adapter failed | operation; terminal/report null | all identities/artifacts null |
-| Compilation admission refused | operation with typed refusal; terminal/report null | all identities/artifacts null |
+| Compilation admission refused | operation with typed refusal; terminal/report null | Compilation Identity non-null; Result Identity/artifacts null |
 | Request rejected | operation+terminal; report null | all identities/artifacts null |
 | Operation failed | operation+terminal+report | Compilation ID only |
 | Result rejected | operation+terminal+report | compilation/result IDs; artifacts null |
@@ -1384,8 +1475,9 @@ for Pack ingress, the creation steps do not run.
 20. Archive encoding, publication, dependencies, timing, rendering, viewer, and
     response are later siblings of the immutable semantic terminal they consume;
     first-party Semantic Result Cache admission is absent.
-21. Commit wins over later cancellation/deadline; cleanup never replaces primary
-    transfer/commit failure.
+21. Commit wins over later cancellation/deadline. Cleanup never replaces an
+    earlier transfer/commit failure, but cleanup is the primary stage when it is
+    the first failure after a successful commit; actual commit and exposure stay true.
 
 ## Reconciliations
 
@@ -1394,7 +1486,7 @@ for Pack ingress, the creation steps do not run.
 - [Freeze Pack Format Epoch 2 normative contract](https://github.com/sagikazarmark/typst-pack/issues/57)
   controls over the stale Deflate-named Rust fixture helper; the implementation
   renames it to all-Stored v1.
-- Final Rust fixture `00cfca1` controls creation construction rejection,
+- The regenerated final Rust fixture controls creation construction rejection,
   operation-bound descriptors and inventories, request-inventory origins,
   representation/transport admission, receipts, and session semantics over the
   prior adapter baseline `43f2af9`.
@@ -1418,6 +1510,7 @@ evidence of actual adapter or generated-Dagger parity. Run these commands from
 ```console
 $ cargo fmt --all -- --check
 $ cargo check --locked --all-targets
+$ cargo test --locked --all-targets
 $ cargo run --locked
 $ jq empty fixtures/cases.json ../PROTOTYPE-first-party-cli-dagger-schemas.json ../PROTOTYPE-native-cli-profile.json ../PROTOTYPE-dagger-ci-profile.json
 $ diff -u <(jq -S '[.schema_cases[], .generated_schema_cases[], .semantic_generated_cases[]] | map(.id) | sort' fixtures/cases.json) <(jq -S '[.schema_cases[], .generated_schema_cases[], .semantic_generated_cases[]] | map(.id) | sort | unique' fixtures/cases.json)
@@ -1432,13 +1525,13 @@ exits 0 after compiling the final interface, prior consumer, serializer probe,
 and harness. The deterministic `cargo run --locked` summary is:
 
 ```text
-issue-69 validation: ok
-json-schema: Draft 2020-12, 355 definitions, 1411 local refs, 40 direct + 45 generated cases
-profiles: 2 valid; issue-69 limits and tightening relationships verified
-capabilities: 16 producer-correlated constants and first-party trust/cache constraints verified
-graphql: 27 types; hand-authored target topology, statuses, and nullability verified
-html: 6 scenarios; 8/11 allowed events covered, 7 allowed effects, 6 publish fences and 2 delivery wrappers structurally verified
-serializer sources: 15 mechanically linked leaves; 12 poison derivations declared; 20 semantic cases checked
+final contract validation: ok
+json-schema: Draft 2020-12, 367 definitions, 1501 local refs, 40 direct + 45 generated cases
+profiles: 2 valid; final aggregate, representation, and transport relationships verified
+capabilities: 17 producer-correlated constants and first-party trust/cache constraints verified
+graphql: 29 types; hand-authored target topology, statuses, and nullability verified
+html: 7 scenarios; 9/12 allowed events covered, 7 allowed effects, 6 publish fences and 2 delivery wrappers structurally verified
+serializer sources: 31 mechanically linked leaves; 17 poison derivations declared; 46 semantic cases checked
 dagger generated parity: DEFERRED (implementation gate not executed)
 ```
 
@@ -1447,7 +1540,7 @@ accessor marker or to a schema pointer checked by the harness. This proves the
 listed representative links, not exhaustive coverage of every schema leaf or a
 serializer implementation. The poison derivations are audited declarations;
 where no forbidden implementation exists, they are not claimed as executed
-rejections. Schema-negative fixtures and the 20 cross-field semantic cases are
+rejections. Schema-negative fixtures and the 46 cross-field semantic cases are
 executed separately.
 
 The exact-positive create and compile cases compare normalized width, the core
