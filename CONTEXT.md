@@ -66,6 +66,18 @@ The explicit assurance selected before Pack ingress. Verify compares one externa
 The immutable, operation-scoped security assumption and minimum enforcement contract selected before input-dependent interpretation for Pack creation, reading, compilation, projection, or delivery. Trusted assumes supplied content and executable facilities are non-adversarial; Partially Trusted treats content as externally controlled and potentially abusive while trusting deployment code and makes no same-process containment claim; Hostile includes deliberate implementation compromise and hard denial attempts and permits containment claims only under verified operating-system or runtime enforcement. Profiles never weaken semantic or integrity validation, are operational rather than identity-bearing, and are never Pack state.
 _Avoid_: trusted Pack, hostile Pack, trust level, sandbox mode
 
+**Operational Capability Class**:
+A descriptive, versioned class name of at most 255 ASCII bytes for one kind of operation-causal facility, written as a reverse-DNS namespace, lower-kebab path, and positive major version. It classifies an Operation Capability Descriptor but is not an instance identity or evidence that a capability was requested, admitted, reached, enforced, or successfully exercised.
+
+**Operation Capability Descriptor**:
+The immutable, versioned, role-specific safe description owned by an exact operation-causal authority, cache, evidence provider, runtime domain, execution or reporting facility, spool, or transport adapter. It states only capabilities offered for appraisal; admission and reached facts remain separate and cannot be inferred from the descriptor, its Operational Capability Class, a concrete type, placement, or eventual success.
+
+**Operation Admission Record**:
+The immutable role-specific fact record created when a well-formed operation is successfully admitted, binding its request and exact appraised Operation Capability Descriptors to the separately requested and admitted operational controls. It never exists on refusal and contains no inferred reached fact; reports and receipt ledgers append only facts actually reached after admission.
+
+**Operation Network Policy**:
+The explicit operation-scoped request and admission choice between Network Permitted and Offline. Network Permitted allows but does not prove network use, while Offline requires every covered operation-causal facility to contractually perform no network I/O during the admitted lifecycle; structural enforcement and later operations remain separate claims.
+
 **Portable Pack**:
 A Pack that can move between hosts and compile when its exact declared external package and font bytes are supplied, without consulting the source host or undeclared ambient state. Every valid Pack provides this guarantee.
 
@@ -86,6 +98,12 @@ The adapter operation that encodes one validated Pack under one exact Archive En
 
 **Pack Archive Publication**:
 The adapter operation that transfers one completed Pack Archive Stable Byte Value to an authorized destination. It reports its admitted Publication Commit Strength, transfer, commit, and cleanup outcomes without changing the Pack or its encoding receipt.
+
+**Format Receipt**:
+The versioned, core-owned, role-specific terminal fact record for one well-formed Pack representation or representation-publication operation. It distinguishes refusal from admission, records only role-legal requested, admitted, and reached representation facts, and remains separate from any subject-bound Transport Receipt; malformed request construction produces no Format Receipt.
+
+**Representation Admission Refusal**:
+The typed terminal returned before effects or input-dependent interpretation when a well-formed non-publication representation request cannot be admitted under its selected or asserted archive recipe or requested operational controls. It retains the complete requested Format Receipt controls and one closed reason but no admitted or reached facts; publication instead preserves its Transport admission refusal without coercion.
 
 **Pack Semantic Extension**:
 A namespaced, versioned addition to a Pack's semantic contract that contributes to Pack Identity and must be fully understood and validated before a Pack is exposed. An unknown semantic extension makes the representation unsupported rather than partially valid.
@@ -201,6 +219,12 @@ The canonical semantic request shared by cross-engine comparisons: Pack Identity
 
 **Prepared Compilation**:
 An immutable, Pack-bound compilation value produced before authority access or Typst execution by requiring a Compilation Output Specification, applying core-owned deterministic defaults, deriving the Typst target and required format features, canonicalizing and validating the complete semantic request, performing strict Pack Override preflight, and attesting the core's actual engine and exporter identity. The other core defaults are an empty Typst input map and caller-selected feature set and absent Compilation Document Time. HTML derives its required feature; the accessibility feature may be selected; the unsupported bundle feature is a Compilation Request Rejection. It owns the fully explicit semantic request, the semantic portion of the Compilation Request Inventory, and the Compilation Identity. It may be executed repeatedly or concurrently; attempts share only facilities explicitly supplied through their independent Compilation Execution Controls.
+
+**Compilation Preparation Policy**:
+The immutable explicit rules for side-effect-free semantic preparation of one compilation request, including unknown-engine-feature handling and whether a Canonical Diagnostic Policy is required. One-shot compilation and Compilation Session acceptance apply the same policy before operational facilities are appraised; it is distinct from Compilation Execution Controls and Compilation Resource Limits.
+
+**Compilation Preparation Limits**:
+The immutable finite ceilings enforced only while a compilation request is prepared: Pack Override count, largest and aggregate replacement bytes, and the maximum entry count and canonical bytes that its Canonical Diagnostic Policy may declare. Exceeding them contributes to Compilation Request Rejection before a Prepared Compilation, Compilation Identity, operational admission, or report exists; they do not govern attempt execution or diagnostic projection.
 
 **Synchronous Compilation Driver**:
 The public execution mode that runs a full Compilation Attempt on its caller's thread. It resolves exact requirements through explicit synchronous authorities and caches, constructs a Compilation Dependency Snapshot, and invokes the featureless synchronous Compilation Kernel. It produces the same Compilation Report model as the Asynchronous Compilation Driver and introduces no hidden async runtime, filesystem, network, or process requirement.
@@ -343,6 +367,18 @@ A caller-owned, Pack-bound coordinator for repeatedly evaluating changing compil
 
 **Compilation Session Revision**:
 The session-local monotonic identity of one desired evaluation state: an immutable semantic request snapshot, effective session policy, and the dependency dirtiness that must be reconciled before it can be current. An effective request or policy change, dependency invalidation, or explicit refresh creates a new revision; an operational retry remains within its revision. Revisions are operational, do not contribute to Compilation Identity, and may resolve to the same Compilation Identity or Compilation Result as another revision.
+
+**Session Evaluation**:
+The session-local, revision-bound ordered identity of one pass that produces and reconciles a terminal candidate. Accepting a revision creates its first evaluation, while an explicit operational retry creates another evaluation in the same revision without changing its prepared semantic request or policy; attempts, fences, publications, and Last Successful Compilation retain the evaluation that produced them.
+
+**Session Ingestion Failure**:
+The typed, tokenless terminal candidate produced when an adapter cannot stabilize the request sources needed to accept a compilation request into a Compilation Session. It retains the failed request-source scopes and effective policy, invokes no preparation, creates no attempt or semantic terminal, and may publish only as stale or unverified without replacing Last Successful Compilation.
+
+**Superseded Session Attempt**:
+A token-bound Compilation Attempt whose session-owned supersession permit has been synchronously revoked because a newer Compilation Session Revision became latest. It cannot publish; a matching late completion is still consumed to clear the draining slot and activate the latest eligible pending work, while any already committed Compilation Report remains immutable.
+
+**Session Retirement**:
+The irreversible shutdown protocol that moves a Compilation Session from Running through Retiring to Retired. It rejects new input and retries, revokes unpublished work, retires subscriptions, and interrupts attempts, reaching Retired only after live attempt and subscription-arming resources are returned, reaped, or proven abandoned; recovery creates a new Session instance.
 
 **Dependency Change Notification**:
 A non-semantic hint that one Dependency Evidence Key or a declared provider scope may no longer describe current backing state. It never supplies trusted replacement evidence: the affected facts must be revalidated. Duplicate, reordered, or coarse notifications may be coalesced, while a detected delivery gap dirties the complete affected scope.
