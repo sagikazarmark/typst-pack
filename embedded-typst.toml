@@ -229,7 +229,7 @@ sha256 = "1db6664bca1d5a1cf52ee65316165cf2d76372d40887dbcacf26e7d05996c356"
 [[surface]]
 path = "src/packer.rs"
 classification = "pack-invariant"
-sha256 = "cd8fd0c29b421dc98aa82f34d434a18bcf032a9777a7f10c645cc449837c55bc"
+sha256 = "0ce9e7329b6df57e50032c271f54088608ea721260280ca0dd0b4f1768590acf"
 
 [[surface]]
 path = "src/project_snapshot.rs"

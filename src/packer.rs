@@ -281,7 +281,7 @@ impl Packer {
             ),
             main: RootedPath::new(VirtualRoot::Project, entrypoint.clone()).intern(),
             sources: FileStore::new(Arc::clone(&primary)),
-            files: FileStore::new(CreationLoader { primary }),
+            files: FileStore::new(primary),
             fonts,
             used_font_indices: Mutex::new(BTreeSet::new()),
             time,
@@ -321,7 +321,6 @@ impl Packer {
         };
 
         let mut package_evidence = Vec::new();
-        let mut external_package_trees = BTreeMap::new();
         let font_evidence = FontEvidence {
             catalog: font_catalog_evidence(&world.fonts),
         };
@@ -357,9 +356,6 @@ impl Packer {
                 },
             )?;
             package_evidence.push((spec.clone(), package_root.path().to_owned(), tree.clone()));
-            if !self.vendor_packages {
-                external_package_trees.insert(spec.to_string(), tree.clone());
-            }
             for (path, data) in tree {
                 builder = if self.vendor_packages {
                     builder.package_file(spec.clone(), path, data.to_vec())?
@@ -405,17 +401,6 @@ impl Packer {
             .map(|font| font.path().to_owned())
             .collect();
 
-        let _ = pack
-            .materialize_package_trees(external_package_trees)
-            .expect("creation retained every exact external package tree");
-        snapshot.revalidate(&root)?;
-        revalidate_package_evidence(&package_evidence)?;
-        revalidate_font_evidence(
-            self.system_fonts,
-            self.typst_embedded_fonts,
-            &self.font_paths,
-            &font_evidence,
-        )?;
         Ok(PackOutcome {
             pack,
             report,
@@ -543,7 +528,7 @@ pub(crate) struct CreationWorld {
     library: LazyHash<Library>,
     main: FileId,
     sources: FileStore<Arc<PrimaryLoader>>,
-    files: FileStore<CreationLoader>,
+    files: FileStore<Arc<PrimaryLoader>>,
     fonts: FontStore,
     used_font_indices: Mutex<BTreeSet<usize>>,
     time: Time,
@@ -653,22 +638,6 @@ impl FileLoader for PrimaryLoader {
             Arc::clone(cache.entry(id).or_default())
         };
         entry.get_or_init(|| self.system.load(id)).clone()
-    }
-}
-
-struct CreationLoader {
-    primary: Arc<PrimaryLoader>,
-}
-
-impl CreationLoader {
-    fn root(&self, id: FileId) -> FileResult<FsRoot> {
-        self.primary.root(id)
-    }
-}
-
-impl FileLoader for CreationLoader {
-    fn load(&self, id: FileId) -> FileResult<Bytes> {
-        self.primary.load(id)
     }
 }
 
