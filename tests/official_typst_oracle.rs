@@ -16,6 +16,8 @@ use typst_pack::{
     PackCompileError, PackOverrideSet, PackageTreeFulfillment, RequestValueOrigin, TracepointKind,
     compile_pack, parse_page_selection,
 };
+#[cfg(feature = "fs")]
+use typst_pack::{DiscoveryTarget, Packer};
 use typst_pdf::PdfStandard;
 
 fn stabilized_pack(fixture: &Fixture) -> Pack {
@@ -389,6 +391,79 @@ fn stabilized_project_round_trips_and_matches_pack_svg_compilation() {
     assert_eq!(actual.exporter_identity().version(), "0.15.0");
     assert!(!actual.exporter_identity().source_checksum().is_empty());
     assert!(!actual.exporter_identity().target().is_empty());
+}
+
+#[cfg(feature = "fs")]
+#[test]
+fn official_source_discovery_replay_and_pack_compilation_agree() {
+    let fixture = Fixture::official_oracle();
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("project");
+    let packages = directory.path().join("packages");
+    let fonts = directory.path().join("fonts");
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::create_dir_all(&fonts).unwrap();
+    for &(path, text) in fixture.project() {
+        let destination = project.join(path);
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::write(destination, text).unwrap();
+    }
+    for &(spec, path, text) in fixture.packages() {
+        let spec: typst::syntax::package::PackageSpec = spec.parse().unwrap();
+        let destination = packages
+            .join(spec.namespace.as_str())
+            .join(spec.name.as_str())
+            .join(spec.version.to_string())
+            .join(path);
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::write(destination, text).unwrap();
+    }
+    for (position, (data, _)) in fixture.fonts().iter().enumerate() {
+        std::fs::write(fonts.join(format!("font-{position}.ttf")), data).unwrap();
+    }
+    let mut inputs = Dict::new();
+    inputs.insert("width".into(), Value::Str("24".into()));
+    let outcome = Packer::new(&project, fixture.entrypoint())
+        .system_fonts(false)
+        .typst_embedded_fonts(false)
+        .font_path(&fonts)
+        .embed_fonts(true)
+        .package_path(&packages)
+        .inputs(inputs.clone())
+        .creation_timestamp(Some(1_706_918_400))
+        .target(DiscoveryTarget::Paged)
+        .pack()
+        .unwrap();
+    assert_eq!(outcome.report.discovery_variants.len(), 1);
+    assert_eq!(
+        outcome.report.discovery_variants[0].trace(),
+        outcome.report.discovery_variants[0].replay_trace()
+    );
+
+    let actual = compile_pack(
+        PackCompilationRequest::new(outcome.pack, OutputFormat::Svg)
+            .inputs(inputs)
+            .document_time(Datetime::from_ymd(2024, 2, 3).unwrap()),
+    )
+    .unwrap();
+    let expected = observe(
+        &fixture,
+        &ReferenceRequest {
+            inputs: string_inputs([("width", "24")]),
+            features: vec![],
+            document_time: Some(Datetime::from_ymd(2024, 2, 3).unwrap()),
+            output: OutputRequest::Svg {
+                source_pages: vec![],
+                render_bleed: false,
+                pretty: false,
+            },
+        },
+    );
+    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
+    assert_eq!(actual.artifacts().len(), expected.artifacts.len());
+    for (actual, expected) in actual.artifacts().iter().zip(&expected.artifacts) {
+        assert_eq!(actual.bytes(), expected.bytes);
+    }
 }
 
 #[test]

@@ -2477,12 +2477,36 @@ Rows: #csv("data.csv").len()
         let outcome = Packer::new(&project, "main.typ")
             .system_fonts(false)
             .feature(typst::Feature::Html)
-            .target(DiscoveryTarget::Paged)
             .target(DiscoveryTarget::Html)
+            .target(DiscoveryTarget::Paged)
             .pack()
             .unwrap();
 
         assert_eq!(outcome.report.files, ["html.txt", "main.typ", "paged.txt"]);
+        assert_eq!(outcome.report.discovery_variants.len(), 2);
+        for variant in &outcome.report.discovery_variants {
+            assert_eq!(variant.trace(), variant.replay_trace());
+        }
+        let traces = outcome
+            .report
+            .discovery_variants
+            .iter()
+            .map(|variant| {
+                variant
+                    .trace()
+                    .observations()
+                    .map(|observation| observation.logical_path())
+                    .collect::<BTreeSet<_>>()
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            outcome.report.discovery_variants[0].request().target(),
+            DiscoveryTarget::Html
+        );
+        assert!(traces[0].contains("project:html.txt"));
+        assert!(!traces[0].contains("project:paged.txt"));
+        assert!(traces[1].contains("project:paged.txt"));
+        assert!(!traces[1].contains("project:html.txt"));
     }
 
     #[test]
@@ -2512,9 +2536,101 @@ Rows: #csv("data.csv").len()
             .filter(|warning| warning.message.contains("unknown font family"))
             .count();
         assert_eq!(
-            missing_font_warnings, 1,
+            missing_font_warnings, 2,
             "{:?}",
             outcome.report.compile_warnings
+        );
+        assert_eq!(outcome.report.discovery_variants.len(), 2);
+        assert!(outcome.report.discovery_variants.iter().all(|variant| {
+            variant
+                .warnings()
+                .iter()
+                .filter(|warning| warning.message.contains("unknown font family"))
+                .count()
+                == 1
+                && variant.warnings() == variant.replay_warnings()
+        }));
+    }
+
+    #[test]
+    fn changed_project_evidence_prevents_pack_issuance() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        let main = project.join("main.typ");
+        fs::write(&main, "original").unwrap();
+
+        let result = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .after_discovery_hook({
+                let main = main.clone();
+                move || fs::write(&main, "changed").unwrap()
+            })
+            .pack();
+
+        assert!(matches!(
+            result,
+            Err(PackerError::CreationEvidenceChanged { ref path }) if path == &main.display().to_string()
+        ));
+    }
+
+    #[test]
+    fn exact_inputs_and_document_time_drive_discovery_and_replay_traces() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("main.typ"),
+            r#"#if sys.inputs.at("pick") == "yes" { read("input.txt") }
+#if datetime.today().year() == 2024 { read("time.txt") }"#,
+        )
+        .unwrap();
+        fs::write(project.join("input.txt"), "input").unwrap();
+        fs::write(project.join("time.txt"), "time").unwrap();
+        let mut inputs = typst::foundations::Dict::new();
+        inputs.insert("pick".into(), typst::foundations::Value::Str("yes".into()));
+
+        let outcome = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .inputs(inputs)
+            .creation_timestamp(Some(1_704_067_200))
+            .pack()
+            .unwrap();
+
+        assert_eq!(outcome.report.files, ["input.txt", "main.typ", "time.txt"]);
+        let variant = &outcome.report.discovery_variants[0];
+        assert_eq!(variant.request().document_timestamp(), 1_704_067_200);
+        assert_eq!(variant.request().inputs().entry_count(), 1);
+        assert_eq!(variant.trace(), variant.replay_trace());
+    }
+
+    #[test]
+    fn discovery_only_overrides_drive_trace_without_replacing_pack_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("main.typ"), "#include \"choice.typ\"").unwrap();
+        fs::write(project.join("choice.typ"), "baseline").unwrap();
+        fs::write(project.join("override.txt"), "selected").unwrap();
+
+        let outcome = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .discovery_override("choice.typ", "#read(\"override.txt\")".as_bytes())
+            .pack()
+            .unwrap();
+
+        assert_eq!(
+            outcome.pack.file("choice.typ").unwrap().as_slice(),
+            b"baseline"
+        );
+        let variant = &outcome.report.discovery_variants[0];
+        assert_eq!(variant.request().overrides().len(), 1);
+        assert_eq!(variant.trace(), variant.replay_trace());
+        assert!(
+            variant
+                .trace()
+                .observations()
+                .any(|observation| observation.logical_path() == "project:override.txt")
         );
     }
 
@@ -3090,7 +3206,7 @@ Rows: #csv("data.csv").len()
 
     #[cfg(unix)]
     #[test]
-    fn discovery_reads_project_sources_once_without_provider_fallback() {
+    fn unavailable_project_source_evidence_prevents_issuance_without_provider_fallback() {
         use std::io::Write as _;
         use std::process::Command;
 
@@ -3128,15 +3244,17 @@ Rows: #csv("data.csv").len()
             "chapter.typ",
             b"#let chapter = rect(width: 2pt, height: 2pt)".to_vec(),
         );
-        let outcome = Packer::new(&project, "main.typ")
+        let result = Packer::new(&project, "main.typ")
             .system_fonts(false)
             .resource_provider(provider)
-            .pack()
-            .unwrap();
+            .pack();
         writer.join().unwrap();
 
-        assert!(outcome.pack.file("chapter.typ").is_some());
-        assert!(outcome.report.resource_slots.is_empty());
+        assert!(matches!(
+            result,
+            Err(PackerError::CreationEvidenceChanged { ref path })
+                if path == &chapter.display().to_string()
+        ));
         assert_eq!(calls.load(Ordering::Relaxed), 0);
     }
 

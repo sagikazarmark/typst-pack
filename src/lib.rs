@@ -39,7 +39,11 @@ pub use world::{PackWorld, PackWorldBuildError, PackWorldBuilder};
 #[cfg(feature = "fs")]
 pub use extract::{ExtractError, ExtractOptions, ExtractReport, extract};
 #[cfg(feature = "fs")]
-pub use packer::{DiscoveryTarget, DiscoveryWorld, PackOutcome, PackReport, Packer, PackerError};
+pub use packer::{
+    DiscoveryAccessKind, DiscoveryAccessOutcome, DiscoveryInputsInventory, DiscoveryObservation,
+    DiscoveryOverridesInventory, DiscoveryRequest, DiscoveryTarget, DiscoveryTrace,
+    DiscoveryVariantReport, DiscoveryWorld, PackOutcome, PackReport, Packer, PackerError,
+};
 #[cfg(feature = "fs")]
 pub use world::OfflineDownloader;
 
