@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use typst::diag::{
     FileError, FileResult, HintedString, Severity, SourceDiagnostic, Tracepoint, Warned,
 };
-use typst::foundations::{Bytes, Datetime, Dict, Duration, Smart, Value};
+use typst::foundations::{Bytes, Datetime, Dict, Duration, Smart};
 use typst::layout::PageRanges;
 use typst::syntax::package::PackageSpec;
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
@@ -20,6 +20,11 @@ const MAIN: &str = include_str!("../fixtures/official-oracle/main.typ");
 const CHAPTER: &str = include_str!("../fixtures/official-oracle/chapter.typ");
 const EXPORT_REJECTION: &str = "#pdf.attach(\"duplicate.txt\", bytes(\"first\"))\n\
                                 #pdf.attach(\"duplicate.txt\", bytes(\"second\"))";
+const SEMANTIC_REQUEST: &str = "#let width = int(sys.inputs.width)\n\
+                                #set page(width: (width + datetime.today().day()) * 1pt, height: 10pt, margin: 0pt)\n\
+                                #pdf.table-summary(table(columns: 1, [feature enabled]))";
+const STATIC_SHAPE: &str =
+    "#set page(width: 10pt, height: 10pt, margin: 0pt)\n#rect(width: 5pt, height: 5pt)";
 const PACKAGE_MANIFEST: &str =
     include_str!("../fixtures/official-oracle/packages/local/oracle/1.0.0/typst.toml");
 const PACKAGE_ENTRYPOINT: &str =
@@ -52,6 +57,22 @@ impl Fixture {
         }
     }
 
+    pub fn semantic_request() -> Self {
+        Self {
+            entrypoint: "main.typ",
+            project: &[("main.typ", SEMANTIC_REQUEST)],
+            packages: &[],
+        }
+    }
+
+    pub fn static_shape() -> Self {
+        Self {
+            entrypoint: "main.typ",
+            project: &[("main.typ", STATIC_SHAPE)],
+            packages: &[],
+        }
+    }
+
     pub fn entrypoint(&self) -> &'static str {
         self.entrypoint
     }
@@ -66,7 +87,7 @@ impl Fixture {
 }
 
 pub struct ReferenceRequest {
-    pub inputs: Vec<(&'static str, &'static str)>,
+    pub inputs: Dict,
     pub features: Vec<Feature>,
     pub document_time: Option<Datetime>,
     pub output: OutputRequest,
@@ -472,15 +493,10 @@ struct ReferenceWorld {
 
 impl ReferenceWorld {
     fn new(fixture: &Fixture, request: &ReferenceRequest) -> Self {
-        let inputs = request
-            .inputs
-            .iter()
-            .map(|(key, value)| ((*key).into(), Value::Str((*value).into())))
-            .collect::<Dict>();
         let features = request.features.iter().copied().collect::<Features>();
         let library = LazyHash::new(
             Library::builder()
-                .with_inputs(inputs)
+                .with_inputs(request.inputs.clone())
                 .with_features(features)
                 .build(),
         );

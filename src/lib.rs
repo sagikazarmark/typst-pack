@@ -13,21 +13,22 @@ mod world;
 pub mod cli;
 
 pub use compile::{
-    CompilationArtifact, CompilationDiagnostic, CompilationOperationOutcome, CompilationOutput,
-    CompilationRequestRejection, CompilationResult, CompilationStatus, CompileError,
-    CompileOptions, CreationTimestamp, DiagnosticHint, DiagnosticPhase, DiagnosticProducer,
-    DiagnosticSeverity, DiagnosticTracepoint, EngineIdentity, ExporterIdentity, LogicalSpan,
+    CompilationArtifact, CompilationDiagnostic, CompilationIdentity, CompilationOperationOutcome,
+    CompilationOutput, CompilationRequestInventory, CompilationRequestRejection, CompilationResult,
+    CompilationStatus, CompileError, CompileOptions, CreationTimestamp, DiagnosticHint,
+    DiagnosticPhase, DiagnosticProducer, DiagnosticSeverity, DiagnosticTracepoint,
+    EffectiveEngineFeature, EffectiveRequestValue, EngineIdentity, ExporterIdentity, LogicalSpan,
     OutputFormat, PackCompilationRequest, PackCompilationWarning, PackCompileError, PageRange,
-    PageSelection, PdfStandardsValidationError, TracepointKind, compile, compile_pack,
-    parse_page_selection,
+    PageSelection, PdfStandardsValidationError, RequestValueOrigin, TracepointKind,
+    TypstInputsInventory, compile, compile_pack, parse_page_selection,
 };
 pub use manifest::{
     FORMAT_VERSION, FontManifest, MANIFEST_PATH, PackManifest, PackManifestError, PackMetadata,
     PackagesManifest, ProjectManifest,
 };
 pub use pack::{
-    FILE_EXTENSION, Pack, PackBuildError, PackBuilder, PackFont, PackInvariantError, PackPathRole,
-    PackReadError, PackWriteError,
+    FILE_EXTENSION, Pack, PackBuildError, PackBuilder, PackFont, PackIdentity, PackInvariantError,
+    PackPathRole, PackReadError, PackWriteError,
 };
 pub use world::{PackWorld, PackWorldBuilder};
 

@@ -10,7 +10,7 @@ use typst::foundations::{Datetime, Dict, Smart, Value};
 use typst_pack::{
     CompilationDiagnostic, CompilationStatus, CompileOptions, CreationTimestamp, DiagnosticPhase,
     DiagnosticProducer, DiagnosticSeverity as PackDiagnosticSeverity, OutputFormat, Pack,
-    PackCompilationRequest, TracepointKind, compile_pack, parse_page_selection,
+    PackCompilationRequest, RequestValueOrigin, TracepointKind, compile_pack, parse_page_selection,
 };
 use typst_pdf::PdfStandard;
 
@@ -25,6 +25,13 @@ fn stabilized_pack(fixture: &Fixture) -> Pack {
             .unwrap();
     }
     Pack::from_bytes(builder.build().unwrap().to_bytes().unwrap()).unwrap()
+}
+
+fn string_inputs<const N: usize>(entries: [(&str, &str); N]) -> Dict {
+    entries
+        .into_iter()
+        .map(|(key, value)| (key.into(), Value::Str(value.into())))
+        .collect()
 }
 
 fn assert_diagnostics_match(actual: &[CompilationDiagnostic], expected: &[DiagnosticObservation]) {
@@ -86,7 +93,7 @@ fn assert_diagnostics_match(actual: &[CompilationDiagnostic], expected: &[Diagno
 fn frozen_fixture_and_request_produce_a_stable_official_observation() {
     let fixture = Fixture::official_oracle();
     let request = ReferenceRequest {
-        inputs: vec![("width", "24")],
+        inputs: string_inputs([("width", "24")]),
         features: vec![],
         document_time: Some(Datetime::from_ymd(2024, 2, 3).unwrap()),
         output: OutputRequest::Svg {
@@ -162,7 +169,7 @@ fn stabilized_project_round_trips_and_matches_pack_svg_compilation() {
     let expected = observe(
         &fixture,
         &ReferenceRequest {
-            inputs: vec![("width", "24")],
+            inputs: string_inputs([("width", "24")]),
             features: vec![],
             document_time: Some(Datetime::from_ymd(2024, 2, 3).unwrap()),
             output: OutputRequest::Svg {
@@ -200,6 +207,145 @@ fn stabilized_project_round_trips_and_matches_pack_svg_compilation() {
 }
 
 #[test]
+fn shared_semantic_values_drive_the_same_official_source_behavior() {
+    let fixture = Fixture::semantic_request();
+    let document_time = Datetime::from_ymd(2024, 2, 3).unwrap();
+    let mut inputs = Dict::new();
+    inputs.insert("width".into(), Value::Int(24));
+    let pack = stabilized_pack(&fixture);
+
+    let actual = compile_pack(
+        PackCompilationRequest::new(pack, OutputFormat::Svg)
+            .inputs(inputs.clone())
+            .feature(typst::Feature::A11yExtras)
+            .document_time(document_time),
+    )
+    .unwrap();
+    let expected = observe(
+        &fixture,
+        &ReferenceRequest {
+            inputs,
+            features: vec![typst::Feature::A11yExtras],
+            document_time: Some(document_time),
+            output: OutputRequest::Svg {
+                source_pages: vec![],
+                render_bleed: false,
+                pretty: false,
+            },
+        },
+    );
+
+    assert_eq!(actual.status(), CompilationStatus::Succeeded);
+    assert_eq!(actual.artifacts()[0].bytes(), expected.artifacts[0].bytes);
+    let inventory = actual.request_inventory();
+    assert_eq!(
+        inventory.inputs().origin(),
+        RequestValueOrigin::CallerSupplied
+    );
+    assert_eq!(inventory.inputs().value().entry_count(), 1);
+    assert_eq!(inventory.inputs().value().total_key_bytes(), 5);
+    assert!(inventory.inputs().value().total_value_repr_bytes() > 0);
+    assert_ne!(inventory.inputs().value().commitment(), [0; 16]);
+    assert_eq!(
+        inventory.document_time().origin(),
+        RequestValueOrigin::CallerSupplied
+    );
+    assert_eq!(inventory.document_time().value(), &Some(document_time));
+    assert_eq!(inventory.features().len(), 1);
+    assert_eq!(inventory.features()[0].value(), typst::Feature::A11yExtras);
+    assert_eq!(
+        inventory.features()[0].origin(),
+        RequestValueOrigin::CallerSupplied
+    );
+}
+
+#[test]
+fn effective_defaults_and_required_features_keep_their_origins() {
+    let fixture = Fixture::exporter_rejection();
+    let pack = stabilized_pack(&fixture);
+    let result = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Html)).unwrap();
+    let inventory = result.request_inventory();
+
+    assert_eq!(
+        inventory.inputs().origin(),
+        RequestValueOrigin::CoreDefaulted
+    );
+    assert_eq!(inventory.inputs().value().entry_count(), 0);
+    assert_eq!(
+        inventory.document_time().origin(),
+        RequestValueOrigin::CoreDefaulted
+    );
+    assert_eq!(inventory.document_time().value(), &None);
+    assert_eq!(inventory.features().len(), 1);
+    assert_eq!(inventory.features()[0].value(), typst::Feature::Html);
+    assert_eq!(
+        inventory.features()[0].origin(),
+        RequestValueOrigin::CoreDerived
+    );
+    assert!(inventory.selected_features().is_empty());
+
+    let explicit = compile_pack(
+        PackCompilationRequest::new(stabilized_pack(&fixture), OutputFormat::Html)
+            .feature(typst::Feature::Html),
+    )
+    .unwrap();
+    assert_eq!(explicit.request_inventory().selected_features().len(), 1);
+    assert_eq!(
+        explicit.request_inventory().selected_features()[0].origin(),
+        RequestValueOrigin::CallerSupplied
+    );
+    assert_eq!(
+        explicit.request_inventory().features()[0].origin(),
+        RequestValueOrigin::CoreDerived
+    );
+}
+
+#[test]
+fn unobserved_shared_values_still_change_compilation_identity() {
+    let fixture = Fixture::exporter_rejection();
+    let first_pack = stabilized_pack(&fixture);
+    let second_pack = stabilized_pack(&fixture);
+    let feature_pack = stabilized_pack(&fixture);
+    let time_pack = stabilized_pack(&fixture);
+    let mut first_inputs = Dict::new();
+    first_inputs.insert("unused".into(), Value::Str("first".into()));
+    let mut second_inputs = Dict::new();
+    second_inputs.insert("unused".into(), Value::Str("second".into()));
+
+    let first = compile_pack(
+        PackCompilationRequest::new(first_pack, OutputFormat::Svg).inputs(first_inputs),
+    )
+    .unwrap();
+    let second = compile_pack(
+        PackCompilationRequest::new(second_pack, OutputFormat::Svg).inputs(second_inputs),
+    )
+    .unwrap();
+    let feature = compile_pack(
+        PackCompilationRequest::new(feature_pack, OutputFormat::Svg)
+            .feature(typst::Feature::A11yExtras),
+    )
+    .unwrap();
+    let document_time = compile_pack(
+        PackCompilationRequest::new(time_pack, OutputFormat::Svg)
+            .document_time(Datetime::from_ymd(2024, 2, 3).unwrap()),
+    )
+    .unwrap();
+
+    assert_ne!(first.compilation_identity(), second.compilation_identity());
+    assert_ne!(first.compilation_identity(), feature.compilation_identity());
+    assert_ne!(
+        first.compilation_identity(),
+        document_time.compilation_identity()
+    );
+    assert_eq!(first.artifacts()[0].bytes(), second.artifacts()[0].bytes());
+    assert_eq!(first.artifacts()[0].bytes(), feature.artifacts()[0].bytes());
+    assert_eq!(
+        first.artifacts()[0].bytes(),
+        document_time.artifacts()[0].bytes()
+    );
+}
+
+#[test]
 fn pack_rejection_matches_official_diagnostics_and_remains_a_result() {
     let fixture = Fixture::official_oracle();
     let mut inputs = Dict::new();
@@ -211,7 +357,7 @@ fn pack_rejection_matches_official_diagnostics_and_remains_a_result() {
     let expected = observe(
         &fixture,
         &ReferenceRequest {
-            inputs: vec![("width", "24")],
+            inputs: string_inputs([("width", "24")]),
             features: vec![],
             document_time: None,
             output: OutputRequest::Svg {
@@ -242,7 +388,7 @@ fn pack_exporter_rejection_matches_official_diagnostics() {
     let expected = observe(
         &fixture,
         &ReferenceRequest {
-            inputs: vec![],
+            inputs: Dict::new(),
             features: vec![],
             document_time: None,
             output: OutputRequest::Pdf {
@@ -283,7 +429,7 @@ fn oracle_is_structurally_independent_of_the_production_crate() {
 fn explicit_pdf_controls_produce_stable_official_artifact_bytes() {
     let fixture = Fixture::official_oracle();
     let request = ReferenceRequest {
-        inputs: vec![("width", "24")],
+        inputs: string_inputs([("width", "24")]),
         features: vec![],
         document_time: Some(Datetime::from_ymd(2024, 2, 3).unwrap()),
         output: OutputRequest::Pdf {
@@ -340,7 +486,7 @@ fn stabilized_pack_matches_official_pdf_export_with_explicit_controls() {
     let expected = observe(
         &fixture,
         &ReferenceRequest {
-            inputs: vec![("width", "24")],
+            inputs: string_inputs([("width", "24")]),
             features: vec![],
             document_time: Some(document_time),
             output: OutputRequest::Pdf {
@@ -389,7 +535,7 @@ fn stabilized_pack_matches_official_pdf_exporter_defaults() {
     let expected = observe(
         &fixture,
         &ReferenceRequest {
-            inputs: vec![("width", "24")],
+            inputs: string_inputs([("width", "24")]),
             features: vec![],
             document_time: Some(document_time),
             output: OutputRequest::Pdf {
@@ -413,10 +559,42 @@ fn stabilized_pack_matches_official_pdf_exporter_defaults() {
 }
 
 #[test]
+fn pack_png_defaults_match_the_pinned_official_exporter() {
+    let fixture = Fixture::static_shape();
+    let actual = compile_pack(PackCompilationRequest::new(
+        stabilized_pack(&fixture),
+        OutputFormat::Png,
+    ))
+    .unwrap();
+    let expected = observe(
+        &fixture,
+        &ReferenceRequest {
+            inputs: Dict::new(),
+            features: vec![],
+            document_time: None,
+            output: OutputRequest::Png {
+                source_pages: vec![],
+                pixels_per_inch: 144.0,
+                render_bleed: false,
+            },
+        },
+    );
+
+    assert_eq!(actual.status(), CompilationStatus::Succeeded);
+    assert_eq!(actual.artifacts().len(), 1);
+    assert_eq!(actual.artifacts()[0].bytes(), expected.artifacts[0].bytes);
+    assert_eq!(
+        actual.request_inventory().options().value().ppi,
+        Some(144.0)
+    );
+    assert!(!actual.request_inventory().options().value().render_bleed);
+}
+
+#[test]
 fn official_rejection_preserves_warning_and_error_order() {
     let fixture = Fixture::official_oracle();
     let request = ReferenceRequest {
-        inputs: vec![("width", "24")],
+        inputs: string_inputs([("width", "24")]),
         features: vec![],
         document_time: None,
         output: OutputRequest::Svg {

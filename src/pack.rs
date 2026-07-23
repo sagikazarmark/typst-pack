@@ -36,6 +36,28 @@ pub struct Pack {
     fonts: Vec<PackFont>,
 }
 
+/// The canonical semantic identity of a [`Pack`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct PackIdentity(u128);
+
+impl PackIdentity {
+    pub fn kind(self) -> &'static str {
+        "pack"
+    }
+
+    pub fn schema(self) -> &'static str {
+        "typst-pack-identity-v1"
+    }
+
+    pub fn algorithm(self) -> &'static str {
+        "typst-hash128-0.15"
+    }
+
+    pub fn digest(self) -> [u8; 16] {
+        self.0.to_be_bytes()
+    }
+}
+
 #[derive(Debug, Clone)]
 struct PackageFiles {
     spec: PackageSpec,
@@ -317,6 +339,47 @@ impl Pack {
     /// The pack manifest.
     pub fn manifest(&self) -> &PackManifest {
         &self.manifest
+    }
+
+    /// Derives the Pack's identity-bearing semantic projection.
+    pub fn identity(&self) -> PackIdentity {
+        let project_files = self
+            .files()
+            .map(|(path, data)| (path, typst::utils::hash128(data)))
+            .collect::<Vec<_>>();
+        let resource_slots = self.resource_slots().collect::<Vec<_>>();
+        let packages = self
+            .packages()
+            .map(|(spec, files)| {
+                (
+                    spec.to_string(),
+                    files
+                        .map(|(path, data)| (path, typst::utils::hash128(data)))
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .collect::<Vec<_>>();
+        let unvendored_packages = self
+            .manifest()
+            .packages()
+            .unvendored()
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        let fonts = self
+            .fonts()
+            .iter()
+            .map(|font| (font.manifest().index(), typst::utils::hash128(font.data())))
+            .collect::<Vec<_>>();
+        PackIdentity(typst::utils::hash128(&(
+            "typst-pack-identity-v1",
+            self.entrypoint(),
+            project_files,
+            resource_slots,
+            packages,
+            unvendored_packages,
+            fonts,
+        )))
     }
 
     /// The root-relative path of the entrypoint file.

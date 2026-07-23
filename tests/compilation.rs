@@ -1,7 +1,8 @@
 use typst_pack::{
     CompilationOperationOutcome, CompilationRequestRejection, CompilationStatus, CompileOptions,
-    DiagnosticPhase, DiagnosticProducer, OutputFormat, Pack, PackCompilationRequest,
-    PackCompileError, PackWorld, compile, compile_pack,
+    CreationTimestamp, DiagnosticPhase, DiagnosticProducer, OutputFormat, Pack,
+    PackCompilationRequest, PackCompileError, PackMetadata, PackWorld, RequestValueOrigin, compile,
+    compile_pack,
 };
 
 fn five_page_world() -> PackWorld {
@@ -51,6 +52,168 @@ fn pack_bound_compilation_does_not_read_an_ambient_clock() {
 }
 
 #[test]
+fn pack_compilation_resolves_exporter_defaults_before_execution() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"defaults".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let png = compile_pack(PackCompilationRequest::new(pack.clone(), OutputFormat::Png)).unwrap();
+    assert_eq!(png.request_inventory().options().value().ppi, Some(144.0));
+    assert_eq!(
+        png.request_inventory().ppi_origin(),
+        RequestValueOrigin::CoreDefaulted
+    );
+    assert!(!png.request_inventory().options().value().render_bleed);
+
+    let pdf = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Pdf)).unwrap();
+    let options = pdf.request_inventory().options().value();
+    assert_eq!(options.pdf_tags, typst::foundations::Smart::Custom(true));
+    assert_eq!(
+        pdf.request_inventory().pdf_tags_origin(),
+        RequestValueOrigin::CoreDefaulted
+    );
+    assert_eq!(
+        pdf.request_inventory().pdf_creation_time_origin(),
+        RequestValueOrigin::CoreDefaulted
+    );
+    assert!(matches!(
+        options.creation_timestamp,
+        CreationTimestamp::Omit
+    ));
+}
+
+#[test]
+fn compilation_identity_ignores_pack_metadata_and_irrelevant_output_controls() {
+    let build = |name| {
+        Pack::builder("main.typ")
+            .file("main.typ", b"same semantics".to_vec())
+            .unwrap()
+            .metadata(PackMetadata::new().with_name(name))
+            .build()
+            .unwrap()
+    };
+    let first = compile_pack(PackCompilationRequest::new(
+        build("first"),
+        OutputFormat::Svg,
+    ))
+    .unwrap();
+    let options = CompileOptions {
+        pdf_creator: typst::foundations::Smart::Custom(Some("irrelevant".to_owned())),
+        ppi: Some(300.0),
+        ..CompileOptions::default()
+    };
+    let second = compile_pack(
+        PackCompilationRequest::new(build("second"), OutputFormat::Svg).options(options),
+    )
+    .unwrap();
+
+    assert_eq!(first.compilation_identity(), second.compilation_identity());
+    assert_eq!(first.artifacts()[0].bytes(), second.artifacts()[0].bytes());
+    assert_eq!(first.compilation_identity().kind(), "compilation");
+    assert_eq!(
+        first.compilation_identity().algorithm(),
+        "typst-hash128-0.15"
+    );
+}
+
+#[test]
+fn compilation_identity_canonicalizes_page_ranges_and_pdf_standard_order() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"canonical request".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let first_ranges = CompileOptions {
+        page_selection: typst_pack::parse_page_selection("1-2").unwrap(),
+        ..CompileOptions::default()
+    };
+    let second_ranges = CompileOptions {
+        page_selection: typst_pack::parse_page_selection("2,1").unwrap(),
+        ..CompileOptions::default()
+    };
+    let first = compile_pack(
+        PackCompilationRequest::new(pack.clone(), OutputFormat::Svg).options(first_ranges),
+    )
+    .unwrap();
+    let second = compile_pack(
+        PackCompilationRequest::new(pack.clone(), OutputFormat::Svg).options(second_ranges),
+    )
+    .unwrap();
+    assert_eq!(first.compilation_identity(), second.compilation_identity());
+    assert_eq!(first.artifacts()[0].bytes(), second.artifacts()[0].bytes());
+
+    let first_standards = CompileOptions {
+        pdf_standards: vec![typst_pdf::PdfStandard::A_2b, typst_pdf::PdfStandard::Ua_1],
+        ..CompileOptions::default()
+    };
+    let second_standards = CompileOptions {
+        pdf_standards: vec![typst_pdf::PdfStandard::Ua_1, typst_pdf::PdfStandard::A_2b],
+        ..CompileOptions::default()
+    };
+    let first = compile_pack(
+        PackCompilationRequest::new(pack.clone(), OutputFormat::Pdf).options(first_standards),
+    )
+    .unwrap();
+    let second = compile_pack(
+        PackCompilationRequest::new(pack, OutputFormat::Pdf).options(second_standards),
+    )
+    .unwrap();
+    assert_eq!(first.compilation_identity(), second.compilation_identity());
+    assert_eq!(first.status(), second.status());
+    assert_eq!(
+        first
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>(),
+        second
+            .diagnostics()
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn adapter_resolved_shared_values_remain_distinguishable() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"adapter values".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let mut inputs = typst::foundations::Dict::new();
+    inputs.insert(
+        "unused".into(),
+        typst::foundations::Value::Str("resolved".into()),
+    );
+    let result = compile_pack(
+        PackCompilationRequest::new(pack, OutputFormat::Svg)
+            .adapter_resolved_inputs(inputs)
+            .adapter_resolved_feature(typst::Feature::A11yExtras)
+            .adapter_resolved_document_time(Some(
+                typst::foundations::Datetime::from_ymd(2024, 2, 3).unwrap(),
+            )),
+    )
+    .unwrap();
+    let inventory = result.request_inventory();
+
+    assert_eq!(
+        inventory.inputs().origin(),
+        RequestValueOrigin::AdapterResolved
+    );
+    assert_eq!(
+        inventory.document_time().origin(),
+        RequestValueOrigin::AdapterResolved
+    );
+    assert_eq!(
+        inventory.features()[0].origin(),
+        RequestValueOrigin::AdapterResolved
+    );
+}
+
+#[test]
 fn pack_bound_compilation_does_not_use_package_caches_or_network() {
     let package = "@preview/example:1.0.0".parse().unwrap();
     let pack = Pack::builder("main.typ")
@@ -67,9 +230,10 @@ fn pack_bound_compilation_does_not_use_package_caches_or_network() {
 
     assert!(matches!(
         result,
-        Err(PackCompileError::Operation(
-            CompilationOperationOutcome::MissingExternalPackageFulfillment { packages }
-        )) if packages.len() == 1
+        Err(PackCompileError::Operation {
+            outcome: CompilationOperationOutcome::MissingExternalPackageFulfillment { packages },
+            ..
+        }) if packages.len() == 1
     ));
 }
 
@@ -85,10 +249,36 @@ fn pack_bound_compilation_rejects_the_bundle_feature() {
 
     assert!(matches!(
         compile_pack(request),
-        Err(PackCompileError::RequestRejected(
-            CompilationRequestRejection::UnsupportedBundleFeature
-        ))
+        Err(PackCompileError::RequestRejected {
+            rejection: CompilationRequestRejection::UnsupportedBundleFeature,
+            ..
+        })
     ));
+}
+
+#[test]
+fn pack_bound_compilation_rejects_invalid_png_resolution() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"invalid resolution".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    for ppi in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+        let options = CompileOptions {
+            ppi: Some(ppi),
+            ..CompileOptions::default()
+        };
+        assert!(matches!(
+            compile_pack(
+                PackCompilationRequest::new(pack.clone(), OutputFormat::Png).options(options)
+            ),
+            Err(PackCompileError::RequestRejected {
+                rejection: CompilationRequestRejection::InvalidPpi,
+                ..
+            })
+        ));
+    }
 }
 
 #[cfg(feature = "embedded-fonts")]
@@ -399,9 +589,10 @@ fn explicit_pdf_tags_with_page_selection_are_rejected_before_compilation() {
 
     assert!(matches!(
         rejection,
-        Err(PackCompileError::RequestRejected(
-            CompilationRequestRejection::PdfTagsWithPageSelection
-        ))
+        Err(PackCompileError::RequestRejected {
+            rejection: CompilationRequestRejection::PdfTagsWithPageSelection,
+            ..
+        })
     ));
 }
 
@@ -423,9 +614,10 @@ fn tag_required_pdf_standard_without_tags_is_rejected_before_compilation() {
 
     assert!(matches!(
         rejection,
-        Err(PackCompileError::RequestRejected(
-            CompilationRequestRejection::PdfStandardRequiresTags
-        ))
+        Err(PackCompileError::RequestRejected {
+            rejection: CompilationRequestRejection::PdfStandardRequiresTags,
+            ..
+        })
     ));
 }
 
@@ -449,7 +641,7 @@ fn pack_request_rejection_collects_independent_pdf_issues_in_stable_order() {
         .feature(typst::Feature::Bundle)
         .options(options);
 
-    let Err(PackCompileError::RequestRejected(rejection)) = compile_pack(request) else {
+    let Err(PackCompileError::RequestRejected { rejection, .. }) = compile_pack(request) else {
         panic!("expected a Pack request rejection");
     };
 

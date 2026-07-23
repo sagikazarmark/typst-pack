@@ -999,6 +999,7 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     let options = CompileOptions {
         page_selection,
         ppi: Some(args.ppi),
+        render_bleed: false,
         pretty: args.pretty,
         pdf_standards: standards,
         pdf_identifier: typst::foundations::Smart::Auto,
