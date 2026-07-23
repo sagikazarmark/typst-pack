@@ -1,6 +1,7 @@
 #![doc = include_str!("../README.md")]
 
 mod compile;
+mod embedded;
 mod extract;
 mod manifest;
 mod pack;

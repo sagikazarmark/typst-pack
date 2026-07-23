@@ -1784,7 +1784,7 @@ fn pdf_default_timestamp_is_resolved_after_compilation() {
     );
     let default_resolutions = AtomicUsize::new(0);
 
-    let default_output = crate::compile::compile_with_page_preflight(
+    let default_output = crate::compile::compile_with_default_pdf_timestamp(
         &world,
         OutputFormat::Pdf,
         &CompileOptions::default(),
@@ -1793,11 +1793,10 @@ fn pdf_default_timestamp_is_resolved_after_compilation() {
             default_resolutions.fetch_add(1, Ordering::Relaxed);
             Some(timestamp)
         },
-        |_, _| Ok::<_, std::convert::Infallible>(()),
     )
     .unwrap();
 
-    let explicit_output = crate::compile::compile_with_page_preflight(
+    let explicit_output = crate::compile::compile_with_default_pdf_timestamp(
         &world,
         OutputFormat::Pdf,
         &CompileOptions {
@@ -1805,7 +1804,6 @@ fn pdf_default_timestamp_is_resolved_after_compilation() {
             ..CompileOptions::default()
         },
         || panic!("an explicit timestamp must not resolve the default"),
-        |_, _| Ok::<_, std::convert::Infallible>(()),
     )
     .unwrap();
 

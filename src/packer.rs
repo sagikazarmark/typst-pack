@@ -16,12 +16,12 @@ use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Feature, Library, LibraryExt, World};
-use typst_html::{HtmlDocument, HtmlNode};
+use typst_html::HtmlNode;
 use typst_kit::datetime::Time;
 use typst_kit::files::{FileLoader, FileStore, FsRoot, SystemFiles};
 use typst_kit::fonts::FontStore;
-use typst_layout::PagedDocument;
 
+use crate::embedded::EmbeddedTypst;
 use crate::manifest::PackMetadata;
 use crate::pack::{Pack, PackBuildError};
 use crate::resource::{DiscoveryResources, Provider};
@@ -376,7 +376,7 @@ impl Packer {
             for target in targets {
                 match target {
                     DiscoveryTarget::Paged => {
-                        let Warned { output, warnings } = typst::compile::<PagedDocument>(world);
+                        let Warned { output, warnings } = EmbeddedTypst::compile_paged(world);
                         compile_warnings.extend(
                             warnings
                                 .into_iter()
@@ -391,7 +391,7 @@ impl Packer {
                         }
                     }
                     DiscoveryTarget::Html => {
-                        let Warned { output, warnings } = typst::compile::<HtmlDocument>(world);
+                        let Warned { output, warnings } = EmbeddedTypst::compile_html(world);
                         compile_warnings.extend(
                             warnings
                                 .into_iter()

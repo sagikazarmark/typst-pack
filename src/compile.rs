@@ -1,6 +1,5 @@
 //! Compiling a pack into Compilation Output Artifacts.
 
-use std::convert::Infallible;
 use std::num::NonZeroUsize;
 
 use ecow::EcoVec;
@@ -9,9 +8,10 @@ use rayon::prelude::*;
 use typst::World;
 use typst::diag::{SourceDiagnostic, Warned};
 use typst::syntax::Span;
-use typst_html::HtmlDocument;
 use typst_layout::PagedDocument;
 use typst_pdf::{PdfOptions, PdfStandards, Timestamp};
+
+use crate::embedded::EmbeddedTypst;
 
 /// The Document Formats and Page Formats a pack can be compiled to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,18 +229,6 @@ pub enum CompileError {
     },
 }
 
-#[derive(Debug)]
-pub(crate) enum CompileWithPagePreflightError<E> {
-    Compile(CompileError),
-    Preflight(E),
-}
-
-impl<E> From<CompileError> for CompileWithPagePreflightError<E> {
-    fn from(error: CompileError) -> Self {
-        Self::Compile(error)
-    }
-}
-
 /// Compiles the world's document and exports it in the requested format.
 ///
 /// This works with any [`World`], but is intended for
@@ -250,35 +238,26 @@ pub fn compile(
     format: OutputFormat,
     options: &CompileOptions,
 ) -> Result<CompilationOutput, CompileError> {
-    match compile_with_page_preflight(
-        world,
-        format,
-        options,
-        || world.today(None).map(Timestamp::new_utc),
-        |_, _| Ok::<_, Infallible>(()),
-    ) {
-        Ok(output) => Ok(output),
-        Err(CompileWithPagePreflightError::Compile(error)) => Err(error),
-        Err(CompileWithPagePreflightError::Preflight(error)) => match error {},
-    }
+    compile_with_default_pdf_timestamp(world, format, options, || {
+        world.today(None).map(Timestamp::new_utc)
+    })
 }
 
-pub(crate) fn compile_with_page_preflight<E>(
+pub(crate) fn compile_with_default_pdf_timestamp(
     world: &dyn World,
     format: OutputFormat,
     options: &CompileOptions,
     default_pdf_timestamp: impl FnOnce() -> Option<Timestamp>,
-    preflight: impl FnOnce(usize, &EcoVec<SourceDiagnostic>) -> Result<(), E>,
-) -> Result<CompilationOutput, CompileWithPagePreflightError<E>> {
+) -> Result<CompilationOutput, CompileError> {
     let _compilation_timing = typst_timing::TimingScope::new("typst-pack compilation");
     if format == OutputFormat::Html {
-        let Warned { output, warnings } = typst::compile::<HtmlDocument>(world);
+        let Warned { output, warnings } = EmbeddedTypst::compile_html(world);
         let document = output.map_err(|errors| CompileError::Diagnostics {
             errors,
             warnings: warnings.clone(),
         })?;
         let _export_timing = typst_timing::TimingScope::new("export");
-        let html = typst_html::html(
+        let bytes = EmbeddedTypst::export_html(
             &document,
             &typst_html::HtmlOptions {
                 pretty: options.pretty,
@@ -291,7 +270,7 @@ pub(crate) fn compile_with_page_preflight<E>(
         return Ok(CompilationOutput {
             artifacts: vec![CompilationArtifact {
                 format,
-                bytes: html.into_bytes(),
+                bytes,
                 source_page_number: None,
             }],
             warnings,
@@ -302,7 +281,7 @@ pub(crate) fn compile_with_page_preflight<E>(
     let Warned {
         output,
         warnings: compile_warnings,
-    } = typst::compile::<PagedDocument>(world);
+    } = EmbeddedTypst::compile_paged(world);
     let mut warnings = compile_warnings;
     if format == OutputFormat::Pdf
         && !options.page_selection.ranges().is_empty()
@@ -320,90 +299,88 @@ pub(crate) fn compile_with_page_preflight<E>(
         errors,
         warnings: warnings.clone(),
     })?;
-    if matches!(format, OutputFormat::Png | OutputFormat::Svg) {
-        let artifact_count = selected_pages(&document, options).count();
-        preflight(artifact_count, &warnings).map_err(CompileWithPagePreflightError::Preflight)?;
-    }
-    let _export_timing = typst_timing::TimingScope::new("export");
-    let artifacts = match format {
-        OutputFormat::Pdf => {
-            let timestamp = match options.creation_timestamp {
-                CreationTimestamp::Automatic => default_pdf_timestamp(),
-                CreationTimestamp::Explicit(timestamp) => Some(timestamp),
-                CreationTimestamp::Omit => None,
-            };
-            let pdf_options = PdfOptions {
-                timestamp,
-                page_ranges: options.page_selection.typst_page_ranges(),
-                standards: options.pdf_standards.clone(),
-                tagged: options.pdf_tags && options.page_selection.ranges().is_empty(),
-                pretty: options.pretty,
-                ..Default::default()
-            };
-            let pdf = typst_pdf::pdf(&document, &pdf_options).map_err(|errors| {
-                CompileError::Diagnostics {
-                    errors,
-                    warnings: warnings.clone(),
-                }
-            })?;
-            vec![CompilationArtifact {
-                format,
-                bytes: pdf,
-                source_page_number: None,
-            }]
-        }
-        OutputFormat::Png => {
-            let ppi = options.ppi.unwrap_or(144.0);
-            let render_options = typst_render::RenderOptions {
-                pixel_per_pt: (ppi / 72.0).into(),
-                ..Default::default()
-            };
-            let pages = selected_pages(&document, options).collect::<Vec<_>>();
-            let export = |(source_page_number, page)| {
-                let bytes = typst_render::render(page, &render_options)
-                    .encode_png()
-                    .map_err(|err| CompileError::PngExport {
-                        message: err.to_string(),
+    let artifacts = {
+        let _export_timing = typst_timing::TimingScope::new("export");
+        match format {
+            OutputFormat::Pdf => {
+                let timestamp = match options.creation_timestamp {
+                    CreationTimestamp::Automatic => default_pdf_timestamp(),
+                    CreationTimestamp::Explicit(timestamp) => Some(timestamp),
+                    CreationTimestamp::Omit => None,
+                };
+                let pdf_options = PdfOptions {
+                    timestamp,
+                    page_ranges: options.page_selection.typst_page_ranges(),
+                    standards: options.pdf_standards.clone(),
+                    tagged: options.pdf_tags && options.page_selection.ranges().is_empty(),
+                    pretty: options.pretty,
+                    ..Default::default()
+                };
+                let pdf = EmbeddedTypst::export_pdf(&document, &pdf_options).map_err(|errors| {
+                    CompileError::Diagnostics {
+                        errors,
                         warnings: warnings.clone(),
-                    })?;
-                Ok::<_, CompileError>(CompilationArtifact {
+                    }
+                })?;
+                vec![CompilationArtifact {
                     format,
-                    bytes,
+                    bytes: pdf,
+                    source_page_number: None,
+                }]
+            }
+            OutputFormat::Png => {
+                let ppi = options.ppi.unwrap_or(144.0);
+                let render_options = typst_render::RenderOptions {
+                    pixel_per_pt: (ppi / 72.0).into(),
+                    ..Default::default()
+                };
+                let pages = selected_pages(&document, options).collect::<Vec<_>>();
+                let export = |(source_page_number, page)| {
+                    let bytes =
+                        EmbeddedTypst::export_png(page, &render_options).map_err(|message| {
+                            CompileError::PngExport {
+                                message,
+                                warnings: warnings.clone(),
+                            }
+                        })?;
+                    Ok::<_, CompileError>(CompilationArtifact {
+                        format,
+                        bytes,
+                        source_page_number: Some(source_page_number),
+                    })
+                };
+                #[cfg(feature = "cli")]
+                let artifacts = pages
+                    .into_par_iter()
+                    .map(export)
+                    .collect::<Result<Vec<_>, _>>()?;
+                #[cfg(not(feature = "cli"))]
+                let artifacts = pages
+                    .into_iter()
+                    .map(export)
+                    .collect::<Result<Vec<_>, _>>()?;
+                artifacts
+            }
+            OutputFormat::Svg => {
+                let svg_options = typst_svg::SvgOptions {
+                    render_bleed: false,
+                    pretty: options.pretty,
+                };
+                let pages = selected_pages(&document, options).collect::<Vec<_>>();
+                let export = |(source_page_number, page)| CompilationArtifact {
+                    format,
+                    bytes: EmbeddedTypst::export_svg(page, &svg_options),
                     source_page_number: Some(source_page_number),
-                })
-            };
-            #[cfg(feature = "cli")]
-            let artifacts = pages
-                .into_par_iter()
-                .map(export)
-                .collect::<Result<Vec<_>, _>>()?;
-            #[cfg(not(feature = "cli"))]
-            let artifacts = pages
-                .into_iter()
-                .map(export)
-                .collect::<Result<Vec<_>, _>>()?;
-            artifacts
+                };
+                #[cfg(feature = "cli")]
+                let artifacts = pages.into_par_iter().map(export).collect();
+                #[cfg(not(feature = "cli"))]
+                let artifacts = pages.into_iter().map(export).collect();
+                artifacts
+            }
+            OutputFormat::Html => unreachable!("handled above"),
         }
-        OutputFormat::Svg => {
-            let svg_options = typst_svg::SvgOptions {
-                render_bleed: false,
-                pretty: options.pretty,
-            };
-            let pages = selected_pages(&document, options).collect::<Vec<_>>();
-            let export = |(source_page_number, page)| CompilationArtifact {
-                format,
-                bytes: typst_svg::svg(page, &svg_options).into_bytes(),
-                source_page_number: Some(source_page_number),
-            };
-            #[cfg(feature = "cli")]
-            let artifacts = pages.into_par_iter().map(export).collect();
-            #[cfg(not(feature = "cli"))]
-            let artifacts = pages.into_iter().map(export).collect();
-            artifacts
-        }
-        OutputFormat::Html => unreachable!("handled above"),
     };
-
     Ok(CompilationOutput {
         artifacts,
         warnings,

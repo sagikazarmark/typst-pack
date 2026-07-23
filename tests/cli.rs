@@ -3929,7 +3929,7 @@ fn multi_page_output_requires_an_explicit_indexable_template() {
             .as_array()
             .unwrap()
             .iter()
-            .all(|entry| entry["name"] != "export"),
+            .any(|entry| entry["name"] == "export"),
         "{timings}"
     );
 }

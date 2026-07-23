@@ -22,9 +22,8 @@ use typst_kit::files::{FileLoader, FsRoot};
 use typst_pdf::{PdfStandard, PdfStandards, Timestamp};
 
 use crate::compile::{
-    CompilationArtifact, CompileError, CompileOptions, CompileWithPagePreflightError,
-    CreationTimestamp, OutputFormat, PageRange, PageSelection, compile_with_page_preflight,
-    parse_page_selection,
+    CompilationArtifact, CompileError, CompileOptions, CreationTimestamp, OutputFormat, PageRange,
+    PageSelection, compile_with_default_pdf_timestamp, parse_page_selection,
 };
 use crate::extract::{ExtractOptions, extract};
 use crate::manifest::PackMetadata;
@@ -1019,7 +1018,6 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     };
 
     let diagnostic_format = args.automation.diagnostic_format.into();
-    let default_output = args.pack.with_extension(format.extension());
     let write_requested_dependencies = |outputs: Option<&[PathBuf]>| {
         let Some(destination) = &args.deps else {
             return Ok(());
@@ -1038,21 +1036,14 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     let mut command_result = None;
     let timings = timer.record(&mut world, |world| {
         command_result = Some((|| -> CliResult {
-            let output = match compile_with_page_preflight(
+            let output = match compile_with_default_pdf_timestamp(
                 world,
                 format,
                 &options,
                 local_timestamp,
-                |count, warnings| {
-                    validate_page_output_destination(args.output.as_deref(), &default_output, count)
-                        .map_err(|message| (message, warnings.clone()))
-                },
             ) {
                 Ok(output) => output,
-                Err(CompileWithPagePreflightError::Compile(CompileError::Diagnostics {
-                    errors,
-                    warnings,
-                })) => {
+                Err(CompileError::Diagnostics { errors, warnings }) => {
                     emit_diagnostics_with(
                         world,
                         errors.iter().chain(&warnings),
@@ -1062,17 +1053,8 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
                     write_requested_dependencies(None)?;
                     return Err(CliError::Reported);
                 }
-                Err(CompileWithPagePreflightError::Compile(CompileError::PngExport {
-                    message,
-                    warnings,
-                })) => {
+                Err(CompileError::PngExport { message, warnings }) => {
                     emit_owned_error(&format!("PNG export failed: {message}"), color);
-                    emit_diagnostics_with(world, warnings.iter(), diagnostic_format, color);
-                    write_requested_dependencies(None)?;
-                    return Err(CliError::Reported);
-                }
-                Err(CompileWithPagePreflightError::Preflight((message, warnings))) => {
-                    emit_owned_error(&message, color);
                     emit_diagnostics_with(world, warnings.iter(), diagnostic_format, color);
                     write_requested_dependencies(None)?;
                     return Err(CliError::Reported);
@@ -1080,6 +1062,7 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
             };
 
             let export_result = (|| {
+                let default_output = args.pack.with_extension(format.extension());
                 let targets: Vec<PathBuf> = match &args.output {
                     Some(path) if path == Path::new("-") => vec![path.clone()],
                     Some(path) if matches!(format, OutputFormat::Pdf | OutputFormat::Html) => {
@@ -1172,27 +1155,6 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         return Err(CliError::Reported);
     }
     command_result
-}
-
-fn validate_page_output_destination(
-    output: Option<&Path>,
-    default_output: &Path,
-    artifact_count: usize,
-) -> Result<(), String> {
-    if artifact_count <= 1 {
-        return Ok(());
-    }
-    let output = output.unwrap_or(default_output);
-    if output == Path::new("-") {
-        return Err("cannot write output to stdout unless exactly one file is emitted".to_owned());
-    }
-    let Some(text) = output.to_str() else {
-        return Err(missing_page_template_error());
-    };
-    if !has_indexable_page_template(text) {
-        return Err(missing_page_template_error());
-    }
-    Ok(())
 }
 
 /// Expands Typst page templates into one path per Page Format artifact.
