@@ -194,7 +194,7 @@ coverage = [".dagger/modules/tests/main.dang"]
 [[surface]]
 path = "src/compile.rs"
 classification = "pack-invariant"
-sha256 = "12f20daf1a4261852d4cffcaca4c4ed87db7220ebc2b2fabc8a60dc7e903127f"
+sha256 = "3b283128a36746e4fd429fc0aad1b695b9b03dc5c5f3b351979c2f7da5383961"
 
 [[surface]]
 path = "src/embedded.rs"
@@ -249,7 +249,7 @@ sha256 = "fb71ecc7669296916ed9d579d2f0016614ce74b987844899c3633995c6d02fdf"
 [[surface]]
 path = "src/world_trace.rs"
 classification = "pack-invariant"
-sha256 = "1b631697897589471e84a2465d2cd698904ca393c36d5af9e41bfdb721e661f1"
+sha256 = "548e89c7d47d476c5eebe2b176bf2ae4c4950b8e4d7b8692d88ec6434b0f3a32"
 
 [[surface]]
 path = "src/cli.rs"

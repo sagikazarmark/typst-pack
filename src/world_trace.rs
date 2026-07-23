@@ -8,34 +8,14 @@ use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Library, World};
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum CapturedAccessKind {
-    Source,
-    File,
-    Font,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) enum CapturedAccessOutcome {
-    Read {
-        byte_length: usize,
-        digest: [u8; 16],
-    },
-    Missing,
-    Failed,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct CapturedObservation {
-    pub(crate) kind: CapturedAccessKind,
-    pub(crate) logical_path: String,
-    pub(crate) font_index: Option<usize>,
-    pub(crate) outcome: CapturedAccessOutcome,
-}
+use crate::{
+    CompilationAccessKind, CompilationAccessObservation, CompilationAccessOutcome,
+    CompilationAccessTrace,
+};
 
 pub(crate) struct WorldTrace<'a, W: ?Sized> {
     world: &'a W,
-    observations: Mutex<BTreeSet<CapturedObservation>>,
+    observations: Mutex<BTreeSet<CompilationAccessObservation>>,
 }
 
 impl<'a, W: World + ?Sized> WorldTrace<'a, W> {
@@ -46,34 +26,36 @@ impl<'a, W: World + ?Sized> WorldTrace<'a, W> {
         }
     }
 
-    pub(crate) fn snapshot(&self) -> BTreeSet<CapturedObservation> {
-        self.observations
-            .lock()
-            .expect("world trace lock poisoned")
-            .clone()
+    pub(crate) fn snapshot(&self) -> CompilationAccessTrace {
+        CompilationAccessTrace::from_observations(
+            self.observations
+                .lock()
+                .expect("world trace lock poisoned")
+                .clone(),
+        )
     }
 
     fn record_file<T>(
         &self,
         id: FileId,
-        kind: CapturedAccessKind,
+        kind: CompilationAccessKind,
         result: &FileResult<T>,
         bytes: impl FnOnce(&T) -> &[u8],
     ) {
         let outcome = match result {
             Ok(value) => read_outcome(bytes(value)),
-            Err(FileError::NotFound(_)) => CapturedAccessOutcome::Missing,
-            Err(_) => CapturedAccessOutcome::Failed,
+            Err(FileError::NotFound(_)) => CompilationAccessOutcome::Missing,
+            Err(_) => CompilationAccessOutcome::Failed,
         };
-        self.record(CapturedObservation {
+        self.record(CompilationAccessObservation::new(
             kind,
-            logical_path: logical_path(id),
-            font_index: None,
+            logical_path(id),
+            None,
             outcome,
-        });
+        ));
     }
 
-    fn record(&self, observation: CapturedObservation) {
+    fn record(&self, observation: CompilationAccessObservation) {
         self.observations
             .lock()
             .expect("world trace lock poisoned")
@@ -96,7 +78,7 @@ impl<W: World + ?Sized> World for WorldTrace<'_, W> {
 
     fn source(&self, id: FileId) -> FileResult<Source> {
         let result = self.world.source(id);
-        self.record_file(id, CapturedAccessKind::Source, &result, |source| {
+        self.record_file(id, CompilationAccessKind::Source, &result, |source| {
             source.text().as_bytes()
         });
         result
@@ -104,30 +86,30 @@ impl<W: World + ?Sized> World for WorldTrace<'_, W> {
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
         let result = self.world.file(id);
-        self.record_file(id, CapturedAccessKind::File, &result, Bytes::as_slice);
+        self.record_file(id, CompilationAccessKind::File, &result, Bytes::as_slice);
         result
     }
 
     fn font(&self, requested_index: usize) -> Option<Font> {
         let font = self.world.font(requested_index);
         let observation = match &font {
-            Some(font) => CapturedObservation {
-                kind: CapturedAccessKind::Font,
-                logical_path: format!(
+            Some(font) => CompilationAccessObservation::new(
+                CompilationAccessKind::Font,
+                format!(
                     "font:{:032x}",
                     u128::from_be_bytes(
                         crate::FontContainerIdentity::from_bytes(font.data().as_slice()).digest()
                     )
                 ),
-                font_index: Some(font.index() as usize),
-                outcome: read_outcome(font.data().as_slice()),
-            },
-            None => CapturedObservation {
-                kind: CapturedAccessKind::Font,
-                logical_path: format!("font-index:{requested_index}"),
-                font_index: Some(requested_index),
-                outcome: CapturedAccessOutcome::Missing,
-            },
+                Some(font.index() as usize),
+                read_outcome(font.data().as_slice()),
+            ),
+            None => CompilationAccessObservation::new(
+                CompilationAccessKind::Font,
+                format!("font-index:{requested_index}"),
+                Some(requested_index),
+                CompilationAccessOutcome::Missing,
+            ),
         };
         self.record(observation);
         font
@@ -138,8 +120,8 @@ impl<W: World + ?Sized> World for WorldTrace<'_, W> {
     }
 }
 
-fn read_outcome(data: &[u8]) -> CapturedAccessOutcome {
-    CapturedAccessOutcome::Read {
+fn read_outcome(data: &[u8]) -> CompilationAccessOutcome {
+    CompilationAccessOutcome::Read {
         byte_length: data.len(),
         digest: typst::utils::hash128(&data).to_be_bytes(),
     }
@@ -191,33 +173,35 @@ mod tests {
         assert!(trace.font(41).is_none());
 
         let observations = trace.snapshot();
+        let observations = observations.observations().collect::<Vec<_>>();
         assert_eq!(observations.len(), 4);
-        assert!(observations.contains(&CapturedObservation {
-            kind: CapturedAccessKind::Source,
-            logical_path: "project:main.typ".to_owned(),
-            font_index: None,
-            outcome: CapturedAccessOutcome::Read {
-                byte_length: 5,
-                digest: typst::utils::hash128(&b"Hello".as_slice()).to_be_bytes(),
-            },
+        assert!(observations.iter().any(|observation| {
+            observation.kind() == CompilationAccessKind::Source
+                && observation.logical_path() == "project:main.typ"
+                && observation.font_index().is_none()
+                && observation.outcome()
+                    == &CompilationAccessOutcome::Read {
+                        byte_length: 5,
+                        digest: typst::utils::hash128(&b"Hello".as_slice()).to_be_bytes(),
+                    }
         }));
-        assert!(observations.contains(&CapturedObservation {
-            kind: CapturedAccessKind::Source,
-            logical_path: "project:bad.typ".to_owned(),
-            font_index: None,
-            outcome: CapturedAccessOutcome::Failed,
+        assert!(observations.iter().any(|observation| {
+            observation.kind() == CompilationAccessKind::Source
+                && observation.logical_path() == "project:bad.typ"
+                && observation.font_index().is_none()
+                && observation.outcome() == &CompilationAccessOutcome::Failed
         }));
-        assert!(observations.contains(&CapturedObservation {
-            kind: CapturedAccessKind::File,
-            logical_path: "project:missing.bin".to_owned(),
-            font_index: None,
-            outcome: CapturedAccessOutcome::Missing,
+        assert!(observations.iter().any(|observation| {
+            observation.kind() == CompilationAccessKind::File
+                && observation.logical_path() == "project:missing.bin"
+                && observation.font_index().is_none()
+                && observation.outcome() == &CompilationAccessOutcome::Missing
         }));
-        assert!(observations.contains(&CapturedObservation {
-            kind: CapturedAccessKind::Font,
-            logical_path: "font-index:41".to_owned(),
-            font_index: Some(41),
-            outcome: CapturedAccessOutcome::Missing,
+        assert!(observations.iter().any(|observation| {
+            observation.kind() == CompilationAccessKind::Font
+                && observation.logical_path() == "font-index:41"
+                && observation.font_index() == Some(41)
+                && observation.outcome() == &CompilationAccessOutcome::Missing
         }));
     }
 }

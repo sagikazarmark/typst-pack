@@ -18,9 +18,7 @@ use typst_pdf::{PdfOptions, PdfStandard, PdfStandards, Timestamp};
 use crate::embedded::EmbeddedTypst;
 use crate::pack::{FontCatalogError, PackageTreeError};
 use crate::world::PackWorld;
-use crate::world_trace::{
-    CapturedAccessKind, CapturedAccessOutcome, CapturedObservation, WorldTrace, logical_path,
-};
+use crate::world_trace::{WorldTrace, logical_path};
 use crate::{FontContainerIdentity, Pack, PackageTreeIdentity};
 
 /// The exact embedded Typst compiler implementation that produced a result.
@@ -1076,26 +1074,17 @@ pub struct CompilationAccessObservation {
 }
 
 impl CompilationAccessObservation {
-    fn from_captured(observation: CapturedObservation) -> Self {
+    pub(crate) fn new(
+        kind: CompilationAccessKind,
+        logical_path: String,
+        font_index: Option<usize>,
+        outcome: CompilationAccessOutcome,
+    ) -> Self {
         Self {
-            kind: match observation.kind {
-                CapturedAccessKind::Source => CompilationAccessKind::Source,
-                CapturedAccessKind::File => CompilationAccessKind::File,
-                CapturedAccessKind::Font => CompilationAccessKind::Font,
-            },
-            logical_path: observation.logical_path,
-            font_index: observation.font_index,
-            outcome: match observation.outcome {
-                CapturedAccessOutcome::Read {
-                    byte_length,
-                    digest,
-                } => CompilationAccessOutcome::Read {
-                    byte_length,
-                    digest,
-                },
-                CapturedAccessOutcome::Missing => CompilationAccessOutcome::Missing,
-                CapturedAccessOutcome::Failed => CompilationAccessOutcome::Failed,
-            },
+            kind,
+            logical_path,
+            font_index,
+            outcome,
         }
     }
 
@@ -1127,13 +1116,8 @@ impl CompilationAccessTrace {
         self.observations.iter()
     }
 
-    fn from_captured(observations: BTreeSet<CapturedObservation>) -> Self {
-        Self {
-            observations: observations
-                .into_iter()
-                .map(CompilationAccessObservation::from_captured)
-                .collect(),
-        }
+    pub(crate) fn from_observations(observations: BTreeSet<CompilationAccessObservation>) -> Self {
+        Self { observations }
     }
 }
 
@@ -1960,7 +1944,7 @@ pub(crate) fn compile_pack_kernel(
         kernel.request_inventory.output_specification.value(),
         || None,
     );
-    let access_trace = CompilationAccessTrace::from_captured(traced.snapshot());
+    let access_trace = traced.snapshot();
     match compiled {
         Ok(output) => {
             let warnings = output.warnings.clone();
@@ -2613,12 +2597,14 @@ mod result_identity_tests {
 
     #[test]
     fn compilation_trace_retains_missing_font_requests() {
-        let trace = CompilationAccessTrace::from_captured(BTreeSet::from([CapturedObservation {
-            kind: CapturedAccessKind::Font,
-            logical_path: "font-index:7".to_owned(),
-            font_index: Some(7),
-            outcome: CapturedAccessOutcome::Missing,
-        }]));
+        let trace = CompilationAccessTrace::from_observations(BTreeSet::from([
+            CompilationAccessObservation::new(
+                CompilationAccessKind::Font,
+                "font-index:7".to_owned(),
+                Some(7),
+                CompilationAccessOutcome::Missing,
+            ),
+        ]));
 
         let observation = trace.observations().next().unwrap();
         assert_eq!(observation.kind(), CompilationAccessKind::Font);
