@@ -174,6 +174,11 @@ classification = "upstream-behavior"
 coverage = ["tests/official_typst_oracle.rs"]
 
 [[semantic]]
+name = "required-output-feature-derivation"
+classification = "intentional-pack-difference"
+coverage = ["tests/official_typst_oracle.rs"]
+
+[[semantic]]
 name = "cli-parsing-and-environment"
 classification = "unavoidable-mirror"
 coverage = ["tests/official_typst_cli.rs", "tests/cli.rs"]
@@ -199,7 +204,7 @@ coverage = [".dagger/modules/tests/main.dang"]
 [[surface]]
 path = "src/compile.rs"
 classification = "pack-invariant"
-sha256 = "c6782daa41c9d0ed48f66919031ee371399a38ff9378d61e9433734695ac3b6c"
+sha256 = "3ebf43cc5a691bbcd4b0db36a7cf150aa6a8cb1fd91060484c3b9ff3c9d94d84"
 
 [[surface]]
 path = "src/embedded.rs"
@@ -214,7 +219,7 @@ sha256 = "a57b8b90aee4fa3805e726ed5ea1cef42166fe9654c4148521eb0bdef397c5a1"
 [[surface]]
 path = "src/lib.rs"
 classification = "pack-invariant"
-sha256 = "124ef8d80ea326653d54bd238e832c46305f7dd97bd3ab5a38f12f0fe260c923"
+sha256 = "3c82dfc6251f4a0ef1ed65eae5c4e106ad996d52bf52fdbc4f87679bc7d4d83f"
 
 [[surface]]
 path = "src/main.rs"
@@ -234,7 +239,7 @@ sha256 = "b37a5b24bea3dc61950325ce93bc4cda1c4cd7a595c262bc0fa243a298d8e903"
 [[surface]]
 path = "src/packer.rs"
 classification = "pack-invariant"
-sha256 = "8c417ab0fb6a4d22043ec1417f6980d79a75a3e76496e0b5c005780571ececea"
+sha256 = "69d0619dd42d15b370ab87853f8669bc726a089058f09d34c2de9679fb2822a9"
 
 [[surface]]
 path = "src/resource.rs"
@@ -244,7 +249,7 @@ sha256 = "6dd2438a248a518d536470e66154e0ef93fa0bedbdf9563047834f76b196ca1a"
 [[surface]]
 path = "src/tests.rs"
 classification = "pack-invariant"
-sha256 = "552b6095b8f0b2696b7a83665163b396d74cdb1b611d5c4f96c388968a55e508"
+sha256 = "0e60d3de7682f6d1b97e5ad5dd5fac950d2891b7787d8cfdba5e3b3d9c5afc69"
 
 [[surface]]
 path = "src/world.rs"
@@ -252,9 +257,14 @@ classification = "pack-invariant"
 sha256 = "b50c84c2d3000d5d63ff02accd5252d9cb6cbd63967ca3837b320b38a420ed9f"
 
 [[surface]]
+path = "src/world_trace.rs"
+classification = "pack-invariant"
+sha256 = "1b631697897589471e84a2465d2cd698904ca393c36d5af9e41bfdb721e661f1"
+
+[[surface]]
 path = "src/cli.rs"
 classification = "unavoidable-mirror"
-sha256 = "7a39e8a43e31374ba8e16758bebc50e09c0c38c330efe96c5b7ec42a468d4d19"
+sha256 = "8c5eaedd9455c6aa99e5abc34f341f0195e755bd15b0a5addae1e4a5bb0b2be2"
 
 [[surface]]
 path = "dagger.dang"
@@ -274,17 +284,17 @@ sha256 = "bcd51566ba5ebea2596eebf44e4508878e1d1be8f66a10e8f32eeb01e21981aa"
 [[surface]]
 path = "tests/compilation.rs"
 classification = "pack-invariant"
-sha256 = "c0cf22a9914bd1277f03c14c9cb78abd561d26189f4c3840e3598b5b3b614c28"
+sha256 = "917d585aa64423e93d3f90476a0bc9f998cebad6bb5a08817ae33e86f3a6ba1a"
 
 [[surface]]
 path = "tests/official_typst_oracle.rs"
 classification = "upstream-behavior"
-sha256 = "3d55359e9ddcf633d976d58961bd0009f1f0f8b9114c0c54252ce4a9f3bc4233"
+sha256 = "28d6d3315b90e76178f1546c5cde4aa1064ae59fb995a4584e39e337b3997c39"
 
 [[surface]]
 path = "tests/official_typst_cli.rs"
 classification = "unavoidable-mirror"
-sha256 = "91edff8b66c886ead42ade36e92abe25d6f45f3736096aad504931bb41ebd13e"
+sha256 = "bfdf73c2898793d237940dc8b5bd8ac72129cf4373a5be763656a7731495e37b"
 
 [[surface]]
 path = "tests/support/mod.rs"
@@ -294,7 +304,7 @@ sha256 = "2d0bd52dd4f556dc7503ed7c8f520cc1322c9bb950e2cce3a8015a118938c3f9"
 [[surface]]
 path = "tests/support/official_typst.rs"
 classification = "upstream-behavior"
-sha256 = "e44f6491f57b4e26c819eb8d88b6fd15df208199ba7e59c0505f3086c6acb26d"
+sha256 = "34e166c5b7020c4aeffe8a8f0ece82ac40dfca1020245a8933e42b38e69333c2"
 
 [[surface]]
 path = "tests/support/official_typst_cli.rs"

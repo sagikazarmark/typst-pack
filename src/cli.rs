@@ -25,11 +25,12 @@ use typst_pdf::{PdfStandard, Timestamp};
 
 use crate::compile::{
     CompilationArtifact, CompilationAttempt, CompilationExecutionControls,
-    CompilationOperationOutcome, CompilationRequestRejection, CompilationStatus, CompileOptions,
-    CreationTimestamp, FontContainerFulfillment, OutputFormat, PackCompilationPresentation,
-    PackCompilationRequest, PackOverrideSet, PackageTreeFulfillment, PageRange, PageSelection,
-    compile_pack_kernel, parse_page_selection, pdf_request_issues, pdf_standard_requiring_tags,
-    prepare_pack_compilation,
+    CompilationOperationOutcome, CompilationOutputSpecification, CompilationRequestRejection,
+    CompilationStatus, CreationTimestamp, FontContainerFulfillment, HtmlOutputSpecification,
+    OutputFormat, PackCompilationPresentation, PackCompilationRequest, PackOverrideSet,
+    PackageTreeFulfillment, PageRange, PageSelection, PdfOutputSpecification,
+    PngOutputSpecification, SvgOutputSpecification, compile_pack_kernel, parse_page_selection,
+    pdf_request_issues, pdf_standard_requiring_tags, prepare_pack_compilation,
 };
 use crate::extract::{ExtractOptions, extract};
 use crate::manifest::PackMetadata;
@@ -1077,25 +1078,39 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         package_roots.insert(requirement.spec().to_string(), root.path().to_owned());
         package_fulfillments.push((requirement.spec().clone(), files));
     }
-    let options = CompileOptions {
-        page_selection,
-        ppi: Some(args.ppi),
-        render_bleed: false,
-        pretty: args.pretty,
-        pdf_standards: standards,
-        pdf_identifier: typst::foundations::Smart::Auto,
-        pdf_creator: typst::foundations::Smart::Auto,
-        pdf_tags,
-        creation_timestamp: match creation_timestamp {
-            Some(timestamp) => convert_datetime(timestamp)
-                .map(Timestamp::new_utc)
-                .map_or(CreationTimestamp::Omit, CreationTimestamp::Explicit),
-            None => system_time
-                .as_ref()
-                .and_then(local_timestamp)
-                .map(CreationTimestamp::Explicit)
-                .unwrap_or(CreationTimestamp::Omit),
-        },
+    let pdf_creation_timestamp = match creation_timestamp {
+        Some(timestamp) => convert_datetime(timestamp)
+            .map(Timestamp::new_utc)
+            .map_or(CreationTimestamp::Omit, CreationTimestamp::Explicit),
+        None => system_time
+            .as_ref()
+            .and_then(local_timestamp)
+            .map(CreationTimestamp::Explicit)
+            .unwrap_or(CreationTimestamp::Omit),
+    };
+    let output_specification = match format {
+        OutputFormat::Pdf => CompilationOutputSpecification::Pdf(PdfOutputSpecification {
+            page_selection,
+            standards,
+            identifier: typst::foundations::Smart::Auto,
+            creator: typst::foundations::Smart::Auto,
+            tags: pdf_tags,
+            creation_timestamp: pdf_creation_timestamp,
+            pretty: args.pretty,
+        }),
+        OutputFormat::Png => CompilationOutputSpecification::Png(PngOutputSpecification {
+            page_selection,
+            pixels_per_inch: Some(args.ppi),
+            render_bleed: false,
+        }),
+        OutputFormat::Svg => CompilationOutputSpecification::Svg(SvgOutputSpecification {
+            page_selection,
+            render_bleed: false,
+            pretty: args.pretty,
+        }),
+        OutputFormat::Html => CompilationOutputSpecification::Html(HtmlOutputSpecification {
+            pretty: args.pretty,
+        }),
     };
 
     let document_timestamp = creation_timestamp_seconds.unwrap_or_else(|| {
@@ -1105,9 +1120,9 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
             .with_timezone(&chrono::Utc)
             .timestamp()
     });
-    let mut request = PackCompilationRequest::new(pack, format)
+    let mut request = PackCompilationRequest::new(pack, output_specification)
+        .adapter_resolved_output()
         .adapter_resolved_inputs(parse_inputs(&args.compilation.inputs))
-        .adapter_resolved_options(options)
         .adapter_resolved_document_timestamp(document_timestamp)
         .map_err(|_| "creation timestamp is out of range")?;
     let mut controls = CompilationExecutionControls::default();

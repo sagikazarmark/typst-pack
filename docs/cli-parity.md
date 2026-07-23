@@ -68,6 +68,7 @@ test in the same Typst upgrade.
 | `--offline` is explicit | Exact Package Requirements must not fall through to an undeclared network source | offline package cases in `tests/cli.rs` and `tests/compilation.rs` |
 | Pack fonts and vendored packages precede host configuration | Contained exact dependencies remain authoritative | package and font authority cases in `tests/cli.rs`, `tests/compilation.rs`, and `tests/official_typst_oracle.rs` |
 | Bundle output and the Bundle feature are rejected | Bundle is outside the Pack output contract | feature acceptance/rejection and help omission cases in `tests/cli.rs` and `tests/compilation.rs` |
+| Pack compilation derives the HTML feature from HTML output | The tagged output specification fully determines the official Typst target and its required feature | Pack derivation and direct-official rejection cases in `tests/official_typst_oracle.rs` |
 | Watch and deprecated `--make-deps` are absent | Watch needs Pack-aware provenance; deprecated compatibility is not adopted | command and help omission cases in `tests/cli.rs` |
 | Creation requires a named source and supports Pack-specific discovery controls | Pack issuance needs a stable entrypoint and dependency closure | create stdin, target, Resource Slot, inclusion, and vendoring cases in `tests/cli.rs` |
 | Multi-output paths are collision-preflighted and stdout requires one artifact | Publication must not expose ambiguous or partial output | template collision, stdout, and empty/single/multiple artifact cases in `tests/cli.rs` |

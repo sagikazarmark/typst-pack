@@ -8,6 +8,7 @@ mod pack;
 mod packer;
 mod resource;
 mod world;
+mod world_trace;
 
 #[cfg(feature = "cli")]
 pub mod cli;
@@ -16,17 +17,19 @@ pub use compile::{
     CompilationAccessKind, CompilationAccessObservation, CompilationAccessOutcome,
     CompilationAccessTrace, CompilationArtifact, CompilationAttempt, CompilationDiagnostic,
     CompilationDocumentSummary, CompilationExecutionControls, CompilationFulfillmentReport,
-    CompilationIdentity, CompilationOperationOutcome, CompilationReport, CompilationReportOutcome,
+    CompilationIdentity, CompilationOperationOutcome, CompilationOutputOrigins,
+    CompilationOutputSpecification, CompilationReport, CompilationReportOutcome,
     CompilationRequestInventory, CompilationRequestRejection, CompilationResult,
-    CompilationResultIdentity, CompilationStatus, CompilationTarget, CompileOptions,
-    CreationTimestamp, DiagnosticHint, DiagnosticPhase, DiagnosticProducer, DiagnosticSeverity,
-    DiagnosticTracepoint, EffectiveEngineFeature, EffectiveRequestValue, EngineIdentity,
-    ExporterIdentity, FontContainerFulfillment, FontFulfillmentReport, LogicalSpan, OutputFormat,
-    PackCompilationRequest, PackCompilationWarning, PackCompileError, PackOverrideInventoryEntry,
-    PackOverrideSet, PackOverrideSetError, PackOverridesInventory, PackageFulfillmentReport,
-    PackageTreeFulfillment, PageRange, PageSelection, PdfStandardsValidationError,
-    RequestValueOrigin, TracepointKind, TypstInputsInventory, compile, compile_report,
-    parse_page_selection,
+    CompilationResultIdentity, CompilationStatus, CompilationTarget, CreationTimestamp,
+    DiagnosticHint, DiagnosticPhase, DiagnosticProducer, DiagnosticSeverity, DiagnosticTracepoint,
+    EffectiveEngineFeature, EffectiveRequestValue, EngineIdentity, ExporterIdentity,
+    FontContainerFulfillment, FontFulfillmentReport, HtmlOutputSpecification, LogicalSpan,
+    OutputFormat, PackCompilationRequest, PackCompilationWarning, PackCompileError,
+    PackOverrideInventoryEntry, PackOverrideSet, PackOverrideSetError, PackOverridesInventory,
+    PackageFulfillmentReport, PackageTreeFulfillment, PageRange, PageSelection,
+    PdfOutputSpecification, PdfStandardsValidationError, PngOutputSpecification,
+    RequestValueOrigin, SvgOutputSpecification, TracepointKind, TypstInputsInventory, compile,
+    compile_report, parse_page_selection,
 };
 #[cfg(feature = "fs")]
 pub use extract::{ExtractError, ExtractOptions, ExtractReport, extract};

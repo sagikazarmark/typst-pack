@@ -21,7 +21,9 @@ const MAIN: &str = include_str!("../fixtures/official-oracle/main.typ");
 const CHAPTER: &str = include_str!("../fixtures/official-oracle/chapter.typ");
 const EXPORT_REJECTION: &str = "#pdf.attach(\"duplicate.txt\", bytes(\"first\"))\n\
                                 #pdf.attach(\"duplicate.txt\", bytes(\"second\"))";
-const HTML_SUCCESS: &str = "#let _ = decimal(1.1)\n#html.div[HTML artifact]";
+const HTML_SUCCESS: &str =
+    "#let _ = decimal(1.1)\n#html.div[HTML artifact #include \"fragment.typ\"]";
+const HTML_FRAGMENT: &str = "from a discovered dependency";
 const HTML_COMPILER_REJECTION: &str = "#let _ = decimal(1.1)\n#datetime.today()";
 const HTML_EXPORTER_REJECTION: &str = "#let _ = decimal(1.1)\n#html.script(\"</script>\")";
 const SEMANTIC_REQUEST: &str = "#let width = int(sys.inputs.width)\n\
@@ -73,7 +75,7 @@ impl Fixture {
     pub fn html_success() -> Self {
         Self {
             entrypoint: "main.typ",
-            project: &[("main.typ", HTML_SUCCESS)],
+            project: &[("main.typ", HTML_SUCCESS), ("fragment.typ", HTML_FRAGMENT)],
             packages: &[],
             fonts: vec![],
         }

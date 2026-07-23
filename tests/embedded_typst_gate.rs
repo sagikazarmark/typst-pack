@@ -199,7 +199,21 @@ fn public_compilation_attests_the_approved_engine_and_exporters() {
             .unwrap()
             .build()
             .unwrap();
-        let result = compile(PackCompilationRequest::new(pack, format)).unwrap();
+        let specification = match format {
+            OutputFormat::Pdf => typst_pack::CompilationOutputSpecification::Pdf(
+                typst_pack::PdfOutputSpecification::default(),
+            ),
+            OutputFormat::Png => typst_pack::CompilationOutputSpecification::Png(
+                typst_pack::PngOutputSpecification::default(),
+            ),
+            OutputFormat::Svg => typst_pack::CompilationOutputSpecification::Svg(
+                typst_pack::SvgOutputSpecification::default(),
+            ),
+            OutputFormat::Html => typst_pack::CompilationOutputSpecification::Html(
+                typst_pack::HtmlOutputSpecification::default(),
+            ),
+        };
+        let result = compile(PackCompilationRequest::new(pack, specification)).unwrap();
         let (engine_version, engine_checksum) = expected("typst");
         let (exporter_version, exporter_checksum) = expected(exporter);
 

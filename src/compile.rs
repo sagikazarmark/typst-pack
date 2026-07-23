@@ -3,18 +3,15 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::ops::Range;
-use std::sync::Mutex;
 
 use ecow::EcoVec;
 #[cfg(feature = "cli")]
 use rayon::prelude::*;
-use typst::diag::{FileError, FileResult, Severity, SourceDiagnostic, Tracepoint, Warned};
-use typst::foundations::{Bytes, Datetime, Dict, Duration, Repr, Smart};
+use typst::diag::{Severity, SourceDiagnostic, Tracepoint, Warned};
+use typst::foundations::{Bytes, Datetime, Dict, Repr, Smart};
 use typst::syntax::package::PackageSpec;
-use typst::syntax::{DiagSpan, FileId, Source, Span, VirtualRoot};
-use typst::text::{Font, FontBook};
-use typst::utils::LazyHash;
-use typst::{Feature, Library, World, WorldExt};
+use typst::syntax::{DiagSpan, Span};
+use typst::{Feature, World, WorldExt};
 use typst_layout::PagedDocument;
 use typst_pdf::{PdfOptions, PdfStandard, PdfStandards, Timestamp};
 
@@ -22,6 +19,9 @@ use crate::embedded::EmbeddedTypst;
 use crate::pack::{FontCatalogError, PackageTreeError};
 use crate::resource::Provider;
 use crate::world::PackWorld;
+use crate::world_trace::{
+    CapturedAccessKind, CapturedAccessOutcome, CapturedObservation, WorldTrace, logical_path,
+};
 use crate::{FontContainerIdentity, Pack, PackageTreeIdentity};
 
 /// The exact embedded Typst compiler implementation that produced a result.
@@ -183,45 +183,96 @@ impl OutputFormat {
     }
 }
 
-/// Options for [`compile`].
+/// Semantic controls for PDF output.
 #[derive(Debug, Clone)]
-pub struct CompileOptions {
+pub struct PdfOutputSpecification {
     /// Which source pages to export.
     pub page_selection: PageSelection,
-    /// Pixels per inch for PNG output. Defaults to 144.
-    pub ppi: Option<f64>,
-    /// Whether Page Format exporters render into the page bleed region.
-    pub render_bleed: bool,
-    /// Whether to pretty-print HTML, SVG, and PDF output.
-    pub pretty: bool,
     /// PDF standards to enforce through the official exporter.
-    pub pdf_standards: Vec<PdfStandard>,
+    pub standards: Vec<PdfStandard>,
     /// The PDF file identifier, using the official exporter's automatic mode by default.
-    pub pdf_identifier: Smart<String>,
+    pub identifier: Smart<String>,
     /// The PDF creator metadata, using the official exporter's automatic mode by default.
-    pub pdf_creator: Smart<Option<String>>,
+    pub creator: Smart<Option<String>>,
     /// Whether PDF accessibility tags should be emitted.
     ///
     /// Automatic tagging is disabled with a warning for a page subset, matching
     /// Typst's CLI. Explicit tagging is passed through to the exporter.
-    pub pdf_tags: Smart<bool>,
+    pub tags: Smart<bool>,
     /// How the document creation datetime is recorded in PDF metadata.
     pub creation_timestamp: CreationTimestamp,
+    /// Whether to pretty-print PDF output.
+    pub pretty: bool,
 }
 
-impl Default for CompileOptions {
+impl Default for PdfOutputSpecification {
     fn default() -> Self {
         let pdf = PdfOptions::default();
         Self {
             page_selection: PageSelection::default(),
-            ppi: None,
-            render_bleed: false,
-            pretty: pdf.pretty,
-            pdf_standards: vec![],
-            pdf_identifier: pdf.ident,
-            pdf_creator: pdf.creator,
-            pdf_tags: Smart::Auto,
+            standards: vec![],
+            identifier: pdf.ident,
+            creator: pdf.creator,
+            tags: Smart::Auto,
             creation_timestamp: CreationTimestamp::Automatic,
+            pretty: pdf.pretty,
+        }
+    }
+}
+
+/// Semantic controls for PNG output.
+#[derive(Debug, Clone, Default)]
+pub struct PngOutputSpecification {
+    /// Which source pages to export.
+    pub page_selection: PageSelection,
+    /// Pixels per inch. `None` selects the core default of 144.
+    pub pixels_per_inch: Option<f64>,
+    /// Whether to render into the page bleed region.
+    pub render_bleed: bool,
+}
+
+/// Semantic controls for SVG output.
+#[derive(Debug, Clone, Default)]
+pub struct SvgOutputSpecification {
+    /// Which source pages to export.
+    pub page_selection: PageSelection,
+    /// Whether to render into the page bleed region.
+    pub render_bleed: bool,
+    /// Whether to pretty-print SVG output.
+    pub pretty: bool,
+}
+
+/// Semantic controls for HTML output.
+#[derive(Debug, Clone, Default)]
+pub struct HtmlOutputSpecification {
+    /// Whether to pretty-print HTML output.
+    pub pretty: bool,
+}
+
+/// The required tagged semantic output request.
+#[derive(Debug, Clone)]
+pub enum CompilationOutputSpecification {
+    Pdf(PdfOutputSpecification),
+    Png(PngOutputSpecification),
+    Svg(SvgOutputSpecification),
+    Html(HtmlOutputSpecification),
+}
+
+impl CompilationOutputSpecification {
+    /// The output format represented by this specification.
+    pub fn format(&self) -> OutputFormat {
+        match self {
+            Self::Pdf(_) => OutputFormat::Pdf,
+            Self::Png(_) => OutputFormat::Png,
+            Self::Svg(_) => OutputFormat::Svg,
+            Self::Html(_) => OutputFormat::Html,
+        }
+    }
+
+    fn target(&self) -> CompilationTarget {
+        match self {
+            Self::Html(_) => CompilationTarget::Html,
+            Self::Pdf(_) | Self::Png(_) | Self::Svg(_) => CompilationTarget::Paged,
         }
     }
 }
@@ -284,11 +335,8 @@ impl EffectiveEngineFeature {
 /// Every effective shared semantic value passed to the embedded Typst engine.
 #[derive(Debug, Clone)]
 pub struct CompilationRequestInventory {
-    format: EffectiveRequestValue<OutputFormat>,
-    options: EffectiveRequestValue<CompileOptions>,
-    ppi_origin: RequestValueOrigin,
-    pdf_tags_origin: RequestValueOrigin,
-    pdf_creation_time_origin: RequestValueOrigin,
+    output_specification: EffectiveRequestValue<CompilationOutputSpecification>,
+    output_origins: CompilationOutputOrigins,
     inputs: EffectiveRequestValue<TypstInputsInventory>,
     overrides: EffectiveRequestValue<PackOverridesInventory>,
     selected_features: Vec<EffectiveEngineFeature>,
@@ -298,14 +346,9 @@ pub struct CompilationRequestInventory {
 }
 
 impl CompilationRequestInventory {
-    /// The selected output format.
-    pub fn format(&self) -> &EffectiveRequestValue<OutputFormat> {
-        &self.format
-    }
-
-    /// The output controls, including their deterministic defaults.
-    pub fn options(&self) -> &EffectiveRequestValue<CompileOptions> {
-        &self.options
+    /// The tagged output controls, including their deterministic defaults.
+    pub fn output_specification(&self) -> &EffectiveRequestValue<CompilationOutputSpecification> {
+        &self.output_specification
     }
 
     /// Safe evidence for the exact `sys.inputs` dictionary.
@@ -318,19 +361,9 @@ impl CompilationRequestInventory {
         &self.overrides
     }
 
-    /// How the effective PNG PPI was established.
-    pub fn ppi_origin(&self) -> RequestValueOrigin {
-        self.ppi_origin
-    }
-
-    /// How the effective PDF tagging value was established.
-    pub fn pdf_tags_origin(&self) -> RequestValueOrigin {
-        self.pdf_tags_origin
-    }
-
-    /// How the effective PDF creation time was established.
-    pub fn pdf_creation_time_origin(&self) -> RequestValueOrigin {
-        self.pdf_creation_time_origin
+    /// Format-specific provenance for effective output controls.
+    pub fn output_origins(&self) -> CompilationOutputOrigins {
+        self.output_origins
     }
 
     /// The exact effective pinned Typst feature set.
@@ -354,6 +387,20 @@ impl CompilationRequestInventory {
     pub fn document_timestamp(&self) -> &EffectiveRequestValue<Option<i64>> {
         &self.document_timestamp
     }
+}
+
+/// Format-specific provenance for output controls resolved during preparation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompilationOutputOrigins {
+    Pdf {
+        tags: RequestValueOrigin,
+        creation_time: RequestValueOrigin,
+    },
+    Png {
+        pixels_per_inch: RequestValueOrigin,
+    },
+    Svg,
+    Html,
 }
 
 /// Safe, role-bound evidence for potentially sensitive Typst inputs.
@@ -525,8 +572,7 @@ impl CompilationIdentity {
 /// environment, cache, or network fallback beyond the Pack and these values.
 pub struct PackCompilationRequest {
     pack: Pack,
-    format: OutputFormat,
-    options: EffectiveRequestValue<CompileOptions>,
+    output_specification: EffectiveRequestValue<CompilationOutputSpecification>,
     inputs: EffectiveRequestValue<Dict>,
     overrides: EffectiveRequestValue<PackOverrideSet>,
     features: Vec<EffectiveEngineFeature>,
@@ -639,15 +685,14 @@ impl FontContainerFulfillment {
 }
 
 impl PackCompilationRequest {
-    /// Binds a validated Pack to an output format and deterministic defaults.
-    pub fn new(pack: Pack, format: OutputFormat) -> Self {
+    /// Binds a validated Pack to a tagged semantic output specification.
+    pub fn new(pack: Pack, output_specification: CompilationOutputSpecification) -> Self {
         let overrides = PackOverrideSet::new(&pack);
         Self {
             pack,
-            format,
-            options: EffectiveRequestValue::new(
-                CompileOptions::default(),
-                RequestValueOrigin::CoreDefaulted,
+            output_specification: EffectiveRequestValue::new(
+                output_specification,
+                RequestValueOrigin::CallerSupplied,
             ),
             inputs: EffectiveRequestValue::new(Dict::new(), RequestValueOrigin::CoreDefaulted),
             overrides: EffectiveRequestValue::new(overrides, RequestValueOrigin::CoreDefaulted),
@@ -659,15 +704,8 @@ impl PackCompilationRequest {
         }
     }
 
-    /// Sets the official exporter controls for this request.
-    pub fn options(mut self, options: CompileOptions) -> Self {
-        self.options = EffectiveRequestValue::new(options, RequestValueOrigin::CallerSupplied);
-        self
-    }
-
-    /// Sets exporter controls after an adapter has resolved its external defaults.
-    pub fn adapter_resolved_options(mut self, options: CompileOptions) -> Self {
-        self.options = EffectiveRequestValue::new(options, RequestValueOrigin::AdapterResolved);
+    pub(crate) fn adapter_resolved_output(mut self) -> Self {
+        self.output_specification.origin = RequestValueOrigin::AdapterResolved;
         self
     }
 
@@ -1055,6 +1093,29 @@ pub struct CompilationAccessObservation {
 }
 
 impl CompilationAccessObservation {
+    fn from_captured(observation: CapturedObservation) -> Self {
+        Self {
+            kind: match observation.kind {
+                CapturedAccessKind::Source => CompilationAccessKind::Source,
+                CapturedAccessKind::File => CompilationAccessKind::File,
+                CapturedAccessKind::Font => CompilationAccessKind::Font,
+            },
+            logical_path: observation.logical_path,
+            font_index: observation.font_index,
+            outcome: match observation.outcome {
+                CapturedAccessOutcome::Read {
+                    byte_length,
+                    digest,
+                } => CompilationAccessOutcome::Read {
+                    byte_length,
+                    digest,
+                },
+                CapturedAccessOutcome::Missing => CompilationAccessOutcome::Missing,
+                CapturedAccessOutcome::Failed => CompilationAccessOutcome::Failed,
+            },
+        }
+    }
+
     pub fn kind(&self) -> CompilationAccessKind {
         self.kind
     }
@@ -1081,6 +1142,15 @@ pub struct CompilationAccessTrace {
 impl CompilationAccessTrace {
     pub fn observations(&self) -> impl Iterator<Item = &CompilationAccessObservation> {
         self.observations.iter()
+    }
+
+    fn from_captured(observations: BTreeSet<CapturedObservation>) -> Self {
+        Self {
+            observations: observations
+                .into_iter()
+                .map(CompilationAccessObservation::from_captured)
+                .collect(),
+        }
     }
 }
 
@@ -1536,12 +1606,9 @@ impl PackCompileError {
 #[cfg(test)]
 pub(crate) fn compile_world(
     world: &dyn World,
-    format: OutputFormat,
-    options: &CompileOptions,
+    output: &CompilationOutputSpecification,
 ) -> Result<CompilationOutput, CompileError> {
-    compile_with_default_pdf_timestamp(world, format, options, || {
-        world.today(None).map(Timestamp::new_utc)
-    })
+    compile_with_default_pdf_timestamp(world, output, || world.today(None).map(Timestamp::new_utc))
 }
 
 /// Compiles a validated Pack through the private Pack Compilation Kernel.
@@ -1596,7 +1663,6 @@ impl PreparedPackCompilation {
 }
 
 pub(crate) struct PreparedPackCompilationKernel {
-    format: OutputFormat,
     request_inventory: CompilationRequestInventory,
     compilation_identity: CompilationIdentity,
     engine_identity: EngineIdentity,
@@ -1635,8 +1701,7 @@ pub(crate) fn prepare_pack_compilation(
     let CompilationAttempt { request, controls } = attempt;
     let PackCompilationRequest {
         pack,
-        format,
-        mut options,
+        output_specification: mut output,
         inputs,
         overrides,
         features,
@@ -1645,7 +1710,6 @@ pub(crate) fn prepare_pack_compilation(
         package_fulfillments,
         font_fulfillments,
     } = request;
-    let options_value = options.value();
     let mut request_issues = vec![];
     if overrides.value.pack_identity != pack.identity() {
         request_issues.push(CompilationRequestRejection::OverrideSetPackMismatch);
@@ -1656,56 +1720,66 @@ pub(crate) fn prepare_pack_compilation(
     {
         request_issues.push(CompilationRequestRejection::UnsupportedBundleFeature);
     }
-    if format == OutputFormat::Png
-        && options_value
-            .ppi
-            .is_some_and(|ppi| !ppi.is_finite() || ppi <= 0.0)
-    {
-        request_issues.push(CompilationRequestRejection::InvalidPpi);
-    }
-    if format == OutputFormat::Pdf {
-        request_issues.extend(pdf_request_issues(
-            &options_value.page_selection,
-            &options_value.pdf_standards,
-            options_value.pdf_tags,
-        ));
-    }
-    let page_selection_implies_untagged_pdf = format == OutputFormat::Pdf
-        && !options.value.page_selection.ranges().is_empty()
-        && options.value.pdf_tags.is_auto()
-        && PdfOptions::default().tagged;
-    let mut ppi_origin = options.origin;
-    let mut pdf_tags_origin = options.origin;
-    let mut pdf_creation_time_origin = options.origin;
-    match format {
-        OutputFormat::Png => {
-            if options.value.ppi.is_none() {
-                options.value.ppi = Some(default_png_ppi());
-                ppi_origin = RequestValueOrigin::CoreDefaulted;
+    let page_selection_implies_untagged_pdf;
+    let output_origins = match &mut output.value {
+        CompilationOutputSpecification::Png(specification) => {
+            let mut pixels_per_inch = output.origin;
+            if specification
+                .pixels_per_inch
+                .is_some_and(|ppi| !ppi.is_finite() || ppi <= 0.0)
+            {
+                request_issues.push(CompilationRequestRejection::InvalidPpi);
             }
+            if specification.pixels_per_inch.is_none() {
+                specification.pixels_per_inch = Some(default_png_ppi());
+                pixels_per_inch = RequestValueOrigin::CoreDefaulted;
+            }
+            page_selection_implies_untagged_pdf = false;
+            CompilationOutputOrigins::Png { pixels_per_inch }
         }
-        OutputFormat::Pdf => {
-            if options.value.pdf_tags.is_auto() {
-                options.value.pdf_tags = Smart::Custom(
+        CompilationOutputSpecification::Pdf(specification) => {
+            let mut tags = output.origin;
+            let mut creation_time = output.origin;
+            request_issues.extend(pdf_request_issues(
+                &specification.page_selection,
+                &specification.standards,
+                specification.tags,
+            ));
+            page_selection_implies_untagged_pdf = !specification.page_selection.ranges().is_empty()
+                && specification.tags.is_auto()
+                && PdfOptions::default().tagged;
+            if specification.tags.is_auto() {
+                specification.tags = Smart::Custom(
                     PdfOptions::default().tagged
-                        && options.value.page_selection.ranges().is_empty(),
+                        && specification.page_selection.ranges().is_empty(),
                 );
-                pdf_tags_origin = if options.value.page_selection.ranges().is_empty() {
+                tags = if specification.page_selection.ranges().is_empty() {
                     RequestValueOrigin::CoreDefaulted
                 } else {
                     RequestValueOrigin::CoreDerived
                 };
             }
             if matches!(
-                options.value.creation_timestamp,
+                specification.creation_timestamp,
                 CreationTimestamp::Automatic
             ) {
-                options.value.creation_timestamp = CreationTimestamp::Omit;
-                pdf_creation_time_origin = RequestValueOrigin::CoreDefaulted;
+                specification.creation_timestamp = CreationTimestamp::Omit;
+                creation_time = RequestValueOrigin::CoreDefaulted;
+            }
+            CompilationOutputOrigins::Pdf {
+                tags,
+                creation_time,
             }
         }
-        OutputFormat::Svg | OutputFormat::Html => {}
-    }
+        CompilationOutputSpecification::Svg(_) => {
+            page_selection_implies_untagged_pdf = false;
+            CompilationOutputOrigins::Svg
+        }
+        CompilationOutputSpecification::Html(_) => {
+            page_selection_implies_untagged_pdf = false;
+            CompilationOutputOrigins::Html
+        }
+    };
     let selected_features = [Feature::Html, Feature::Bundle, Feature::A11yExtras]
         .into_iter()
         .filter_map(|value| {
@@ -1716,7 +1790,7 @@ pub(crate) fn prepare_pack_compilation(
         })
         .collect::<Vec<_>>();
     let mut effective_features = selected_features.clone();
-    if format == OutputFormat::Html {
+    if matches!(&output.value, CompilationOutputSpecification::Html(_)) {
         effective_features.retain(|feature| feature.value != Feature::Html);
         effective_features.push(EffectiveEngineFeature {
             value: Feature::Html,
@@ -1724,7 +1798,7 @@ pub(crate) fn prepare_pack_compilation(
         });
     }
     let engine_identity = EmbeddedTypst::engine_identity();
-    let exporter_identity = EmbeddedTypst::exporter_identity(format);
+    let exporter_identity = EmbeddedTypst::exporter_identity(output.value.format());
     let raw_inputs = inputs.value;
     let total_key_bytes = raw_inputs.iter().map(|(key, _)| key.len()).sum();
     let total_value_repr_bytes = raw_inputs.iter().map(|(_, value)| value.repr().len()).sum();
@@ -1754,11 +1828,8 @@ pub(crate) fn prepare_pack_compilation(
             .collect(),
     );
     let request_inventory = CompilationRequestInventory {
-        format: EffectiveRequestValue::new(format, RequestValueOrigin::CallerSupplied),
-        options,
-        ppi_origin,
-        pdf_tags_origin,
-        pdf_creation_time_origin,
+        output_specification: output,
+        output_origins,
         inputs: EffectiveRequestValue::new(
             TypstInputsInventory {
                 commitment: inputs_commitment,
@@ -1894,7 +1965,6 @@ pub(crate) fn prepare_pack_compilation(
     Ok(PreparedPackCompilation {
         world,
         kernel: PreparedPackCompilationKernel {
-            format,
             request_inventory,
             compilation_identity,
             engine_identity,
@@ -1905,179 +1975,49 @@ pub(crate) fn prepare_pack_compilation(
     })
 }
 
-struct TracingCompilationWorld<'a> {
-    world: &'a PackWorld,
-    observations: Mutex<BTreeSet<CompilationAccessObservation>>,
-}
-
-impl<'a> TracingCompilationWorld<'a> {
-    fn new(world: &'a PackWorld) -> Self {
-        Self {
-            world,
-            observations: Mutex::new(BTreeSet::new()),
-        }
-    }
-
-    fn record<T>(
-        &self,
-        id: FileId,
-        kind: CompilationAccessKind,
-        result: &FileResult<T>,
-        bytes: impl FnOnce(&T) -> &[u8],
-    ) {
-        let outcome = match result {
-            Ok(value) => {
-                let data = bytes(value);
-                CompilationAccessOutcome::Read {
-                    byte_length: data.len(),
-                    digest: typst::utils::hash128(&data).to_be_bytes(),
-                }
-            }
-            Err(FileError::NotFound(_)) => CompilationAccessOutcome::Missing,
-            Err(_) => CompilationAccessOutcome::Failed,
-        };
-        self.observations
-            .lock()
-            .expect("compilation trace lock poisoned")
-            .insert(CompilationAccessObservation {
-                kind,
-                logical_path: logical_path(id),
-                font_index: None,
-                outcome,
-            });
-    }
-
-    fn finish(&self) -> CompilationAccessTrace {
-        CompilationAccessTrace {
-            observations: self
-                .observations
-                .lock()
-                .expect("compilation trace lock poisoned")
-                .clone(),
-        }
-    }
-}
-
-impl World for TracingCompilationWorld<'_> {
-    fn library(&self) -> &LazyHash<Library> {
-        self.world.library()
-    }
-    fn book(&self) -> &LazyHash<FontBook> {
-        self.world.book()
-    }
-    fn main(&self) -> FileId {
-        self.world.main()
-    }
-
-    fn source(&self, id: FileId) -> FileResult<Source> {
-        let result = self.world.source(id);
-        self.record(id, CompilationAccessKind::Source, &result, |source| {
-            source.text().as_bytes()
-        });
-        result
-    }
-
-    fn file(&self, id: FileId) -> FileResult<Bytes> {
-        let result = self.world.file(id);
-        self.record(id, CompilationAccessKind::File, &result, Bytes::as_slice);
-        result
-    }
-
-    fn font(&self, index: usize) -> Option<Font> {
-        let font = self.world.font(index);
-        let (logical_path, outcome) = match &font {
-            Some(font) => (
-                format!(
-                    "font:{:032x}",
-                    u128::from_be_bytes(
-                        FontContainerIdentity::from_bytes(font.data().as_slice()).digest()
-                    )
-                ),
-                CompilationAccessOutcome::Read {
-                    byte_length: font.data().len(),
-                    digest: typst::utils::hash128(&font.data().as_slice()).to_be_bytes(),
-                },
-            ),
-            None => (
-                format!("font-index:{index}"),
-                CompilationAccessOutcome::Missing,
-            ),
-        };
-        self.observations
-            .lock()
-            .expect("compilation trace lock poisoned")
-            .insert(CompilationAccessObservation {
-                kind: CompilationAccessKind::Font,
-                logical_path,
-                font_index: font
-                    .as_ref()
-                    .map(|font| font.index() as usize)
-                    .or(Some(index)),
-                outcome,
-            });
-        font
-    }
-
-    fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
-        self.world.today(offset)
-    }
-}
-
 pub(crate) fn compile_pack_kernel(
     world: &PackWorld,
     kernel: PreparedPackCompilationKernel,
 ) -> PackCompilationExecution {
-    let PreparedPackCompilationKernel {
-        format,
-        request_inventory,
-        compilation_identity,
-        engine_identity,
-        exporter_identity,
-        page_selection_implies_untagged_pdf,
-        fulfillments,
-    } = kernel;
-    let traced = TracingCompilationWorld::new(world);
+    let traced = WorldTrace::new(world);
     let compiled = compile_with_default_pdf_timestamp(
         &traced,
-        format,
-        request_inventory.options.value(),
+        kernel.request_inventory.output_specification.value(),
         || None,
     );
-    let access_trace = traced.finish();
+    let access_trace = CompilationAccessTrace::from_captured(traced.snapshot());
     match compiled {
         Ok(output) => {
             let warnings = output.warnings.clone();
             let mut presentation_pack_warnings = output.pack_warnings.clone();
-            if page_selection_implies_untagged_pdf {
+            if kernel.page_selection_implies_untagged_pdf {
                 presentation_pack_warnings.push(page_selection_pdf_tags_warning());
             }
             let diagnostics = project_diagnostics(
                 &traced,
                 output.warnings,
                 DiagnosticPhase::Compilation,
-                DiagnosticProducer::Engine(engine_identity),
+                DiagnosticProducer::Engine(kernel.engine_identity),
             );
-            let pack_warnings =
-                project_pack_warnings(output.pack_warnings, page_selection_implies_untagged_pdf);
+            let pack_warnings = project_pack_warnings(
+                output.pack_warnings,
+                kernel.page_selection_implies_untagged_pdf,
+            );
             PackCompilationExecution {
-                result: finalize_result(CompilationResult {
-                    status: CompilationStatus::Succeeded,
-                    artifacts: output.artifacts,
+                result: assemble_compilation_result(
+                    &kernel,
+                    CompilationStatus::Succeeded,
+                    output.artifacts,
                     diagnostics,
                     pack_warnings,
-                    document: document_summary(format, output.source_page_count),
+                    output.source_page_count,
                     access_trace,
-                    result_identity: CompilationResultIdentity(0),
-                    request_inventory: request_inventory.clone(),
-                    compilation_identity,
-                    engine_identity,
-                    exporter_identity,
-                }),
+                ),
                 presentation: PackCompilationPresentation::Succeeded {
                     warnings,
                     pack_warnings: presentation_pack_warnings,
                 },
-                fulfillments,
+                fulfillments: kernel.fulfillments,
             }
         }
         Err(CompileError::Diagnostics {
@@ -2088,7 +2028,7 @@ pub(crate) fn compile_pack_kernel(
             source_page_count,
         }) => {
             let mut presentation_pack_warnings = pack_warnings.clone();
-            if page_selection_implies_untagged_pdf {
+            if kernel.page_selection_implies_untagged_pdf {
                 presentation_pack_warnings.push(page_selection_pdf_tags_warning());
             }
             let presentation = PackCompilationPresentation::Diagnostics {
@@ -2100,32 +2040,28 @@ pub(crate) fn compile_pack_kernel(
                 &traced,
                 warnings,
                 DiagnosticPhase::Compilation,
-                DiagnosticProducer::Engine(engine_identity),
+                DiagnosticProducer::Engine(kernel.engine_identity),
             );
             let producer = match phase {
-                DiagnosticPhase::Compilation => DiagnosticProducer::Engine(engine_identity),
-                DiagnosticPhase::Export => DiagnosticProducer::Exporter(exporter_identity),
+                DiagnosticPhase::Compilation => DiagnosticProducer::Engine(kernel.engine_identity),
+                DiagnosticPhase::Export => DiagnosticProducer::Exporter(kernel.exporter_identity),
             };
             diagnostics.extend(project_diagnostics(&traced, errors, phase, producer));
             PackCompilationExecution {
-                result: finalize_result(CompilationResult {
-                    status: CompilationStatus::Rejected,
-                    artifacts: vec![],
+                result: assemble_compilation_result(
+                    &kernel,
+                    CompilationStatus::Rejected,
+                    vec![],
                     diagnostics,
-                    pack_warnings: project_pack_warnings(
+                    project_pack_warnings(
                         pack_warnings,
-                        page_selection_implies_untagged_pdf,
+                        kernel.page_selection_implies_untagged_pdf,
                     ),
-                    document: document_summary(format, source_page_count),
+                    source_page_count,
                     access_trace,
-                    result_identity: CompilationResultIdentity(0),
-                    request_inventory: request_inventory.clone(),
-                    compilation_identity,
-                    engine_identity,
-                    exporter_identity,
-                }),
+                ),
                 presentation,
-                fulfillments,
+                fulfillments: kernel.fulfillments,
             }
         }
         Err(CompileError::PngExport {
@@ -2136,7 +2072,7 @@ pub(crate) fn compile_pack_kernel(
             source_page_number,
         }) => {
             let mut presentation_pack_warnings = pack_warnings.clone();
-            if page_selection_implies_untagged_pdf {
+            if kernel.page_selection_implies_untagged_pdf {
                 presentation_pack_warnings.push(page_selection_pdf_tags_warning());
             }
             let presentation = PackCompilationPresentation::PngExport {
@@ -2148,7 +2084,7 @@ pub(crate) fn compile_pack_kernel(
                 &traced,
                 warnings,
                 DiagnosticPhase::Compilation,
-                DiagnosticProducer::Engine(engine_identity),
+                DiagnosticProducer::Engine(kernel.engine_identity),
             );
             diagnostics.push(CompilationDiagnostic {
                 severity: DiagnosticSeverity::Error,
@@ -2160,28 +2096,24 @@ pub(crate) fn compile_pack_kernel(
                 hints: vec![],
                 trace: vec![],
                 phase: DiagnosticPhase::Export,
-                producer: DiagnosticProducer::Exporter(exporter_identity),
+                producer: DiagnosticProducer::Exporter(kernel.exporter_identity),
                 source_page_number: Some(source_page_number),
             });
             PackCompilationExecution {
-                result: finalize_result(CompilationResult {
-                    status: CompilationStatus::Rejected,
-                    artifacts: vec![],
+                result: assemble_compilation_result(
+                    &kernel,
+                    CompilationStatus::Rejected,
+                    vec![],
                     diagnostics,
-                    pack_warnings: project_pack_warnings(
+                    project_pack_warnings(
                         pack_warnings,
-                        page_selection_implies_untagged_pdf,
+                        kernel.page_selection_implies_untagged_pdf,
                     ),
-                    document: document_summary(format, Some(source_page_count)),
+                    Some(source_page_count),
                     access_trace,
-                    result_identity: CompilationResultIdentity(0),
-                    request_inventory: request_inventory.clone(),
-                    compilation_identity,
-                    engine_identity,
-                    exporter_identity,
-                }),
+                ),
                 presentation,
-                fulfillments,
+                fulfillments: kernel.fulfillments,
             }
         }
         Err(CompileError::InvalidPdfStandards(error)) => {
@@ -2190,16 +2122,39 @@ pub(crate) fn compile_pack_kernel(
     }
 }
 
+fn assemble_compilation_result(
+    kernel: &PreparedPackCompilationKernel,
+    status: CompilationStatus,
+    artifacts: Vec<CompilationArtifact>,
+    diagnostics: Vec<CompilationDiagnostic>,
+    pack_warnings: Vec<PackCompilationWarning>,
+    source_page_count: Option<usize>,
+    access_trace: CompilationAccessTrace,
+) -> CompilationResult {
+    finalize_result(CompilationResult {
+        status,
+        artifacts,
+        diagnostics,
+        pack_warnings,
+        document: document_summary(
+            kernel.request_inventory.output_specification.value(),
+            source_page_count,
+        ),
+        access_trace,
+        result_identity: CompilationResultIdentity(0),
+        request_inventory: kernel.request_inventory.clone(),
+        compilation_identity: kernel.compilation_identity,
+        engine_identity: kernel.engine_identity,
+        exporter_identity: kernel.exporter_identity,
+    })
+}
+
 fn document_summary(
-    format: OutputFormat,
+    output: &CompilationOutputSpecification,
     source_page_count: Option<usize>,
 ) -> CompilationDocumentSummary {
     CompilationDocumentSummary {
-        target: if format == OutputFormat::Html {
-            CompilationTarget::Html
-        } else {
-            CompilationTarget::Paged
-        },
+        target: output.target(),
         source_page_count,
     }
 }
@@ -2270,12 +2225,11 @@ fn compilation_identity(
     engine_identity: EngineIdentity,
     exporter_identity: ExporterIdentity,
 ) -> CompilationIdentity {
-    let options = inventory.options.value();
-    let page_selection = canonical_page_selection(&options.page_selection);
-    let output_digest = match inventory.format.value {
-        OutputFormat::Pdf => {
-            let mut standards = options
-                .pdf_standards
+    let output_digest = match inventory.output_specification.value() {
+        CompilationOutputSpecification::Pdf(specification) => {
+            let page_selection = canonical_page_selection(&specification.page_selection);
+            let mut standards = specification
+                .standards
                 .iter()
                 .map(pdf_standard_identity)
                 .collect::<Vec<_>>();
@@ -2283,24 +2237,35 @@ fn compilation_identity(
             typst::utils::hash128(&(
                 "pdf",
                 &page_selection,
-                &options.pdf_identifier,
-                &options.pdf_creator,
-                options.pdf_tags,
-                options.creation_timestamp,
+                &specification.identifier,
+                &specification.creator,
+                specification.tags,
+                specification.creation_timestamp,
                 standards,
-                options.pretty,
+                specification.pretty,
             ))
         }
-        OutputFormat::Png => typst::utils::hash128(&(
-            "png",
-            &page_selection,
-            options.ppi.map(f64::to_bits),
-            options.render_bleed,
-        )),
-        OutputFormat::Svg => {
-            typst::utils::hash128(&("svg", &page_selection, options.render_bleed, options.pretty))
+        CompilationOutputSpecification::Png(specification) => {
+            let page_selection = canonical_page_selection(&specification.page_selection);
+            typst::utils::hash128(&(
+                "png",
+                &page_selection,
+                specification.pixels_per_inch.map(f64::to_bits),
+                specification.render_bleed,
+            ))
         }
-        OutputFormat::Html => typst::utils::hash128(&("html", options.pretty)),
+        CompilationOutputSpecification::Svg(specification) => {
+            let page_selection = canonical_page_selection(&specification.page_selection);
+            typst::utils::hash128(&(
+                "svg",
+                &page_selection,
+                specification.render_bleed,
+                specification.pretty,
+            ))
+        }
+        CompilationOutputSpecification::Html(specification) => {
+            typst::utils::hash128(&("html", specification.pretty))
+        }
     };
     let feature_values = inventory
         .features
@@ -2310,7 +2275,7 @@ fn compilation_identity(
     CompilationIdentity(typst::utils::hash128(&(
         "typst-pack-compilation-v1",
         pack.identity(),
-        inventory.format.value,
+        inventory.output_specification.value().format(),
         output_digest,
         inventory.inputs.value.commitment,
         inventory
@@ -2377,16 +2342,11 @@ fn pdf_standard_identity(standard: &PdfStandard) -> &'static str {
 
 pub(crate) fn compile_with_default_pdf_timestamp(
     world: &dyn World,
-    format: OutputFormat,
-    options: &CompileOptions,
+    specification: &CompilationOutputSpecification,
     default_pdf_timestamp: impl FnOnce() -> Option<Timestamp>,
 ) -> Result<CompilationOutput, CompileError> {
     let _compilation_timing = typst_timing::TimingScope::new("typst-pack compilation");
-    let pdf_standards = (format == OutputFormat::Pdf)
-        .then(|| validate_pdf_standards(&options.pdf_standards))
-        .transpose()
-        .map_err(CompileError::InvalidPdfStandards)?;
-    if format == OutputFormat::Html {
+    if let CompilationOutputSpecification::Html(specification) = specification {
         let pack_warnings = EcoVec::new();
         let Warned { output, warnings } = EmbeddedTypst::compile_html(world);
         let document = output.map_err(|errors| CompileError::Diagnostics {
@@ -2400,7 +2360,7 @@ pub(crate) fn compile_with_default_pdf_timestamp(
         let bytes = EmbeddedTypst::export_html(
             &document,
             &typst_html::HtmlOptions {
-                pretty: options.pretty,
+                pretty: specification.pretty,
             },
         )
         .map_err(|errors| CompileError::Diagnostics {
@@ -2412,7 +2372,7 @@ pub(crate) fn compile_with_default_pdf_timestamp(
         })?;
         return Ok(CompilationOutput {
             artifacts: vec![CompilationArtifact {
-                format,
+                format: OutputFormat::Html,
                 bytes,
                 source_page_number: None,
             }],
@@ -2428,9 +2388,9 @@ pub(crate) fn compile_with_default_pdf_timestamp(
     } = EmbeddedTypst::compile_paged(world);
     let warnings = compile_warnings;
     let mut pack_warnings = EcoVec::new();
-    if format == OutputFormat::Pdf
-        && !options.page_selection.ranges().is_empty()
-        && options.pdf_tags.is_auto()
+    if let CompilationOutputSpecification::Pdf(specification) = specification
+        && !specification.page_selection.ranges().is_empty()
+        && specification.tags.is_auto()
         && PdfOptions::default().tagged
     {
         pack_warnings.push(page_selection_pdf_tags_warning());
@@ -2445,29 +2405,29 @@ pub(crate) fn compile_with_default_pdf_timestamp(
     let source_page_count = document.pages().len();
     let artifacts = {
         let _export_timing = typst_timing::TimingScope::new("export");
-        match format {
-            OutputFormat::Pdf => {
-                let timestamp = match options.creation_timestamp {
+        match specification {
+            CompilationOutputSpecification::Pdf(specification) => {
+                let standards = validate_pdf_standards(&specification.standards)
+                    .map_err(CompileError::InvalidPdfStandards)?;
+                let timestamp = match specification.creation_timestamp {
                     CreationTimestamp::Automatic => default_pdf_timestamp(),
                     CreationTimestamp::Explicit(timestamp) => Some(timestamp),
                     CreationTimestamp::Omit => None,
                 };
                 let pdf_options = PdfOptions {
-                    ident: options.pdf_identifier.clone(),
-                    creator: options.pdf_creator.clone(),
+                    ident: specification.identifier.clone(),
+                    creator: specification.creator.clone(),
                     timestamp,
-                    page_ranges: options.page_selection.typst_page_ranges(),
-                    standards: pdf_standards
-                        .clone()
-                        .expect("PDF standards are prepared for PDF export"),
-                    tagged: match options.pdf_tags {
+                    page_ranges: specification.page_selection.typst_page_ranges(),
+                    standards,
+                    tagged: match specification.tags {
                         Smart::Auto => {
                             PdfOptions::default().tagged
-                                && options.page_selection.ranges().is_empty()
+                                && specification.page_selection.ranges().is_empty()
                         }
                         Smart::Custom(tagged) => tagged,
                     },
-                    pretty: options.pretty,
+                    pretty: specification.pretty,
                 };
                 let pdf = EmbeddedTypst::export_pdf(&document, &pdf_options).map_err(|errors| {
                     CompileError::Diagnostics {
@@ -2479,18 +2439,21 @@ pub(crate) fn compile_with_default_pdf_timestamp(
                     }
                 })?;
                 vec![CompilationArtifact {
-                    format,
+                    format: OutputFormat::Pdf,
                     bytes: pdf,
                     source_page_number: None,
                 }]
             }
-            OutputFormat::Png => {
-                let ppi = options.ppi.unwrap_or_else(default_png_ppi);
+            CompilationOutputSpecification::Png(specification) => {
+                let pixels_per_inch = specification
+                    .pixels_per_inch
+                    .unwrap_or_else(default_png_ppi);
                 let render_options = typst_render::RenderOptions {
-                    pixel_per_pt: (ppi / 72.0).into(),
-                    render_bleed: options.render_bleed,
+                    pixel_per_pt: (pixels_per_inch / 72.0).into(),
+                    render_bleed: specification.render_bleed,
                 };
-                let pages = selected_pages(&document, options).collect::<Vec<_>>();
+                let pages =
+                    selected_pages(&document, &specification.page_selection).collect::<Vec<_>>();
                 let export = |(source_page_number, page)| {
                     let bytes =
                         EmbeddedTypst::export_png(page, &render_options).map_err(|message| {
@@ -2503,7 +2466,7 @@ pub(crate) fn compile_with_default_pdf_timestamp(
                             }
                         })?;
                     Ok::<_, CompileError>(CompilationArtifact {
-                        format,
+                        format: OutputFormat::Png,
                         bytes,
                         source_page_number: Some(source_page_number),
                     })
@@ -2520,14 +2483,15 @@ pub(crate) fn compile_with_default_pdf_timestamp(
                     .collect::<Result<Vec<_>, _>>()?;
                 artifacts
             }
-            OutputFormat::Svg => {
+            CompilationOutputSpecification::Svg(specification) => {
                 let svg_options = typst_svg::SvgOptions {
-                    render_bleed: options.render_bleed,
-                    pretty: options.pretty,
+                    render_bleed: specification.render_bleed,
+                    pretty: specification.pretty,
                 };
-                let pages = selected_pages(&document, options).collect::<Vec<_>>();
+                let pages =
+                    selected_pages(&document, &specification.page_selection).collect::<Vec<_>>();
                 let export = |(source_page_number, page)| CompilationArtifact {
-                    format,
+                    format: OutputFormat::Svg,
                     bytes: EmbeddedTypst::export_svg(page, &svg_options),
                     source_page_number: Some(source_page_number),
                 };
@@ -2537,7 +2501,7 @@ pub(crate) fn compile_with_default_pdf_timestamp(
                 let artifacts = pages.into_iter().map(export).collect();
                 artifacts
             }
-            OutputFormat::Html => unreachable!("handled above"),
+            CompilationOutputSpecification::Html(_) => unreachable!("handled above"),
         }
     };
     Ok(CompilationOutput {
@@ -2592,9 +2556,9 @@ pub(crate) fn pdf_standard_requiring_tags(standards: &[PdfStandard]) -> Option<&
 
 fn selected_pages<'a>(
     document: &'a PagedDocument,
-    options: &'a CompileOptions,
+    page_selection: &'a PageSelection,
 ) -> impl Iterator<Item = (NonZeroUsize, &'a typst_layout::Page)> {
-    let ranges = options.page_selection.typst_page_ranges();
+    let ranges = page_selection.typst_page_ranges();
     document
         .pages()
         .iter()
@@ -2690,17 +2654,25 @@ fn logical_span(world: &dyn World, span: DiagSpan) -> LogicalSpan {
     }
 }
 
-fn logical_path(id: FileId) -> String {
-    let path = id.vpath().get_without_slash();
-    match id.root() {
-        VirtualRoot::Project => format!("project:{path}"),
-        VirtualRoot::Package(spec) => format!("package:{spec}/{path}"),
-    }
-}
-
 #[cfg(test)]
 mod result_identity_tests {
     use super::*;
+
+    #[test]
+    fn compilation_trace_retains_missing_font_requests() {
+        let trace = CompilationAccessTrace::from_captured(BTreeSet::from([CapturedObservation {
+            kind: CapturedAccessKind::Font,
+            logical_path: "font-index:7".to_owned(),
+            font_index: Some(7),
+            outcome: CapturedAccessOutcome::Missing,
+        }]));
+
+        let observation = trace.observations().next().unwrap();
+        assert_eq!(observation.kind(), CompilationAccessKind::Font);
+        assert_eq!(observation.logical_path(), "font-index:7");
+        assert_eq!(observation.font_index(), Some(7));
+        assert_eq!(observation.outcome(), &CompilationAccessOutcome::Missing);
+    }
 
     #[test]
     fn result_identity_binds_each_post_execution_projection() {
@@ -2712,7 +2684,11 @@ mod result_identity_tests {
             .unwrap()
             .build()
             .unwrap();
-        let base = compile(PackCompilationRequest::new(pack, OutputFormat::Svg)).unwrap();
+        let base = compile(PackCompilationRequest::new(
+            pack,
+            CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
+        ))
+        .unwrap();
         let identity = base.result_identity;
 
         let mut status = base.clone();

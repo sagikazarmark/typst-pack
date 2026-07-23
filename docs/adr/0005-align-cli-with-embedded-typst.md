@@ -120,6 +120,9 @@ registered automatically, and explicit declarations are `resourceSlots`.
   of host configuration.
 - Pack Overrides replace only contained project files for one compilation and
   never mutate the Pack.
+- Pack compilation derives the required HTML engine feature from its tagged
+  HTML output specification; direct upstream compilation requires callers to
+  enable that feature.
 - The hidden deprecated `--make-deps` compatibility option is not adopted.
 
 ## Consequences

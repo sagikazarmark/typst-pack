@@ -71,8 +71,11 @@ typst-pack compile project.typk reproducible.pdf --creation-timestamp 1700000000
 # Guarantee no network access (fails instead of downloading packages):
 typst-pack compile project.typk --offline
 
-# Experimental HTML export, gated like in the Typst CLI:
-typst-pack compile project.typk out.html --features html
+# Experimental HTML export (the output format enables its required feature):
+typst-pack compile project.typk out.html
+
+# HTML discovery still selects the feature explicitly:
+typst-pack create project/main.typ --target html --features html
 
 # Unpack a pack back into an editable project directory:
 typst-pack extract project.typk -o project/
@@ -161,10 +164,10 @@ without a Source Page Number. PNG and SVG are Page Formats and produce one
 artifact per selected source page. Page artifacts retain their original Source
 Page Number and are emitted once each in source-document order.
 
-HTML export is experimental in Typst itself; like the Typst CLI, it must be
-enabled explicitly with `--features html` (or `TYPST_FEATURES=html`), and Typst
-emits a warning that its behavior may change. The library derives the required
-engine feature from `OutputFormat::Html`.
+HTML export is experimental in Typst itself, and Typst emits a warning that its
+behavior may change. Pack compilation derives the required engine feature from
+`CompilationOutputSpecification::Html`; HTML discovery still requires
+`--features html` (or `TYPST_FEATURES=html`).
 
 The Dagger `compile` function returns a directory for every format. Document
 Formats use `output.pdf` or `output.html`; Page Formats use deterministic names
@@ -190,7 +193,10 @@ typst-pack = { version = "0.4", features = ["embedded-fonts", "fs"] }
 The core in-memory packing and compilation APIs require no crate features.
 
 ```rust,ignore
-use typst_pack::{compile, OutputFormat, Pack, PackCompilationRequest, Packer};
+use typst_pack::{
+    compile, CompilationOutputSpecification, OutputFormat, Pack,
+    PackCompilationRequest, Packer, PdfOutputSpecification,
+};
 
 // Pack a project directory (requires the `fs` feature).
 let outcome = Packer::new("path/to/project", "main.typ")
@@ -200,7 +206,10 @@ let bytes = outcome.pack.to_bytes()?;
 
 // ... ship the bytes somewhere, then compile without a file system:
 let pack = Pack::from_bytes(bytes)?;
-let request = PackCompilationRequest::new(pack, OutputFormat::Pdf);
+let request = PackCompilationRequest::new(
+    pack,
+    CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
+);
 let output = compile(request)?;
 assert_eq!(output.engine_identity().implementation(), "typst");
 assert_eq!(output.exporter_identity().implementation(), "typst-pdf");
@@ -248,7 +257,10 @@ let pack = Pack::builder("main.typ")
     .file("main.typ", source_text.as_bytes().to_vec())?
     .resource_slot("assets/logo.png")?
     .build()?;
-let request = PackCompilationRequest::new(pack, OutputFormat::Pdf);
+let request = PackCompilationRequest::new(
+    pack,
+    CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
+);
 let controls = CompilationExecutionControls::default()
     .resource_provider(resource_provider);
 let output = compile(CompilationAttempt::new(request, controls))?;
@@ -319,10 +331,11 @@ compatibility aliases:
   `font.data()`.
 - Shared Pack consistency failures are available as `PackInvariantError`,
   wrapped by `PackBuildError::Invariant` or `PackReadError::Invariant`.
-- Migrate `CompileOptions::creation_timestamp` from `None` to
-  `CreationTimestamp::Automatic` and from `Some(timestamp)` to
-  `CreationTimestamp::Explicit(timestamp)`. Use `CreationTimestamp::Omit` to
-  suppress PDF creation datetime metadata.
+- Replace `OutputFormat` plus `CompileOptions` request construction with the
+  corresponding `CompilationOutputSpecification` variant and format-specific
+  structure. PDF creation time is configured through
+  `PdfOutputSpecification::creation_timestamp`; use `CreationTimestamp::Omit`
+  to suppress PDF creation datetime metadata.
 - `ExtractError` adds `PlannedPathConflict` and `DestinationConflict`; exhaustive
   matches must handle both variants.
 

@@ -1092,8 +1092,11 @@ fn malformed_external_font_is_a_pack_owned_pre_compilation_outcome() {
     let pack = Pack::from_bytes(archive).unwrap();
 
     let result = compile_request(
-        PackCompilationRequest::new(pack, OutputFormat::Svg)
-            .font_fulfillment(identity, FontContainerFulfillment::new(data.to_vec())),
+        PackCompilationRequest::new(
+            pack,
+            CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
+        )
+        .font_fulfillment(identity, FontContainerFulfillment::new(data.to_vec())),
     );
 
     assert!(matches!(
@@ -1918,11 +1921,19 @@ fn compile_in_memory_pack_to_pdf_and_svg() {
 
     let world = PackWorld::builder(pack).build().unwrap();
 
-    let pdf = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap();
+    let pdf = compile(
+        &world,
+        &CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
+    )
+    .unwrap();
     assert_eq!(pdf.artifacts.len(), 1);
     assert!(pdf.artifacts[0].bytes().starts_with(b"%PDF"));
 
-    let svg = compile(&world, OutputFormat::Svg, &CompileOptions::default()).unwrap();
+    let svg = compile(
+        &world,
+        &CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
+    )
+    .unwrap();
     assert_eq!(svg.artifacts.len(), 1);
     assert!(
         std::str::from_utf8(svg.artifacts[0].bytes())
@@ -1930,7 +1941,11 @@ fn compile_in_memory_pack_to_pdf_and_svg() {
             .contains("<svg")
     );
 
-    let png = compile(&world, OutputFormat::Png, &CompileOptions::default()).unwrap();
+    let png = compile(
+        &world,
+        &CompilationOutputSpecification::Png(PngOutputSpecification::default()),
+    )
+    .unwrap();
     assert!(
         png.artifacts[0]
             .bytes()
@@ -1956,15 +1971,27 @@ fn declared_resource_slot_compiles_through_a_provider() {
         .resource_provider(MemoryProjectFile::new("assets/logo.png", tiny_png()))
         .build()
         .unwrap();
-    let pdf = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap();
+    let pdf = compile(
+        &world,
+        &CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
+    )
+    .unwrap();
     assert!(pdf.artifacts[0].bytes().starts_with(b"%PDF"));
-    let png = compile(&world, OutputFormat::Png, &CompileOptions::default()).unwrap();
+    let png = compile(
+        &world,
+        &CompilationOutputSpecification::Png(PngOutputSpecification::default()),
+    )
+    .unwrap();
     assert!(
         png.artifacts[0]
             .bytes()
             .starts_with(&[0x89, b'P', b'N', b'G'])
     );
-    let svg = compile(&world, OutputFormat::Svg, &CompileOptions::default()).unwrap();
+    let svg = compile(
+        &world,
+        &CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
+    )
+    .unwrap();
     assert!(
         std::str::from_utf8(svg.artifacts[0].bytes())
             .unwrap()
@@ -1976,7 +2003,11 @@ fn declared_resource_slot_compiles_through_a_provider() {
         .feature(typst::Feature::Html)
         .build()
         .unwrap();
-    let html = compile(&world, OutputFormat::Html, &CompileOptions::default()).unwrap();
+    let html = compile(
+        &world,
+        &CompilationOutputSpecification::Html(HtmlOutputSpecification::default()),
+    )
+    .unwrap();
     assert!(
         std::str::from_utf8(html.artifacts[0].bytes())
             .unwrap()
@@ -2000,7 +2031,13 @@ fn source_compilation_cannot_use_a_non_typ_resource_slot_provider() {
         .build()
         .unwrap();
 
-    assert!(compile(&world, OutputFormat::Svg, &CompileOptions::default()).is_err());
+    assert!(
+        compile(
+            &world,
+            &CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
+        )
+        .is_err()
+    );
     assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
 
@@ -2028,8 +2065,7 @@ fn pdf_default_timestamp_is_resolved_after_compilation() {
 
     let default_output = crate::compile::compile_with_default_pdf_timestamp(
         &world,
-        OutputFormat::Pdf,
-        &CompileOptions::default(),
+        &CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
         || {
             assert_eq!(calls.load(Ordering::Acquire), 1);
             default_resolutions.fetch_add(1, Ordering::Relaxed);
@@ -2040,11 +2076,10 @@ fn pdf_default_timestamp_is_resolved_after_compilation() {
 
     let explicit_output = crate::compile::compile_with_default_pdf_timestamp(
         &world,
-        OutputFormat::Pdf,
-        &CompileOptions {
+        &CompilationOutputSpecification::Pdf(PdfOutputSpecification {
             creation_timestamp: CreationTimestamp::Explicit(timestamp),
-            ..CompileOptions::default()
-        },
+            ..PdfOutputSpecification::default()
+        }),
         || panic!("an explicit timestamp must not resolve the default"),
     )
     .unwrap();
@@ -2181,7 +2216,11 @@ fn raw_reads_use_providers_even_when_a_resource_slot_has_a_typ_extension() {
         .build()
         .unwrap();
 
-    let output = compile(&world, OutputFormat::Svg, &CompileOptions::default()).unwrap();
+    let output = compile(
+        &world,
+        &CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
+    )
+    .unwrap();
 
     assert_eq!(output.artifacts.len(), 1);
     assert_eq!(calls.load(Ordering::Relaxed), 1);
@@ -2348,7 +2387,13 @@ fn vendored_package_compiles_from_the_pack() {
         .unwrap();
     let world = PackWorld::builder(pack).build().unwrap();
 
-    assert!(compile(&world, OutputFormat::Svg, &CompileOptions::default()).is_ok());
+    assert!(
+        compile(
+            &world,
+            &CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
+        )
+        .is_ok()
+    );
 }
 
 #[test]
@@ -2373,7 +2418,13 @@ fn missing_vendored_package_file_has_no_ambient_fallback() {
         .unwrap();
     let world = PackWorld::builder(pack).build().unwrap();
 
-    assert!(compile(&world, OutputFormat::Svg, &CompileOptions::default()).is_err());
+    assert!(
+        compile(
+            &world,
+            &CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
+        )
+        .is_err()
+    );
 }
 
 #[cfg(feature = "fs")]
@@ -2800,7 +2851,10 @@ Rows: #csv("data.csv").len()
             ["assets/logo.png"]
         );
         let world = PackWorld::builder(pack.clone()).build().unwrap();
-        match compile(&world, OutputFormat::Svg, &CompileOptions::default()) {
+        match compile(
+            &world,
+            &CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
+        ) {
             Err(CompileError::Diagnostics { errors, .. }) => assert!(
                 errors
                     .iter()
@@ -2813,7 +2867,11 @@ Rows: #csv("data.csv").len()
             .resource_provider(MemoryProjectFile::new("assets/logo.png", tiny_png()))
             .build()
             .unwrap();
-        let output = compile(&world, OutputFormat::Svg, &CompileOptions::default()).unwrap();
+        let output = compile(
+            &world,
+            &CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
+        )
+        .unwrap();
         assert!(
             std::str::from_utf8(output.artifacts[0].bytes())
                 .unwrap()
@@ -2852,7 +2910,10 @@ Rows: #csv("data.csv").len()
 
         let pack = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
         let world = PackWorld::builder(pack.clone()).build().unwrap();
-        match compile(&world, OutputFormat::Svg, &CompileOptions::default()) {
+        match compile(
+            &world,
+            &CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
+        ) {
             Err(CompileError::Diagnostics { errors, .. }) => assert!(
                 errors
                     .iter()
@@ -2864,7 +2925,13 @@ Rows: #csv("data.csv").len()
             .resource_provider(MemoryProjectFile::new("assets/logo.png", tiny_png()))
             .build()
             .unwrap();
-        assert!(compile(&world, OutputFormat::Svg, &CompileOptions::default()).is_ok());
+        assert!(
+            compile(
+                &world,
+                &CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
+            )
+            .is_ok()
+        );
 
         let target = dir.path().join("extracted");
         let report = extract(&pack, &target, &ExtractOptions::default()).unwrap();
@@ -3496,7 +3563,11 @@ Rows: #csv("data.csv").len()
             .embedded_fonts(true)
             .build()
             .unwrap();
-        let output = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap();
+        let output = compile(
+            &world,
+            &CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
+        )
+        .unwrap();
         assert!(output.artifacts[0].bytes().starts_with(b"%PDF"));
     }
 
@@ -3810,14 +3881,24 @@ fn html_output_is_gated_by_the_html_feature() {
 
     // Without the feature, Typst itself rejects HTML export.
     let world = PackWorld::builder(pack.clone()).build().unwrap();
-    assert!(compile(&world, OutputFormat::Html, &CompileOptions::default()).is_err());
+    assert!(
+        compile(
+            &world,
+            &CompilationOutputSpecification::Html(HtmlOutputSpecification::default()),
+        )
+        .is_err()
+    );
 
     // With the feature, it produces a document plus an "experimental" warning.
     let world = PackWorld::builder(pack)
         .feature(typst::Feature::Html)
         .build()
         .unwrap();
-    let output = compile(&world, OutputFormat::Html, &CompileOptions::default()).unwrap();
+    let output = compile(
+        &world,
+        &CompilationOutputSpecification::Html(HtmlOutputSpecification::default()),
+    )
+    .unwrap();
     let html = std::str::from_utf8(output.artifacts[0].bytes()).unwrap();
     assert!(html.contains("<html"));
     assert!(html.contains("Hello from HTML"));

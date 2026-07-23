@@ -26,6 +26,9 @@ use crate::manifest::{
 use crate::pack::{Pack, PackBuildError, PackageFiles};
 use crate::resource::{DiscoveryResources, Provider};
 use crate::world::system_packages;
+use crate::world_trace::{
+    CapturedAccessKind, CapturedAccessOutcome, CapturedObservation, WorldTrace,
+};
 
 #[cfg(test)]
 type DiscoveryHook = Box<dyn Fn(&mut DiscoveryWorld)>;
@@ -414,9 +417,9 @@ impl Packer {
                 // Its partial observations and diagnostics are intentionally discarded.
                 let _ = compile_discovery_target(world, target);
                 world.discard_dependency_observations();
-                let traced = TracingWorld::new(world);
+                let traced = WorldTrace::new(world);
                 let Warned { output, warnings } = compile_discovery_target(&traced, target);
-                let trace = traced.finish();
+                let trace = DiscoveryTrace::from_captured(traced.snapshot());
                 let (sources, files, fonts) = world.take_dependency_observations();
                 discovered_sources.extend(sources);
                 discovered_files.extend(files);
@@ -1069,6 +1072,19 @@ impl DiscoveryTrace {
     pub fn observations(&self) -> impl Iterator<Item = &DiscoveryObservation> {
         self.observations.iter()
     }
+
+    fn from_captured(observations: BTreeSet<CapturedObservation>) -> Self {
+        Self {
+            observations: observations
+                .into_iter()
+                .filter(|observation| {
+                    !(observation.kind == CapturedAccessKind::Font
+                        && observation.outcome == CapturedAccessOutcome::Missing)
+                })
+                .map(DiscoveryObservation::from_captured)
+                .collect(),
+        }
+    }
 }
 
 /// The kind of dependency access observed by Typst.
@@ -1100,6 +1116,29 @@ pub struct DiscoveryObservation {
 }
 
 impl DiscoveryObservation {
+    fn from_captured(observation: CapturedObservation) -> Self {
+        Self {
+            kind: match observation.kind {
+                CapturedAccessKind::Source => DiscoveryAccessKind::Source,
+                CapturedAccessKind::File => DiscoveryAccessKind::File,
+                CapturedAccessKind::Font => DiscoveryAccessKind::Font,
+            },
+            logical_path: observation.logical_path,
+            font_index: observation.font_index,
+            outcome: match observation.outcome {
+                CapturedAccessOutcome::Read {
+                    byte_length,
+                    digest,
+                } => DiscoveryAccessOutcome::Read {
+                    byte_length,
+                    digest,
+                },
+                CapturedAccessOutcome::Missing => DiscoveryAccessOutcome::Missing,
+                CapturedAccessOutcome::Failed => DiscoveryAccessOutcome::Failed,
+            },
+        }
+    }
+
     pub fn kind(&self) -> DiscoveryAccessKind {
         self.kind
     }
@@ -1114,6 +1153,34 @@ impl DiscoveryObservation {
 
     pub fn outcome(&self) -> &DiscoveryAccessOutcome {
         &self.outcome
+    }
+}
+
+#[cfg(test)]
+mod trace_projection_tests {
+    use super::*;
+
+    #[test]
+    fn discovery_filters_missing_fonts_but_retains_other_misses() {
+        let trace = DiscoveryTrace::from_captured(BTreeSet::from([
+            CapturedObservation {
+                kind: CapturedAccessKind::File,
+                logical_path: "project:missing.bin".to_owned(),
+                font_index: None,
+                outcome: CapturedAccessOutcome::Missing,
+            },
+            CapturedObservation {
+                kind: CapturedAccessKind::Font,
+                logical_path: "font-index:7".to_owned(),
+                font_index: Some(7),
+                outcome: CapturedAccessOutcome::Missing,
+            },
+        ]));
+
+        assert_eq!(trace.observations().count(), 1);
+        let observation = trace.observations().next().unwrap();
+        assert_eq!(observation.kind(), DiscoveryAccessKind::File);
+        assert_eq!(observation.outcome(), &DiscoveryAccessOutcome::Missing);
     }
 }
 
@@ -1374,121 +1441,6 @@ fn is_typst_embedded_font(font: &Font) -> bool {
     }
 }
 
-struct TracingWorld<'a, W: ?Sized> {
-    world: &'a W,
-    observations: Mutex<BTreeSet<DiscoveryObservation>>,
-}
-
-impl<'a, W: World + ?Sized> TracingWorld<'a, W> {
-    fn new(world: &'a W) -> Self {
-        Self {
-            world,
-            observations: Mutex::new(BTreeSet::new()),
-        }
-    }
-
-    fn finish(self) -> DiscoveryTrace {
-        DiscoveryTrace {
-            observations: self.observations.into_inner().expect("trace lock poisoned"),
-        }
-    }
-
-    fn record<T>(
-        &self,
-        id: FileId,
-        kind: DiscoveryAccessKind,
-        result: &FileResult<T>,
-        bytes: impl FnOnce(&T) -> &[u8],
-    ) {
-        let outcome = match result {
-            Ok(value) => {
-                let data = bytes(value);
-                DiscoveryAccessOutcome::Read {
-                    byte_length: data.len(),
-                    digest: typst::utils::hash128(&data).to_be_bytes(),
-                }
-            }
-            Err(FileError::NotFound(_)) => DiscoveryAccessOutcome::Missing,
-            Err(_) => DiscoveryAccessOutcome::Failed,
-        };
-        self.observations
-            .lock()
-            .expect("trace lock poisoned")
-            .insert(DiscoveryObservation {
-                kind,
-                logical_path: logical_file_path(id),
-                font_index: None,
-                outcome,
-            });
-    }
-}
-
-impl<W: World + ?Sized> World for TracingWorld<'_, W> {
-    fn library(&self) -> &LazyHash<Library> {
-        self.world.library()
-    }
-
-    fn book(&self) -> &LazyHash<FontBook> {
-        self.world.book()
-    }
-
-    fn main(&self) -> FileId {
-        self.world.main()
-    }
-
-    fn source(&self, id: FileId) -> FileResult<Source> {
-        let result = self.world.source(id);
-        self.record(id, DiscoveryAccessKind::Source, &result, |source| {
-            source.text().as_bytes()
-        });
-        result
-    }
-
-    fn file(&self, id: FileId) -> FileResult<Bytes> {
-        let result = self.world.file(id);
-        self.record(id, DiscoveryAccessKind::File, &result, Bytes::as_slice);
-        result
-    }
-
-    fn font(&self, index: usize) -> Option<Font> {
-        let font = self.world.font(index);
-        if let Some(font) = &font {
-            self.observations
-                .lock()
-                .expect("trace lock poisoned")
-                .insert(DiscoveryObservation {
-                    kind: DiscoveryAccessKind::Font,
-                    logical_path: format!(
-                        "font:{:032x}",
-                        u128::from_be_bytes(
-                            crate::FontContainerIdentity::from_bytes(font.data().as_slice())
-                                .digest()
-                        )
-                    ),
-                    font_index: Some(font.index() as usize),
-                    outcome: DiscoveryAccessOutcome::Read {
-                        byte_length: font.data().len(),
-                        digest: typst::utils::hash128(&font.data().as_slice()).to_be_bytes(),
-                    },
-                });
-        }
-        font
-    }
-
-    fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
-        self.world.today(offset)
-    }
-}
-
-fn logical_file_path(id: FileId) -> String {
-    match id.root() {
-        VirtualRoot::Project => format!("project:{}", id.vpath().get_without_slash()),
-        VirtualRoot::Package(spec) => {
-            format!("package:{spec}/{}", id.vpath().get_without_slash())
-        }
-    }
-}
-
 fn compile_discovery_target(
     world: &dyn World,
     target: DiscoveryTarget,
@@ -1694,9 +1646,9 @@ fn replay_variants(
         let world = world
             .build()
             .expect("frozen creation dependencies must build a Pack World");
-        let traced = TracingWorld::new(&world);
+        let traced = WorldTrace::new(&world);
         let Warned { output, warnings } = compile_discovery_target(&traced, variant.request.target);
-        let replay_trace = traced.finish();
+        let replay_trace = DiscoveryTrace::from_captured(traced.snapshot());
         if let Err(errors) = output {
             return Err(PackerError::ReplayCompile {
                 target: variant.request.target,
