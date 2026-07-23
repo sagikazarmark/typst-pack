@@ -5,13 +5,151 @@ use std::num::NonZeroUsize;
 use ecow::EcoVec;
 #[cfg(feature = "cli")]
 use rayon::prelude::*;
-use typst::World;
 use typst::diag::{SourceDiagnostic, Warned};
+use typst::foundations::{Datetime, Dict};
 use typst::syntax::Span;
+use typst::{Feature, World};
 use typst_layout::PagedDocument;
 use typst_pdf::{PdfOptions, PdfStandards, Timestamp};
 
 use crate::embedded::EmbeddedTypst;
+use crate::{Pack, PackWorld};
+
+/// The exact embedded Typst compiler implementation that produced a result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ImplementationIdentity {
+    implementation: &'static str,
+    version: &'static str,
+    source_checksum: &'static str,
+    target: &'static str,
+    target_features: &'static str,
+    feature_set: &'static str,
+    debug_assertions: bool,
+}
+
+impl ImplementationIdentity {
+    const fn new(
+        implementation: &'static str,
+        version: &'static str,
+        source_checksum: &'static str,
+    ) -> Self {
+        Self {
+            implementation,
+            version,
+            source_checksum,
+            target: env!("TYPST_PACK_TARGET"),
+            target_features: env!("TYPST_PACK_CARGO_CFG_TARGET_FEATURE"),
+            feature_set: "cargo-default-features",
+            debug_assertions: cfg!(debug_assertions),
+        }
+    }
+}
+
+/// The exact embedded Typst compiler implementation that produced a result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct EngineIdentity(ImplementationIdentity);
+
+impl EngineIdentity {
+    pub(crate) const fn new(
+        implementation: &'static str,
+        version: &'static str,
+        source_checksum: &'static str,
+    ) -> Self {
+        Self(ImplementationIdentity::new(
+            implementation,
+            version,
+            source_checksum,
+        ))
+    }
+
+    /// The compiler crate used for semantic compilation.
+    pub fn implementation(self) -> &'static str {
+        self.0.implementation
+    }
+
+    /// The exact compiler crate version.
+    pub fn version(self) -> &'static str {
+        self.0.version
+    }
+
+    /// The checksum of the exact compiler crate source from the Cargo lockfile.
+    pub fn source_checksum(self) -> &'static str {
+        self.0.source_checksum
+    }
+
+    /// The complete Rust target triple of the compiler implementation.
+    pub fn target(self) -> &'static str {
+        self.0.target
+    }
+
+    /// The target CPU features enabled for the compiler implementation.
+    pub fn target_features(self) -> &'static str {
+        self.0.target_features
+    }
+
+    /// The Cargo feature configuration of the compiler crate.
+    pub fn feature_set(self) -> &'static str {
+        self.0.feature_set
+    }
+
+    /// Whether the compiler implementation was built with debug assertions.
+    pub fn debug_assertions(self) -> bool {
+        self.0.debug_assertions
+    }
+}
+
+/// The exact official exporter implementation that produced a result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct ExporterIdentity(ImplementationIdentity);
+
+impl ExporterIdentity {
+    pub(crate) const fn new(
+        implementation: &'static str,
+        version: &'static str,
+        source_checksum: &'static str,
+    ) -> Self {
+        Self(ImplementationIdentity::new(
+            implementation,
+            version,
+            source_checksum,
+        ))
+    }
+
+    /// The exporter crate used to produce the artifacts.
+    pub fn implementation(self) -> &'static str {
+        self.0.implementation
+    }
+
+    /// The exact exporter crate version.
+    pub fn version(self) -> &'static str {
+        self.0.version
+    }
+
+    /// The checksum of the exact exporter crate source from the Cargo lockfile.
+    pub fn source_checksum(self) -> &'static str {
+        self.0.source_checksum
+    }
+
+    /// The complete Rust target triple of the exporter implementation.
+    pub fn target(self) -> &'static str {
+        self.0.target
+    }
+
+    /// The target CPU features enabled for the exporter implementation.
+    pub fn target_features(self) -> &'static str {
+        self.0.target_features
+    }
+
+    /// The Cargo feature configuration of the exporter crate.
+    pub fn feature_set(self) -> &'static str {
+        self.0.feature_set
+    }
+
+    /// Whether the exporter implementation was built with debug assertions.
+    pub fn debug_assertions(self) -> bool {
+        self.0.debug_assertions
+    }
+}
 
 /// The Document Formats and Page Formats a pack can be compiled to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -65,6 +203,58 @@ impl Default for CompileOptions {
             pdf_tags: true,
             creation_timestamp: CreationTimestamp::Automatic,
         }
+    }
+}
+
+/// An explicit semantic compilation request bound to one validated [`Pack`].
+///
+/// Compilation through this request has no project, package, font, clock,
+/// environment, cache, or network fallback beyond the Pack and these values.
+#[derive(Debug, Clone)]
+pub struct PackCompilationRequest {
+    pack: Pack,
+    format: OutputFormat,
+    options: CompileOptions,
+    inputs: Dict,
+    features: Vec<Feature>,
+    document_time: Option<Datetime>,
+}
+
+impl PackCompilationRequest {
+    /// Binds a validated Pack to an output format and deterministic defaults.
+    pub fn new(pack: Pack, format: OutputFormat) -> Self {
+        Self {
+            pack,
+            format,
+            options: CompileOptions::default(),
+            inputs: Dict::new(),
+            features: Vec::new(),
+            document_time: None,
+        }
+    }
+
+    /// Sets the official exporter controls for this request.
+    pub fn options(mut self, options: CompileOptions) -> Self {
+        self.options = options;
+        self
+    }
+
+    /// Sets the exact values exposed to document code as `sys.inputs`.
+    pub fn inputs(mut self, inputs: Dict) -> Self {
+        self.inputs = inputs;
+        self
+    }
+
+    /// Enables one official Typst engine feature.
+    pub fn feature(mut self, feature: Feature) -> Self {
+        self.features.push(feature);
+        self
+    }
+
+    /// Sets the exact date returned by document-time requests.
+    pub fn document_time(mut self, document_time: Datetime) -> Self {
+        self.document_time = Some(document_time);
+        self
     }
 }
 
@@ -199,6 +389,8 @@ pub struct CompilationOutput {
     /// Warnings emitted during compilation.
     pub warnings: EcoVec<SourceDiagnostic>,
     source_page_count: Option<usize>,
+    engine_identity: EngineIdentity,
+    exporter_identity: ExporterIdentity,
 }
 
 impl CompilationOutput {
@@ -207,6 +399,16 @@ impl CompilationOutput {
     /// HTML output is unpaged and returns `None`.
     pub fn source_page_count(&self) -> Option<usize> {
         self.source_page_count
+    }
+
+    /// The embedded compiler implementation that produced this output.
+    pub fn engine_identity(&self) -> EngineIdentity {
+        self.engine_identity
+    }
+
+    /// The official exporter implementation that produced these artifacts.
+    pub fn exporter_identity(&self) -> ExporterIdentity {
+        self.exporter_identity
     }
 }
 
@@ -229,6 +431,17 @@ pub enum CompileError {
     },
 }
 
+/// A failed Pack-bound compilation request or engine execution.
+#[derive(Debug, thiserror::Error)]
+pub enum PackCompileError {
+    /// The Pack compilation contract intentionally excludes Typst Bundle.
+    #[error("the Typst Bundle feature is not supported for Pack compilation")]
+    UnsupportedBundleFeature,
+    /// The embedded compiler or exporter rejected the request.
+    #[error(transparent)]
+    Compilation(#[from] CompileError),
+}
+
 /// Compiles the world's document and exports it in the requested format.
 ///
 /// This works with any [`World`], but is intended for
@@ -241,6 +454,45 @@ pub fn compile(
     compile_with_default_pdf_timestamp(world, format, options, || {
         world.today(None).map(Timestamp::new_utc)
     })
+}
+
+/// Compiles a validated Pack through the private Pack Compilation Kernel.
+pub fn compile_pack(
+    request: PackCompilationRequest,
+) -> Result<CompilationOutput, PackCompileError> {
+    let PackCompilationRequest {
+        pack,
+        format,
+        options,
+        inputs,
+        mut features,
+        document_time,
+    } = request;
+    if features.contains(&Feature::Bundle) {
+        return Err(PackCompileError::UnsupportedBundleFeature);
+    }
+    if format == OutputFormat::Html && !features.contains(&Feature::Html) {
+        features.push(Feature::Html);
+    }
+    let mut world = PackWorld::builder(pack).inputs(inputs);
+    #[cfg(feature = "embedded-fonts")]
+    {
+        world = world.embedded_fonts(false);
+    }
+    for feature in features {
+        world = world.feature(feature);
+    }
+    if let Some(document_time) = document_time {
+        world = world.fixed_date(document_time);
+    }
+    let world = world.build();
+
+    Ok(compile_with_default_pdf_timestamp(
+        &world,
+        format,
+        &options,
+        || None,
+    )?)
 }
 
 pub(crate) fn compile_with_default_pdf_timestamp(
@@ -275,6 +527,8 @@ pub(crate) fn compile_with_default_pdf_timestamp(
             }],
             warnings,
             source_page_count: None,
+            engine_identity: EmbeddedTypst::engine_identity(),
+            exporter_identity: EmbeddedTypst::exporter_identity(format),
         });
     }
 
@@ -385,6 +639,8 @@ pub(crate) fn compile_with_default_pdf_timestamp(
         artifacts,
         warnings,
         source_page_count: Some(document.pages().len()),
+        engine_identity: EmbeddedTypst::engine_identity(),
+        exporter_identity: EmbeddedTypst::exporter_identity(format),
     })
 }
 

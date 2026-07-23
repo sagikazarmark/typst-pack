@@ -1,4 +1,7 @@
-use typst_pack::{CompileOptions, OutputFormat, Pack, PackWorld, compile};
+use typst_pack::{
+    CompileError, CompileOptions, OutputFormat, Pack, PackCompilationRequest, PackCompileError,
+    PackWorld, compile, compile_pack,
+};
 
 fn five_page_world() -> PackWorld {
     let source = (1..=5)
@@ -16,6 +19,105 @@ fn five_page_world() -> PackWorld {
         .unwrap();
 
     PackWorld::builder(pack).build()
+}
+
+#[test]
+fn pack_bound_compilation_does_not_read_ambient_project_files() {
+    let ambient = "tests/fixtures/official-oracle/chapter.typ";
+    assert!(std::path::Path::new(ambient).is_file());
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", format!("#include \"{ambient}\"").into_bytes())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let result = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Svg));
+
+    assert!(matches!(
+        result,
+        Err(PackCompileError::Compilation(
+            CompileError::Diagnostics { .. }
+        ))
+    ));
+}
+
+#[test]
+fn pack_bound_compilation_does_not_read_an_ambient_clock() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"#datetime.today()".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let result = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Svg));
+
+    assert!(matches!(
+        result,
+        Err(PackCompileError::Compilation(
+            CompileError::Diagnostics { .. }
+        ))
+    ));
+}
+
+#[test]
+fn pack_bound_compilation_does_not_use_package_caches_or_network() {
+    let package = "@preview/example:1.0.0".parse().unwrap();
+    let pack = Pack::builder("main.typ")
+        .file(
+            "main.typ",
+            b"#import \"@preview/example:1.0.0\": *".to_vec(),
+        )
+        .unwrap()
+        .unvendored_package(package)
+        .build()
+        .unwrap();
+
+    let result = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Svg));
+
+    assert!(matches!(
+        result,
+        Err(PackCompileError::Compilation(
+            CompileError::Diagnostics { .. }
+        ))
+    ));
+}
+
+#[test]
+fn pack_bound_compilation_rejects_the_bundle_feature() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", Vec::new())
+        .unwrap()
+        .build()
+        .unwrap();
+    let request =
+        PackCompilationRequest::new(pack, OutputFormat::Svg).feature(typst::Feature::Bundle);
+
+    assert!(matches!(
+        compile_pack(request),
+        Err(PackCompileError::UnsupportedBundleFeature)
+    ));
+}
+
+#[cfg(feature = "embedded-fonts")]
+#[test]
+fn pack_bound_compilation_does_not_use_unpacked_embedded_fonts() {
+    let pack = Pack::builder("main.typ")
+        .file(
+            "main.typ",
+            b"#set text(font: \"Libertinus Serif\")\nHello".to_vec(),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let output = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Svg)).unwrap();
+
+    assert!(
+        output
+            .warnings
+            .iter()
+            .any(|warning| warning.message.contains("unknown font family"))
+    );
 }
 
 #[test]

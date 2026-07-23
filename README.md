@@ -183,7 +183,7 @@ typst-pack = { version = "0.4", features = ["embedded-fonts", "fs"] }
 The core in-memory packing and compilation APIs require no crate features.
 
 ```rust,ignore
-use typst_pack::{compile, CompileOptions, OutputFormat, Pack, PackWorld, Packer};
+use typst_pack::{compile_pack, OutputFormat, Pack, PackCompilationRequest, Packer};
 
 // Pack a project directory (requires the `fs` feature).
 let outcome = Packer::new("path/to/project", "main.typ")
@@ -193,8 +193,10 @@ let bytes = outcome.pack.to_bytes()?;
 
 // ... ship the bytes somewhere, then compile without a file system:
 let pack = Pack::from_bytes(bytes)?;
-let world = PackWorld::builder(pack).build();
-let output = compile(&world, OutputFormat::Pdf, &CompileOptions::default())?;
+let request = PackCompilationRequest::new(pack, OutputFormat::Pdf);
+let output = compile_pack(request)?;
+assert_eq!(output.engine_identity().implementation(), "typst");
+assert_eq!(output.exporter_identity().implementation(), "typst-pdf");
 let artifact = output.artifacts.into_iter().next().expect("PDF artifact");
 assert_eq!(artifact.format(), OutputFormat::Pdf);
 assert_eq!(artifact.source_page_number(), None);

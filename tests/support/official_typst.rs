@@ -41,6 +41,18 @@ impl Fixture {
             ],
         }
     }
+
+    pub fn entrypoint(&self) -> &'static str {
+        self.entrypoint
+    }
+
+    pub fn project(&self) -> &'static [(&'static str, &'static str)] {
+        self.project
+    }
+
+    pub fn packages(&self) -> &'static [(&'static str, &'static str, &'static str)] {
+        self.packages
+    }
 }
 
 pub struct ReferenceRequest {

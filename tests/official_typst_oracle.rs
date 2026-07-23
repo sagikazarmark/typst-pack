@@ -5,7 +5,10 @@ use std::num::NonZeroUsize;
 use support::official_typst::{
     ArtifactRole, Fixture, ObservationStatus, OutputRequest, ReferenceRequest, Target, observe,
 };
-use typst::foundations::{Datetime, Smart};
+use typst::foundations::{Datetime, Dict, Smart, Value};
+use typst_pack::{
+    CompileOptions, OutputFormat, Pack, PackCompilationRequest, compile_pack, parse_page_selection,
+};
 
 #[test]
 fn frozen_fixture_and_request_produce_a_stable_official_observation() {
@@ -67,15 +70,91 @@ fn frozen_fixture_and_request_produce_a_stable_official_observation() {
 }
 
 #[test]
+fn stabilized_project_round_trips_and_matches_pack_svg_compilation() {
+    let fixture = Fixture::official_oracle();
+    let mut inputs = Dict::new();
+    inputs.insert("width".into(), Value::Str("24".into()));
+    let mut builder = Pack::builder(fixture.entrypoint());
+    for &(path, text) in fixture.project() {
+        builder = builder.file(path, text.as_bytes().to_vec()).unwrap();
+    }
+    for &(spec, path, text) in fixture.packages() {
+        builder = builder
+            .package_file(spec.parse().unwrap(), path, text.as_bytes().to_vec())
+            .unwrap();
+    }
+    let created = builder.build().unwrap();
+    let pack = Pack::from_bytes(created.to_bytes().unwrap()).unwrap();
+    let options = CompileOptions {
+        page_selection: parse_page_selection("2,1").unwrap(),
+        pretty: true,
+        ..CompileOptions::default()
+    };
+    let request = PackCompilationRequest::new(pack, OutputFormat::Svg)
+        .inputs(inputs)
+        .document_time(Datetime::from_ymd(2024, 2, 3).unwrap())
+        .options(options);
+
+    let actual = compile_pack(request).unwrap();
+    let expected = observe(
+        &fixture,
+        &ReferenceRequest {
+            inputs: vec![("width", "24")],
+            features: vec![],
+            document_time: Some(Datetime::from_ymd(2024, 2, 3).unwrap()),
+            output: OutputRequest::Svg {
+                source_pages: vec![NonZeroUsize::new(2).unwrap(), NonZeroUsize::new(1).unwrap()],
+                render_bleed: false,
+                pretty: true,
+            },
+        },
+    );
+
+    assert_eq!(actual.source_page_count(), expected.source_page_count);
+    assert_eq!(actual.warnings.len(), expected.diagnostics.len());
+    for (actual, expected) in actual.warnings.iter().zip(&expected.diagnostics) {
+        assert_eq!(actual.message.as_str(), expected.message);
+        assert_eq!(
+            actual
+                .hints
+                .iter()
+                .map(|hint| hint.v.as_str())
+                .collect::<Vec<_>>(),
+            expected
+                .hints
+                .iter()
+                .map(|hint| hint.message.as_str())
+                .collect::<Vec<_>>()
+        );
+    }
+    assert_eq!(actual.artifacts.len(), expected.artifacts.len());
+    for (actual, expected) in actual.artifacts.iter().zip(&expected.artifacts) {
+        let ArtifactRole::Svg { source_page_number } = expected.role else {
+            panic!("oracle produced a non-SVG artifact");
+        };
+        assert_eq!(actual.format(), OutputFormat::Svg);
+        assert_eq!(actual.source_page_number(), Some(source_page_number));
+        assert_eq!(actual.bytes(), expected.bytes);
+    }
+    assert_eq!(actual.engine_identity().implementation(), "typst");
+    assert_eq!(actual.engine_identity().version(), "0.15.0");
+    assert!(!actual.engine_identity().source_checksum().is_empty());
+    assert!(!actual.engine_identity().target().is_empty());
+    assert_eq!(actual.exporter_identity().implementation(), "typst-svg");
+    assert_eq!(actual.exporter_identity().version(), "0.15.0");
+    assert!(!actual.exporter_identity().source_checksum().is_empty());
+    assert!(!actual.exporter_identity().target().is_empty());
+}
+
+#[test]
 fn oracle_is_structurally_independent_of_the_production_crate() {
-    let test_sources = concat!(
-        include_str!("official_typst_oracle.rs"),
+    let oracle_sources = concat!(
         include_str!("support/mod.rs"),
         include_str!("support/official_typst.rs"),
     );
     let production_crate = ["typst", "pack"].join("_");
 
-    assert!(!test_sources.contains(&production_crate));
+    assert!(!oracle_sources.contains(&production_crate));
 }
 
 #[test]
