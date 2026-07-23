@@ -1480,12 +1480,6 @@ pub enum CompilationRequestRejection {
     /// The official PDF standards validator rejected the requested set.
     #[error(transparent)]
     InvalidPdfStandards(PdfStandardsValidationError),
-    /// Explicit tagging cannot be combined with a PDF page subset.
-    #[error("cannot enable tagged PDF and export a page range")]
-    PdfTagsWithPageSelection,
-    /// A selected PDF standard requires accessibility tags.
-    #[error("cannot disable PDF tags for a standard that requires them")]
-    PdfStandardRequiresTags,
     /// The Pack Override Set was preflighted against a different Pack.
     #[error("the Pack Override Set is bound to a different Pack")]
     OverrideSetPackMismatch,
@@ -1740,11 +1734,9 @@ pub(crate) fn prepare_pack_compilation(
         CompilationOutputSpecification::Pdf(specification) => {
             let mut tags = output.origin;
             let mut creation_time = output.origin;
-            request_issues.extend(pdf_request_issues(
-                &specification.page_selection,
-                &specification.standards,
-                specification.tags,
-            ));
+            if let Err(error) = validate_pdf_standards(&specification.standards) {
+                request_issues.push(CompilationRequestRejection::InvalidPdfStandards(error));
+            }
             page_selection_implies_untagged_pdf = !specification.page_selection.ranges().is_empty()
                 && specification.tags.is_auto()
                 && PdfOptions::default().tagged;
@@ -2521,29 +2513,7 @@ pub(crate) fn validate_pdf_standards(
     })
 }
 
-pub(crate) fn pdf_request_issues(
-    page_selection: &PageSelection,
-    standards: &[PdfStandard],
-    pdf_tags: Smart<bool>,
-) -> Vec<CompilationRequestRejection> {
-    let mut issues = Vec::new();
-    if let Err(error) = validate_pdf_standards(standards) {
-        issues.push(CompilationRequestRejection::InvalidPdfStandards(error));
-    }
-    let has_page_selection = !page_selection.ranges().is_empty();
-    let tagged = match pdf_tags {
-        Smart::Auto => PdfOptions::default().tagged && !has_page_selection,
-        Smart::Custom(tagged) => tagged,
-    };
-    if has_page_selection && matches!(pdf_tags, Smart::Custom(true)) {
-        issues.push(CompilationRequestRejection::PdfTagsWithPageSelection);
-    }
-    if !tagged && pdf_standard_requiring_tags(standards).is_some() {
-        issues.push(CompilationRequestRejection::PdfStandardRequiresTags);
-    }
-    issues
-}
-
+#[cfg(feature = "cli")]
 pub(crate) fn pdf_standard_requiring_tags(standards: &[PdfStandard]) -> Option<&'static str> {
     standards.iter().find_map(|standard| match standard {
         PdfStandard::A_1a => Some("PDF/A-1a"),

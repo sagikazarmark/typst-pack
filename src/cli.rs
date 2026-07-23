@@ -25,12 +25,12 @@ use typst_pdf::{PdfStandard, Timestamp};
 
 use crate::compile::{
     CompilationArtifact, CompilationAttempt, CompilationExecutionControls,
-    CompilationOperationOutcome, CompilationOutputSpecification, CompilationRequestRejection,
-    CompilationStatus, CreationTimestamp, FontContainerFulfillment, HtmlOutputSpecification,
-    OutputFormat, PackCompilationPresentation, PackCompilationRequest, PackOverrideSet,
-    PackageTreeFulfillment, PageRange, PageSelection, PdfOutputSpecification,
-    PngOutputSpecification, SvgOutputSpecification, compile_pack_kernel, parse_page_selection,
-    pdf_request_issues, pdf_standard_requiring_tags, prepare_pack_compilation,
+    CompilationOperationOutcome, CompilationOutputSpecification, CompilationStatus,
+    CreationTimestamp, FontContainerFulfillment, HtmlOutputSpecification, OutputFormat,
+    PackCompilationPresentation, PackCompilationRequest, PackOverrideSet, PackageTreeFulfillment,
+    PageRange, PageSelection, PdfOutputSpecification, PngOutputSpecification,
+    SvgOutputSpecification, compile_pack_kernel, parse_page_selection, pdf_standard_requiring_tags,
+    prepare_pack_compilation, validate_pdf_standards,
 };
 use crate::extract::{ExtractOptions, extract};
 use crate::manifest::PackMetadata;
@@ -949,29 +949,20 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     } else {
         typst::foundations::Smart::Auto
     };
-    if let Some(issue) = pdf_request_issues(&page_selection, &standards, pdf_tags)
-        .into_iter()
-        .next()
-    {
-        return Err(match issue {
-            CompilationRequestRejection::InvalidPdfStandards(error) => {
-                let (message, hints) = error.into_parts();
-                CliError::Hinted { message, hints }
+    if let Err(error) = validate_pdf_standards(&standards) {
+        let (message, hints) = error.into_parts();
+        return Err(CliError::Hinted { message, hints });
+    }
+    let tags_disabled = args.no_pdf_tags || !page_selection.ranges().is_empty();
+    if tags_disabled && let Some(name) = pdf_standard_requiring_tags(&standards) {
+        let message = format!("cannot disable PDF tags when exporting a {name} document");
+        return Err(if args.no_pdf_tags {
+            CliError::Message(message)
+        } else {
+            CliError::Hinted {
+                message,
+                hints: vec!["using --pages implies --no-pdf-tags".to_owned()],
             }
-            CompilationRequestRejection::PdfStandardRequiresTags => {
-                let name = pdf_standard_requiring_tags(&standards)
-                    .expect("tag requirement was established by the shared validator");
-                let message = format!("cannot disable PDF tags when exporting a {name} document");
-                if args.no_pdf_tags {
-                    CliError::Message(message)
-                } else {
-                    CliError::Hinted {
-                        message,
-                        hints: vec!["using --pages implies --no-pdf-tags".to_owned()],
-                    }
-                }
-            }
-            other => CliError::Message(other.to_string()),
         });
     }
 

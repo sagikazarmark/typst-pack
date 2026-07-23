@@ -70,6 +70,8 @@ pub struct Packer {
     discovery_hook: Option<DiscoveryHook>,
     #[cfg(test)]
     after_discovery_hook: Option<Box<dyn Fn()>>,
+    #[cfg(test)]
+    before_evidence_revalidation_hook: Option<Box<dyn Fn()>>,
 }
 
 impl Packer {
@@ -103,6 +105,8 @@ impl Packer {
             discovery_hook: None,
             #[cfg(test)]
             after_discovery_hook: None,
+            #[cfg(test)]
+            before_evidence_revalidation_hook: None,
         }
     }
 
@@ -283,6 +287,12 @@ impl Packer {
     #[cfg(test)]
     pub(crate) fn after_discovery_hook(mut self, hook: impl Fn() + 'static) -> Self {
         self.after_discovery_hook = Some(Box::new(hook));
+        self
+    }
+
+    #[cfg(test)]
+    pub(crate) fn before_evidence_revalidation_hook(mut self, hook: impl Fn() + 'static) -> Self {
+        self.before_evidence_revalidation_hook = Some(Box::new(hook));
         self
     }
 
@@ -683,6 +693,10 @@ impl Packer {
             builder = builder.metadata(metadata);
         }
 
+        #[cfg(test)]
+        if let Some(hook) = &self.before_evidence_revalidation_hook {
+            hook();
+        }
         revalidate_creation_evidence(
             &project_evidence,
             &project_absence_evidence,
@@ -1491,19 +1505,20 @@ fn revalidate_creation_evidence(
         }
     }
     for (root, expected) in directories {
-        let actual = walkdir::WalkDir::new(root)
-            .sort_by_file_name()
-            .into_iter()
-            .filter_map(Result::ok)
-            .filter(|entry| entry.file_type().is_file())
-            .filter(|entry| {
-                entry
+        let mut actual = Vec::new();
+        for entry in walkdir::WalkDir::new(root).sort_by_file_name() {
+            let entry = entry.map_err(|_| PackerError::CreationEvidenceChanged {
+                path: root.display().to_string(),
+            })?;
+            if entry.file_type().is_file()
+                && entry
                     .path()
                     .extension()
                     .is_none_or(|extension| extension != "typk")
-            })
-            .map(|entry| entry.into_path())
-            .collect::<Vec<_>>();
+            {
+                actual.push(entry.into_path());
+            }
+        }
         if &actual != expected {
             return Err(PackerError::CreationEvidenceChanged {
                 path: root.display().to_string(),

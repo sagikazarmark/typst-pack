@@ -2659,6 +2659,34 @@ Rows: #csv("data.csv").len()
         ));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn unreadable_included_directory_prevents_pack_issuance() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let included = project.join("included");
+        fs::create_dir_all(&included).unwrap();
+        fs::write(project.join("main.typ"), "Hello").unwrap();
+
+        let result = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .include("included")
+            .before_evidence_revalidation_hook({
+                let included = included.clone();
+                move || fs::set_permissions(&included, fs::Permissions::from_mode(0o000)).unwrap()
+            })
+            .pack();
+        fs::set_permissions(&included, fs::Permissions::from_mode(0o700)).unwrap();
+
+        assert!(matches!(
+            result,
+            Err(PackerError::CreationEvidenceChanged { ref path })
+                if path == &included.display().to_string()
+        ));
+    }
+
     #[test]
     fn exact_inputs_and_document_time_drive_discovery_and_replay_traces() {
         let dir = tempfile::tempdir().unwrap();

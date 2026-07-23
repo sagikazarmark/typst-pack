@@ -912,6 +912,49 @@ fn pack_exporter_rejection_matches_official_diagnostics() {
 }
 
 #[test]
+fn pack_pdf_option_conflict_matches_official_exporter_rejection() {
+    let fixture = Fixture::static_shape();
+    let pack = stabilized_pack(&fixture);
+    let source_page = NonZeroUsize::new(1).unwrap();
+    let actual = compile(PackCompilationRequest::new(
+        pack,
+        CompilationOutputSpecification::Pdf(PdfOutputSpecification {
+            page_selection: parse_page_selection("1").unwrap(),
+            tags: Smart::Custom(true),
+            ..PdfOutputSpecification::default()
+        }),
+    ))
+    .unwrap();
+    let expected = observe(
+        &fixture,
+        &ReferenceRequest {
+            inputs: Dict::new(),
+            features: vec![],
+            document_time: None,
+            output: OutputRequest::Pdf {
+                source_pages: vec![source_page],
+                ident: Smart::Auto,
+                creator: Smart::Auto,
+                creation_time: None,
+                standards: vec![],
+                tagged: true,
+                pretty: false,
+            },
+        },
+    );
+
+    assert_eq!(expected.status, ObservationStatus::Rejected);
+    assert_eq!(actual.status(), CompilationStatus::Rejected);
+    assert!(actual.artifacts().is_empty());
+    assert_eq!(actual.source_page_count(), expected.source_page_count);
+    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
+    assert!(actual.diagnostics().iter().all(|diagnostic| {
+        diagnostic.phase() == DiagnosticPhase::Export
+            && diagnostic.producer() == DiagnosticProducer::Exporter(actual.exporter_identity())
+    }));
+}
+
+#[test]
 fn oracle_is_structurally_independent_of_the_production_crate() {
     let oracle_sources = concat!(
         include_str!("support/mod.rs"),

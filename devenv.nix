@@ -4,7 +4,7 @@
   dotenv.enable = true;
 
   dagger.enable = true;
-  env.DAGGER_X_RELEASE = "86d1d2f5791bcf3213d56903cfa81a3ba0abe54a";
+  env.DAGGER_X_RELEASE = "v1.0.0-beta.7";
 
   packages = with pkgs; [
     lld

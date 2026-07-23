@@ -108,6 +108,12 @@ viewing, stdout, color, or arbitrary local output paths. Its creation inputs use
 `project`, `input`, and `sysInputs`; ordered `resourceDirs` are mounted and
 registered automatically, and explicit declarations are `resourceSlots`.
 
+Async compilation, Sessions, watch mode, and semantic result caching are not
+currently exposed. Issue #83 establishes that any future implementation must
+orchestrate the same synchronous Pack Compilation Kernel rather than introduce a
+second semantic path; implementing those lifecycle surfaces is deferred until
+their Pack-specific operational contracts are designed.
+
 ## Intentional Differences
 
 - Typst Bundle output and its feature are not supported.

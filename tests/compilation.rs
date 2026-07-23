@@ -1138,7 +1138,7 @@ fn pack_owned_pdf_warning_is_not_attributed_to_the_engine() {
 }
 
 #[test]
-fn explicit_pdf_tags_with_page_selection_are_rejected_before_compilation() {
+fn explicit_pdf_tags_with_page_selection_preserve_the_exporter_rejection() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"One page".to_vec())
         .unwrap()
@@ -1150,22 +1150,23 @@ fn explicit_pdf_tags_with_page_selection_are_rejected_before_compilation() {
         ..PdfOutputSpecification::default()
     };
 
-    let rejection = compile(PackCompilationRequest::new(
+    let result = compile(PackCompilationRequest::new(
         pack,
         CompilationOutputSpecification::Pdf(specification),
-    ));
+    ))
+    .unwrap();
 
-    assert!(matches!(
-        rejection,
-        Err(PackCompileError::RequestRejected {
-            rejection: CompilationRequestRejection::PdfTagsWithPageSelection,
-            ..
-        })
-    ));
+    assert_eq!(result.status(), CompilationStatus::Rejected);
+    assert!(result.artifacts().is_empty());
+    assert!(result.diagnostics().iter().any(|diagnostic| {
+        diagnostic.phase() == DiagnosticPhase::Export
+            && diagnostic.producer() == DiagnosticProducer::Exporter(result.exporter_identity())
+            && diagnostic.message().contains("tagged PDF")
+    }));
 }
 
 #[test]
-fn tag_required_pdf_standard_without_tags_is_rejected_before_compilation() {
+fn tag_required_pdf_standard_without_tags_preserves_the_exporter_rejection() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"One page".to_vec())
         .unwrap()
@@ -1177,18 +1178,19 @@ fn tag_required_pdf_standard_without_tags_is_rejected_before_compilation() {
         ..PdfOutputSpecification::default()
     };
 
-    let rejection = compile(PackCompilationRequest::new(
+    let result = compile(PackCompilationRequest::new(
         pack,
         CompilationOutputSpecification::Pdf(specification),
-    ));
+    ))
+    .unwrap();
 
-    assert!(matches!(
-        rejection,
-        Err(PackCompileError::RequestRejected {
-            rejection: CompilationRequestRejection::PdfStandardRequiresTags,
-            ..
-        })
-    ));
+    assert_eq!(result.status(), CompilationStatus::Rejected);
+    assert!(result.artifacts().is_empty());
+    assert!(result.diagnostics().iter().any(|diagnostic| {
+        diagnostic.phase() == DiagnosticPhase::Export
+            && diagnostic.producer() == DiagnosticProducer::Exporter(result.exporter_identity())
+            && diagnostic.message().contains("PDF/UA-1")
+    }));
 }
 
 #[test]
@@ -1215,7 +1217,7 @@ fn pack_request_rejection_collects_independent_pdf_issues_in_stable_order() {
         panic!("expected a Pack request rejection");
     };
 
-    assert_eq!(rejection.issues().len(), 3);
+    assert_eq!(rejection.issues().len(), 2);
     assert!(matches!(
         rejection.issues()[0],
         CompilationRequestRejection::UnsupportedBundleFeature
@@ -1223,10 +1225,6 @@ fn pack_request_rejection_collects_independent_pdf_issues_in_stable_order() {
     assert!(matches!(
         rejection.issues()[1],
         CompilationRequestRejection::InvalidPdfStandards(_)
-    ));
-    assert!(matches!(
-        rejection.issues()[2],
-        CompilationRequestRejection::PdfStandardRequiresTags
     ));
 }
 
