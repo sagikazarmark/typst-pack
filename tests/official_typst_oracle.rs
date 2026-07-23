@@ -205,6 +205,7 @@ fn assert_diagnostics_match(actual: &[CompilationDiagnostic], expected: &[Diagno
                 expected.span.byte_range.as_ref()
             );
         }
+        assert_eq!(actual.source_page_number(), None);
     }
 }
 
@@ -700,13 +701,149 @@ fn pack_png_defaults_match_the_pinned_official_exporter() {
     );
 
     assert_eq!(actual.status(), CompilationStatus::Succeeded);
-    assert_eq!(actual.artifacts().len(), 1);
+    assert_eq!(actual.source_page_count(), expected.source_page_count);
+    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
+    assert_eq!(actual.artifacts().len(), expected.artifacts.len());
+    assert_eq!(expected.artifacts.len(), 1);
+    assert_eq!(
+        expected.artifacts[0].role,
+        ArtifactRole::Png {
+            source_page_number: NonZeroUsize::new(1).unwrap(),
+        }
+    );
+    assert_eq!(actual.artifacts()[0].format(), OutputFormat::Png);
+    assert_eq!(
+        actual.artifacts()[0].source_page_number(),
+        NonZeroUsize::new(1)
+    );
     assert_eq!(actual.artifacts()[0].bytes(), expected.artifacts[0].bytes);
     assert_eq!(
         actual.request_inventory().options().value().ppi,
         Some(144.0)
     );
     assert!(!actual.request_inventory().options().value().render_bleed);
+    assert_eq!(actual.exporter_identity().implementation(), "typst-render");
+    assert_eq!(actual.exporter_identity().version(), "0.15.0");
+}
+
+#[test]
+fn stabilized_pack_matches_complete_official_png_page_artifacts() {
+    let fixture = Fixture::official_oracle();
+    let document_time = Datetime::from_ymd(2024, 2, 3).unwrap();
+    let mut inputs = Dict::new();
+    inputs.insert("width".into(), Value::Str("24".into()));
+    let options = CompileOptions {
+        page_selection: parse_page_selection("2,1,2").unwrap(),
+        ppi: Some(216.0),
+        render_bleed: true,
+        ..CompileOptions::default()
+    };
+
+    let actual = compile_pack(
+        PackCompilationRequest::new(stabilized_pack(&fixture), OutputFormat::Png)
+            .inputs(inputs)
+            .document_time(document_time)
+            .options(options),
+    )
+    .unwrap();
+    let repeated = compile_pack(
+        PackCompilationRequest::new(stabilized_pack(&fixture), OutputFormat::Png)
+            .inputs(string_inputs([("width", "24")]))
+            .document_time(document_time)
+            .options(CompileOptions {
+                page_selection: parse_page_selection("1-2").unwrap(),
+                ppi: Some(216.0),
+                render_bleed: true,
+                ..CompileOptions::default()
+            }),
+    )
+    .unwrap();
+    let expected = observe(
+        &fixture,
+        &ReferenceRequest {
+            inputs: string_inputs([("width", "24")]),
+            features: vec![],
+            document_time: Some(document_time),
+            output: OutputRequest::Png {
+                source_pages: vec![
+                    NonZeroUsize::new(2).unwrap(),
+                    NonZeroUsize::new(1).unwrap(),
+                    NonZeroUsize::new(2).unwrap(),
+                ],
+                pixels_per_inch: 216.0,
+                render_bleed: true,
+            },
+        },
+    );
+
+    assert_eq!(actual.status(), CompilationStatus::Succeeded);
+    assert_eq!(actual.source_page_count(), expected.source_page_count);
+    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
+    assert!(actual.diagnostics().iter().all(|diagnostic| {
+        diagnostic.phase() == DiagnosticPhase::Compilation
+            && diagnostic.producer() == DiagnosticProducer::Engine(actual.engine_identity())
+    }));
+    assert_eq!(actual.artifacts().len(), expected.artifacts.len());
+    for (actual, expected) in actual.artifacts().iter().zip(&expected.artifacts) {
+        let ArtifactRole::Png { source_page_number } = expected.role else {
+            panic!("oracle produced a non-PNG artifact");
+        };
+        assert_eq!(actual.format(), OutputFormat::Png);
+        assert_eq!(actual.source_page_number(), Some(source_page_number));
+        assert_eq!(actual.bytes(), expected.bytes);
+    }
+    assert_eq!(
+        actual
+            .artifacts()
+            .iter()
+            .map(|artifact| artifact.source_page_number().unwrap().get())
+            .collect::<Vec<_>>(),
+        [1, 2]
+    );
+    assert!(actual.pack_warnings().is_empty());
+    assert_eq!(actual.exporter_identity().implementation(), "typst-render");
+    assert_eq!(actual.exporter_identity().version(), "0.15.0");
+    assert_eq!(actual.artifacts().len(), repeated.artifacts().len());
+    assert!(
+        actual
+            .artifacts()
+            .iter()
+            .zip(repeated.artifacts())
+            .all(|(actual, repeated)| actual.bytes() == repeated.bytes())
+    );
+}
+
+#[test]
+fn valid_png_selection_matching_no_page_matches_the_official_oracle() {
+    let fixture = Fixture::static_shape();
+    let options = CompileOptions {
+        page_selection: parse_page_selection("9").unwrap(),
+        ..CompileOptions::default()
+    };
+    let actual = compile_pack(
+        PackCompilationRequest::new(stabilized_pack(&fixture), OutputFormat::Png).options(options),
+    )
+    .unwrap();
+    let expected = observe(
+        &fixture,
+        &ReferenceRequest {
+            inputs: Dict::new(),
+            features: vec![],
+            document_time: None,
+            output: OutputRequest::Png {
+                source_pages: vec![NonZeroUsize::new(9).unwrap()],
+                pixels_per_inch: 144.0,
+                render_bleed: false,
+            },
+        },
+    );
+
+    assert_eq!(expected.status, ObservationStatus::Accepted);
+    assert_eq!(actual.status(), CompilationStatus::Succeeded);
+    assert_eq!(actual.source_page_count(), expected.source_page_count);
+    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
+    assert_eq!(actual.artifacts().len(), expected.artifacts.len());
+    assert!(actual.artifacts().is_empty());
 }
 
 #[test]

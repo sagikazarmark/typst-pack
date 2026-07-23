@@ -1087,16 +1087,19 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
                     write_requested_dependencies(None)?;
                     return Err(CliError::Reported);
                 }
-                Err(CompileError::PngExport {
-                    message,
-                    warnings,
-                    pack_warnings,
-                    ..
-                }) => {
-                    emit_owned_error(&format!("PNG export failed: {message}"), color);
+                Err(error @ CompileError::PngExport { .. }) => {
+                    emit_owned_error(&error.to_string(), color);
+                    let CompileError::PngExport {
+                        warnings,
+                        pack_warnings,
+                        ..
+                    } = &error
+                    else {
+                        unreachable!()
+                    };
                     emit_diagnostics_with(
                         world,
-                        warnings.iter().chain(&pack_warnings),
+                        warnings.iter().chain(pack_warnings.iter()),
                         diagnostic_format,
                         color,
                     );

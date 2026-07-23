@@ -716,7 +716,7 @@ impl DiagnosticTracepoint {
     }
 }
 
-/// A lossless projection of the exposed fields of an official Typst diagnostic.
+/// A structured compiler or exporter diagnostic.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompilationDiagnostic {
     severity: DiagnosticSeverity,
@@ -726,6 +726,7 @@ pub struct CompilationDiagnostic {
     trace: Vec<DiagnosticTracepoint>,
     phase: DiagnosticPhase,
     producer: DiagnosticProducer,
+    source_page_number: Option<NonZeroUsize>,
 }
 
 impl CompilationDiagnostic {
@@ -755,6 +756,11 @@ impl CompilationDiagnostic {
 
     pub fn producer(&self) -> DiagnosticProducer {
         self.producer
+    }
+
+    /// The Source Page Number whose Page Format export failed, when known.
+    pub fn source_page_number(&self) -> Option<NonZeroUsize> {
+        self.source_page_number
     }
 }
 
@@ -908,13 +914,15 @@ pub enum CompileError {
         source_page_count: Option<usize>,
     },
     /// PNG export failed after compilation completed.
-    #[error("PNG export failed: {message}")]
+    #[error("PNG export failed for source page {source_page_number}: {message}")]
     PngExport {
         message: String,
         /// Warnings emitted before PNG export failed.
         warnings: EcoVec<SourceDiagnostic>,
         pack_warnings: EcoVec<SourceDiagnostic>,
         source_page_count: usize,
+        /// The page whose PNG encoding failed.
+        source_page_number: NonZeroUsize,
     },
 }
 
@@ -1331,6 +1339,7 @@ pub fn compile_pack(
             warnings,
             pack_warnings,
             source_page_count,
+            source_page_number,
         }) => {
             let mut diagnostics = project_diagnostics(
                 &world,
@@ -1349,6 +1358,7 @@ pub fn compile_pack(
                 trace: vec![],
                 phase: DiagnosticPhase::Export,
                 producer: DiagnosticProducer::Exporter(exporter_identity),
+                source_page_number: Some(source_page_number),
             });
             CompilationResult {
                 status: CompilationStatus::Rejected,
@@ -1605,6 +1615,7 @@ pub(crate) fn compile_with_default_pdf_timestamp(
                                 warnings: warnings.clone(),
                                 pack_warnings: pack_warnings.clone(),
                                 source_page_count,
+                                source_page_number,
                             }
                         })?;
                     Ok::<_, CompileError>(CompilationArtifact {
@@ -1737,6 +1748,7 @@ fn project_diagnostics(
                 .collect(),
             phase,
             producer,
+            source_page_number: None,
         })
         .collect()
 }

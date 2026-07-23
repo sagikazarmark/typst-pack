@@ -19,6 +19,32 @@ fn tiny_png() -> Vec<u8> {
     tiny_skia::Pixmap::new(4, 4).unwrap().encode_png().unwrap()
 }
 
+#[test]
+fn png_export_error_preserves_the_failing_source_page() {
+    let error = CompileError::PngExport {
+        message: "encoding failed".to_owned(),
+        warnings: ecow::EcoVec::new(),
+        pack_warnings: ecow::EcoVec::new(),
+        source_page_count: 3,
+        source_page_number: std::num::NonZeroUsize::new(2).unwrap(),
+    };
+
+    assert_eq!(
+        error.to_string(),
+        "PNG export failed for source page 2: encoding failed"
+    );
+    let CompileError::PngExport {
+        source_page_count,
+        source_page_number,
+        ..
+    } = error
+    else {
+        panic!("expected a PNG export error");
+    };
+    assert_eq!(source_page_count, 3);
+    assert_eq!(source_page_number.get(), 2);
+}
+
 #[cfg(feature = "embedded-fonts")]
 fn embedded_font_data() -> Vec<u8> {
     typst_kit::fonts::embedded()
