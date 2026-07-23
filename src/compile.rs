@@ -7,12 +7,12 @@ use ecow::EcoVec;
 #[cfg(feature = "cli")]
 use rayon::prelude::*;
 use typst::diag::{Severity, SourceDiagnostic, Tracepoint, Warned};
-use typst::foundations::{Datetime, Dict};
+use typst::foundations::{Datetime, Dict, Smart};
 use typst::syntax::package::PackageSpec;
 use typst::syntax::{DiagSpan, FileId, Span, VirtualRoot};
 use typst::{Feature, World, WorldExt};
 use typst_layout::PagedDocument;
-use typst_pdf::{PdfOptions, PdfStandards, Timestamp};
+use typst_pdf::{PdfOptions, PdfStandard, PdfStandards, Timestamp};
 
 use crate::embedded::EmbeddedTypst;
 use crate::{Pack, PackWorld};
@@ -187,22 +187,32 @@ pub struct CompileOptions {
     pub ppi: Option<f64>,
     /// Whether to pretty-print HTML, SVG, and PDF output.
     pub pretty: bool,
-    /// PDF standards to enforce.
-    pub pdf_standards: PdfStandards,
-    /// Whether PDF accessibility tags should be emitted when possible.
-    pub pdf_tags: bool,
+    /// PDF standards to enforce through the official exporter.
+    pub pdf_standards: Vec<PdfStandard>,
+    /// The PDF file identifier, using the official exporter's automatic mode by default.
+    pub pdf_identifier: Smart<String>,
+    /// The PDF creator metadata, using the official exporter's automatic mode by default.
+    pub pdf_creator: Smart<Option<String>>,
+    /// Whether PDF accessibility tags should be emitted.
+    ///
+    /// Automatic tagging is disabled with a warning for a page subset, matching
+    /// Typst's CLI. Explicit tagging is passed through to the exporter.
+    pub pdf_tags: Smart<bool>,
     /// How the document creation datetime is recorded in PDF metadata.
     pub creation_timestamp: CreationTimestamp,
 }
 
 impl Default for CompileOptions {
     fn default() -> Self {
+        let pdf = PdfOptions::default();
         Self {
             page_selection: PageSelection::default(),
             ppi: None,
-            pretty: false,
-            pdf_standards: PdfStandards::default(),
-            pdf_tags: true,
+            pretty: pdf.pretty,
+            pdf_standards: vec![],
+            pdf_identifier: pdf.ident,
+            pdf_creator: pdf.creator,
+            pdf_tags: Smart::Auto,
             creation_timestamp: CreationTimestamp::Automatic,
         }
     }
@@ -620,6 +630,9 @@ impl CompilationOutput {
 /// A failed compilation.
 #[derive(Debug, thiserror::Error)]
 pub enum CompileError {
+    /// The official PDF standards validator rejected the requested set.
+    #[error(transparent)]
+    InvalidPdfStandards(#[from] PdfStandardsValidationError),
     /// Compilation or export produced errors; warnings are included for
     /// complete reporting.
     #[error("compilation failed with {} error(s)", errors.len())]
@@ -641,12 +654,67 @@ pub enum CompileError {
     },
 }
 
+/// A lossless projection of an official PDF standards validation error.
+#[derive(Debug, thiserror::Error)]
+#[error("invalid PDF standards: {message}")]
+pub struct PdfStandardsValidationError {
+    message: String,
+    hints: Vec<String>,
+}
+
+impl PdfStandardsValidationError {
+    /// The official validation message.
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    /// The official validation hints in their original order.
+    pub fn hints(&self) -> &[String] {
+        &self.hints
+    }
+
+    /// Consumes the error into its official message and ordered hints.
+    pub fn into_parts(self) -> (String, Vec<String>) {
+        (self.message, self.hints)
+    }
+}
+
 /// A Pack-owned semantic request rejection.
 #[derive(Debug, thiserror::Error)]
 pub enum CompilationRequestRejection {
     /// The Pack compilation contract intentionally excludes Typst Bundle.
     #[error("the Typst Bundle feature is not supported for Pack compilation")]
     UnsupportedBundleFeature,
+    /// The official PDF standards validator rejected the requested set.
+    #[error(transparent)]
+    InvalidPdfStandards(PdfStandardsValidationError),
+    /// Explicit tagging cannot be combined with a PDF page subset.
+    #[error("cannot enable tagged PDF and export a page range")]
+    PdfTagsWithPageSelection,
+    /// A selected PDF standard requires accessibility tags.
+    #[error("cannot disable PDF tags for a standard that requires them")]
+    PdfStandardRequiresTags,
+    /// Multiple independently detectable request issues in stable order.
+    #[error("the compilation request contains multiple invalid values")]
+    Multiple { issues: Vec<Self> },
+}
+
+impl CompilationRequestRejection {
+    /// The independently detectable request issues in stable order.
+    pub fn issues(&self) -> &[Self] {
+        match self {
+            Self::Multiple { issues } => issues,
+            issue => std::slice::from_ref(issue),
+        }
+    }
+
+    fn from_issues(mut issues: Vec<Self>) -> Option<Self> {
+        match issues.len() {
+            0 => None,
+            1 => issues.pop(),
+            _ => Some(Self::Multiple { issues }),
+        }
+    }
 }
 
 /// A Pack-owned operational outcome before official compilation begins.
@@ -692,8 +760,28 @@ pub fn compile_pack(
         mut features,
         document_time,
     } = request;
+    let mut request_issues = vec![];
     if features.contains(&Feature::Bundle) {
-        return Err(CompilationRequestRejection::UnsupportedBundleFeature.into());
+        request_issues.push(CompilationRequestRejection::UnsupportedBundleFeature);
+    }
+    if format == OutputFormat::Pdf {
+        if let Err(error) = validate_pdf_standards(&options.pdf_standards) {
+            request_issues.push(CompilationRequestRejection::InvalidPdfStandards(error));
+        }
+        let has_page_selection = !options.page_selection.ranges().is_empty();
+        let tagged = match options.pdf_tags {
+            Smart::Auto => PdfOptions::default().tagged && !has_page_selection,
+            Smart::Custom(tagged) => tagged,
+        };
+        if has_page_selection && matches!(options.pdf_tags, Smart::Custom(true)) {
+            request_issues.push(CompilationRequestRejection::PdfTagsWithPageSelection);
+        }
+        if !tagged && pdf_standard_requiring_tags(&options.pdf_standards).is_some() {
+            request_issues.push(CompilationRequestRejection::PdfStandardRequiresTags);
+        }
+    }
+    if let Some(rejection) = CompilationRequestRejection::from_issues(request_issues) {
+        return Err(rejection.into());
     }
     let external_packages = pack.manifest().packages().unvendored().to_vec();
     if !external_packages.is_empty() {
@@ -803,6 +891,9 @@ pub fn compile_pack(
                 exporter_identity,
             }
         }
+        Err(CompileError::InvalidPdfStandards(error)) => {
+            return Err(CompilationRequestRejection::InvalidPdfStandards(error).into());
+        }
     };
     Ok(result)
 }
@@ -814,6 +905,10 @@ pub(crate) fn compile_with_default_pdf_timestamp(
     default_pdf_timestamp: impl FnOnce() -> Option<Timestamp>,
 ) -> Result<CompilationOutput, CompileError> {
     let _compilation_timing = typst_timing::TimingScope::new("typst-pack compilation");
+    let pdf_standards = (format == OutputFormat::Pdf)
+        .then(|| validate_pdf_standards(&options.pdf_standards))
+        .transpose()
+        .map_err(CompileError::InvalidPdfStandards)?;
     if format == OutputFormat::Html {
         let pack_warnings = EcoVec::new();
         let Warned { output, warnings } = EmbeddedTypst::compile_html(world);
@@ -860,7 +955,8 @@ pub(crate) fn compile_with_default_pdf_timestamp(
     let mut pack_warnings = EcoVec::new();
     if format == OutputFormat::Pdf
         && !options.page_selection.ranges().is_empty()
-        && options.pdf_tags
+        && options.pdf_tags.is_auto()
+        && PdfOptions::default().tagged
     {
         pack_warnings.push(
             SourceDiagnostic::warning(Span::detached(), "using --pages implies --no-pdf-tags")
@@ -888,12 +984,21 @@ pub(crate) fn compile_with_default_pdf_timestamp(
                     CreationTimestamp::Omit => None,
                 };
                 let pdf_options = PdfOptions {
+                    ident: options.pdf_identifier.clone(),
+                    creator: options.pdf_creator.clone(),
                     timestamp,
                     page_ranges: options.page_selection.typst_page_ranges(),
-                    standards: options.pdf_standards.clone(),
-                    tagged: options.pdf_tags && options.page_selection.ranges().is_empty(),
+                    standards: pdf_standards
+                        .clone()
+                        .expect("PDF standards are prepared for PDF export"),
+                    tagged: match options.pdf_tags {
+                        Smart::Auto => {
+                            PdfOptions::default().tagged
+                                && options.page_selection.ranges().is_empty()
+                        }
+                        Smart::Custom(tagged) => tagged,
+                    },
                     pretty: options.pretty,
-                    ..Default::default()
                 };
                 let pdf = EmbeddedTypst::export_pdf(&document, &pdf_options).map_err(|errors| {
                     CompileError::Diagnostics {
@@ -972,6 +1077,25 @@ pub(crate) fn compile_with_default_pdf_timestamp(
         source_page_count: Some(source_page_count),
         engine_identity: EmbeddedTypst::engine_identity(),
         exporter_identity: EmbeddedTypst::exporter_identity(format),
+    })
+}
+
+pub(crate) fn validate_pdf_standards(
+    standards: &[PdfStandard],
+) -> Result<PdfStandards, PdfStandardsValidationError> {
+    PdfStandards::new(standards).map_err(|error| PdfStandardsValidationError {
+        message: error.message().to_string(),
+        hints: error.hints().iter().map(ToString::to_string).collect(),
+    })
+}
+
+pub(crate) fn pdf_standard_requiring_tags(standards: &[PdfStandard]) -> Option<&'static str> {
+    standards.iter().find_map(|standard| match standard {
+        PdfStandard::A_1a => Some("PDF/A-1a"),
+        PdfStandard::A_2a => Some("PDF/A-2a"),
+        PdfStandard::A_3a => Some("PDF/A-3a"),
+        PdfStandard::Ua_1 => Some("PDF/UA-1"),
+        _ => None,
     })
 }
 

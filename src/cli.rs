@@ -19,11 +19,12 @@ use typst_kit::diagnostics::termcolor::{
 };
 use typst_kit::diagnostics::{DiagnosticFormat, DiagnosticWorld};
 use typst_kit::files::{FileLoader, FsRoot};
-use typst_pdf::{PdfStandard, PdfStandards, Timestamp};
+use typst_pdf::{PdfStandard, Timestamp};
 
 use crate::compile::{
     CompilationArtifact, CompileError, CompileOptions, CreationTimestamp, OutputFormat, PageRange,
     PageSelection, compile_with_default_pdf_timestamp, parse_page_selection,
+    pdf_standard_requiring_tags, validate_pdf_standards,
 };
 use crate::extract::{ExtractOptions, extract};
 use crate::manifest::PackMetadata;
@@ -924,15 +925,7 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         .map(PdfStandard::from)
         .collect::<Vec<_>>();
     if args.no_pdf_tags || !page_selection.ranges().is_empty() {
-        let accessible_standard = [
-            (PdfStandard::A_1a, "PDF/A-1a"),
-            (PdfStandard::A_2a, "PDF/A-2a"),
-            (PdfStandard::A_3a, "PDF/A-3a"),
-            (PdfStandard::Ua_1, "PDF/UA-1"),
-        ]
-        .into_iter()
-        .find_map(|(standard, name)| standards.contains(&standard).then_some(name));
-        if let Some(name) = accessible_standard {
+        if let Some(name) = pdf_standard_requiring_tags(&standards) {
             let message = format!("cannot disable PDF tags when exporting a {name} document");
             return if args.no_pdf_tags {
                 Err(message.into())
@@ -944,9 +937,9 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
             };
         }
     }
-    let pdf_standards = PdfStandards::new(&standards).map_err(|error| CliError::Hinted {
-        message: error.message().to_string(),
-        hints: error.hints().iter().map(ToString::to_string).collect(),
+    validate_pdf_standards(&standards).map_err(|error| {
+        let (message, hints) = error.into_parts();
+        CliError::Hinted { message, hints }
     })?;
 
     if args.output.as_deref() == Some(Path::new("-"))
@@ -1007,8 +1000,14 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         page_selection,
         ppi: Some(args.ppi),
         pretty: args.pretty,
-        pdf_standards,
-        pdf_tags: !args.no_pdf_tags,
+        pdf_standards: standards,
+        pdf_identifier: typst::foundations::Smart::Auto,
+        pdf_creator: typst::foundations::Smart::Auto,
+        pdf_tags: if args.no_pdf_tags {
+            typst::foundations::Smart::Custom(false)
+        } else {
+            typst::foundations::Smart::Auto
+        },
         creation_timestamp: match creation_timestamp {
             Some(timestamp) => convert_datetime(timestamp)
                 .map(Timestamp::new_utc)
@@ -1073,6 +1072,10 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
                     );
                     write_requested_dependencies(None)?;
                     return Err(CliError::Reported);
+                }
+                Err(CompileError::InvalidPdfStandards(error)) => {
+                    let (message, hints) = error.into_parts();
+                    return Err(CliError::Hinted { message, hints });
                 }
             };
 

@@ -18,7 +18,8 @@ pub use compile::{
     CompileOptions, CreationTimestamp, DiagnosticHint, DiagnosticPhase, DiagnosticProducer,
     DiagnosticSeverity, DiagnosticTracepoint, EngineIdentity, ExporterIdentity, LogicalSpan,
     OutputFormat, PackCompilationRequest, PackCompilationWarning, PackCompileError, PageRange,
-    PageSelection, TracepointKind, compile, compile_pack, parse_page_selection,
+    PageSelection, PdfStandardsValidationError, TracepointKind, compile, compile_pack,
+    parse_page_selection,
 };
 pub use manifest::{
     FORMAT_VERSION, FontManifest, MANIFEST_PATH, PackManifest, PackManifestError, PackMetadata,

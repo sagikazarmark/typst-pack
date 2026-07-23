@@ -344,7 +344,7 @@ fn pdf_page_selection_warns_that_accessibility_tags_are_disabled() {
 
     let options = CompileOptions {
         page_selection: typst_pack::parse_page_selection("2,5").unwrap(),
-        pdf_tags: false,
+        pdf_tags: typst::foundations::Smart::Custom(false),
         ..CompileOptions::default()
     };
     let output = compile(&world, OutputFormat::Pdf, &options).unwrap();
@@ -379,6 +379,93 @@ fn pack_owned_pdf_warning_is_not_attributed_to_the_engine() {
             .message()
             .contains("--pages implies --no-pdf-tags")
     );
+}
+
+#[test]
+fn explicit_pdf_tags_with_page_selection_are_rejected_before_compilation() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"One page".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let options = CompileOptions {
+        page_selection: typst_pack::parse_page_selection("1").unwrap(),
+        pdf_tags: typst::foundations::Smart::Custom(true),
+        ..CompileOptions::default()
+    };
+
+    let rejection =
+        compile_pack(PackCompilationRequest::new(pack, OutputFormat::Pdf).options(options));
+
+    assert!(matches!(
+        rejection,
+        Err(PackCompileError::RequestRejected(
+            CompilationRequestRejection::PdfTagsWithPageSelection
+        ))
+    ));
+}
+
+#[test]
+fn tag_required_pdf_standard_without_tags_is_rejected_before_compilation() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"One page".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let options = CompileOptions {
+        pdf_standards: vec![typst_pdf::PdfStandard::Ua_1],
+        pdf_tags: typst::foundations::Smart::Custom(false),
+        ..CompileOptions::default()
+    };
+
+    let rejection =
+        compile_pack(PackCompilationRequest::new(pack, OutputFormat::Pdf).options(options));
+
+    assert!(matches!(
+        rejection,
+        Err(PackCompileError::RequestRejected(
+            CompilationRequestRejection::PdfStandardRequiresTags
+        ))
+    ));
+}
+
+#[test]
+fn pack_request_rejection_collects_independent_pdf_issues_in_stable_order() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"#panic(\"must not compile\")".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let options = CompileOptions {
+        page_selection: typst_pack::parse_page_selection("1").unwrap(),
+        pdf_standards: vec![
+            typst_pdf::PdfStandard::V_2_0,
+            typst_pdf::PdfStandard::A_1b,
+            typst_pdf::PdfStandard::Ua_1,
+        ],
+        ..CompileOptions::default()
+    };
+    let request = PackCompilationRequest::new(pack, OutputFormat::Pdf)
+        .feature(typst::Feature::Bundle)
+        .options(options);
+
+    let Err(PackCompileError::RequestRejected(rejection)) = compile_pack(request) else {
+        panic!("expected a Pack request rejection");
+    };
+
+    assert_eq!(rejection.issues().len(), 3);
+    assert!(matches!(
+        rejection.issues()[0],
+        CompilationRequestRejection::UnsupportedBundleFeature
+    ));
+    assert!(matches!(
+        rejection.issues()[1],
+        CompilationRequestRejection::InvalidPdfStandards(_)
+    ));
+    assert!(matches!(
+        rejection.issues()[2],
+        CompilationRequestRejection::PdfStandardRequiresTags
+    ));
 }
 
 #[cfg(feature = "embedded-fonts")]

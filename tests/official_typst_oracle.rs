@@ -8,10 +8,24 @@ use support::official_typst::{
 };
 use typst::foundations::{Datetime, Dict, Smart, Value};
 use typst_pack::{
-    CompilationDiagnostic, CompilationStatus, CompileOptions, DiagnosticPhase, DiagnosticProducer,
-    DiagnosticSeverity as PackDiagnosticSeverity, OutputFormat, Pack, PackCompilationRequest,
-    TracepointKind, compile_pack, parse_page_selection,
+    CompilationDiagnostic, CompilationStatus, CompileOptions, CreationTimestamp, DiagnosticPhase,
+    DiagnosticProducer, DiagnosticSeverity as PackDiagnosticSeverity, OutputFormat, Pack,
+    PackCompilationRequest, TracepointKind, compile_pack, parse_page_selection,
 };
+use typst_pdf::PdfStandard;
+
+fn stabilized_pack(fixture: &Fixture) -> Pack {
+    let mut builder = Pack::builder(fixture.entrypoint());
+    for &(path, text) in fixture.project() {
+        builder = builder.file(path, text.as_bytes().to_vec()).unwrap();
+    }
+    for &(spec, path, text) in fixture.packages() {
+        builder = builder
+            .package_file(spec.parse().unwrap(), path, text.as_bytes().to_vec())
+            .unwrap();
+    }
+    Pack::from_bytes(builder.build().unwrap().to_bytes().unwrap()).unwrap()
+}
 
 fn assert_diagnostics_match(actual: &[CompilationDiagnostic], expected: &[DiagnosticObservation]) {
     assert_eq!(actual.len(), expected.len());
@@ -132,16 +146,7 @@ fn stabilized_project_round_trips_and_matches_pack_svg_compilation() {
     let fixture = Fixture::official_oracle();
     let mut inputs = Dict::new();
     inputs.insert("width".into(), Value::Str("24".into()));
-    let mut builder = Pack::builder(fixture.entrypoint());
-    for &(path, text) in fixture.project() {
-        builder = builder.file(path, text.as_bytes().to_vec()).unwrap();
-    }
-    for &(spec, path, text) in fixture.packages() {
-        builder = builder
-            .package_file(spec.parse().unwrap(), path, text.as_bytes().to_vec())
-            .unwrap();
-    }
-    let created = builder.build().unwrap();
+    let created = stabilized_pack(&fixture);
     let pack = Pack::from_bytes(created.to_bytes().unwrap()).unwrap();
     let options = CompileOptions {
         page_selection: parse_page_selection("2,1").unwrap(),
@@ -199,16 +204,7 @@ fn pack_rejection_matches_official_diagnostics_and_remains_a_result() {
     let fixture = Fixture::official_oracle();
     let mut inputs = Dict::new();
     inputs.insert("width".into(), Value::Str("24".into()));
-    let mut builder = Pack::builder(fixture.entrypoint());
-    for &(path, text) in fixture.project() {
-        builder = builder.file(path, text.as_bytes().to_vec()).unwrap();
-    }
-    for &(spec, path, text) in fixture.packages() {
-        builder = builder
-            .package_file(spec.parse().unwrap(), path, text.as_bytes().to_vec())
-            .unwrap();
-    }
-    let pack = Pack::from_bytes(builder.build().unwrap().to_bytes().unwrap()).unwrap();
+    let pack = stabilized_pack(&fixture);
 
     let actual = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Svg).inputs(inputs))
         .expect("the accepted Pack request must produce a Compilation Result");
@@ -240,11 +236,7 @@ fn pack_rejection_matches_official_diagnostics_and_remains_a_result() {
 #[test]
 fn pack_exporter_rejection_matches_official_diagnostics() {
     let fixture = Fixture::exporter_rejection();
-    let mut builder = Pack::builder(fixture.entrypoint());
-    for &(path, text) in fixture.project() {
-        builder = builder.file(path, text.as_bytes().to_vec()).unwrap();
-    }
-    let pack = Pack::from_bytes(builder.build().unwrap().to_bytes().unwrap()).unwrap();
+    let pack = stabilized_pack(&fixture);
 
     let actual = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Pdf)).unwrap();
     let expected = observe(
@@ -316,6 +308,108 @@ fn explicit_pdf_controls_produce_stable_official_artifact_bytes() {
     assert_eq!(first.artifacts.len(), 1);
     assert_eq!(first.artifacts[0].role, ArtifactRole::Pdf);
     assert!(first.artifacts[0].bytes.starts_with(b"%PDF"));
+}
+
+#[test]
+fn stabilized_pack_matches_official_pdf_export_with_explicit_controls() {
+    let fixture = Fixture::official_oracle();
+    let document_time = Datetime::from_ymd(2024, 2, 3).unwrap();
+    let creation_time =
+        typst_pdf::Timestamp::new_utc(Datetime::from_ymd_hms(2024, 2, 3, 4, 5, 6).unwrap());
+    let mut inputs = Dict::new();
+    inputs.insert("width".into(), Value::Str("24".into()));
+    let pack = stabilized_pack(&fixture);
+    let options = CompileOptions {
+        page_selection: parse_page_selection("2").unwrap(),
+        pretty: true,
+        pdf_identifier: Smart::Custom("official-oracle".to_owned()),
+        pdf_creator: Smart::Custom(Some("typst-pack differential oracle".to_owned())),
+        pdf_tags: Smart::Custom(false),
+        pdf_standards: vec![PdfStandard::A_2b],
+        creation_timestamp: CreationTimestamp::Explicit(creation_time),
+        ..CompileOptions::default()
+    };
+
+    let actual = compile_pack(
+        PackCompilationRequest::new(pack, OutputFormat::Pdf)
+            .inputs(inputs)
+            .document_time(document_time)
+            .options(options),
+    )
+    .unwrap();
+    let expected = observe(
+        &fixture,
+        &ReferenceRequest {
+            inputs: vec![("width", "24")],
+            features: vec![],
+            document_time: Some(document_time),
+            output: OutputRequest::Pdf {
+                source_pages: vec![NonZeroUsize::new(2).unwrap()],
+                ident: Smart::Custom("official-oracle".to_owned()),
+                creator: Smart::Custom(Some("typst-pack differential oracle".to_owned())),
+                creation_time: Some(creation_time),
+                standards: vec![PdfStandard::A_2b],
+                tagged: false,
+                pretty: true,
+            },
+        },
+    );
+
+    assert_eq!(actual.status(), CompilationStatus::Succeeded);
+    assert_eq!(actual.source_page_count(), expected.source_page_count);
+    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
+    assert!(actual.pack_warnings().is_empty());
+    assert_eq!(actual.artifacts().len(), 1);
+    assert_eq!(expected.artifacts.len(), 1);
+    assert_eq!(expected.artifacts[0].role, ArtifactRole::Pdf);
+    assert_eq!(actual.artifacts()[0].format(), OutputFormat::Pdf);
+    assert_eq!(actual.artifacts()[0].source_page_number(), None);
+    assert_eq!(actual.artifacts()[0].bytes(), expected.artifacts[0].bytes);
+    let mut destination_bytes = actual.artifacts()[0].bytes().to_vec();
+    destination_bytes.clear();
+    assert_eq!(actual.artifacts()[0].bytes(), expected.artifacts[0].bytes);
+    assert_eq!(actual.exporter_identity().implementation(), "typst-pdf");
+    assert_eq!(actual.exporter_identity().version(), "0.15.0");
+}
+
+#[test]
+fn stabilized_pack_matches_official_pdf_exporter_defaults() {
+    let fixture = Fixture::official_oracle();
+    let document_time = Datetime::from_ymd(2024, 2, 3).unwrap();
+    let mut inputs = Dict::new();
+    inputs.insert("width".into(), Value::Str("24".into()));
+    let pack = stabilized_pack(&fixture);
+
+    let actual = compile_pack(
+        PackCompilationRequest::new(pack, OutputFormat::Pdf)
+            .inputs(inputs)
+            .document_time(document_time),
+    )
+    .unwrap();
+    let expected = observe(
+        &fixture,
+        &ReferenceRequest {
+            inputs: vec![("width", "24")],
+            features: vec![],
+            document_time: Some(document_time),
+            output: OutputRequest::Pdf {
+                source_pages: vec![],
+                ident: Smart::Auto,
+                creator: Smart::Auto,
+                creation_time: None,
+                standards: vec![],
+                tagged: true,
+                pretty: false,
+            },
+        },
+    );
+
+    assert_eq!(actual.status(), CompilationStatus::Succeeded);
+    assert_eq!(actual.source_page_count(), expected.source_page_count);
+    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
+    assert_eq!(actual.artifacts().len(), 1);
+    assert_eq!(actual.artifacts()[0].source_page_number(), None);
+    assert_eq!(actual.artifacts()[0].bytes(), expected.artifacts[0].bytes);
 }
 
 #[test]
