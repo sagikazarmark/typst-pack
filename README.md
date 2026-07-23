@@ -193,6 +193,12 @@ assert_eq!(artifact.source_page_number(), None);
 let pdf = artifact.bytes();
 ```
 
+`PackOutcome::report` is the transient Creation Report. On success it retains
+warnings from the representative creation compile. Inspect `PackOutcome::pack`
+for authoritative project files, package requirements and their embedding
+disposition, and the Pack Font Catalog; that static inventory is not duplicated
+in the report.
+
 Use `compile_report` when operational dependency evidence is needed alongside
 the immutable semantic result. Its fulfillment report retains caller-supplied
 package and font provenance, cache disposition, and licensing metadata without

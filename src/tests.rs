@@ -1811,7 +1811,11 @@ Rows: #csv("data.csv").len()
         let dir = tempfile::tempdir().unwrap();
         let outcome = pack_fixture(dir.path());
 
-        let report = &outcome.report;
+        let project_files = outcome
+            .pack
+            .files()
+            .map(|(path, _)| path)
+            .collect::<Vec<_>>();
         for expected in [
             "main.typ",
             "chapters/intro.typ",
@@ -1820,19 +1824,17 @@ Rows: #csv("data.csv").len()
             "notes.txt",
         ] {
             assert!(
-                report.files.iter().any(|file| file == expected),
+                project_files.contains(&expected),
                 "missing {expected} in {:?}",
-                report.files
+                project_files
             );
         }
-        assert_eq!(report.packages_vendored.len(), 1);
-        assert_eq!(
-            report.packages_vendored[0].to_string(),
-            "@local/greet:0.1.0"
-        );
-        assert!(report.packages_unvendored.is_empty());
+        assert_eq!(outcome.pack.package_requirements().len(), 1);
+        let requirement = &outcome.pack.package_requirements()[0];
+        assert!(requirement.is_embedded());
+        assert_eq!(requirement.spec().to_string(), "@local/greet:0.1.0");
 
-        let spec = &report.packages_vendored[0];
+        let spec = requirement.spec();
         assert!(outcome.pack.has_package(spec));
         assert!(outcome.pack.package_file(spec, "lib.typ").is_some());
         assert!(outcome.pack.package_file(spec, "typst.toml").is_some());
@@ -1868,7 +1870,11 @@ Rows: #csv("data.csv").len()
             .unwrap();
 
         assert_eq!(
-            outcome.report.files,
+            outcome
+                .pack
+                .files()
+                .map(|(path, _)| path)
+                .collect::<Vec<_>>(),
             [
                 ".typkignore",
                 "ignored/reincluded/keep.txt",
@@ -1900,7 +1906,11 @@ Rows: #csv("data.csv").len()
             .unwrap();
 
         assert_eq!(
-            outcome.report.files,
+            outcome
+                .pack
+                .files()
+                .map(|(path, _)| path)
+                .collect::<Vec<_>>(),
             [".typkignore", "main.typ", "other/keep.txt"]
         );
     }
@@ -1967,7 +1977,14 @@ Rows: #csv("data.csv").len()
             .pack()
             .unwrap();
 
-        assert_eq!(outcome.report.files, ["html.txt", "main.typ", "paged.txt"]);
+        assert_eq!(
+            outcome
+                .pack
+                .files()
+                .map(|(path, _)| path)
+                .collect::<Vec<_>>(),
+            ["html.txt", "main.typ", "paged.txt"]
+        );
     }
 
     #[test]
@@ -2056,7 +2073,14 @@ Rows: #csv("data.csv").len()
             .pack()
             .unwrap();
 
-        assert_eq!(outcome.report.files, ["input.txt", "main.typ", "time.txt"]);
+        assert_eq!(
+            outcome
+                .pack
+                .files()
+                .map(|(path, _)| path)
+                .collect::<Vec<_>>(),
+            ["input.txt", "main.typ", "time.txt"]
+        );
     }
 
     #[test]
@@ -2094,7 +2118,7 @@ Rows: #csv("data.csv").len()
             .pack()
             .unwrap();
 
-        assert_eq!(outcome.report.packages_vendored.len(), 1);
+        assert_eq!(outcome.pack.package_requirements().len(), 1);
     }
 
     #[test]
@@ -2132,7 +2156,7 @@ Rows: #csv("data.csv").len()
                 .pack()
                 .unwrap();
 
-            let spec = &outcome.report.packages_vendored[0];
+            let spec = outcome.pack.package_requirements()[0].spec();
             assert_eq!(spec.to_string(), "@preview/cached:0.1.0");
             assert!(outcome.pack.package_file(spec, "lib.typ").is_some());
         }
@@ -2447,6 +2471,26 @@ Rows: #csv("data.csv").len()
         let result = Packer::new(&project, "main.typ").system_fonts(false).pack();
         assert!(matches!(result, Err(PackerError::Compile { .. })));
     }
+
+    #[test]
+    fn successful_creation_report_retains_representative_compile_warnings() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(
+            project.join("main.typ"),
+            "#set text(font: \"Definitely Missing\")\nWarning",
+        )
+        .unwrap();
+
+        let outcome = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .typst_embedded_fonts(false)
+            .pack()
+            .unwrap();
+
+        assert!(!outcome.report.compile_warnings.is_empty());
+    }
 }
 
 #[cfg(feature = "embedded-fonts")]
@@ -2534,7 +2578,7 @@ mod offline {
             .offline(true)
             .pack()
             .unwrap();
-        assert_eq!(outcome.report.packages_vendored.len(), 1);
+        assert_eq!(outcome.pack.package_requirements().len(), 1);
     }
 
     #[test]

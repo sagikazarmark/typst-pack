@@ -311,12 +311,7 @@ impl Packer {
             hook();
         }
 
-        let mut report = PackReport {
-            files: snapshot.files().map(|(path, _)| path.to_owned()).collect(),
-            packages_vendored: Vec::new(),
-            packages_unvendored: Vec::new(),
-            fonts: Vec::new(),
-            warnings: Vec::new(),
+        let report = PackReport {
             compile_warnings: warnings,
         };
 
@@ -363,11 +358,6 @@ impl Packer {
                     builder.external_package_file(spec.clone(), path, data.to_vec())?
                 };
             }
-            if self.vendor_packages {
-                report.packages_vendored.push(spec.clone());
-            } else {
-                report.packages_unvendored.push(spec.clone());
-            }
         }
 
         // Project selected faces back into the original candidate catalog order.
@@ -394,12 +384,6 @@ impl Packer {
             &font_evidence,
         )?;
         let pack = builder.build()?;
-        report.fonts = pack
-            .manifest()
-            .fonts()
-            .iter()
-            .map(|font| font.path().to_owned())
-            .collect();
 
         Ok(PackOutcome {
             pack,
@@ -434,7 +418,7 @@ pub enum CreationTarget {
 pub struct PackOutcome {
     /// The assembled pack.
     pub pack: Pack,
-    /// The contained and supplied parts of the compilation contract.
+    /// Transient diagnostics from the creation attempt.
     pub report: PackReport,
     pub(crate) world: CreationWorld,
 }
@@ -453,19 +437,11 @@ impl CreationDiagnosticContext {
     }
 }
 
-/// A summary of the compilation contract selected by a [`Packer`].
+/// Transient diagnostics from a successful [`Packer`] creation attempt.
+///
+/// Inspect the issued [`Pack`] for its project, package, and font inventory.
 #[derive(Debug, Clone)]
 pub struct PackReport {
-    /// Root-relative paths of the packed project files.
-    pub files: Vec<String>,
-    /// Packages stored inside the pack.
-    pub packages_vendored: Vec<PackageSpec>,
-    /// Observed dependencies that were not vendored.
-    pub packages_unvendored: Vec<PackageSpec>,
-    /// Archive paths of embedded fonts.
-    pub fonts: Vec<String>,
-    /// Non-fatal problems encountered while packing.
-    pub warnings: Vec<String>,
     /// Warnings emitted by the representative creation compile.
     pub compile_warnings: EcoVec<SourceDiagnostic>,
 }

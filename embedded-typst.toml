@@ -229,7 +229,7 @@ sha256 = "1db6664bca1d5a1cf52ee65316165cf2d76372d40887dbcacf26e7d05996c356"
 [[surface]]
 path = "src/packer.rs"
 classification = "pack-invariant"
-sha256 = "0ce9e7329b6df57e50032c271f54088608ea721260280ca0dd0b4f1768590acf"
+sha256 = "458ca3773bf9ee182bd3d1f2eb00bd9167fc7937f749b07415ae556c1ca4537a"
 
 [[surface]]
 path = "src/project_snapshot.rs"
@@ -239,7 +239,7 @@ sha256 = "ff5b4f24b0dd8ae448e70bb1aff57a77c83f5aa3ad9e91c6bd2d7d5fa96aae12"
 [[surface]]
 path = "src/tests.rs"
 classification = "pack-invariant"
-sha256 = "48314376e5a6aa2cabf9f3d5003317d38a304109b13bb84d740e9c51dfeea40e"
+sha256 = "7920000f89991187564fd7a3029c51098594bda083cf45115641cb19a2565d3e"
 
 [[surface]]
 path = "src/world.rs"
@@ -254,7 +254,7 @@ sha256 = "1b631697897589471e84a2465d2cd698904ca393c36d5af9e41bfdb721e661f1"
 [[surface]]
 path = "src/cli.rs"
 classification = "unavoidable-mirror"
-sha256 = "f9654be6b454bcede0ac655ac724a21a90aca652a2440c167277973f99d6c756"
+sha256 = "878f8c4a19b302003f2b3cd52e59104f7464da22ea1337a2ff10e27a020409bb"
 
 [[surface]]
 path = "dagger.dang"
@@ -269,7 +269,7 @@ sha256 = "3d4dfaa961c5c95829e4773ff6e19d2411a9b9d2a0d5dd7c52f32d65a8b6313b"
 [[surface]]
 path = "tests/cli.rs"
 classification = "unavoidable-mirror"
-sha256 = "259cb01a6d79f2a5aabf28623a4f61cd1fe23981f208e62916b6ed9e7c110ccc"
+sha256 = "e5ddf4bf3f3f774ed420106217c5784aea68b7b61a5015664e12185c27841479"
 
 [[surface]]
 path = "tests/compilation.rs"

@@ -451,6 +451,12 @@ fn create_packs_the_structural_project_closure_with_root_ignore_policy() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
+    assert!(
+        String::from_utf8_lossy(&result.stdout)
+            .contains("packed 6 project file(s), 0 package(s), 1 font(s)"),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
 
     let pack = Pack::from_bytes(std::fs::read(output).unwrap()).unwrap();
     assert_eq!(
@@ -2292,6 +2298,19 @@ fn no_vendor_packages_records_dependency_and_compiles_with_package_path() {
         created.status.success(),
         "{}",
         String::from_utf8_lossy(&created.stderr)
+    );
+    let creation_summary = String::from_utf8_lossy(&created.stdout);
+    assert!(
+        creation_summary.contains("packed 1 project file(s), 0 package(s)"),
+        "{creation_summary}"
+    );
+    assert!(
+        creation_summary.contains("1 package(s) were not vendored"),
+        "{creation_summary}"
+    );
+    assert!(
+        creation_summary.contains("@preview/unvendored:0.1.0"),
+        "{creation_summary}"
     );
 
     let pack = Pack::from_bytes(std::fs::read(&pack_path).unwrap()).unwrap();

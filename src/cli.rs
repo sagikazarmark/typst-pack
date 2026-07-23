@@ -702,9 +702,6 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
         diagnostic_format,
         color,
     );
-    for warning in &outcome.report.warnings {
-        emit_owned_warning(warning, color);
-    }
     if let Some(error) = timing_error {
         return Err(error.into());
     }
@@ -725,21 +722,34 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
         .write(std::io::BufWriter::new(file))
         .map_err(|err| err.to_string())?;
 
-    let report = &outcome.report;
+    let project_file_count = outcome.pack.files().count();
+    let vendored_package_count = outcome
+        .pack
+        .package_requirements()
+        .iter()
+        .filter(|requirement| requirement.is_embedded())
+        .count();
+    let unvendored_packages = outcome
+        .pack
+        .package_requirements()
+        .iter()
+        .filter(|requirement| !requirement.is_embedded())
+        .collect::<Vec<_>>();
+    let font_count = outcome.pack.font_catalog().len();
     println!(
         "packed {} project file(s), {} package(s), {} font(s) into `{}`",
-        report.files.len(),
-        report.packages_vendored.len(),
-        report.fonts.len(),
+        project_file_count,
+        vendored_package_count,
+        font_count,
         output.display(),
     );
-    if !report.packages_unvendored.is_empty() {
+    if !unvendored_packages.is_empty() {
         println!(
             "note: {} package(s) were not vendored and must be available when compiling:",
-            report.packages_unvendored.len()
+            unvendored_packages.len()
         );
-        for spec in &report.packages_unvendored {
-            println!("  {spec}");
+        for requirement in unvendored_packages {
+            println!("  {}", requirement.spec());
         }
     }
     Ok(())
@@ -1551,16 +1561,6 @@ fn emit_owned_error(message: &str, color: ColorChoice) {
     spec.set_fg(Some(Color::Red)).set_bold(true);
     let _ = stream.set_color(&spec);
     let _ = write!(stream, "error");
-    let _ = stream.reset();
-    let _ = writeln!(stream, ": {message}");
-}
-
-fn emit_owned_warning(message: &str, color: ColorChoice) {
-    let mut stream = StandardStream::stderr(color);
-    let mut spec = ColorSpec::new();
-    spec.set_fg(Some(Color::Yellow)).set_bold(true);
-    let _ = stream.set_color(&spec);
-    let _ = write!(stream, "warning");
     let _ = stream.reset();
     let _ = writeln!(stream, ": {message}");
 }
