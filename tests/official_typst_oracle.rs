@@ -7,14 +7,13 @@ use support::official_typst::{
     OutputRequest, ReferenceRequest, Target, TraceKind, observe, observe_with_project_overrides,
     select_font,
 };
-use typst::World;
 use typst::foundations::{Bytes, Datetime, Dict, Smart, Value};
 use typst_pack::{
     CompilationDiagnostic, CompilationRequestRejection, CompilationStatus, CompileOptions,
     CreationTimestamp, DiagnosticPhase, DiagnosticProducer,
     DiagnosticSeverity as PackDiagnosticSeverity, OutputFormat, Pack, PackCompilationRequest,
     PackCompileError, PackOverrideSet, PackageTreeFulfillment, RequestValueOrigin, TracepointKind,
-    compile_pack, parse_page_selection,
+    compile, parse_page_selection,
 };
 #[cfg(feature = "fs")]
 use typst_pack::{DiscoveryTarget, Packer};
@@ -50,7 +49,7 @@ fn embedded_and_external_complete_package_trees_match_the_independent_oracle() {
         },
     };
     let expected = observe(&fixture, &reference_request);
-    let embedded = compile_pack(
+    let embedded = compile(
         PackCompilationRequest::new(stabilized_pack(&fixture), OutputFormat::Svg)
             .inputs(string_inputs([("width", "24")]))
             .document_time(Datetime::from_ymd(2024, 2, 3).unwrap()),
@@ -68,7 +67,7 @@ fn embedded_and_external_complete_package_trees_match_the_independent_oracle() {
             .unwrap();
     }
     let external_pack = builder.build().unwrap();
-    let external = compile_pack(
+    let external = compile(
         PackCompilationRequest::new(external_pack, OutputFormat::Svg)
             .inputs(string_inputs([("width", "24")]))
             .document_time(Datetime::from_ymd(2024, 2, 3).unwrap())
@@ -129,7 +128,7 @@ fn exact_pack_font_catalog_matches_the_independent_oracle_and_external_fulfillme
         embedded_pack.fonts()[0].data().as_slice(),
         expected.font_catalog[0].1
     );
-    let embedded = compile_pack(PackCompilationRequest::new(
+    let embedded = compile(PackCompilationRequest::new(
         embedded_pack,
         OutputFormat::Svg,
     ))
@@ -144,7 +143,7 @@ fn exact_pack_font_catalog_matches_the_independent_oracle_and_external_fulfillme
         .build()
         .unwrap();
     let identity = external_pack.font_requirements()[0].container_identity();
-    let external = compile_pack(
+    let external = compile(
         PackCompilationRequest::new(external_pack, OutputFormat::Svg)
             .font_fulfillment(identity, typst_pack::FontContainerFulfillment::new(data)),
     )
@@ -177,14 +176,27 @@ fn catalog_order_drives_the_same_official_font_selection_on_every_path() {
             .font(ordered[1].clone(), base.index());
         assert_eq!(select_font(&fixture, &family, variant).unwrap().0, expected);
 
-        let embedded_pack = stabilized_pack(&fixture);
-        let embedded_world = typst_pack::PackWorld::builder(embedded_pack)
-            .build()
-            .unwrap();
-        let selected = embedded_world.book().select(&family, variant).unwrap();
+        let expected_output = observe(
+            &fixture,
+            &ReferenceRequest {
+                inputs: Dict::new(),
+                features: vec![],
+                document_time: None,
+                output: OutputRequest::Svg {
+                    source_pages: vec![],
+                    render_bleed: false,
+                    pretty: false,
+                },
+            },
+        );
+        let embedded = compile(PackCompilationRequest::new(
+            stabilized_pack(&fixture),
+            OutputFormat::Svg,
+        ))
+        .unwrap();
         assert_eq!(
-            embedded_world.font(selected).unwrap().data().as_slice(),
-            expected
+            embedded.artifacts()[0].bytes(),
+            expected_output.artifacts[0].bytes
         );
 
         let external_pack = Pack::builder("main.typ")
@@ -196,19 +208,21 @@ fn catalog_order_drives_the_same_official_font_selection_on_every_path() {
             .unwrap()
             .build()
             .unwrap();
-        let supplied = ordered.iter().map(|data| {
-            let font = typst::text::Font::new(Bytes::new(data.clone()), base.index()).unwrap();
-            let info = font.info().clone();
-            (font, info)
-        });
-        let external_world = typst_pack::PackWorld::builder(external_pack)
-            .extra_fonts(supplied)
-            .build()
-            .unwrap();
-        let selected = external_world.book().select(&family, variant).unwrap();
+        let fulfillments = external_pack
+            .font_requirements()
+            .iter()
+            .zip(ordered)
+            .map(|(requirement, data)| (requirement.container_identity(), data))
+            .collect::<Vec<_>>();
+        let mut request = PackCompilationRequest::new(external_pack, OutputFormat::Svg);
+        for (identity, data) in fulfillments {
+            request =
+                request.font_fulfillment(identity, typst_pack::FontContainerFulfillment::new(data));
+        }
+        let external = compile(request).unwrap();
         assert_eq!(
-            external_world.font(selected).unwrap().data().as_slice(),
-            expected
+            external.artifacts()[0].bytes(),
+            expected_output.artifacts[0].bytes
         );
     }
 }
@@ -352,7 +366,7 @@ fn stabilized_project_round_trips_and_matches_pack_svg_compilation() {
         .document_time(Datetime::from_ymd(2024, 2, 3).unwrap())
         .options(options);
 
-    let actual = compile_pack(request).unwrap();
+    let actual = compile(request).unwrap();
     let expected = observe(
         &fixture,
         &ReferenceRequest {
@@ -440,7 +454,7 @@ fn official_source_discovery_replay_and_pack_compilation_agree() {
         outcome.report.discovery_variants[0].replay_trace()
     );
 
-    let actual = compile_pack(
+    let actual = compile(
         PackCompilationRequest::new(outcome.pack, OutputFormat::Svg)
             .inputs(inputs)
             .document_time(Datetime::from_ymd(2024, 2, 3).unwrap()),
@@ -505,8 +519,7 @@ fn pack_source_and_non_source_overrides_match_the_independent_oracle() {
         .replace("unused.txt", b"replacement unused".to_vec())
         .unwrap();
     let actual =
-        compile_pack(PackCompilationRequest::new(pack, OutputFormat::Svg).overrides(overrides))
-            .unwrap();
+        compile(PackCompilationRequest::new(pack, OutputFormat::Svg).overrides(overrides)).unwrap();
     let expected = observe_with_project_overrides(
         &fixture,
         &reference_request,
@@ -531,7 +544,7 @@ fn shared_semantic_values_drive_the_same_official_source_behavior() {
     inputs.insert("width".into(), Value::Int(24));
     let pack = stabilized_pack(&fixture);
 
-    let actual = compile_pack(
+    let actual = compile(
         PackCompilationRequest::new(pack, OutputFormat::Svg)
             .inputs(inputs.clone())
             .feature(typst::Feature::A11yExtras)
@@ -580,7 +593,7 @@ fn shared_semantic_values_drive_the_same_official_source_behavior() {
 fn effective_defaults_and_required_features_keep_their_origins() {
     let fixture = Fixture::exporter_rejection();
     let pack = stabilized_pack(&fixture);
-    let result = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Html)).unwrap();
+    let result = compile(PackCompilationRequest::new(pack, OutputFormat::Html)).unwrap();
     let inventory = result.request_inventory();
 
     assert_eq!(
@@ -601,7 +614,7 @@ fn effective_defaults_and_required_features_keep_their_origins() {
     );
     assert!(inventory.selected_features().is_empty());
 
-    let explicit = compile_pack(
+    let explicit = compile(
         PackCompilationRequest::new(stabilized_pack(&fixture), OutputFormat::Html)
             .feature(typst::Feature::Html),
     )
@@ -616,7 +629,7 @@ fn effective_defaults_and_required_features_keep_their_origins() {
         RequestValueOrigin::CoreDerived
     );
 
-    let rejected = compile_pack(
+    let rejected = compile(
         PackCompilationRequest::new(stabilized_pack(&fixture), OutputFormat::Html)
             .feature(typst::Feature::Bundle),
     );
@@ -647,20 +660,18 @@ fn unobserved_shared_values_still_change_compilation_identity() {
     let mut second_inputs = Dict::new();
     second_inputs.insert("unused".into(), Value::Str("second".into()));
 
-    let first = compile_pack(
-        PackCompilationRequest::new(first_pack, OutputFormat::Svg).inputs(first_inputs),
-    )
-    .unwrap();
-    let second = compile_pack(
-        PackCompilationRequest::new(second_pack, OutputFormat::Svg).inputs(second_inputs),
-    )
-    .unwrap();
-    let feature = compile_pack(
+    let first =
+        compile(PackCompilationRequest::new(first_pack, OutputFormat::Svg).inputs(first_inputs))
+            .unwrap();
+    let second =
+        compile(PackCompilationRequest::new(second_pack, OutputFormat::Svg).inputs(second_inputs))
+            .unwrap();
+    let feature = compile(
         PackCompilationRequest::new(feature_pack, OutputFormat::Svg)
             .feature(typst::Feature::A11yExtras),
     )
     .unwrap();
-    let document_time = compile_pack(
+    let document_time = compile(
         PackCompilationRequest::new(time_pack, OutputFormat::Svg)
             .document_time(Datetime::from_ymd(2024, 2, 3).unwrap()),
     )
@@ -687,7 +698,7 @@ fn pack_rejection_matches_official_diagnostics_and_remains_a_result() {
     inputs.insert("width".into(), Value::Str("24".into()));
     let pack = stabilized_pack(&fixture);
 
-    let actual = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Svg).inputs(inputs))
+    let actual = compile(PackCompilationRequest::new(pack, OutputFormat::Svg).inputs(inputs))
         .expect("the accepted Pack request must produce a Compilation Result");
     let expected = observe(
         &fixture,
@@ -719,7 +730,7 @@ fn pack_exporter_rejection_matches_official_diagnostics() {
     let fixture = Fixture::exporter_rejection();
     let pack = stabilized_pack(&fixture);
 
-    let actual = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Pdf)).unwrap();
+    let actual = compile(PackCompilationRequest::new(pack, OutputFormat::Pdf)).unwrap();
     let expected = observe(
         &fixture,
         &ReferenceRequest {
@@ -811,7 +822,7 @@ fn stabilized_pack_matches_official_pdf_export_with_explicit_controls() {
         ..CompileOptions::default()
     };
 
-    let actual = compile_pack(
+    let actual = compile(
         PackCompilationRequest::new(pack, OutputFormat::Pdf)
             .inputs(inputs)
             .document_time(document_time)
@@ -861,7 +872,7 @@ fn stabilized_pack_matches_official_pdf_exporter_defaults() {
     inputs.insert("width".into(), Value::Str("24".into()));
     let pack = stabilized_pack(&fixture);
 
-    let actual = compile_pack(
+    let actual = compile(
         PackCompilationRequest::new(pack, OutputFormat::Pdf)
             .inputs(inputs)
             .document_time(document_time),
@@ -900,12 +911,12 @@ fn stabilized_pack_matches_official_html_artifacts_and_pretty_control() {
         CompileOptions::default().pretty,
         typst_html::HtmlOptions::default().pretty
     );
-    let compact = compile_pack(PackCompilationRequest::new(
+    let compact = compile(PackCompilationRequest::new(
         stabilized_pack(&fixture),
         OutputFormat::Html,
     ))
     .unwrap();
-    let pretty_result = compile_pack(
+    let pretty_result = compile(
         PackCompilationRequest::new(stabilized_pack(&fixture), OutputFormat::Html).options(
             CompileOptions {
                 pretty: true,
@@ -1008,7 +1019,7 @@ fn official_html_target_rejects_a_missing_required_feature() {
 #[test]
 fn html_compiler_rejection_matches_official_diagnostics_and_order() {
     let fixture = Fixture::html_compiler_rejection();
-    let actual = compile_pack(PackCompilationRequest::new(
+    let actual = compile(PackCompilationRequest::new(
         stabilized_pack(&fixture),
         OutputFormat::Html,
     ))
@@ -1046,7 +1057,7 @@ fn html_compiler_rejection_matches_official_diagnostics_and_order() {
 #[test]
 fn html_exporter_rejection_matches_official_diagnostics_and_order() {
     let fixture = Fixture::html_exporter_rejection();
-    let actual = compile_pack(PackCompilationRequest::new(
+    let actual = compile(PackCompilationRequest::new(
         stabilized_pack(&fixture),
         OutputFormat::Html,
     ))
@@ -1086,7 +1097,7 @@ fn html_exporter_rejection_matches_official_diagnostics_and_order() {
 #[test]
 fn pack_png_defaults_match_the_pinned_official_exporter() {
     let fixture = Fixture::static_shape();
-    let actual = compile_pack(PackCompilationRequest::new(
+    let actual = compile(PackCompilationRequest::new(
         stabilized_pack(&fixture),
         OutputFormat::Png,
     ))
@@ -1144,14 +1155,14 @@ fn stabilized_pack_matches_complete_official_png_page_artifacts() {
         ..CompileOptions::default()
     };
 
-    let actual = compile_pack(
+    let actual = compile(
         PackCompilationRequest::new(stabilized_pack(&fixture), OutputFormat::Png)
             .inputs(inputs)
             .document_time(document_time)
             .options(options),
     )
     .unwrap();
-    let repeated = compile_pack(
+    let repeated = compile(
         PackCompilationRequest::new(stabilized_pack(&fixture), OutputFormat::Png)
             .inputs(string_inputs([("width", "24")]))
             .document_time(document_time)
@@ -1225,7 +1236,7 @@ fn valid_png_selection_matching_no_page_matches_the_official_oracle() {
         page_selection: parse_page_selection("9").unwrap(),
         ..CompileOptions::default()
     };
-    let actual = compile_pack(
+    let actual = compile(
         PackCompilationRequest::new(stabilized_pack(&fixture), OutputFormat::Png).options(options),
     )
     .unwrap();

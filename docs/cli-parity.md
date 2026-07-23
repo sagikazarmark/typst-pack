@@ -24,6 +24,12 @@ missing, replaced, or version-mismatched oracle fails the gate.
 | Dependency JSON, zero, and Make serialization | Mirrors Typst 0.15.0 with Pack-aware input provenance | dependency cases in `tests/cli.rs` |
 | Font, package, certificate, timestamp, jobs, timing, and viewer environment resolution | `typst-kit` where public; remaining process policy mirrors Typst 0.15.0 | corresponding environment and automation cases in `tests/cli.rs` |
 
+`World`, `Library`, the synchronous Typst compiler call, and all official
+exporter calls in this table are private mechanisms of the embedded adapter.
+They are not typst-pack extension interfaces. Public Rust, CLI, and Dagger
+callers provide validated Pack-bound lifecycle values and all converge on that
+adapter.
+
 The mirrored rows are the complete parity-review list. They must not be moved
 behind private or unstable Typst CLI internals. An embedded Typst upgrade must
 compare each row against the new official command before updating expectations.

@@ -1,12 +1,49 @@
 use typst_pack::{
-    CompilationOperationOutcome, CompilationRequestRejection, CompilationStatus, CompileOptions,
-    CreationTimestamp, DiagnosticPhase, DiagnosticProducer, FontContainerFulfillment, OutputFormat,
-    Pack, PackCompilationRequest, PackCompileError, PackMetadata, PackOverrideSet,
-    PackOverrideSetError, PackWorld, PackageTreeFulfillment, RequestValueOrigin, compile,
-    compile_pack,
+    CompilationAttempt, CompilationExecutionControls, CompilationOperationOutcome,
+    CompilationRequestRejection, CompilationStatus, CompileOptions, CreationTimestamp,
+    DiagnosticPhase, DiagnosticProducer, FontContainerFulfillment, OutputFormat, Pack,
+    PackCompilationRequest, PackCompileError, PackMetadata, PackOverrideSet, PackOverrideSetError,
+    PackageTreeFulfillment, RequestValueOrigin, compile,
 };
 
-fn five_page_world() -> PackWorld {
+struct RuntimeResource;
+
+impl typst_kit::files::FileLoader for RuntimeResource {
+    fn load(
+        &self,
+        id: typst::syntax::FileId,
+    ) -> typst::diag::FileResult<typst::foundations::Bytes> {
+        if id.vpath().get_without_slash() == "runtime.txt" {
+            Ok(typst::foundations::Bytes::new(b"runtime value".to_vec()))
+        } else {
+            Err(typst::diag::FileError::NotFound(
+                id.vpath().get_without_slash().into(),
+            ))
+        }
+    }
+}
+
+#[test]
+fn pack_bound_compilation_resolves_declared_resource_slots() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"#read(\"runtime.txt\")".to_vec())
+        .unwrap()
+        .resource_slot("runtime.txt")
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let result = compile(CompilationAttempt::new(
+        PackCompilationRequest::new(pack, OutputFormat::Svg),
+        CompilationExecutionControls::default().resource_provider(RuntimeResource),
+    ))
+    .unwrap();
+
+    assert_eq!(result.status(), CompilationStatus::Succeeded);
+    assert_eq!(result.artifacts().len(), 1);
+}
+
+fn five_page_pack() -> Pack {
     let source = (1..=5)
         .map(|page| {
             format!(
@@ -15,13 +52,11 @@ fn five_page_world() -> PackWorld {
             ) + if page < 5 { "#pagebreak()\n" } else { "" }
         })
         .collect::<String>();
-    let pack = Pack::builder("main.typ")
+    Pack::builder("main.typ")
         .file("main.typ", source.into_bytes())
         .unwrap()
         .build()
-        .unwrap();
-
-    PackWorld::builder(pack).build().unwrap()
+        .unwrap()
 }
 
 #[test]
@@ -34,7 +69,7 @@ fn pack_bound_compilation_does_not_read_ambient_project_files() {
         .build()
         .unwrap();
 
-    let result = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Svg));
+    let result = compile(PackCompilationRequest::new(pack, OutputFormat::Svg));
 
     assert_eq!(result.unwrap().status(), CompilationStatus::Rejected);
 }
@@ -47,7 +82,7 @@ fn pack_bound_compilation_does_not_read_an_ambient_clock() {
         .build()
         .unwrap();
 
-    let result = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Svg));
+    let result = compile(PackCompilationRequest::new(pack, OutputFormat::Svg));
 
     assert_eq!(result.unwrap().status(), CompilationStatus::Rejected);
 }
@@ -106,17 +141,16 @@ fn pack_overrides_replace_contained_bytes_without_mutating_the_pack() {
         .unwrap();
     let pack_identity = pack.identity();
     let baseline_result =
-        compile_pack(PackCompilationRequest::new(pack.clone(), OutputFormat::Svg)).unwrap();
+        compile(PackCompilationRequest::new(pack.clone(), OutputFormat::Svg)).unwrap();
     let overrides = PackOverrideSet::new(&pack)
         .replace("main.typ", replacement)
         .unwrap()
         .replace("unused.txt", b"unused replacement".to_vec())
         .unwrap();
 
-    let overridden = compile_pack(
-        PackCompilationRequest::new(pack.clone(), OutputFormat::Svg).overrides(overrides),
-    )
-    .unwrap();
+    let overridden =
+        compile(PackCompilationRequest::new(pack.clone(), OutputFormat::Svg).overrides(overrides))
+            .unwrap();
 
     assert_ne!(
         overridden.artifacts()[0].bytes(),
@@ -145,7 +179,7 @@ fn pack_overrides_replace_contained_bytes_without_mutating_the_pack() {
     let unused_override = PackOverrideSet::new(&pack)
         .replace("unused.txt", b"another unused value".to_vec())
         .unwrap();
-    let unused_result = compile_pack(
+    let unused_result = compile(
         PackCompilationRequest::new(pack.clone(), OutputFormat::Svg).overrides(unused_override),
     )
     .unwrap();
@@ -174,10 +208,9 @@ fn pack_override_set_cannot_be_applied_to_a_different_pack() {
     let overrides = PackOverrideSet::new(&first)
         .replace("main.typ", b"replacement".to_vec())
         .unwrap();
-    let accepted = compile_pack(
-        PackCompilationRequest::new(first, OutputFormat::Svg).overrides(overrides.clone()),
-    )
-    .unwrap();
+    let accepted =
+        compile(PackCompilationRequest::new(first, OutputFormat::Svg).overrides(overrides.clone()))
+            .unwrap();
     let accepted_commitment = accepted
         .request_inventory()
         .overrides()
@@ -188,7 +221,7 @@ fn pack_override_set_cannot_be_applied_to_a_different_pack() {
         .commitment();
 
     let result =
-        compile_pack(PackCompilationRequest::new(second, OutputFormat::Svg).overrides(overrides));
+        compile(PackCompilationRequest::new(second, OutputFormat::Svg).overrides(overrides));
 
     let Err(PackCompileError::RequestRejected {
         rejection: CompilationRequestRejection::OverrideSetPackMismatch,
@@ -217,7 +250,7 @@ fn pack_compilation_resolves_exporter_defaults_before_execution() {
         .build()
         .unwrap();
 
-    let png = compile_pack(PackCompilationRequest::new(pack.clone(), OutputFormat::Png)).unwrap();
+    let png = compile(PackCompilationRequest::new(pack.clone(), OutputFormat::Png)).unwrap();
     assert_eq!(png.request_inventory().options().value().ppi, Some(144.0));
     assert_eq!(
         png.request_inventory().ppi_origin(),
@@ -225,7 +258,7 @@ fn pack_compilation_resolves_exporter_defaults_before_execution() {
     );
     assert!(!png.request_inventory().options().value().render_bleed);
 
-    let pdf = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Pdf)).unwrap();
+    let pdf = compile(PackCompilationRequest::new(pack, OutputFormat::Pdf)).unwrap();
     let options = pdf.request_inventory().options().value();
     assert_eq!(options.pdf_tags, typst::foundations::Smart::Custom(true));
     assert_eq!(
@@ -252,7 +285,7 @@ fn compilation_identity_ignores_pack_metadata_and_irrelevant_output_controls() {
             .build()
             .unwrap()
     };
-    let first = compile_pack(PackCompilationRequest::new(
+    let first = compile(PackCompilationRequest::new(
         build("first"),
         OutputFormat::Svg,
     ))
@@ -262,10 +295,9 @@ fn compilation_identity_ignores_pack_metadata_and_irrelevant_output_controls() {
         ppi: Some(300.0),
         ..CompileOptions::default()
     };
-    let second = compile_pack(
-        PackCompilationRequest::new(build("second"), OutputFormat::Svg).options(options),
-    )
-    .unwrap();
+    let second =
+        compile(PackCompilationRequest::new(build("second"), OutputFormat::Svg).options(options))
+            .unwrap();
 
     assert_eq!(first.compilation_identity(), second.compilation_identity());
     assert_eq!(first.artifacts()[0].bytes(), second.artifacts()[0].bytes());
@@ -291,11 +323,10 @@ fn compilation_identity_canonicalizes_page_ranges_and_pdf_standard_order() {
         page_selection: typst_pack::parse_page_selection("2,1").unwrap(),
         ..CompileOptions::default()
     };
-    let first = compile_pack(
-        PackCompilationRequest::new(pack.clone(), OutputFormat::Svg).options(first_ranges),
-    )
-    .unwrap();
-    let second = compile_pack(
+    let first =
+        compile(PackCompilationRequest::new(pack.clone(), OutputFormat::Svg).options(first_ranges))
+            .unwrap();
+    let second = compile(
         PackCompilationRequest::new(pack.clone(), OutputFormat::Svg).options(second_ranges),
     )
     .unwrap();
@@ -310,14 +341,13 @@ fn compilation_identity_canonicalizes_page_ranges_and_pdf_standard_order() {
         pdf_standards: vec![typst_pdf::PdfStandard::Ua_1, typst_pdf::PdfStandard::A_2b],
         ..CompileOptions::default()
     };
-    let first = compile_pack(
+    let first = compile(
         PackCompilationRequest::new(pack.clone(), OutputFormat::Pdf).options(first_standards),
     )
     .unwrap();
-    let second = compile_pack(
-        PackCompilationRequest::new(pack, OutputFormat::Pdf).options(second_standards),
-    )
-    .unwrap();
+    let second =
+        compile(PackCompilationRequest::new(pack, OutputFormat::Pdf).options(second_standards))
+            .unwrap();
     assert_eq!(first.compilation_identity(), second.compilation_identity());
     assert_eq!(first.status(), second.status());
     assert_eq!(
@@ -346,7 +376,7 @@ fn adapter_resolved_shared_values_remain_distinguishable() {
         "unused".into(),
         typst::foundations::Value::Str("resolved".into()),
     );
-    let result = compile_pack(
+    let result = compile(
         PackCompilationRequest::new(pack, OutputFormat::Svg)
             .adapter_resolved_inputs(inputs)
             .adapter_resolved_feature(typst::Feature::A11yExtras)
@@ -394,13 +424,13 @@ fn offset_aware_document_timestamps_on_the_same_utc_date_have_distinct_identitie
             .today(None)
     );
 
-    let first = compile_pack(
+    let first = compile(
         PackCompilationRequest::new(pack.clone(), OutputFormat::Svg)
             .adapter_resolved_document_timestamp(early)
             .unwrap(),
     )
     .unwrap();
-    let second = compile_pack(
+    let second = compile(
         PackCompilationRequest::new(pack, OutputFormat::Svg)
             .adapter_resolved_document_timestamp(late)
             .unwrap(),
@@ -433,7 +463,7 @@ fn pack_bound_compilation_does_not_use_package_caches_or_network() {
         .build()
         .unwrap();
 
-    let result = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Svg));
+    let result = compile(PackCompilationRequest::new(pack, OutputFormat::Svg));
 
     assert!(matches!(
         result,
@@ -463,7 +493,7 @@ fn external_package_fulfillment_is_verified_before_official_compilation() {
         .build()
         .unwrap();
 
-    let malformed = compile_pack(
+    let malformed = compile(
         PackCompilationRequest::new(pack.clone(), OutputFormat::Svg).package_fulfillment(
             package.clone(),
             PackageTreeFulfillment::new([("../lib.typ", source.clone())]),
@@ -477,7 +507,7 @@ fn external_package_fulfillment_is_verified_before_official_compilation() {
         }) if spec == package
     ));
 
-    let mismatched = compile_pack(
+    let mismatched = compile(
         PackCompilationRequest::new(pack.clone(), OutputFormat::Svg).package_fulfillment(
             package.clone(),
             PackageTreeFulfillment::new([
@@ -494,7 +524,7 @@ fn external_package_fulfillment_is_verified_before_official_compilation() {
         }) if spec == package
     ));
 
-    let baseline = compile_pack(
+    let baseline = compile(
         PackCompilationRequest::new(pack.clone(), OutputFormat::Svg).package_fulfillment(
             package.clone(),
             PackageTreeFulfillment::new([
@@ -504,7 +534,7 @@ fn external_package_fulfillment_is_verified_before_official_compilation() {
         ),
     )
     .unwrap();
-    let with_telemetry = compile_pack(
+    let with_telemetry = compile(
         PackCompilationRequest::new(pack, OutputFormat::Svg).package_fulfillment(
             package,
             PackageTreeFulfillment::new([("lib.typ", source), ("typst.toml", manifest)])
@@ -540,7 +570,7 @@ fn external_font_fulfillment_is_verified_before_official_compilation() {
         .unwrap();
     let requirement = pack.font_requirements()[0].clone();
 
-    let missing = compile_pack(PackCompilationRequest::new(pack.clone(), OutputFormat::Svg));
+    let missing = compile(PackCompilationRequest::new(pack.clone(), OutputFormat::Svg));
     assert!(matches!(
         missing,
         Err(PackCompileError::Operation {
@@ -551,7 +581,7 @@ fn external_font_fulfillment_is_verified_before_official_compilation() {
 
     let mut wrong = data.clone();
     wrong.push(0);
-    let mismatched = compile_pack(
+    let mismatched = compile(
         PackCompilationRequest::new(pack.clone(), OutputFormat::Svg).font_fulfillment(
             requirement.container_identity(),
             FontContainerFulfillment::new(wrong),
@@ -565,14 +595,14 @@ fn external_font_fulfillment_is_verified_before_official_compilation() {
         }) if expected == requirement.container_identity()
     ));
 
-    let baseline = compile_pack(
+    let baseline = compile(
         PackCompilationRequest::new(pack.clone(), OutputFormat::Svg).font_fulfillment(
             requirement.container_identity(),
             FontContainerFulfillment::new(data.clone()),
         ),
     )
     .unwrap();
-    let with_metadata = compile_pack(
+    let with_metadata = compile(
         PackCompilationRequest::new(pack, OutputFormat::Svg).font_fulfillment(
             requirement.container_identity(),
             FontContainerFulfillment::new(data)
@@ -607,7 +637,7 @@ fn pack_bound_compilation_rejects_the_bundle_feature() {
         PackCompilationRequest::new(pack, OutputFormat::Svg).feature(typst::Feature::Bundle);
 
     assert!(matches!(
-        compile_pack(request),
+        compile(request),
         Err(PackCompileError::RequestRejected {
             rejection: CompilationRequestRejection::UnsupportedBundleFeature,
             ..
@@ -629,9 +659,7 @@ fn pack_bound_compilation_rejects_invalid_png_resolution() {
             ..CompileOptions::default()
         };
         assert!(matches!(
-            compile_pack(
-                PackCompilationRequest::new(pack.clone(), OutputFormat::Png).options(options)
-            ),
+            compile(PackCompilationRequest::new(pack.clone(), OutputFormat::Png).options(options)),
             Err(PackCompileError::RequestRejected {
                 rejection: CompilationRequestRejection::InvalidPpi,
                 ..
@@ -652,7 +680,7 @@ fn pack_bound_compilation_does_not_use_unpacked_embedded_fonts() {
         .build()
         .unwrap();
 
-    let output = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Svg)).unwrap();
+    let output = compile(PackCompilationRequest::new(pack, OutputFormat::Svg)).unwrap();
 
     assert!(
         output
@@ -675,7 +703,7 @@ fn official_exporter_rejection_is_a_scoped_compilation_result() {
         .build()
         .unwrap();
 
-    let result = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Pdf)).unwrap();
+    let result = compile(PackCompilationRequest::new(pack, OutputFormat::Pdf)).unwrap();
 
     assert_eq!(result.status(), CompilationStatus::Rejected);
     assert!(result.artifacts().is_empty());
@@ -698,12 +726,10 @@ fn pdf_is_one_document_format_artifact() {
         .unwrap()
         .build()
         .unwrap();
-    let world = PackWorld::builder(pack).build().unwrap();
+    let output = compile(PackCompilationRequest::new(pack, OutputFormat::Pdf)).unwrap();
 
-    let output = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap();
-
-    assert_eq!(output.artifacts.len(), 1);
-    let artifact = output.artifacts.into_iter().next().unwrap();
+    assert_eq!(output.artifacts().len(), 1);
+    let artifact = output.artifacts()[0].clone();
     assert_eq!(artifact.format(), OutputFormat::Pdf);
     assert_eq!(artifact.source_page_number(), None);
     assert!(artifact.bytes().starts_with(b"%PDF"));
@@ -721,7 +747,6 @@ fn page_format_selection_matching_no_source_page_produces_no_artifacts() {
         .unwrap()
         .build()
         .unwrap();
-    let world = PackWorld::builder(pack).build().unwrap();
     for expression in ["9", "9-"] {
         let options = CompileOptions {
             page_selection: typst_pack::parse_page_selection(expression).unwrap(),
@@ -729,37 +754,40 @@ fn page_format_selection_matching_no_source_page_produces_no_artifacts() {
         };
 
         for format in [OutputFormat::Png, OutputFormat::Svg] {
-            let output = compile(&world, format, &options).unwrap();
-            assert!(output.artifacts.is_empty());
+            let output =
+                compile(PackCompilationRequest::new(pack.clone(), format).options(options.clone()))
+                    .unwrap();
+            assert!(output.artifacts().is_empty());
         }
     }
 }
 
 #[test]
 fn page_format_artifacts_preserve_source_page_identity() {
-    let world = five_page_world();
+    let pack = five_page_pack();
     let options = CompileOptions {
         page_selection: typst_pack::parse_page_selection("5,2").unwrap(),
         ppi: Some(72.0),
         ..CompileOptions::default()
     };
 
-    let output = compile(&world, OutputFormat::Png, &options).unwrap();
+    let output =
+        compile(PackCompilationRequest::new(pack, OutputFormat::Png).options(options)).unwrap();
 
     let source_pages = output
-        .artifacts
+        .artifacts()
         .iter()
         .map(|artifact| artifact.source_page_number().unwrap().get())
         .collect::<Vec<_>>();
     assert_eq!(source_pages, [2, 5]);
     assert!(
         output
-            .artifacts
+            .artifacts()
             .iter()
             .all(|artifact| artifact.format() == OutputFormat::Png)
     );
     let widths = output
-        .artifacts
+        .artifacts()
         .iter()
         .map(|artifact| {
             tiny_skia::Pixmap::decode_png(artifact.bytes())
@@ -772,16 +800,18 @@ fn page_format_artifacts_preserve_source_page_identity() {
 
 #[test]
 fn page_format_artifacts_are_ordered_and_deduplicated_by_source_page() {
-    let world = five_page_world();
+    let pack = five_page_pack();
     let options = CompileOptions {
         page_selection: typst_pack::parse_page_selection("5,2-4,2,3-5,1").unwrap(),
         ..CompileOptions::default()
     };
 
     for format in [OutputFormat::Png, OutputFormat::Svg] {
-        let output = compile(&world, format, &options).unwrap();
+        let output =
+            compile(PackCompilationRequest::new(pack.clone(), format).options(options.clone()))
+                .unwrap();
         let source_pages = output
-            .artifacts
+            .artifacts()
             .iter()
             .map(|artifact| artifact.source_page_number().unwrap().get())
             .collect::<Vec<_>>();
@@ -789,7 +819,7 @@ fn page_format_artifacts_are_ordered_and_deduplicated_by_source_page() {
         assert_eq!(source_pages, [1, 2, 3, 4, 5]);
         assert!(
             output
-                .artifacts
+                .artifacts()
                 .iter()
                 .all(|artifact| artifact.format() == format)
         );
@@ -798,7 +828,7 @@ fn page_format_artifacts_are_ordered_and_deduplicated_by_source_page() {
 
 #[test]
 fn page_range_membership_preserves_typst_selection_semantics() {
-    let world = five_page_world();
+    let pack = five_page_pack();
     let cases = [
         (None, vec![1, 2, 3, 4, 5]),
         (Some("-3"), vec![1, 2, 3]),
@@ -816,9 +846,11 @@ fn page_range_membership_preserves_typst_selection_semantics() {
                 .unwrap_or_default(),
             ..CompileOptions::default()
         };
-        let output = compile(&world, OutputFormat::Svg, &options).unwrap();
+        let output =
+            compile(PackCompilationRequest::new(pack.clone(), OutputFormat::Svg).options(options))
+                .unwrap();
         let source_pages = output
-            .artifacts
+            .artifacts()
             .iter()
             .map(|artifact| artifact.source_page_number().unwrap().get())
             .collect::<Vec<_>>();
@@ -839,19 +871,20 @@ fn invalid_textual_page_expressions_fail_parsing() {
 
 #[test]
 fn pdf_page_selection_produces_one_document_format_artifact() {
-    let world = five_page_world();
+    let pack = five_page_pack();
     let options = CompileOptions {
         page_selection: typst_pack::parse_page_selection("5,2").unwrap(),
         ..CompileOptions::default()
     };
 
-    let output = compile(&world, OutputFormat::Pdf, &options).unwrap();
+    let output =
+        compile(PackCompilationRequest::new(pack, OutputFormat::Pdf).options(options)).unwrap();
 
-    assert_eq!(output.artifacts.len(), 1);
-    assert_eq!(output.artifacts[0].format(), OutputFormat::Pdf);
-    assert_eq!(output.artifacts[0].source_page_number(), None);
-    assert!(output.artifacts[0].bytes().starts_with(b"%PDF"));
-    let pdf = hayro_syntax::Pdf::new(output.artifacts[0].bytes().to_vec()).unwrap();
+    assert_eq!(output.artifacts().len(), 1);
+    assert_eq!(output.artifacts()[0].format(), OutputFormat::Pdf);
+    assert_eq!(output.artifacts()[0].source_page_number(), None);
+    assert!(output.artifacts()[0].bytes().starts_with(b"%PDF"));
+    let pdf = hayro_syntax::Pdf::new(output.artifacts()[0].bytes().to_vec()).unwrap();
     let page_widths = pdf
         .pages()
         .iter()
@@ -862,33 +895,36 @@ fn pdf_page_selection_produces_one_document_format_artifact() {
 
 #[test]
 fn pdf_page_selection_matching_no_source_page_still_produces_a_pdf() {
-    let world = five_page_world();
+    let pack = five_page_pack();
     let options = CompileOptions {
         page_selection: typst_pack::parse_page_selection("9-").unwrap(),
         ..CompileOptions::default()
     };
 
-    let output = compile(&world, OutputFormat::Pdf, &options).unwrap();
+    let output =
+        compile(PackCompilationRequest::new(pack, OutputFormat::Pdf).options(options)).unwrap();
 
-    assert_eq!(output.artifacts.len(), 1);
-    assert!(output.artifacts[0].bytes().starts_with(b"%PDF"));
+    assert_eq!(output.artifacts().len(), 1);
+    assert!(output.artifacts()[0].bytes().starts_with(b"%PDF"));
 }
 
 #[test]
 fn pdf_page_selection_warns_that_accessibility_tags_are_disabled() {
-    let world = five_page_world();
+    let pack = five_page_pack();
     let options = CompileOptions {
         page_selection: typst_pack::parse_page_selection("2,5").unwrap(),
         ..CompileOptions::default()
     };
 
-    let output = compile(&world, OutputFormat::Pdf, &options).unwrap();
+    let output =
+        compile(PackCompilationRequest::new(pack.clone(), OutputFormat::Pdf).options(options))
+            .unwrap();
 
     assert!(
         output
             .pack_warnings()
             .iter()
-            .any(|warning| warning.message.contains("--pages implies --no-pdf-tags"))
+            .any(|warning| warning.message().contains("--pages implies --no-pdf-tags"))
     );
 
     let options = CompileOptions {
@@ -896,12 +932,13 @@ fn pdf_page_selection_warns_that_accessibility_tags_are_disabled() {
         pdf_tags: typst::foundations::Smart::Custom(false),
         ..CompileOptions::default()
     };
-    let output = compile(&world, OutputFormat::Pdf, &options).unwrap();
+    let output =
+        compile(PackCompilationRequest::new(pack, OutputFormat::Pdf).options(options)).unwrap();
     assert!(
         output
             .pack_warnings()
             .iter()
-            .all(|warning| !warning.message.contains("--pages implies --no-pdf-tags"))
+            .all(|warning| !warning.message().contains("--pages implies --no-pdf-tags"))
     );
 }
 
@@ -918,8 +955,7 @@ fn pack_owned_pdf_warning_is_not_attributed_to_the_engine() {
     };
 
     let result =
-        compile_pack(PackCompilationRequest::new(pack, OutputFormat::Pdf).options(options))
-            .unwrap();
+        compile(PackCompilationRequest::new(pack, OutputFormat::Pdf).options(options)).unwrap();
 
     assert!(result.diagnostics().is_empty());
     assert_eq!(result.pack_warnings().len(), 1);
@@ -943,8 +979,7 @@ fn explicit_pdf_tags_with_page_selection_are_rejected_before_compilation() {
         ..CompileOptions::default()
     };
 
-    let rejection =
-        compile_pack(PackCompilationRequest::new(pack, OutputFormat::Pdf).options(options));
+    let rejection = compile(PackCompilationRequest::new(pack, OutputFormat::Pdf).options(options));
 
     assert!(matches!(
         rejection,
@@ -968,8 +1003,7 @@ fn tag_required_pdf_standard_without_tags_is_rejected_before_compilation() {
         ..CompileOptions::default()
     };
 
-    let rejection =
-        compile_pack(PackCompilationRequest::new(pack, OutputFormat::Pdf).options(options));
+    let rejection = compile(PackCompilationRequest::new(pack, OutputFormat::Pdf).options(options));
 
     assert!(matches!(
         rejection,
@@ -1000,7 +1034,7 @@ fn pack_request_rejection_collects_independent_pdf_issues_in_stable_order() {
         .feature(typst::Feature::Bundle)
         .options(options);
 
-    let Err(PackCompileError::RequestRejected { rejection, .. }) = compile_pack(request) else {
+    let Err(PackCompileError::RequestRejected { rejection, .. }) = compile(request) else {
         panic!("expected a Pack request rejection");
     };
 
@@ -1027,22 +1061,17 @@ fn html_is_one_document_format_artifact() {
         .unwrap()
         .build()
         .unwrap();
-    let world = PackWorld::builder(pack)
-        .feature(typst::Feature::Html)
-        .build()
-        .unwrap();
+    let output = compile(PackCompilationRequest::new(pack, OutputFormat::Html)).unwrap();
 
-    let output = compile(&world, OutputFormat::Html, &CompileOptions::default()).unwrap();
-
-    assert_eq!(output.artifacts.len(), 1);
-    assert_eq!(output.artifacts[0].format(), OutputFormat::Html);
-    assert_eq!(output.artifacts[0].source_page_number(), None);
+    assert_eq!(output.artifacts().len(), 1);
+    assert_eq!(output.artifacts()[0].format(), OutputFormat::Html);
+    assert_eq!(output.artifacts()[0].source_page_number(), None);
     assert!(
-        std::str::from_utf8(output.artifacts[0].bytes())
+        std::str::from_utf8(output.artifacts()[0].bytes())
             .unwrap()
             .contains("Hello from HTML")
     );
-    assert!(!output.warnings.is_empty());
+    assert!(!output.diagnostics().is_empty());
 }
 
 #[cfg(feature = "embedded-fonts")]
@@ -1053,10 +1082,6 @@ fn pretty_affects_html_svg_and_pdf_but_not_png() {
         .unwrap()
         .build()
         .unwrap();
-    let world = PackWorld::builder(pack)
-        .feature(typst::Feature::Html)
-        .build()
-        .unwrap();
     let compact = CompileOptions::default();
     let pretty = CompileOptions {
         pretty: true,
@@ -1064,14 +1089,27 @@ fn pretty_affects_html_svg_and_pdf_but_not_png() {
     };
 
     for format in [OutputFormat::Html, OutputFormat::Svg, OutputFormat::Pdf] {
-        let compact = compile(&world, format, &compact).unwrap();
-        let pretty = compile(&world, format, &pretty).unwrap();
-        assert_ne!(compact.artifacts[0].bytes(), pretty.artifacts[0].bytes());
+        let compact =
+            compile(PackCompilationRequest::new(pack.clone(), format).options(compact.clone()))
+                .unwrap();
+        let pretty =
+            compile(PackCompilationRequest::new(pack.clone(), format).options(pretty.clone()))
+                .unwrap();
+        assert_ne!(
+            compact.artifacts()[0].bytes(),
+            pretty.artifacts()[0].bytes()
+        );
     }
 
-    let compact = compile(&world, OutputFormat::Png, &compact).unwrap();
-    let pretty = compile(&world, OutputFormat::Png, &pretty).unwrap();
-    assert_eq!(compact.artifacts[0].bytes(), pretty.artifacts[0].bytes());
+    let compact =
+        compile(PackCompilationRequest::new(pack.clone(), OutputFormat::Png).options(compact))
+            .unwrap();
+    let pretty =
+        compile(PackCompilationRequest::new(pack, OutputFormat::Png).options(pretty)).unwrap();
+    assert_eq!(
+        compact.artifacts()[0].bytes(),
+        pretty.artifacts()[0].bytes()
+    );
 }
 
 #[cfg(feature = "embedded-fonts")]
@@ -1085,14 +1123,14 @@ fn empty_page_format_output_retains_compilation_warnings() {
         .unwrap()
         .build()
         .unwrap();
-    let world = PackWorld::builder(pack).build().unwrap();
     let options = CompileOptions {
         page_selection: typst_pack::parse_page_selection("9").unwrap(),
         ..CompileOptions::default()
     };
 
-    let output = compile(&world, OutputFormat::Svg, &options).unwrap();
+    let output =
+        compile(PackCompilationRequest::new(pack, OutputFormat::Svg).options(options)).unwrap();
 
-    assert!(output.artifacts.is_empty());
-    assert!(!output.warnings.is_empty());
+    assert!(output.artifacts().is_empty());
+    assert!(!output.diagnostics().is_empty());
 }

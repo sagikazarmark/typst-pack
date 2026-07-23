@@ -24,11 +24,12 @@ use typst_kit::fonts::FontSource;
 use typst_pdf::{PdfStandard, Timestamp};
 
 use crate::compile::{
-    CompilationArtifact, CompilationOperationOutcome, CompilationStatus, CompileOptions,
-    CreationTimestamp, FontContainerFulfillment, OutputFormat, PackCompilationContext,
-    PackCompilationPresentation, PackCompilationRequest, PackOverrideSet, PackageTreeFulfillment,
-    PageRange, PageSelection, compile_pack_kernel, parse_page_selection,
-    pdf_standard_requiring_tags, prepare_pack_compilation, validate_pdf_standards,
+    CompilationArtifact, CompilationAttempt, CompilationExecutionControls,
+    CompilationOperationOutcome, CompilationStatus, CompileOptions, CreationTimestamp,
+    FontContainerFulfillment, OutputFormat, PackCompilationPresentation, PackCompilationRequest,
+    PackOverrideSet, PackageTreeFulfillment, PageRange, PageSelection, compile_pack_kernel,
+    parse_page_selection, pdf_standard_requiring_tags, prepare_pack_compilation,
+    validate_pdf_standards,
 };
 use crate::extract::{ExtractOptions, extract};
 use crate::manifest::PackMetadata;
@@ -714,7 +715,7 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
             warnings,
         }) => {
             emit_diagnostics_with(
-                world.as_ref(),
+                world.world(),
                 errors.iter().chain(&warnings),
                 diagnostic_format,
                 color,
@@ -1058,14 +1059,6 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         package_roots.insert(requirement.spec().to_string(), root.path().to_owned());
         package_fulfillments.push((requirement.spec().clone(), files));
     }
-    let mut context = PackCompilationContext::default();
-    for path in &args.resource_paths {
-        context = context.resource_provider(FilesystemResourceProvider::tracked(
-            path.clone(),
-            Arc::clone(&host_dependencies),
-        ));
-    }
-
     let options = CompileOptions {
         page_selection,
         ppi: Some(args.ppi),
@@ -1103,6 +1096,13 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         .adapter_resolved_options(options)
         .adapter_resolved_document_timestamp(document_timestamp)
         .map_err(|_| "creation timestamp is out of range")?;
+    let mut controls = CompilationExecutionControls::default();
+    for path in &args.resource_paths {
+        controls = controls.resource_provider(FilesystemResourceProvider::tracked(
+            path.clone(),
+            Arc::clone(&host_dependencies),
+        ));
+    }
     if !args.overrides.is_empty() {
         request = request.overrides(overrides);
     }
@@ -1120,7 +1120,7 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
             ),
         );
     }
-    let prepared = prepare_pack_compilation(request, context)
+    let prepared = prepare_pack_compilation(CompilationAttempt::new(request, controls))
         .map_err(|error| CliError::Message(error.to_string()))?;
     let (mut world, kernel) = prepared.into_parts();
 

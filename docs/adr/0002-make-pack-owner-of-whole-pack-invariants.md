@@ -43,13 +43,12 @@ shared invariant failures. Adapter-specific Zip, I/O, encoding, and ingestion
 failures remain specific to archive reading.
 
 A constructed Pack retains parsed fonts and a canonical contained entrypoint.
-Consequently, `PackWorldBuilder::build` is infallible and does not revalidate
-Pack content.
+Consequently, the private Pack-backed World does not revalidate Pack content.
 
 ## Consequences
 
-- Every Pack instance is canonical, immutable, writable, and usable by a
-  Pack-backed World.
+- Every Pack instance is canonical, immutable, writable, and usable by the
+  private Pack compilation adapter.
 - Writing performs no second invariant pass.
 - The numeric Pack format version remains 1, while its unstable manifest schema
   intentionally changes incompatibly: old `external-resources` and

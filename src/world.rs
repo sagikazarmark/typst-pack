@@ -196,7 +196,7 @@ pub(crate) fn read_complete_package_tree(
 /// dependency snapshot. Fonts come from the Pack plus any configured fonts.
 /// Declared Resource Slots may come from Resource Providers; providers cannot
 /// replace packed files or supply Typst source or package files.
-pub struct PackWorld {
+pub(crate) struct PackWorld {
     library: LazyHash<Library>,
     main: FileId,
     store: FileStore<PackLoader>,
@@ -206,18 +206,8 @@ pub struct PackWorld {
 
 impl PackWorld {
     /// Starts configuring a world for the given pack.
-    pub fn builder(pack: Pack) -> PackWorldBuilder {
+    pub(crate) fn builder(pack: Pack) -> PackWorldBuilder {
         PackWorldBuilder::new(pack)
-    }
-
-    /// Creates a world with default configuration.
-    pub fn new(pack: Pack) -> Result<Self, PackWorldBuildError> {
-        Self::builder(pack).build()
-    }
-
-    /// The pack this world serves resources from.
-    pub fn pack(&self) -> &Pack {
-        self.store.loader().pack.as_ref()
     }
 }
 
@@ -257,8 +247,6 @@ impl World for PackWorld {
             Clock::FixedDate(datetime) => Some(*datetime),
             #[cfg(feature = "fs")]
             Clock::FixedTimestamp(time) => time.today(offset),
-            #[cfg(feature = "fs")]
-            Clock::System(time) => time.today(offset),
         }
     }
 }
@@ -279,9 +267,6 @@ enum Clock {
     /// A fixed timestamp whose date respects requested timezone offsets.
     #[cfg(feature = "fs")]
     FixedTimestamp(typst_kit::datetime::Time),
-    /// The system clock.
-    #[cfg(feature = "fs")]
-    System(typst_kit::datetime::Time),
 }
 
 /// Serves file requests only from a Pack and verified dependency snapshots.
@@ -329,7 +314,7 @@ impl FileLoader for PackLoader {
 }
 
 /// Configures a [`PackWorld`].
-pub struct PackWorldBuilder {
+pub(crate) struct PackWorldBuilder {
     pack: Pack,
     inputs: Dict,
     features: Vec<Feature>,
@@ -345,7 +330,7 @@ pub struct PackWorldBuilder {
 
 /// A Pack cannot be exposed to Typst without exact dependency snapshots.
 #[derive(Debug, thiserror::Error)]
-pub enum PackWorldBuildError {
+pub(crate) enum PackWorldBuildError {
     #[error("external package fulfillment is unavailable for {packages:?}")]
     MissingExternalPackages {
         packages: Vec<typst::syntax::package::PackageSpec>,
@@ -380,7 +365,7 @@ impl PackWorldBuilder {
     }
 
     /// Values made available to document code as `sys.inputs`.
-    pub fn inputs(mut self, inputs: Dict) -> Self {
+    pub(crate) fn inputs(mut self, inputs: Dict) -> Self {
         self.inputs = inputs;
         self
     }
@@ -389,35 +374,28 @@ impl PackWorldBuilder {
     ///
     /// [`Feature::Html`](typst::Feature::Html) is required for compiling to
     /// [`OutputFormat::Html`](crate::OutputFormat::Html).
-    pub fn feature(mut self, feature: Feature) -> Self {
+    pub(crate) fn feature(mut self, feature: Feature) -> Self {
         self.features.push(feature);
         self
     }
 
     /// Uses a fixed date for `datetime.today()`, for reproducible output.
-    pub fn fixed_date(mut self, datetime: Datetime) -> Self {
+    pub(crate) fn fixed_date(mut self, datetime: Datetime) -> Self {
         self.clock = Clock::FixedDate(datetime);
         self
     }
 
     /// Uses a fixed UNIX timestamp for `datetime.today()`, for reproducible output.
     #[cfg(feature = "fs")]
-    pub fn fixed_timestamp(mut self, timestamp: i64) -> typst::diag::StrResult<Self> {
+    pub(crate) fn fixed_timestamp(mut self, timestamp: i64) -> typst::diag::StrResult<Self> {
         self.clock = Clock::FixedTimestamp(typst_kit::datetime::Time::fixed_timestamp(timestamp)?);
         Ok(self)
-    }
-
-    /// Uses the system clock for `datetime.today()`.
-    #[cfg(feature = "fs")]
-    pub fn system_date(mut self) -> Self {
-        self.clock = Clock::System(typst_kit::datetime::Time::system());
-        self
     }
 
     /// Whether to include Typst's default embedded fonts. Defaults to `true`
     /// when the `embedded-fonts` feature is enabled.
     #[cfg(feature = "embedded-fonts")]
-    pub fn embedded_fonts(mut self, include: bool) -> Self {
+    pub(crate) fn embedded_fonts(mut self, include: bool) -> Self {
         self.embedded_fonts = include;
         self
     }
@@ -428,7 +406,8 @@ impl PackWorldBuilder {
     /// this for system fonts or other host-provided fonts. Accepts the same
     /// `(source, info)` entries yielded by the `typst_kit::fonts` providers,
     /// so fonts are only loaded into memory when actually used.
-    pub fn extra_fonts<T: FontSource>(
+    #[cfg(test)]
+    pub(crate) fn extra_fonts<T: FontSource>(
         mut self,
         fonts: impl IntoIterator<Item = (T, FontInfo)>,
     ) -> Self {
@@ -455,34 +434,10 @@ impl PackWorldBuilder {
         self
     }
 
-    /// Adds a Resource Provider for declared Resource Slots.
-    ///
-    /// Providers are tried in registration order after packed project files.
-    ///
-    /// ```compile_fail
-    /// use std::path::PathBuf;
-    /// use typst::diag::{FileError, FileResult};
-    /// use typst::foundations::Bytes;
-    /// use typst::syntax::FileId;
-    /// use typst_kit::files::FileLoader;
-    /// use typst_pack::{Pack, PackWorld};
-    ///
-    /// struct Missing;
-    /// impl FileLoader for Missing {
-    ///     fn load(&self, id: FileId) -> FileResult<Bytes> {
-    ///         Err(FileError::NotFound(PathBuf::from(
-    ///             id.vpath().get_without_slash(),
-    ///         )))
-    ///     }
-    /// }
-    ///
-    /// let pack = Pack::builder("main.typ")
-    ///     .file("main.typ", Vec::new())?
-    ///     .build()?;
-    /// let _ = PackWorld::builder(pack).external_resource_reference(Missing);
-    /// # Ok::<(), Box<dyn std::error::Error>>(())
-    /// ```
-    pub fn resource_provider(mut self, provider: impl FileLoader + Send + Sync + 'static) -> Self {
+    pub(crate) fn resource_provider(
+        mut self,
+        provider: impl FileLoader + Send + Sync + 'static,
+    ) -> Self {
         self.resource_providers.push(Box::new(provider));
         self
     }
@@ -493,7 +448,7 @@ impl PackWorldBuilder {
     }
 
     /// Builds the world.
-    pub fn build(self) -> Result<PackWorld, PackWorldBuildError> {
+    pub(crate) fn build(self) -> Result<PackWorld, PackWorldBuildError> {
         let missing_packages = self
             .pack
             .package_requirements()

@@ -17,6 +17,9 @@ The CLI parity baseline is the exact Typst engine version embedded by
 typst-pack. Shared flags track that version's spelling, values, parsing,
 environment variables, semantics, and help text. A Typst engine upgrade includes
 an explicit CLI parity review. `typst-pack --version` reports both versions.
+The Pack-backed `World`, Typst compiler call, and official exporter calls remain
+private to the Embedded Typst Adapter; the CLI supplies only Pack-bound request
+and operational values.
 
 The command shapes are:
 

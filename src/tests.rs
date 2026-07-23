@@ -1,5 +1,9 @@
 //! Crate tests.
 
+use crate::compile::{CompileError, compile as compile_request, compile_world as compile};
+#[cfg(feature = "fs")]
+use crate::packer::DiscoveryWorld;
+use crate::world::PackWorld;
 use crate::*;
 
 use std::collections::BTreeSet;
@@ -1066,7 +1070,7 @@ fn malformed_external_font_is_a_pack_owned_pre_compilation_outcome() {
     ]);
     let pack = Pack::from_bytes(archive).unwrap();
 
-    let result = compile_pack(
+    let result = compile_request(
         PackCompilationRequest::new(pack, OutputFormat::Svg)
             .font_fulfillment(identity, FontContainerFulfillment::new(data.to_vec())),
     );
@@ -3061,7 +3065,7 @@ Rows: #csv("data.csv").len()
         };
 
         assert_eq!(
-            world.file(project_file_id("requested.bin")),
+            world.world().file(project_file_id("requested.bin")),
             Err(FileError::NotFound(PathBuf::from("requested.bin")))
         );
         assert_eq!(calls.load(Ordering::Relaxed), 1);
@@ -3086,7 +3090,7 @@ Rows: #csv("data.csv").len()
         };
 
         assert_eq!(
-            world.file(project_file_id("resource.bin")),
+            world.world().file(project_file_id("resource.bin")),
             Err(FileError::AccessDenied)
         );
         assert_eq!(denied_calls.load(Ordering::Relaxed), 1);

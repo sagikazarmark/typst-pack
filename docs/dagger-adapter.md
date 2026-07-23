@@ -4,7 +4,8 @@ The first-party Dagger module is a typed transport adapter over the public
 `typst-pack` CLI and Pack lifecycle. `create` stabilizes Dagger `Directory` and
 `File` inputs in a container before Pack creation. `compile` invokes
 `typst-pack compile`, which prepares a public `PackCompilationRequest` and
-reaches the shared Pack Compilation Kernel. The module contains no compiler,
+reaches the single private Pack Compilation Kernel and Embedded Typst Adapter.
+The module contains no compiler,
 exporter, semantic default, diagnostic interpretation, or artifact
 postprocessing.
 

@@ -7,7 +7,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use official_typst_cli::OfficialTypstCli;
-use typst_pack::{OutputFormat, Pack, PackCompilationRequest, compile_pack};
+use typst_pack::{OutputFormat, Pack, PackCompilationRequest, compile};
 
 const PAGED_SOURCE: &str =
     "#set page(width: 20pt, height: 10pt, margin: 0pt)\n#rect(width: 4pt, height: 4pt)";
@@ -86,7 +86,7 @@ fn official_typst_compile_is_the_process_level_parity_baseline() {
     let pack_path = directory.path().join("project.typk");
     let pack = write_pack(&pack_path, PAGED_SOURCE);
 
-    let public_result = compile_pack(PackCompilationRequest::new(pack.clone(), OutputFormat::Svg))
+    let public_result = compile(PackCompilationRequest::new(pack.clone(), OutputFormat::Svg))
         .expect("public Pack compilation must establish the embedded Engine baseline");
     official.require_version(public_result.engine_identity().version());
 
@@ -157,7 +157,7 @@ fn official_typst_compile_is_the_process_level_parity_baseline() {
         "HTML artifact differs from official Typst"
     );
 
-    let public_svg = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Svg)).unwrap();
+    let public_svg = compile(PackCompilationRequest::new(pack, OutputFormat::Svg)).unwrap();
     assert_eq!(
         public_svg.artifacts()[0].bytes(),
         std::fs::read(directory.path().join("official.svg")).unwrap(),

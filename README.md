@@ -163,9 +163,8 @@ Page Number and are emitted once each in source-document order.
 
 HTML export is experimental in Typst itself; like the Typst CLI, it must be
 enabled explicitly with `--features html` (or `TYPST_FEATURES=html`), and Typst
-emits a warning that its behavior may change. In the library, enable it with
-`PackWorldBuilder::feature(typst::Feature::Html)` and compile with
-`OutputFormat::Html`.
+emits a warning that its behavior may change. The library derives the required
+engine feature from `OutputFormat::Html`.
 
 The Dagger `compile` function returns a directory for every format. Document
 Formats use `output.pdf` or `output.html`; Page Formats use deterministic names
@@ -186,7 +185,7 @@ typst-pack = { version = "0.4", features = ["embedded-fonts", "fs"] }
 The core in-memory packing and compilation APIs require no crate features.
 
 ```rust,ignore
-use typst_pack::{compile_pack, OutputFormat, Pack, PackCompilationRequest, Packer};
+use typst_pack::{compile, OutputFormat, Pack, PackCompilationRequest, Packer};
 
 // Pack a project directory (requires the `fs` feature).
 let outcome = Packer::new("path/to/project", "main.typ")
@@ -197,7 +196,7 @@ let bytes = outcome.pack.to_bytes()?;
 // ... ship the bytes somewhere, then compile without a file system:
 let pack = Pack::from_bytes(bytes)?;
 let request = PackCompilationRequest::new(pack, OutputFormat::Pdf);
-let output = compile_pack(request)?;
+let output = compile(request)?;
 assert_eq!(output.engine_identity().implementation(), "typst");
 assert_eq!(output.exporter_identity().implementation(), "typst-pdf");
 let artifact = output.artifacts().first().expect("PDF artifact");
@@ -232,14 +231,51 @@ let pack = Pack::builder("main.typ")
     .file("main.typ", source_text.as_bytes().to_vec())?
     .resource_slot("assets/logo.png")?
     .build()?;
-let world = PackWorld::builder(pack)
-    .resource_provider(resource_provider)
-    .build();
+let request = PackCompilationRequest::new(pack, OutputFormat::Pdf);
+let controls = CompilationExecutionControls::default()
+    .resource_provider(resource_provider);
+let output = compile(CompilationAttempt::new(request, controls))?;
 ```
 
 For filesystem discovery, add one or more `Packer::resource_provider`
 implementations. Registering a provider enables successful missing-resource
 loads to be inferred as Resource Slots; no separate fallback policy is needed.
+
+### Compilation authority
+
+The public compilation boundary accepts only a validated `Pack` bound into a
+`PackCompilationRequest`. The Pack-backed Typst `World`, compilation kernel,
+and embedded compiler and exporter adapter are private. In particular, callers
+cannot substitute a `typst::World`, language library, compiler, or exporter:
+
+```compile_fail
+use typst_pack::PackWorld;
+```
+
+```compile_fail
+use typst_pack::compile_pack;
+```
+
+```compile_fail
+use typst_pack::compile;
+
+fn arbitrary_world(world: &dyn typst::World) {
+    let _ = compile(world);
+}
+```
+
+Typst 0.15.0 owns language evaluation, layout, official diagnostics, document
+structures, and PDF, PNG, SVG, and HTML export behavior. typst-pack owns Pack
+creation and validity, the fixed project namespace, exact package and font
+verification, Resource Slots, Pack Overrides, request identities and reports,
+and later CLI or Dagger publication. Artifact bytes and official diagnostics
+are not reinterpreted by destination, transport, cache, or presentation code.
+
+Intentional differences from `typst compile` are Pack confinement, Pack input
+instead of a source root, declared Resource Slots, exact dependency
+fulfillment, Pack Overrides, unsupported Bundle output, and publication rules
+for immutable artifacts. The complete version-bound inventory is in
+[`docs/cli-parity.md`](docs/cli-parity.md).
 
 ### Migrating to 0.4
 
@@ -257,9 +293,10 @@ compatibility aliases:
   `creationTimestamp`.
 - Change creation from a directory plus `--entrypoint`/`--output` to
   `create <INPUT> [OUTPUT]`.
-- `PackWorld::new` and `PackWorldBuilder::build` now return `PackWorld`
-  directly. A successfully constructed Pack already guarantees a contained
-  entrypoint and valid contained fonts.
+- Replace `compile_pack(request)` with `compile(request)`. The provisional
+  arbitrary-`World` `compile` overload and public `PackWorld` builder are
+  removed; configure semantic values on `PackCompilationRequest` and operational
+  values on `CompilationExecutionControls`.
 - Pack Manifest fields and `PackFont` fields are read-only. Use accessors such
   as `manifest.project()`, `project.entrypoint()`, `font.manifest()`, and
   `font.data()`.

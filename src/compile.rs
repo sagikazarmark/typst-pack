@@ -17,9 +17,9 @@ use typst_pdf::{PdfOptions, PdfStandard, PdfStandards, Timestamp};
 
 use crate::embedded::EmbeddedTypst;
 use crate::pack::{FontCatalogError, PackageTreeError};
-#[cfg(feature = "cli")]
 use crate::resource::Provider;
-use crate::{FontContainerIdentity, Pack, PackWorld, PackageTreeIdentity};
+use crate::world::PackWorld;
+use crate::{FontContainerIdentity, Pack, PackageTreeIdentity};
 
 /// The exact embedded Typst compiler implementation that produced a result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -163,10 +163,8 @@ pub enum OutputFormat {
     Pdf,
     Png,
     Svg,
-    /// HTML export is experimental in Typst; compiling to it requires a world
-    /// whose library has [`Feature::Html`](typst::Feature::Html) enabled
-    /// (see [`PackWorldBuilder::feature`](crate::PackWorldBuilder::feature)),
-    /// otherwise compilation errors.
+    /// HTML export is experimental in Typst. Pack-bound compilation derives the
+    /// required [`Feature::Html`](typst::Feature::Html) engine feature.
     Html,
 }
 
@@ -522,7 +520,6 @@ impl CompilationIdentity {
 ///
 /// Compilation through this request has no project, package, font, clock,
 /// environment, cache, or network fallback beyond the Pack and these values.
-#[derive(Debug, Clone)]
 pub struct PackCompilationRequest {
     pack: Pack,
     format: OutputFormat,
@@ -534,6 +531,44 @@ pub struct PackCompilationRequest {
     document_timestamp: EffectiveRequestValue<Option<i64>>,
     package_fulfillments: BTreeMap<String, PackageTreeFulfillment>,
     font_fulfillments: BTreeMap<FontContainerIdentity, FontContainerFulfillment>,
+}
+
+/// Operational controls for one Pack compilation attempt.
+#[derive(Default)]
+pub struct CompilationExecutionControls {
+    resource_providers: Vec<Provider>,
+}
+
+impl CompilationExecutionControls {
+    /// Adds an ordered provider for declared Resource Slots.
+    ///
+    /// Providers cannot replace contained project files, supply Typst source,
+    /// or satisfy undeclared paths.
+    pub fn resource_provider(
+        mut self,
+        provider: impl typst_kit::files::FileLoader + Send + Sync + 'static,
+    ) -> Self {
+        self.resource_providers.push(Box::new(provider));
+        self
+    }
+}
+
+/// A validated Pack-bound request paired with independent operational controls.
+pub struct CompilationAttempt {
+    request: PackCompilationRequest,
+    controls: CompilationExecutionControls,
+}
+
+impl CompilationAttempt {
+    pub fn new(request: PackCompilationRequest, controls: CompilationExecutionControls) -> Self {
+        Self { request, controls }
+    }
+}
+
+impl From<PackCompilationRequest> for CompilationAttempt {
+    fn from(request: PackCompilationRequest) -> Self {
+        Self::new(request, CompilationExecutionControls::default())
+    }
 }
 
 /// One externally acquired Complete Package Tree and operational metadata.
@@ -1062,44 +1097,18 @@ impl CompilationArtifact {
 
 /// The result of compiling a pack.
 #[derive(Debug, Clone)]
-pub struct CompilationOutput {
+pub(crate) struct CompilationOutput {
     /// The produced Compilation Output Artifacts.
     pub artifacts: Vec<CompilationArtifact>,
     /// Warnings emitted during compilation.
     pub warnings: EcoVec<SourceDiagnostic>,
     pack_warnings: EcoVec<SourceDiagnostic>,
     source_page_count: Option<usize>,
-    engine_identity: EngineIdentity,
-    exporter_identity: ExporterIdentity,
-}
-
-impl CompilationOutput {
-    /// Pack-owned warnings kept separate from official Typst warnings.
-    pub fn pack_warnings(&self) -> &[SourceDiagnostic] {
-        &self.pack_warnings
-    }
-
-    /// Total pages in the source document before page selection.
-    ///
-    /// HTML output is unpaged and returns `None`.
-    pub fn source_page_count(&self) -> Option<usize> {
-        self.source_page_count
-    }
-
-    /// The embedded compiler implementation that produced this output.
-    pub fn engine_identity(&self) -> EngineIdentity {
-        self.engine_identity
-    }
-
-    /// The official exporter implementation that produced these artifacts.
-    pub fn exporter_identity(&self) -> ExporterIdentity {
-        self.exporter_identity
-    }
 }
 
 /// A failed compilation.
 #[derive(Debug, thiserror::Error)]
-pub enum CompileError {
+pub(crate) enum CompileError {
     /// The official PDF standards validator rejected the requested set.
     #[error(transparent)]
     InvalidPdfStandards(#[from] PdfStandardsValidationError),
@@ -1284,11 +1293,9 @@ impl PackCompileError {
     }
 }
 
-/// Compiles the world's document and exports it in the requested format.
-///
-/// This works with any [`World`], but is intended for
-/// [`PackWorld`](crate::PackWorld).
-pub fn compile(
+/// Compiles one private adapter world through the embedded Typst implementation.
+#[cfg(test)]
+pub(crate) fn compile_world(
     world: &dyn World,
     format: OutputFormat,
     options: &CompileOptions,
@@ -1299,29 +1306,13 @@ pub fn compile(
 }
 
 /// Compiles a validated Pack through the private Pack Compilation Kernel.
-pub fn compile_pack(
-    request: PackCompilationRequest,
+#[allow(clippy::result_large_err)]
+pub fn compile(
+    attempt: impl Into<CompilationAttempt>,
 ) -> Result<CompilationResult, PackCompileError> {
-    let prepared = prepare_pack_compilation(request, PackCompilationContext::default())?;
+    let prepared = prepare_pack_compilation(attempt.into())?;
     let (world, kernel) = prepared.into_parts();
     Ok(compile_pack_kernel(&world, kernel).result)
-}
-
-#[derive(Default)]
-pub(crate) struct PackCompilationContext {
-    #[cfg(feature = "cli")]
-    resource_providers: Vec<Provider>,
-}
-
-impl PackCompilationContext {
-    #[cfg(feature = "cli")]
-    pub(crate) fn resource_provider(
-        mut self,
-        provider: impl typst_kit::files::FileLoader + Send + Sync + 'static,
-    ) -> Self {
-        self.resource_providers.push(Box::new(provider));
-        self
-    }
 }
 
 pub(crate) struct PreparedPackCompilation {
@@ -1366,10 +1357,11 @@ pub(crate) enum PackCompilationPresentation {
     },
 }
 
+#[allow(clippy::result_large_err)]
 pub(crate) fn prepare_pack_compilation(
-    request: PackCompilationRequest,
-    context: PackCompilationContext,
+    attempt: CompilationAttempt,
 ) -> Result<PreparedPackCompilation, PackCompileError> {
+    let CompilationAttempt { request, controls } = attempt;
     let PackCompilationRequest {
         pack,
         format,
@@ -1601,8 +1593,7 @@ pub(crate) fn prepare_pack_compilation(
     if let Some(document_time) = request_inventory.document_time.value {
         world = world.fixed_date(document_time);
     }
-    #[cfg(feature = "cli")]
-    let world = world.resource_providers(context.resource_providers);
+    let world = world.resource_providers(controls.resource_providers);
     let world = world
         .build()
         .expect("verified Pack dependency snapshots must build a World");
@@ -1632,7 +1623,7 @@ pub(crate) fn compile_pack_kernel(
         exporter_identity,
         page_selection_implies_untagged_pdf,
     } = kernel;
-    let result = match compile_with_default_pdf_timestamp(
+    match compile_with_default_pdf_timestamp(
         world,
         format,
         request_inventory.options.value(),
@@ -1771,8 +1762,7 @@ pub(crate) fn compile_pack_kernel(
         Err(CompileError::InvalidPdfStandards(error)) => {
             unreachable!("PDF standards are validated during request preparation: {error}");
         }
-    };
-    result
+    }
 }
 
 pub(crate) fn package_tree_outcome(error: PackageTreeError) -> CompilationOperationOutcome {
@@ -1964,8 +1954,6 @@ pub(crate) fn compile_with_default_pdf_timestamp(
             warnings,
             pack_warnings,
             source_page_count: None,
-            engine_identity: EmbeddedTypst::engine_identity(),
-            exporter_identity: EmbeddedTypst::exporter_identity(format),
         });
     }
 
@@ -2092,8 +2080,6 @@ pub(crate) fn compile_with_default_pdf_timestamp(
         warnings,
         pack_warnings,
         source_page_count: Some(source_page_count),
-        engine_identity: EmbeddedTypst::engine_identity(),
-        exporter_identity: EmbeddedTypst::exporter_identity(format),
     })
 }
 

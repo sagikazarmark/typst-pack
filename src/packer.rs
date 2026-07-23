@@ -729,7 +729,7 @@ fn discovery_compile_error(
         return Err(PackerError::ResourceSlotUnavailable { path });
     }
     Err(PackerError::Compile {
-        world: Box::new(world),
+        world: Box::new(CreationDiagnosticContext { world }),
         errors,
         warnings,
     })
@@ -750,9 +750,21 @@ pub struct PackOutcome {
     pub pack: Pack,
     /// The contained and supplied parts of the compilation contract.
     pub report: PackReport,
-    /// The world used for the discovery compile. Kept so that the compile
-    /// warnings in the report can be rendered with source context.
-    pub world: DiscoveryWorld,
+    pub(crate) world: DiscoveryWorld,
+}
+
+/// Opaque source context retained for first-party creation diagnostics.
+///
+/// This value intentionally does not implement Typst's [`World`] interface.
+#[derive(Debug)]
+pub struct CreationDiagnosticContext {
+    world: DiscoveryWorld,
+}
+
+impl CreationDiagnosticContext {
+    pub(crate) fn world(&self) -> &DiscoveryWorld {
+        &self.world
+    }
 }
 
 /// A summary of the compilation contract discovered by a [`Packer`].
@@ -992,8 +1004,8 @@ pub enum PackerError {
     OutsideRoot(PathBuf),
     #[error("the discovery compile failed with {} error(s)", errors.len())]
     Compile {
-        /// The world the compile ran in, for rendering the diagnostics.
-        world: Box<DiscoveryWorld>,
+        /// Opaque source context retained for first-party diagnostic rendering.
+        world: Box<CreationDiagnosticContext>,
         errors: EcoVec<SourceDiagnostic>,
         warnings: EcoVec<SourceDiagnostic>,
     },
@@ -1036,11 +1048,8 @@ impl PackerError {
     }
 }
 
-/// The file-system-backed world used for the discovery compile.
-///
-/// This is exposed so that its compile diagnostics can be rendered with
-/// source context; it is not meant to be constructed directly.
-pub struct DiscoveryWorld {
+/// The private file-system-backed world used for discovery compilation.
+pub(crate) struct DiscoveryWorld {
     root: PathBuf,
     workdir: Option<PathBuf>,
     library: LazyHash<Library>,
@@ -1448,7 +1457,7 @@ fn replay_variants(
 ) -> Result<(), PackerError> {
     let resources = SnapshotResources(Arc::new(resources));
     for variant in variants {
-        let mut world = crate::PackWorld::builder(pack.clone())
+        let mut world = crate::world::PackWorld::builder(pack.clone())
             .inputs(std::mem::take(&mut variant.replay_inputs))
             .exact_project_overrides(std::mem::take(&mut variant.replay_overrides))
             .exact_packages(exact_packages.clone())

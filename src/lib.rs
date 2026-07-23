@@ -13,17 +13,19 @@ mod world;
 pub mod cli;
 
 pub use compile::{
-    CompilationArtifact, CompilationDiagnostic, CompilationIdentity, CompilationOperationOutcome,
-    CompilationOutput, CompilationRequestInventory, CompilationRequestRejection, CompilationResult,
-    CompilationStatus, CompileError, CompileOptions, CreationTimestamp, DiagnosticHint,
-    DiagnosticPhase, DiagnosticProducer, DiagnosticSeverity, DiagnosticTracepoint,
-    EffectiveEngineFeature, EffectiveRequestValue, EngineIdentity, ExporterIdentity,
-    FontContainerFulfillment, LogicalSpan, OutputFormat, PackCompilationRequest,
+    CompilationArtifact, CompilationAttempt, CompilationDiagnostic, CompilationExecutionControls,
+    CompilationIdentity, CompilationOperationOutcome, CompilationRequestInventory,
+    CompilationRequestRejection, CompilationResult, CompilationStatus, CompileOptions,
+    CreationTimestamp, DiagnosticHint, DiagnosticPhase, DiagnosticProducer, DiagnosticSeverity,
+    DiagnosticTracepoint, EffectiveEngineFeature, EffectiveRequestValue, EngineIdentity,
+    ExporterIdentity, FontContainerFulfillment, LogicalSpan, OutputFormat, PackCompilationRequest,
     PackCompilationWarning, PackCompileError, PackOverrideInventoryEntry, PackOverrideSet,
     PackOverrideSetError, PackOverridesInventory, PackageTreeFulfillment, PageRange, PageSelection,
     PdfStandardsValidationError, RequestValueOrigin, TracepointKind, TypstInputsInventory, compile,
-    compile_pack, parse_page_selection,
+    parse_page_selection,
 };
+#[cfg(feature = "fs")]
+pub use extract::{ExtractError, ExtractOptions, ExtractReport, extract};
 pub use manifest::{
     FORMAT_VERSION, FontManifest, MANIFEST_PATH, PackManifest, PackManifestError, PackMetadata,
     PackageManifest, PackagesManifest, ProjectManifest,
@@ -34,15 +36,12 @@ pub use pack::{
     PackInvariantError, PackPathRole, PackReadError, PackWriteError, PackageRequirement,
     PackageTreeError, PackageTreeIdentity,
 };
-pub use world::{PackWorld, PackWorldBuildError, PackWorldBuilder};
-
-#[cfg(feature = "fs")]
-pub use extract::{ExtractError, ExtractOptions, ExtractReport, extract};
 #[cfg(feature = "fs")]
 pub use packer::{
-    DiscoveryAccessKind, DiscoveryAccessOutcome, DiscoveryInputsInventory, DiscoveryObservation,
-    DiscoveryOverridesInventory, DiscoveryRequest, DiscoveryTarget, DiscoveryTrace,
-    DiscoveryVariantReport, DiscoveryWorld, PackOutcome, PackReport, Packer, PackerError,
+    CreationDiagnosticContext, DiscoveryAccessKind, DiscoveryAccessOutcome,
+    DiscoveryInputsInventory, DiscoveryObservation, DiscoveryOverridesInventory, DiscoveryRequest,
+    DiscoveryTarget, DiscoveryTrace, DiscoveryVariantReport, PackOutcome, PackReport, Packer,
+    PackerError,
 };
 #[cfg(feature = "fs")]
 pub use world::OfflineDownloader;
