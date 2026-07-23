@@ -17,7 +17,6 @@ use typst_pdf::{PdfOptions, PdfStandard, PdfStandards, Timestamp};
 
 use crate::embedded::EmbeddedTypst;
 use crate::pack::{FontCatalogError, PackageTreeError};
-use crate::resource::Provider;
 use crate::world::PackWorld;
 use crate::world_trace::{
     CapturedAccessKind, CapturedAccessOutcome, CapturedObservation, WorldTrace, logical_path,
@@ -584,23 +583,7 @@ pub struct PackCompilationRequest {
 
 /// Operational controls for one Pack compilation attempt.
 #[derive(Default)]
-pub struct CompilationExecutionControls {
-    resource_providers: Vec<Provider>,
-}
-
-impl CompilationExecutionControls {
-    /// Adds an ordered provider for declared Resource Slots.
-    ///
-    /// Providers cannot replace contained project files, supply Typst source,
-    /// or satisfy undeclared paths.
-    pub fn resource_provider(
-        mut self,
-        provider: impl typst_kit::files::FileLoader + Send + Sync + 'static,
-    ) -> Self {
-        self.resource_providers.push(Box::new(provider));
-        self
-    }
-}
+pub struct CompilationExecutionControls;
 
 /// A validated Pack-bound request paired with independent operational controls.
 pub struct CompilationAttempt {
@@ -616,7 +599,7 @@ impl CompilationAttempt {
 
 impl From<PackCompilationRequest> for CompilationAttempt {
     fn from(request: PackCompilationRequest) -> Self {
-        Self::new(request, CompilationExecutionControls::default())
+        Self::new(request, CompilationExecutionControls)
     }
 }
 
@@ -1949,7 +1932,7 @@ pub(crate) fn prepare_pack_compilation(
     if let Some(document_time) = request_inventory.document_time.value {
         world = world.fixed_date(document_time);
     }
-    let world = world.resource_providers(controls.resource_providers);
+    let _ = controls;
     let world = world
         .build()
         .expect("verified Pack dependency snapshots must build a World");

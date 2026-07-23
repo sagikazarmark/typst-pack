@@ -70,6 +70,10 @@ type TypstPack {
       "sourceReferenceDir",
       "sourceReferences",
       "externalResources",
+      "include",
+      "resourceDirs",
+      "resourceSlots",
+      "targets",
       "sourceDateEpoch",
     ]
     let checkedCreate = false
@@ -183,31 +187,19 @@ type TypstPack {
     """
     includeTypstEmbeddedFonts: Boolean! = false,
     """
-    Additional files or directories inside the project root to pack.
-    """
-    include: [String!]! = [],
-    """
-    Ordered project-shaped directories that provide Resource Slot bytes.
-    """
-    resourceDirs: [Directory!]! = [],
-    """
-    Root-relative Resource Slot paths to declare.
-    """
-    resourceSlots: [String!]! = [],
-    """
-    KEY=VALUE pairs visible through sys.inputs during discovery.
+    KEY=VALUE pairs visible through sys.inputs during creation.
     """
     sysInputs: [String!]! = [],
     """
-    Discovery targets.
+    Target for the representative creation compilation.
     """
-    targets: [DiscoveryTarget!]! = [],
+    target: CreationTarget,
     """
-    Experimental Typst features to enable during discovery.
+    Experimental Typst features to enable during creation.
     """
     features: [Feature!]! = [],
     """
-    UNIX timestamp used during discovery.
+    UNIX timestamp used during creation.
     """
     creationTimestamp: Int,
     """
@@ -227,11 +219,11 @@ type TypstPack {
     """
     fontPaths: [String!]! = [],
     """
-    Do not use system fonts during discovery.
+    Do not use system fonts during creation.
     """
     ignoreSystemFonts: Boolean! = false,
     """
-    Do not use fonts embedded into Typst during discovery.
+    Do not use fonts embedded into Typst during creation.
     """
     ignoreEmbeddedFonts: Boolean! = false,
     """
@@ -275,10 +267,8 @@ type TypstPack {
     if (noVendorPackages) { args += ["--no-vendor-packages"] }
     if (embedFonts) { args += ["--embed-fonts"] }
     if (includeTypstEmbeddedFonts) { args += ["--include-typst-embedded-fonts"] }
-    include.each { path => args += ["--include", path] }
-    resourceSlots.each { path => args += ["--resource-slot", path] }
     sysInputs.each { input => args += ["--input", input] }
-    targets.each { target => args += ["--target", discoveryTargetName(target)] }
+    if (target != null) { args += ["--target", creationTargetName(target)] }
     features.each { feature => args += ["--features", featureName(feature)] }
     if (creationTimestamp != null) {
       args += ["--creation-timestamp", toString(creationTimestamp)]
@@ -306,13 +296,6 @@ type TypstPack {
 
     if (fontDir != null) {
       container = container.withMountedDirectory("/work/fonts", fontDir)
-    }
-    let resourceIndex = 0
-    resourceDirs.each { resourceDir =>
-      let resourcePath = "/work/resources/" + toString(resourceIndex)
-      container = container.withMountedDirectory(resourcePath, resourceDir)
-      args += ["--resource-path", resourcePath]
-      resourceIndex += 1
     }
     if (packageDir != null) {
       container = container.withMountedDirectory("/work/packages", packageDir)
@@ -419,10 +402,6 @@ type TypstPack {
     Root-relative contained project paths to replace from overrideDir.
     """
     overridePaths: [String!]! = [],
-    """
-    Ordered project-shaped directories that provide Resource Slot bytes.
-    """
-    resourceDirs: [Directory!]! = [],
     """
     Optional font directory mounted at /work/fonts and added to the font search path.
     """
@@ -533,13 +512,6 @@ type TypstPack {
     if (overrideDir != null) {
       container = container.withMountedDirectory("/work/overrides", overrideDir)
     }
-    let resourceIndex = 0
-    resourceDirs.each { resourceDir =>
-      let resourcePath = "/work/resources/" + toString(resourceIndex)
-      container = container.withMountedDirectory(resourcePath, resourceDir)
-      args += ["--resource-path", resourcePath]
-      resourceIndex += 1
-    }
     if (packageDir != null) {
       container = container.withMountedDirectory("/work/packages", packageDir)
     }
@@ -569,7 +541,7 @@ enum DiagnosticFormat {
   SHORT
 }
 
-enum DiscoveryTarget {
+enum CreationTarget {
   PAGED
   HTML
 }
@@ -607,7 +579,7 @@ let diagnosticFormatName(format: DiagnosticFormat!): String! {
   toString(format).toLower
 }
 
-let discoveryTargetName(target: DiscoveryTarget!): String! {
+let creationTargetName(target: CreationTarget!): String! {
   toString(target).toLower
 }
 

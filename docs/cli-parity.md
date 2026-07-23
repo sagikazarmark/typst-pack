@@ -63,14 +63,14 @@ test in the same Typst upgrade.
 | Intentional difference | Pack contract reason | Positive and negative coverage |
 | --- | --- | --- |
 | Compile consumes a Pack and has no `--root` | The Pack owns its fixed virtual project tree | Pack file/stdin and help omission cases in `tests/cli.rs` |
-| Resource Slots use ordered `--resource-path` providers | Only declared non-source paths may receive compilation-specific bytes | Resource Provider order, missing, authority, and help cases in `tests/cli.rs` and `src/tests.rs` |
+| Pack Overrides replace contained project files | Compilation cannot add paths or expand package/font authority | Override preflight, identity, immutability, and lifecycle cases in `tests/compilation.rs` and `tests/cli.rs` |
 | Pack Overrides use `--override PACK_PATH FILE` | A compilation may replace only contained project files without mutating the Pack | Pack Override cases in `tests/cli.rs`, `tests/compilation.rs`, and `tests/official_typst_oracle.rs` |
 | `--offline` is explicit | Exact Package Requirements must not fall through to an undeclared network source | offline package cases in `tests/cli.rs` and `tests/compilation.rs` |
 | Pack fonts and vendored packages precede host configuration | Contained exact dependencies remain authoritative | package and font authority cases in `tests/cli.rs`, `tests/compilation.rs`, and `tests/official_typst_oracle.rs` |
 | Bundle output and the Bundle feature are rejected | Bundle is outside the Pack output contract | feature acceptance/rejection and help omission cases in `tests/cli.rs` and `tests/compilation.rs` |
 | Pack compilation derives the HTML feature from HTML output | The tagged output specification fully determines the official Typst target and its required feature | Pack derivation and direct-official rejection cases in `tests/official_typst_oracle.rs` |
 | Watch and deprecated `--make-deps` are absent | Watch needs Pack-aware provenance; deprecated compatibility is not adopted | command and help omission cases in `tests/cli.rs` |
-| Creation requires a named source and supports Pack-specific discovery controls | Pack issuance needs a stable entrypoint and dependency closure | create stdin, target, Resource Slot, inclusion, and vendoring cases in `tests/cli.rs` |
+| Creation structurally packs the selected root and uses one optional representative target | Pack issuance needs a stable entrypoint, complete project snapshot, and selected dependency closure | create stdin, root, ignore-policy, target, and vendoring cases in `tests/cli.rs` |
 | Multi-output paths are collision-preflighted and stdout requires one artifact | Publication must not expose ambiguous or partial output | template collision, stdout, and empty/single/multiple artifact cases in `tests/cli.rs` |
 
 ## Adapter boundary

@@ -148,16 +148,6 @@ category = "pack-overrides"
 classification = "intentional-pack-difference"
 coverage = ["pack_source_and_non_source_overrides_match_the_independent_oracle"]
 
-[[matrix]]
-category = "discovery"
-classification = "pack-invariant"
-coverage = ["official_source_discovery_replay_and_pack_compilation_agree"]
-
-[[matrix]]
-category = "replay"
-classification = "pack-invariant"
-coverage = ["official_source_discovery_replay_and_pack_compilation_agree"]
-
 [[semantic]]
 name = "pack-backed-world"
 classification = "pack-invariant"
@@ -204,7 +194,7 @@ coverage = [".dagger/modules/tests/main.dang"]
 [[surface]]
 path = "src/compile.rs"
 classification = "pack-invariant"
-sha256 = "d911e2042a44a6836b46338cc415051ff9decd76aafcbffabe79c030b4e64b53"
+sha256 = "12f20daf1a4261852d4cffcaca4c4ed87db7220ebc2b2fabc8a60dc7e903127f"
 
 [[surface]]
 path = "src/embedded.rs"
@@ -214,12 +204,12 @@ sha256 = "7c23c4a6f4e39cba18c6be325e77af113aa500287cf86903942ca6ba8c446ce1"
 [[surface]]
 path = "src/extract.rs"
 classification = "pack-invariant"
-sha256 = "a57b8b90aee4fa3805e726ed5ea1cef42166fe9654c4148521eb0bdef397c5a1"
+sha256 = "a549c99d90ecbedeb0c4cec8e2e6ea9c6fd07f76eded233cda467e7ef96660f7"
 
 [[surface]]
 path = "src/lib.rs"
 classification = "pack-invariant"
-sha256 = "3c82dfc6251f4a0ef1ed65eae5c4e106ad996d52bf52fdbc4f87679bc7d4d83f"
+sha256 = "d835c8fd351740c10153e6825f47e97f02fc5f9a89d1e91f59456032ecedac5f"
 
 [[surface]]
 path = "src/main.rs"
@@ -229,32 +219,32 @@ sha256 = "adce8be17cae31d2753b2ecd1636a466e0e02dded3780951e0bd3fe172a2d098"
 [[surface]]
 path = "src/manifest.rs"
 classification = "pack-invariant"
-sha256 = "9b3dc1d5b8df111328899d184537250f9b5e2efd775872240f0d0b320e504080"
+sha256 = "ec6e48aa406c958c4141b675e0f1915a84e29cbdeb33498b575186d7f3779995"
 
 [[surface]]
 path = "src/pack.rs"
 classification = "pack-invariant"
-sha256 = "b37a5b24bea3dc61950325ce93bc4cda1c4cd7a595c262bc0fa243a298d8e903"
+sha256 = "1db6664bca1d5a1cf52ee65316165cf2d76372d40887dbcacf26e7d05996c356"
 
 [[surface]]
 path = "src/packer.rs"
 classification = "pack-invariant"
-sha256 = "2ef2970d35195df8ebd46df2ba4d83f4723924467ff52d0af95d8042d616948e"
+sha256 = "cd8fd0c29b421dc98aa82f34d434a18bcf032a9777a7f10c645cc449837c55bc"
 
 [[surface]]
-path = "src/resource.rs"
+path = "src/project_snapshot.rs"
 classification = "pack-invariant"
-sha256 = "6dd2438a248a518d536470e66154e0ef93fa0bedbdf9563047834f76b196ca1a"
+sha256 = "ff5b4f24b0dd8ae448e70bb1aff57a77c83f5aa3ad9e91c6bd2d7d5fa96aae12"
 
 [[surface]]
 path = "src/tests.rs"
 classification = "pack-invariant"
-sha256 = "dfa89d4678c100eb474b30efe5d067b0eece925a31775d50321a438d95e91ab1"
+sha256 = "48314376e5a6aa2cabf9f3d5003317d38a304109b13bb84d740e9c51dfeea40e"
 
 [[surface]]
 path = "src/world.rs"
 classification = "pack-invariant"
-sha256 = "b50c84c2d3000d5d63ff02accd5252d9cb6cbd63967ca3837b320b38a420ed9f"
+sha256 = "fb71ecc7669296916ed9d579d2f0016614ce74b987844899c3633995c6d02fdf"
 
 [[surface]]
 path = "src/world_trace.rs"
@@ -264,32 +254,32 @@ sha256 = "1b631697897589471e84a2465d2cd698904ca393c36d5af9e41bfdb721e661f1"
 [[surface]]
 path = "src/cli.rs"
 classification = "unavoidable-mirror"
-sha256 = "6a24f0801bb9ce2e311d886cfc9a750f80e681e43d92b6a216974bc0e907b7b1"
+sha256 = "f9654be6b454bcede0ac655ac724a21a90aca652a2440c167277973f99d6c756"
 
 [[surface]]
 path = "dagger.dang"
 classification = "adapter-concern"
-sha256 = "7988c41b0bb71ce6b6431db08e961910260ef4506fb591494696788ac14ee5b5"
+sha256 = "9e6fbf165b4407e0e17c8c9ababa2a5d89edfc20c907d14839adddd69e9839e4"
 
 [[surface]]
 path = ".dagger/modules/tests"
 classification = "adapter-concern"
-sha256 = "e223dac81f095a82fd98eff1055a8ba13dec654033fb72607cbe5b412473707c"
+sha256 = "3d4dfaa961c5c95829e4773ff6e19d2411a9b9d2a0d5dd7c52f32d65a8b6313b"
 
 [[surface]]
 path = "tests/cli.rs"
 classification = "unavoidable-mirror"
-sha256 = "bcd51566ba5ebea2596eebf44e4508878e1d1be8f66a10e8f32eeb01e21981aa"
+sha256 = "259cb01a6d79f2a5aabf28623a4f61cd1fe23981f208e62916b6ed9e7c110ccc"
 
 [[surface]]
 path = "tests/compilation.rs"
 classification = "pack-invariant"
-sha256 = "8d40ab1c61adfd45a634fa75184df4c061bd08a5448ef12b5fc0076e076bd891"
+sha256 = "1db7c32d7bec24416151cf0c7511bf5a73b9582c67cec651e51da20440b6c9e1"
 
 [[surface]]
 path = "tests/official_typst_oracle.rs"
 classification = "upstream-behavior"
-sha256 = "f7195e2aeb9aa133fb2fd35eada839e3ea6f0d0457e0abd13368c2c72436496a"
+sha256 = "4260b570b300f14eaa298eda35ce091ab004566a12948b82a96152e26ead796c"
 
 [[surface]]
 path = "tests/official_typst_cli.rs"

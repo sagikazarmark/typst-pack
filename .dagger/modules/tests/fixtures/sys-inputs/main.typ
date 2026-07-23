@@ -1,6 +1,6 @@
 #let phase = sys.inputs.at("phase")
-#if phase == "discovery" {
-  read("discovered.txt")
+#if phase == "creation" {
+  read("resources/discovered.txt")
 } else {
   assert(phase == "compilation")
 }

@@ -300,7 +300,7 @@ fn stdout_uses_typst_sigpipe_behavior() {
 }
 
 #[test]
-fn create_unions_repeated_and_comma_delimited_discovery_targets() {
+fn create_rejects_multiple_creation_targets() {
     let directory = tempfile::tempdir().unwrap();
     let project = directory.path().join("project");
     std::fs::create_dir(&project).unwrap();
@@ -314,29 +314,21 @@ fn create_unions_repeated_and_comma_delimited_discovery_targets() {
     let input = project.join("main.typ");
     let output = directory.path().join("project.typk");
 
-    let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-        .current_dir(directory.path())
-        .args([
+    for targets in [vec!["paged,html"], vec!["paged", "--target", "html"]] {
+        let mut arguments = vec![
             "create",
             input.to_str().unwrap(),
             output.to_str().unwrap(),
             "--target",
-            "paged,html",
-            "--features",
-            "html",
-            "--ignore-system-fonts",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let pack = Pack::from_bytes(std::fs::read(output).unwrap()).unwrap();
-    assert!(pack.file("paged.txt").is_some());
-    assert!(pack.file("html.txt").is_some());
+        ];
+        arguments.extend(targets);
+        let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
+            .current_dir(directory.path())
+            .args(arguments)
+            .output()
+            .unwrap();
+        assert!(!result.status.success());
+    }
 }
 
 #[test]
@@ -424,6 +416,116 @@ fn create_root_and_typst_root_define_the_pack_project_tree() {
 }
 
 #[test]
+fn create_packs_the_structural_project_closure_with_root_ignore_policy() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("project");
+    std::fs::create_dir_all(project.join("ignored/reincluded")).unwrap();
+    std::fs::create_dir_all(project.join("nested")).unwrap();
+    std::fs::write(project.join("main.typ"), "Hello").unwrap();
+    std::fs::write(project.join("unused.txt"), "packed").unwrap();
+    std::fs::write(
+        project.join(".typkignore"),
+        "# Pack policy\nignored/**\n!ignored/reincluded/keep.txt\n*.secret\n",
+    )
+    .unwrap();
+    std::fs::write(project.join("ignored/drop.txt"), "drop").unwrap();
+    std::fs::write(project.join("ignored/reincluded/keep.txt"), "keep").unwrap();
+    std::fs::write(project.join("nested/.typkignore"), "*.txt\n").unwrap();
+    std::fs::write(project.join("nested/ordinary.txt"), "packed").unwrap();
+    std::fs::write(project.join("private.secret"), "drop").unwrap();
+    std::fs::write(project.join("old.typk"), "drop").unwrap();
+    let output = directory.path().join("project.typk");
+
+    let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
+        .current_dir(directory.path())
+        .args([
+            "create",
+            project.join("main.typ").to_str().unwrap(),
+            output.to_str().unwrap(),
+            "--ignore-system-fonts",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+
+    let pack = Pack::from_bytes(std::fs::read(output).unwrap()).unwrap();
+    assert_eq!(
+        pack.files().map(|(path, _)| path).collect::<Vec<_>>(),
+        [
+            ".typkignore",
+            "ignored/reincluded/keep.txt",
+            "main.typ",
+            "nested/.typkignore",
+            "nested/ordinary.txt",
+            "unused.txt",
+        ]
+    );
+}
+
+#[test]
+fn create_rejects_ignored_entrypoints_and_invalid_ignore_policies() {
+    for (policy, expected) in [
+        ("main.typ\n", "entrypoint `main.typ` is excluded"),
+        ("trailing\\\n", "invalid Project Ignore Policy"),
+    ] {
+        let directory = tempfile::tempdir().unwrap();
+        let project = directory.path().join("project");
+        std::fs::create_dir(&project).unwrap();
+        std::fs::write(project.join("main.typ"), "Hello").unwrap();
+        std::fs::write(project.join(".typkignore"), policy).unwrap();
+
+        let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
+            .current_dir(directory.path())
+            .args([
+                "create",
+                project.join("main.typ").to_str().unwrap(),
+                directory.path().join("output.typk").to_str().unwrap(),
+                "--ignore-system-fonts",
+            ])
+            .output()
+            .unwrap();
+        let stderr = String::from_utf8_lossy(&result.stderr);
+        assert!(!result.status.success(), "{stderr}");
+        assert!(stderr.contains(expected), "{stderr}");
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn create_rejects_unignored_symlinks() {
+    use std::os::unix::fs::symlink;
+
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(project.join("main.typ"), "Hello").unwrap();
+    std::fs::write(directory.path().join("outside.txt"), "outside").unwrap();
+    symlink(
+        directory.path().join("outside.txt"),
+        project.join("linked.txt"),
+    )
+    .unwrap();
+
+    let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
+        .current_dir(directory.path())
+        .args([
+            "create",
+            project.join("main.typ").to_str().unwrap(),
+            directory.path().join("output.typk").to_str().unwrap(),
+            "--ignore-system-fonts",
+        ])
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(!result.status.success(), "{stderr}");
+    assert!(stderr.contains("unsupported filesystem entry"), "{stderr}");
+}
+
+#[test]
 fn legacy_resource_options_are_rejected() {
     let directory = tempfile::tempdir().unwrap();
     let project = write_minimal_project(directory.path());
@@ -431,6 +533,9 @@ fn legacy_resource_options_are_rejected() {
     for (option, value) in [
         ("--source-reference", "resources"),
         ("--external-resource", "resource.bin"),
+        ("--include", "extra.txt"),
+        ("--resource-path", "resources"),
+        ("--resource-slot", "resource.bin"),
     ] {
         let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
             .current_dir(directory.path())
@@ -448,72 +553,6 @@ fn legacy_resource_options_are_rejected() {
         assert!(!result.status.success(), "{option} was accepted");
         assert!(stderr.contains("unexpected argument"), "{stderr}");
     }
-}
-
-#[test]
-fn resource_paths_preserve_order_for_create_and_compile() {
-    let directory = tempfile::tempdir().unwrap();
-    let project = write_minimal_project(directory.path());
-    std::fs::write(
-        project.join("main.typ"),
-        "#assert(read(\"resource.bin\") == \"first\")\n#rect(width: 1pt, height: 1pt)",
-    )
-    .unwrap();
-    let first = directory.path().join("first");
-    let second = directory.path().join("second");
-    std::fs::create_dir(&first).unwrap();
-    std::fs::create_dir(&second).unwrap();
-    std::fs::write(first.join("resource.bin"), "first").unwrap();
-    std::fs::write(second.join("resource.bin"), "second").unwrap();
-    let pack_path = directory.path().join("project.typk");
-    let input = project.join("main.typ");
-
-    let created = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-        .current_dir(directory.path())
-        .args([
-            "create",
-            input.to_str().unwrap(),
-            pack_path.to_str().unwrap(),
-            "--resource-path",
-            first.to_str().unwrap(),
-            "--resource-path",
-            second.to_str().unwrap(),
-            "--ignore-system-fonts",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        created.status.success(),
-        "{}",
-        String::from_utf8_lossy(&created.stderr)
-    );
-    let pack = Pack::from_bytes(std::fs::read(&pack_path).unwrap()).unwrap();
-    assert_eq!(pack.resource_slots().collect::<Vec<_>>(), ["resource.bin"]);
-
-    let output = directory.path().join("output.svg");
-    let compiled = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-        .current_dir(directory.path())
-        .args([
-            "compile",
-            pack_path.to_str().unwrap(),
-            output.to_str().unwrap(),
-            "--format",
-            "svg",
-            "--resource-path",
-            first.to_str().unwrap(),
-            "--resource-path",
-            second.to_str().unwrap(),
-            "--ignore-system-fonts",
-            "--ignore-embedded-fonts",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        compiled.status.success(),
-        "{}",
-        String::from_utf8_lossy(&compiled.stderr)
-    );
-    assert!(output.is_file());
 }
 
 #[test]
@@ -658,39 +697,6 @@ fn compile_accepts_a_non_unicode_pack_override_source_path() {
 }
 
 #[test]
-fn unavailable_resource_slot_creation_reports_the_complete_remedy() {
-    let directory = tempfile::tempdir().unwrap();
-    let project = directory.path().join("project");
-    std::fs::create_dir(&project).unwrap();
-    let input = project.join("main.typ");
-    std::fs::write(&input, "#read(\"branding/logo.bin\")").unwrap();
-    let output = directory.path().join("project.typk");
-
-    let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-        .current_dir(directory.path())
-        .args([
-            "create",
-            input.to_str().unwrap(),
-            output.to_str().unwrap(),
-            "--resource-slot",
-            "branding/logo.bin",
-            "--ignore-system-fonts",
-            "--ignore-embedded-fonts",
-        ])
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&result.stderr);
-
-    assert!(!result.status.success());
-    assert!(result.stdout.is_empty(), "{:?}", result.stdout);
-    assert!(!output.exists());
-    assert_eq!(
-        stderr,
-        "error: requested Resource Slot `branding/logo.bin` is unavailable for discovery; place representative bytes at `branding/logo.bin` in the source project or supply them via `--resource-path`; representative bytes are not stored in the Pack\n"
-    );
-}
-
-#[test]
 fn create_reports_source_diagnostics_before_a_timing_failure() {
     let directory = tempfile::tempdir().unwrap();
     let project = directory.path().join("project");
@@ -728,41 +734,7 @@ fn create_reports_source_diagnostics_before_a_timing_failure() {
 }
 
 #[test]
-fn create_reports_resource_slot_guidance_before_a_timing_failure() {
-    let directory = tempfile::tempdir().unwrap();
-    let project = directory.path().join("project");
-    std::fs::create_dir(&project).unwrap();
-    let input = project.join("main.typ");
-    std::fs::write(&input, "#read(\"branding/logo.bin\")").unwrap();
-    let output = directory.path().join("project.typk");
-
-    let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-        .current_dir(directory.path())
-        .args([
-            "create",
-            input.to_str().unwrap(),
-            output.to_str().unwrap(),
-            "--resource-slot",
-            "branding/logo.bin",
-            "--timings",
-            directory.path().to_str().unwrap(),
-            "--ignore-system-fonts",
-            "--ignore-embedded-fonts",
-        ])
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&result.stderr);
-
-    assert!(!result.status.success());
-    let guidance = stderr.find("place representative bytes").unwrap();
-    let timing = stderr.find("failed to create file").unwrap();
-    assert!(guidance < timing, "{stderr}");
-    assert!(stderr.contains("--resource-path"), "{stderr}");
-    assert!(!output.exists());
-}
-
-#[test]
-fn create_reports_successful_discovery_warnings_before_a_timing_failure() {
+fn create_reports_successful_creation_warnings_before_a_timing_failure() {
     let directory = tempfile::tempdir().unwrap();
     let project = directory.path().join("project");
     let included = project.join("included");
@@ -778,8 +750,6 @@ fn create_reports_successful_discovery_warnings_before_a_timing_failure() {
             "create",
             input.to_str().unwrap(),
             output.to_str().unwrap(),
-            "--include",
-            included.to_str().unwrap(),
             "--timings",
             directory.path().to_str().unwrap(),
             "--ignore-system-fonts",
@@ -791,38 +761,9 @@ fn create_reports_successful_discovery_warnings_before_a_timing_failure() {
 
     assert!(!result.status.success());
     let compile_warning = stderr.find("Definitely Missing").unwrap();
-    let pack_warning = stderr.find("skipped pack file").unwrap();
     let timing = stderr.find("failed to create file").unwrap();
-    assert!(compile_warning < pack_warning, "{stderr}");
-    assert!(pack_warning < timing, "{stderr}");
+    assert!(compile_warning < timing, "{stderr}");
     assert!(!output.exists());
-}
-
-#[test]
-fn inspect_lists_resource_slots() {
-    let directory = tempfile::tempdir().unwrap();
-    let pack = Pack::builder("main.typ")
-        .file("main.typ", Vec::new())
-        .unwrap()
-        .resource_slot("assets/logo.png")
-        .unwrap()
-        .build()
-        .unwrap();
-    let pack_path = directory.path().join("project.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
-
-    let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-        .current_dir(directory.path())
-        .args(["inspect", pack_path.to_str().unwrap()])
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&result.stdout);
-
-    assert!(result.status.success(), "{stdout}");
-    assert!(
-        stdout.contains("\nResource Slots:\n  assets/logo.png\n"),
-        "{stdout}"
-    );
 }
 
 #[test]
@@ -838,57 +779,6 @@ fn inspect_treats_a_dash_as_a_pack_file_path() {
         String::from_utf8_lossy(&result.stderr).contains("cannot open `-`"),
         "{}",
         String::from_utf8_lossy(&result.stderr)
-    );
-}
-
-#[test]
-fn extract_preserves_prefilled_resource_slots_without_materializing_them() {
-    let directory = tempfile::tempdir().unwrap();
-    let pack = Pack::builder("main.typ")
-        .file("main.typ", b"main".to_vec())
-        .unwrap()
-        .file("ordinary.txt", b"ordinary".to_vec())
-        .unwrap()
-        .resource_slot("assets/logo.png")
-        .unwrap()
-        .build()
-        .unwrap();
-    let pack_path = directory.path().join("project.typk");
-    let output = directory.path().join("extracted");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
-    std::fs::create_dir_all(output.join("assets")).unwrap();
-    std::fs::write(output.join("assets/logo.png"), b"prefilled").unwrap();
-
-    let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-        .current_dir(directory.path())
-        .args([
-            "extract",
-            pack_path.to_str().unwrap(),
-            "--output",
-            output.to_str().unwrap(),
-        ])
-        .output()
-        .unwrap();
-    let stdout = String::from_utf8_lossy(&result.stdout);
-
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    assert!(stdout.contains("extracted 2 file(s)"), "{stdout}");
-    assert!(
-        stdout.contains("\nResource Slots (not extracted):\n  assets/logo.png\n"),
-        "{stdout}"
-    );
-    assert_eq!(std::fs::read(output.join("main.typ")).unwrap(), b"main");
-    assert_eq!(
-        std::fs::read(output.join("ordinary.txt")).unwrap(),
-        b"ordinary"
-    );
-    assert_eq!(
-        std::fs::read(output.join("assets/logo.png")).unwrap(),
-        b"prefilled"
     );
 }
 
@@ -2489,15 +2379,12 @@ fn compile_writes_valid_perfetto_timings_json() {
             b"#read(\"data/value.txt\")\n#rect(width: 1pt, height: 1pt)".to_vec(),
         )
         .unwrap()
-        .resource_slot("data/value.txt")
+        .file("data/value.txt", b"provided".to_vec())
         .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
     std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
-    let resources = directory.path().join("resources");
-    std::fs::create_dir_all(resources.join("data")).unwrap();
-    std::fs::write(resources.join("data/value.txt"), "provided").unwrap();
     let timings = directory.path().join("timings.json");
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
@@ -2506,8 +2393,6 @@ fn compile_writes_valid_perfetto_timings_json() {
             "compile",
             pack_path.to_str().unwrap(),
             "timed.pdf",
-            "--resource-path",
-            resources.to_str().unwrap(),
             "--timings",
             timings.to_str().unwrap(),
             "--ignore-system-fonts",
@@ -2529,12 +2414,7 @@ fn compile_writes_valid_perfetto_timings_json() {
         .iter()
         .filter_map(|entry| entry["name"].as_str())
         .collect::<std::collections::BTreeSet<_>>();
-    for name in [
-        "typst-pack compilation",
-        "Pack",
-        "Resource Provider",
-        "export",
-    ] {
+    for name in ["typst-pack compilation", "Pack", "export"] {
         assert!(
             names.contains(name),
             "missing `{name}` timing span: {names:?}"
@@ -2708,70 +2588,6 @@ fn filesystem_export_error_and_warnings_precede_timing_while_saved_errors_are_su
     assert!(primary < warning, "{stderr}");
     assert!(warning < timings, "{stderr}");
     assert!(!stderr.contains("cannot write dependencies"), "{stderr}");
-}
-
-#[test]
-fn dependency_json_reports_pack_and_consumed_resource_slot_files() {
-    let directory = tempfile::tempdir().unwrap();
-    let pack = Pack::builder("main.typ")
-        .file(
-            "main.typ",
-            b"#assert(read(\"data/value.txt\") == \"provided\")\n#rect(width: 1pt, height: 1pt)"
-                .to_vec(),
-        )
-        .unwrap()
-        .resource_slot("data/value.txt")
-        .unwrap()
-        .build()
-        .unwrap();
-    let pack_path = directory.path().join("project.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
-    let resources = directory.path().join("resources");
-    std::fs::create_dir_all(resources.join("data")).unwrap();
-    let resource = resources.join("data/value.txt");
-    std::fs::write(&resource, "provided").unwrap();
-    let output = directory.path().join("document.svg");
-    let deps = directory.path().join("deps.json");
-
-    let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-        .current_dir(directory.path())
-        .args([
-            "compile",
-            pack_path.to_str().unwrap(),
-            output.to_str().unwrap(),
-            "--resource-path",
-            resources.to_str().unwrap(),
-            "--deps",
-            deps.to_str().unwrap(),
-            "--ignore-system-fonts",
-            "--ignore-embedded-fonts",
-        ])
-        .output()
-        .unwrap();
-
-    assert!(
-        result.status.success(),
-        "{}",
-        String::from_utf8_lossy(&result.stderr)
-    );
-    let deps: serde_json::Value = serde_json::from_slice(&std::fs::read(deps).unwrap()).unwrap();
-    let inputs = deps["inputs"].as_array().unwrap();
-    assert!(
-        inputs
-            .iter()
-            .any(|value| value == &serde_json::json!(pack_path))
-    );
-    assert!(
-        inputs
-            .iter()
-            .any(|value| value == &serde_json::json!(resource))
-    );
-    assert!(
-        inputs
-            .iter()
-            .all(|value| !value.as_str().unwrap().ends_with("main.typ"))
-    );
-    assert_eq!(deps["outputs"], serde_json::json!([output]));
 }
 
 #[test]
@@ -3079,13 +2895,11 @@ fn auto_color_disables_ansi_when_stderr_is_captured() {
 }
 
 #[test]
-fn global_color_controls_create_report_warnings() {
+fn global_color_controls_creation_warnings() {
     let directory = tempfile::tempdir().unwrap();
     let project = write_minimal_project(directory.path());
-    let included = project.join("included");
-    std::fs::create_dir(&included).unwrap();
-    std::fs::write(included.join("nested.typk"), b"ignored").unwrap();
     let input = project.join("main.typ");
+    std::fs::write(&input, "#set text(font: \"Definitely Missing\")\nWarning").unwrap();
     let output = directory.path().join("project.typk");
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
@@ -3096,9 +2910,8 @@ fn global_color_controls_create_report_warnings() {
             "create",
             input.to_str().unwrap(),
             output.to_str().unwrap(),
-            "--include",
-            included.to_str().unwrap(),
             "--ignore-system-fonts",
+            "--ignore-embedded-fonts",
         ])
         .output()
         .unwrap();
@@ -3108,7 +2921,7 @@ fn global_color_controls_create_report_warnings() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert!(String::from_utf8_lossy(&result.stderr).contains("skipped pack file"));
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Definitely Missing"));
     assert!(result.stderr.contains(&0x1b), "{:?}", result.stderr);
 }
 
@@ -3387,8 +3200,8 @@ fn command_help_is_task_grouped_and_documents_intentional_differences() {
             [
                 "Compilation:",
                 "Output:",
+                "Overrides:",
                 "PDF:",
-                "Resource Slots:",
                 "Fonts:",
                 "Packages:",
                 "Diagnostics & Automation:",
@@ -3399,13 +3212,13 @@ fn command_help_is_task_grouped_and_documents_intentional_differences() {
             "create",
             [
                 "Project:",
-                "Discovery:",
+                "Creation:",
                 "Pack Contents:",
-                "Resource Slots:",
                 "Fonts:",
                 "Packages:",
                 "Metadata:",
                 "Diagnostics & Automation:",
+                "",
             ],
         ),
     ] {
@@ -3477,9 +3290,10 @@ fn command_help_is_task_grouped_and_documents_intentional_differences() {
         ),
         (
             "Output:",
-            Some("PDF:"),
+            Some("Overrides:"),
             ["[OUTPUT]", "--format", "--pretty", "--pages", "--ppi"].as_slice(),
         ),
+        ("Overrides:", Some("PDF:"), ["--override"].as_slice()),
         (
             "Fonts:",
             Some("Packages:"),
@@ -3529,18 +3343,18 @@ fn command_help_is_task_grouped_and_documents_intentional_differences() {
     for (heading, next, options) in [
         (
             "Project:",
-            Some("Discovery:"),
+            Some("Creation:"),
             ["<INPUT>", "--root"].as_slice(),
         ),
         (
-            "Discovery:",
+            "Creation:",
             Some("Pack Contents:"),
             ["--target", "--input", "--features"].as_slice(),
         ),
         (
             "Pack Contents:",
-            Some("Resource Slots:"),
-            ["[OUTPUT]", "--embed-fonts", "--include"].as_slice(),
+            Some("Fonts:"),
+            ["[OUTPUT]", "--embed-fonts"].as_slice(),
         ),
         (
             "Fonts:",

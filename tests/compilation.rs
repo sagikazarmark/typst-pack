@@ -1,7 +1,6 @@
 use typst_pack::{
-    CompilationAttempt, CompilationExecutionControls, CompilationOperationOutcome,
-    CompilationOutputOrigins, CompilationOutputSpecification, CompilationReportOutcome,
-    CompilationRequestRejection, CompilationStatus, CompilationTarget, CreationTimestamp,
+    CompilationOperationOutcome, CompilationOutputOrigins, CompilationOutputSpecification,
+    CompilationReportOutcome, CompilationRequestRejection, CompilationStatus, CreationTimestamp,
     DiagnosticPhase, DiagnosticProducer, FontContainerFulfillment, HtmlOutputSpecification,
     OutputFormat, Pack, PackCompilationRequest, PackCompileError, PackMetadata, PackOverrideSet,
     PackOverrideSetError, PackageTreeFulfillment, PdfOutputSpecification, PngOutputSpecification,
@@ -38,57 +37,6 @@ fn page_output(
         }),
         OutputFormat::Html => panic!("HTML has no page selection"),
     }
-}
-
-struct RuntimeResource;
-
-impl typst_kit::files::FileLoader for RuntimeResource {
-    fn load(
-        &self,
-        id: typst::syntax::FileId,
-    ) -> typst::diag::FileResult<typst::foundations::Bytes> {
-        if id.vpath().get_without_slash() == "runtime.txt" {
-            Ok(typst::foundations::Bytes::new(b"runtime value".to_vec()))
-        } else {
-            Err(typst::diag::FileError::NotFound(
-                id.vpath().get_without_slash().into(),
-            ))
-        }
-    }
-}
-
-#[test]
-fn pack_bound_compilation_resolves_declared_resource_slots() {
-    let pack = Pack::builder("main.typ")
-        .file("main.typ", b"#read(\"runtime.txt\")".to_vec())
-        .unwrap()
-        .resource_slot("runtime.txt")
-        .unwrap()
-        .build()
-        .unwrap();
-
-    let result = compile(CompilationAttempt::new(
-        PackCompilationRequest::new(pack, output(OutputFormat::Svg)),
-        CompilationExecutionControls::default().resource_provider(RuntimeResource),
-    ))
-    .unwrap();
-
-    assert_eq!(result.status(), CompilationStatus::Succeeded);
-    assert_eq!(result.artifacts().len(), 1);
-    assert_eq!(result.document().target(), CompilationTarget::Paged);
-    assert!(
-        result
-            .result_identity()
-            .digest()
-            .iter()
-            .any(|byte| *byte != 0)
-    );
-    assert!(
-        result
-            .access_trace()
-            .observations()
-            .any(|observation| { observation.logical_path() == "project:main.typ" })
-    );
 }
 
 fn five_page_pack() -> Pack {
@@ -142,8 +90,6 @@ fn pack_bound_compilation_does_not_read_an_ambient_clock() {
 fn pack_override_preflight_rejects_paths_outside_the_bound_pack() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"baseline".to_vec())
-        .unwrap()
-        .resource_slot("runtime.txt")
         .unwrap()
         .package_file(
             "@local/example:1.0.0".parse().unwrap(),

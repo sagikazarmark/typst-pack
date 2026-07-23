@@ -12,14 +12,13 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{Datelike, Timelike};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use typst::diag::{FileError, FileResult, SourceDiagnostic};
+use typst::diag::SourceDiagnostic;
 use typst::foundations::{Bytes, Datetime, Dict, IntoValue};
 use typst::syntax::{FileId, VirtualRoot};
 use typst_kit::diagnostics::termcolor::{
     Color, ColorChoice, ColorSpec, StandardStream, WriteColor,
 };
 use typst_kit::diagnostics::{DiagnosticFormat, DiagnosticWorld};
-use typst_kit::files::{FileLoader, FsRoot};
 use typst_kit::fonts::FontSource;
 use typst_pdf::{PdfStandard, Timestamp};
 
@@ -35,7 +34,7 @@ use crate::compile::{
 use crate::extract::{ExtractOptions, extract};
 use crate::manifest::PackMetadata;
 use crate::pack::{FILE_EXTENSION, FontContainerIdentity, Pack};
-use crate::packer::{DiscoveryTarget, DiscoveryWorld, Packer, PackerError};
+use crate::packer::{CreationTarget, CreationWorld, Packer, PackerError};
 use crate::world::PackWorld;
 
 const ENV_PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
@@ -201,16 +200,11 @@ struct CreateArgs {
     #[arg(long, env = "TYPST_ROOT", value_name = "DIR", help_heading = "Project")]
     root: Option<PathBuf>,
 
-    /// Compilation targets whose dependencies should be discovered.
-    #[arg(
-        long = "target",
-        value_name = "TARGET",
-        value_delimiter = ',',
-        help_heading = "Discovery"
-    )]
-    targets: Vec<DiscoveryTargetArg>,
+    /// Target for the representative creation compilation [default: paged].
+    #[arg(long = "target", value_name = "TARGET", help_heading = "Creation")]
+    target: Option<CreationTargetArg>,
 
-    #[command(flatten, next_help_heading = "Discovery")]
+    #[command(flatten, next_help_heading = "Creation")]
     compilation: SharedCompilationArgs,
 
     /// Path to the output Pack [default: INPUT with its extension replaced by .typk].
@@ -225,27 +219,6 @@ struct CreateArgs {
     /// fonts.
     #[arg(long, requires = "embed_fonts", help_heading = "Pack Contents")]
     include_typst_embedded_fonts: bool,
-
-    /// Additional files or directories (inside the project root) to pack
-    /// beyond what the discovery compile finds.
-    #[arg(long = "include", value_name = "PATH", help_heading = "Pack Contents")]
-    include: Vec<PathBuf>,
-
-    /// Project-shaped directories that provide Resource Slot bytes during discovery.
-    #[arg(
-        long = "resource-path",
-        value_name = "DIR",
-        help_heading = "Resource Slots"
-    )]
-    resource_paths: Vec<PathBuf>,
-
-    /// Root-relative Resource Slot paths to declare even if discovery does not request them.
-    #[arg(
-        long = "resource-slot",
-        value_name = "PATH",
-        help_heading = "Resource Slots"
-    )]
-    resource_slots: Vec<String>,
 
     #[command(flatten, next_help_heading = "Fonts")]
     fonts: SharedFontArgs,
@@ -343,7 +316,7 @@ struct CompileArgs {
         long = "override",
         value_names = ["PACK_PATH", "FILE"],
         num_args = 2,
-        help_heading = "Compilation"
+        help_heading = "Overrides"
     )]
     overrides: Vec<OsString>,
 
@@ -380,14 +353,6 @@ struct CompileArgs {
     /// it can be desirable to disable tagged PDF.
     #[arg(long = "no-pdf-tags", help_heading = "PDF")]
     no_pdf_tags: bool,
-
-    /// Project-shaped directories that provide Resource Slot bytes during compilation.
-    #[arg(
-        long = "resource-path",
-        value_name = "DIR",
-        help_heading = "Resource Slots"
-    )]
-    resource_paths: Vec<PathBuf>,
 
     #[command(flatten, next_help_heading = "Fonts")]
     fonts: SharedFontArgs,
@@ -464,16 +429,16 @@ impl From<FeatureArg> for typst::Feature {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
-enum DiscoveryTargetArg {
+enum CreationTargetArg {
     Paged,
     Html,
 }
 
-impl From<DiscoveryTargetArg> for DiscoveryTarget {
-    fn from(value: DiscoveryTargetArg) -> Self {
+impl From<CreationTargetArg> for CreationTarget {
+    fn from(value: CreationTargetArg) -> Self {
         match value {
-            DiscoveryTargetArg::Paged => Self::Paged,
-            DiscoveryTargetArg::Html => Self::Html,
+            CreationTargetArg::Paged => Self::Paged,
+            CreationTargetArg::Html => Self::Html,
         }
     }
 }
@@ -673,16 +638,7 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
         .creation_timestamp(args.automation.creation_timestamp)
         .timings(args.automation.timings.clone())
         .inputs(parse_inputs(&args.compilation.inputs));
-    for path in &args.include {
-        packer = packer.include(path);
-    }
-    for path in &args.resource_paths {
-        packer = packer.resource_provider(FilesystemResourceProvider::new(path.clone()));
-    }
-    for path in args.resource_slots {
-        packer = packer.resource_slot(path);
-    }
-    for target in args.targets {
+    if let Some(target) = args.target {
         packer = packer.target(target.into());
     }
     for feature in args.compilation.features {
@@ -730,16 +686,6 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
                 return Err(error.into());
             }
             return Err(CliError::Reported);
-        }
-        Err(PackerError::ResourceSlotUnavailable { path }) => {
-            let message = format!(
-                "requested Resource Slot `{path}` is unavailable for discovery; place representative bytes at `{path}` in the source project or supply them via `--resource-path`; representative bytes are not stored in the Pack"
-            );
-            if let Some(error) = timing_error {
-                emit_owned_error(&message, color);
-                return Err(error.into());
-            }
-            return Err(message.into());
         }
         Err(err) => {
             if let Some(error) = timing_error {
@@ -796,15 +742,6 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
             println!("  {spec}");
         }
     }
-    if !report.resource_slots.is_empty() {
-        println!(
-            "note: {} Resource Slot path(s) are declared and must be supplied if requested:",
-            report.resource_slots.len()
-        );
-        for path in &report.resource_slots {
-            println!("  {path}");
-        }
-    }
     Ok(())
 }
 
@@ -830,13 +767,6 @@ fn inspect(args: InspectArgs) -> CliResult {
     println!("\npacked project files:");
     for (path, data) in pack.files() {
         println!("  {path} ({})", human_size(data.len()));
-    }
-
-    if manifest.project().resource_slots().next().is_some() {
-        println!("\nResource Slots:");
-        for path in manifest.project().resource_slots() {
-            println!("  {path}");
-        }
     }
 
     let vendored: Vec<_> = pack.packages().collect();
@@ -897,12 +827,6 @@ fn extract_command(args: ExtractArgs) -> CliResult {
         report.written.len(),
         output.display()
     );
-    if !report.resource_slots.is_empty() {
-        println!("\nResource Slots (not extracted):");
-        for path in &report.resource_slots {
-            println!("  {}", path.display());
-        }
-    }
     Ok(())
 }
 
@@ -1116,13 +1040,7 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         .adapter_resolved_inputs(parse_inputs(&args.compilation.inputs))
         .adapter_resolved_document_timestamp(document_timestamp)
         .map_err(|_| "creation timestamp is out of range")?;
-    let mut controls = CompilationExecutionControls::default();
-    for path in &args.resource_paths {
-        controls = controls.resource_provider(FilesystemResourceProvider::tracked(
-            path.clone(),
-            Arc::clone(&host_dependencies),
-        ));
-    }
+    let controls = CompilationExecutionControls;
     if !args.overrides.is_empty() {
         request = request.overrides(overrides);
     }
@@ -1471,46 +1389,6 @@ fn initialize_jobs(jobs: Option<usize>) {
     }
 }
 
-struct FilesystemResourceProvider {
-    root: FsRoot,
-    path: PathBuf,
-    dependencies: Arc<Mutex<BTreeSet<PathBuf>>>,
-}
-
-impl FilesystemResourceProvider {
-    fn new(root: PathBuf) -> Self {
-        Self::tracked(root, Arc::new(Mutex::new(BTreeSet::new())))
-    }
-
-    fn tracked(root: PathBuf, dependencies: Arc<Mutex<BTreeSet<PathBuf>>>) -> Self {
-        Self {
-            root: FsRoot::new(root.clone()),
-            path: root,
-            dependencies,
-        }
-    }
-}
-
-impl FileLoader for FilesystemResourceProvider {
-    fn load(&self, id: FileId) -> FileResult<Bytes> {
-        match id.root() {
-            VirtualRoot::Project => {
-                let result = self.root.load(id.vpath());
-                if result.is_ok() {
-                    self.dependencies
-                        .lock()
-                        .expect("host dependency lock poisoned")
-                        .insert(self.path.join(id.vpath().get_without_slash()));
-                }
-                result
-            }
-            VirtualRoot::Package(_) => Err(FileError::NotFound(PathBuf::from(
-                id.vpath().get_without_slash(),
-            ))),
-        }
-    }
-}
-
 fn write_dependencies(
     destination: &Path,
     format: DepsFormat,
@@ -1744,7 +1622,7 @@ fn relative_path(path: &Path, base: &Path) -> Option<PathBuf> {
     Some(relative.iter().map(|part| part.as_os_str()).collect())
 }
 
-impl DiagnosticWorld for DiscoveryWorld {
+impl DiagnosticWorld for CreationWorld {
     fn name(&self, id: FileId) -> String {
         match id.root() {
             VirtualRoot::Project => id

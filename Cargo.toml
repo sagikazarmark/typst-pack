@@ -34,10 +34,11 @@ cli = [
 # Ship Typst's embedded fonts (Libertinus Serif, New Computer Modern, ...) so
 # packs that only use them render without any font embedding.
 embedded-fonts = ["typst-kit/embedded-fonts"]
-# Filesystem-based packing: directory discovery, package download and caching,
+# Filesystem-based packing: structural snapshot acquisition, package download and caching,
 # system font scanning. Not available on wasm targets.
 fs = [
     "dep:env_proxy",
+    "dep:ignore",
     "dep:rustls-pemfile",
     "dep:ureq",
     "dep:walkdir",
@@ -53,6 +54,7 @@ chrono = { version = "0.4", default-features = false, features = ["clock", "std"
 clap = { version = "4", features = ["derive", "env"], optional = true }
 ecow = "0.2"
 env_proxy = { version = "0.4", optional = true }
+ignore = { version = "0.4", optional = true }
 open = { version = "5", optional = true }
 rayon = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"] }

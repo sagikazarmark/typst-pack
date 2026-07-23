@@ -29,8 +29,8 @@ pub(crate) const PACKAGE_TREE_IDENTITY_ALGORITHM: &str = "typst-hash128-0.15";
 /// A portable pack of a Typst project.
 ///
 /// A pack holds project files (sources, images, and data files), optionally
-/// package files and fonts, and declared Resource Slots whose bytes are supplied
-/// when requested. Its archive form is a Zip file with a `typst-pack.toml`
+/// package files and fonts. Every project path has contained baseline bytes.
+/// Its archive form is a Zip file with a `typst-pack.toml`
 /// manifest, conventionally named `*.typk`.
 #[derive(Debug, Clone)]
 pub struct Pack {
@@ -318,11 +318,6 @@ impl Pack {
     ) -> Result<Self, PackInvariantError> {
         let entrypoint = canonical_path(PackPathRole::Entrypoint, manifest.project().entrypoint())?;
         let canonical_files = files;
-        let resource_slots = manifest
-            .project()
-            .resource_slots()
-            .map(|path| canonical_path(PackPathRole::ResourceSlot, path))
-            .collect::<Result<BTreeSet<_>, _>>()?;
         let font_entries = manifest
             .fonts()
             .iter()
@@ -364,7 +359,7 @@ impl Pack {
             validate_archive_entry_name(PackPathRole::FontData, path, path.as_str().len())?;
         }
 
-        validate_project_declarations(canonical_files.keys().cloned(), &resource_slots)?;
+        validate_project_declarations(canonical_files.keys().cloned())?;
 
         for package in packages.values() {
             let paths = package
@@ -414,11 +409,6 @@ impl Pack {
             return Err(PackInvariantError::PackageRoleConflict(spec.clone()));
         }
 
-        if resource_slots.contains(&entrypoint) {
-            return Err(PackInvariantError::EntrypointIsResourceSlot(
-                entrypoint.to_string(),
-            ));
-        }
         if !canonical_files.contains_key(&entrypoint) {
             return Err(PackInvariantError::MissingEntrypoint(
                 entrypoint.to_string(),
@@ -594,10 +584,6 @@ impl Pack {
 
         let manifest = PackManifest::new(
             entrypoint.into_string(),
-            resource_slots
-                .into_iter()
-                .map(CanonicalPath::into_string)
-                .collect(),
             package_requirements
                 .iter()
                 .filter(|requirement| requirement.embedded)
@@ -609,7 +595,6 @@ impl Pack {
                 .map(package_requirement_manifest)
                 .collect(),
             canonical_font_entries,
-            manifest.discovery().to_vec(),
             manifest.metadata().cloned(),
         );
 
@@ -622,7 +607,6 @@ impl Pack {
             font_catalog,
             font_requirements,
         };
-        pack.validate_discovery_evidence()?;
         Ok(pack)
     }
 
@@ -637,7 +621,6 @@ impl Pack {
             .files()
             .map(|(path, data)| (path, typst::utils::hash128(data)))
             .collect::<Vec<_>>();
-        let resource_slots = self.resource_slots().collect::<Vec<_>>();
         let packages = self
             .package_requirements()
             .iter()
@@ -666,10 +649,8 @@ impl Pack {
             "typst-pack-identity-v1",
             self.entrypoint(),
             project_files,
-            resource_slots,
             packages,
             fonts,
-            self.manifest.discovery(),
         )))
     }
 
@@ -692,125 +673,6 @@ impl Pack {
         canonical_path(PackPathRole::ProjectFile, path)
             .map(CanonicalPath::into_string)
             .map_err(|error| error.to_string())
-    }
-
-    /// The root-relative Resource Slot paths.
-    pub fn resource_slots(&self) -> impl Iterator<Item = &str> {
-        self.manifest.project().resource_slots()
-    }
-
-    /// Persisted discovery coverage for Packs issued through filesystem discovery.
-    pub fn discovery(&self) -> &[crate::manifest::DiscoveryEvidence] {
-        self.manifest.discovery()
-    }
-
-    fn validate_discovery_evidence(&self) -> Result<(), PackInvariantError> {
-        for variant in self.discovery() {
-            for observation in variant.observations() {
-                let project_path = observation.logical_path().strip_prefix("project:");
-                if observation.authority() == "resource-provider"
-                    && !project_path.is_some_and(|path| self.is_resource_slot(path))
-                {
-                    return Err(PackInvariantError::InvalidDiscoveryEvidence {
-                        path: observation.logical_path().to_owned(),
-                    });
-                }
-                if observation.project_provenance() == Some("override")
-                    && project_path.is_none_or(|path| self.file(path).is_none())
-                {
-                    return Err(PackInvariantError::InvalidDiscoveryEvidence {
-                        path: observation.logical_path().to_owned(),
-                    });
-                }
-                if observation.outcome() == "missing"
-                    && observation.authority() == "project"
-                    && project_path.is_some_and(|path| self.file(path).is_some())
-                {
-                    return Err(PackInvariantError::InvalidDiscoveryEvidence {
-                        path: observation.logical_path().to_owned(),
-                    });
-                }
-                if observation.outcome() != "read" || observation.commitment().is_some() {
-                    continue;
-                }
-                if observation.authority() == "package"
-                    && self
-                        .package_requirements
-                        .iter()
-                        .filter(|requirement| !requirement.embedded)
-                        .any(|requirement| {
-                            observation
-                                .logical_path()
-                                .starts_with(&format!("package:{}/", requirement.spec))
-                        })
-                {
-                    continue;
-                }
-                let expected = match observation.authority() {
-                    "project" if observation.project_provenance() == Some("baseline") => {
-                        observation
-                            .logical_path()
-                            .strip_prefix("project:")
-                            .and_then(|path| self.file(path))
-                    }
-                    "package" => self.packages.values().find_map(|package| {
-                        let prefix = format!("package:{}/", package.spec);
-                        observation
-                            .logical_path()
-                            .strip_prefix(&prefix)
-                            .and_then(|path| package.file(path))
-                    }),
-                    "font-catalog" => {
-                        let identity = observation.logical_path().strip_prefix("font:");
-                        let requirement = self.font_requirements.iter().find(|requirement| {
-                            identity.and_then(FontContainerIdentity::decode)
-                                == Some(requirement.container)
-                        });
-                        let Some(requirement) = requirement else {
-                            return Err(PackInvariantError::InvalidDiscoveryEvidence {
-                                path: observation.logical_path().to_owned(),
-                            });
-                        };
-                        if observation.byte_length() != Some(requirement.length)
-                            || observation.digest() != identity
-                            || !observation.font_index().is_some_and(|index| {
-                                u32::try_from(index)
-                                    .is_ok_and(|index| requirement.face_indices.contains(&index))
-                            })
-                        {
-                            return Err(PackInvariantError::InvalidDiscoveryEvidence {
-                                path: observation.logical_path().to_owned(),
-                            });
-                        }
-                        continue;
-                    }
-                    _ => continue,
-                };
-                let Some(expected) = expected else {
-                    return Err(PackInvariantError::InvalidDiscoveryEvidence {
-                        path: observation.logical_path().to_owned(),
-                    });
-                };
-                let digest = format!("{:032x}", typst::utils::hash128(&expected.as_slice()));
-                if observation.byte_length() != Some(expected.len() as u64)
-                    || observation.digest() != Some(digest.as_str())
-                {
-                    return Err(PackInvariantError::InvalidDiscoveryEvidence {
-                        path: observation.logical_path().to_owned(),
-                    });
-                }
-            }
-        }
-        Ok(())
-    }
-
-    #[cfg(feature = "fs")]
-    pub(crate) fn set_discovery(&mut self, discovery: Vec<crate::manifest::DiscoveryEvidence>) {
-        self.manifest.set_discovery(discovery);
-    }
-
-    pub(crate) fn is_resource_slot(&self, path: &str) -> bool {
-        self.manifest.project().contains_resource_slot(path)
     }
 
     /// The vendored packages and their files.
@@ -1480,7 +1342,6 @@ pub enum PackWriteError {
 pub struct PackBuilder {
     entrypoint: String,
     files: BTreeMap<CanonicalPath, Bytes>,
-    resource_slots: BTreeSet<CanonicalPath>,
     packages: BTreeMap<String, PackageFiles>,
     external_packages: BTreeMap<String, PackageFiles>,
     fonts: Vec<PackFontInput>,
@@ -1493,7 +1354,6 @@ impl PackBuilder {
         Self {
             entrypoint: entrypoint.into(),
             files: BTreeMap::new(),
-            resource_slots: BTreeSet::new(),
             packages: BTreeMap::new(),
             external_packages: BTreeMap::new(),
             fonts: Vec::new(),
@@ -1510,34 +1370,6 @@ impl PackBuilder {
         let path = canonical_path(PackPathRole::ProjectFile, path.as_ref())?;
         self.files.insert(path, Bytes::new(data.into()));
         Ok(self)
-    }
-
-    /// Declares a Resource Slot whose bytes will be supplied at compilation time.
-    ///
-    /// ```compile_fail
-    /// use typst_pack::Pack;
-    ///
-    /// let _ = Pack::builder("main.typ").external_resource("assets/logo.png");
-    /// ```
-    pub fn resource_slot(mut self, path: impl AsRef<str>) -> Result<Self, PackBuildError> {
-        self.resource_slots
-            .insert(canonical_path(PackPathRole::ResourceSlot, path.as_ref())?);
-        Ok(self)
-    }
-
-    #[cfg(feature = "fs")]
-    pub(crate) fn resource_slot_paths(&self) -> BTreeSet<String> {
-        self.resource_slots
-            .iter()
-            .map(ToString::to_string)
-            .collect()
-    }
-
-    #[cfg(feature = "fs")]
-    pub(crate) fn validate_declarations(&self) -> Result<(), PackBuildError> {
-        let entrypoint = canonical_path(PackPathRole::Entrypoint, &self.entrypoint)?;
-        validate_project_declarations(std::iter::once(entrypoint), &self.resource_slots)?;
-        Ok(())
     }
 
     /// Adds a file of a vendored package.
@@ -1675,14 +1507,9 @@ impl PackBuilder {
             .collect();
         let manifest = PackManifest::new(
             entrypoint.into_string(),
-            self.resource_slots
-                .into_iter()
-                .map(CanonicalPath::into_string)
-                .collect(),
             vendored_requirements,
             external_requirements,
             self.fonts.iter().map(|font| font.entry.clone()).collect(),
-            vec![],
             self.metadata,
         );
 
@@ -1853,25 +1680,11 @@ fn find_path_tree_conflict(
 
 fn validate_project_declarations(
     project_files: impl IntoIterator<Item = CanonicalPath>,
-    resource_slots: &BTreeSet<CanonicalPath>,
 ) -> Result<(), PackInvariantError> {
-    let mut project_paths = Vec::new();
-    for path in project_files {
-        if resource_slots.contains(&path) {
-            return Err(PackInvariantError::PathRoleConflict {
-                path: path.to_string(),
-                first: PackPathRole::ProjectFile,
-                second: PackPathRole::ResourceSlot,
-            });
-        }
-        project_paths.push((path, PackPathRole::ProjectFile));
-    }
-    project_paths.extend(
-        resource_slots
-            .iter()
-            .cloned()
-            .map(|path| (path, PackPathRole::ResourceSlot)),
-    );
+    let project_paths = project_files
+        .into_iter()
+        .map(|path| (path, PackPathRole::ProjectFile))
+        .collect();
     if let Some(conflict) = find_path_tree_conflict(project_paths) {
         return Err(PackInvariantError::PathTreeConflict {
             ancestor: conflict.ancestor.to_string(),
@@ -1943,9 +1756,6 @@ pub enum PackBuildError {
 /// A violation of the invariants shared by every [`Pack`] construction path.
 #[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
 pub enum PackInvariantError {
-    /// Persisted discovery evidence disagrees with contained Pack state.
-    #[error("discovery evidence for `{path}` disagrees with the Pack")]
-    InvalidDiscoveryEvidence { path: String },
     /// A path cannot identify a canonical file for its declared role.
     #[error("invalid {role} path `{path}`: {message}")]
     InvalidPath {
@@ -2000,9 +1810,6 @@ pub enum PackInvariantError {
         descendant: String,
         descendant_role: PackPathRole,
     },
-    /// The entrypoint was declared as a Resource Slot.
-    #[error("entrypoint `{0}` cannot be a Resource Slot")]
-    EntrypointIsResourceSlot(String),
     /// A package was declared both vendored and unvendored.
     #[error("package `{0}` cannot be both vendored and unvendored")]
     PackageRoleConflict(String),
@@ -2050,7 +1857,6 @@ pub enum PackPathRole {
     PackManifest,
     Entrypoint,
     ProjectFile,
-    ResourceSlot,
     PackageFile,
     FontData,
 }
@@ -2061,7 +1867,6 @@ impl std::fmt::Display for PackPathRole {
             Self::PackManifest => "Pack Manifest",
             Self::Entrypoint => "entrypoint",
             Self::ProjectFile => "project file",
-            Self::ResourceSlot => "Resource Slot",
             Self::PackageFile => "package file",
             Self::FontData => "font data",
         })

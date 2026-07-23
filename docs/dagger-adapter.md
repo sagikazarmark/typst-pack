@@ -17,9 +17,10 @@ Compilation inputs map as follows:
   dependencies through the CLI authorities;
 - `overrideDir` is an immutable project-shaped Dagger value, while
   `overridePaths` selects contained project paths whose same relative files are
-  passed as Pack Overrides; and
-- Resource Provider directories remain separate from Pack Overrides and can
-  satisfy only declared Resource Slots.
+  passed as Pack Overrides.
+
+Creation packs the supplied project `Directory` structurally. Its optional
+singular target controls only the representative package/font selection run.
 
 The CLI completes compilation before the adapter returns the staged Dagger
 `Directory`; `create` similarly completes Pack issuance before returning its

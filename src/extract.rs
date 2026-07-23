@@ -23,8 +23,6 @@ pub struct ExtractOptions {
 pub struct ExtractReport {
     /// Paths written, relative to the target directory.
     pub written: Vec<PathBuf>,
-    /// Resource Slot paths omitted from the extracted project.
-    pub resource_slots: Vec<PathBuf>,
 }
 
 /// A failure while extracting a pack.
@@ -101,21 +99,10 @@ pub fn extract(
         }
     }
 
-    for path in pack.resource_slots() {
-        add_to_plan(
-            &mut plan,
-            PathBuf::from(path),
-            PackPathRole::ResourceSlot,
-            None,
-        )?;
-    }
     validate_plan(&plan)?;
     preflight_destination(&plan, dir, options.force)?;
 
-    let mut report = ExtractReport {
-        resource_slots: pack.resource_slots().map(PathBuf::from).collect(),
-        ..ExtractReport::default()
-    };
+    let mut report = ExtractReport::default();
 
     for (relative, planned) in plan {
         if let Some(data) = planned.data {
@@ -157,7 +144,7 @@ fn add_to_plan<'a>(
 
 fn validate_plan(plan: &BTreeMap<PathBuf, PlannedPath<'_>>) -> Result<(), ExtractError> {
     let mut ancestors = Vec::<(&Path, PackPathRole)>::new();
-    let mut role_counts = [0usize; 6];
+    let mut role_counts = [0usize; 5];
 
     for (relative, planned) in plan {
         while ancestors
@@ -193,9 +180,8 @@ fn role_index(role: PackPathRole) -> usize {
         PackPathRole::PackManifest => 0,
         PackPathRole::Entrypoint => 1,
         PackPathRole::ProjectFile => 2,
-        PackPathRole::ResourceSlot => 3,
-        PackPathRole::PackageFile => 4,
-        PackPathRole::FontData => 5,
+        PackPathRole::PackageFile => 3,
+        PackPathRole::FontData => 4,
     }
 }
 

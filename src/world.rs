@@ -19,7 +19,6 @@ use typst_kit::files::{FileLoader, FileStore};
 use typst_kit::fonts::{FontSource, FontStore};
 
 use crate::pack::{FontCatalogError, FontContainerIdentity, Pack, PackageFiles};
-use crate::resource::{CompilationResources, Provider};
 
 #[cfg(feature = "fs")]
 const USER_AGENT: &str = concat!("typst-pack/", env!("CARGO_PKG_VERSION"));
@@ -194,8 +193,6 @@ pub(crate) fn read_complete_package_tree(
 /// Project files and embedded package files come from the Pack. Externally
 /// fulfilled package files are available only through a crate-verified exact
 /// dependency snapshot. Fonts come from the Pack plus any configured fonts.
-/// Declared Resource Slots may come from Resource Providers; providers cannot
-/// replace packed files or supply Typst source or package files.
 pub(crate) struct PackWorld {
     library: LazyHash<Library>,
     main: FileId,
@@ -225,10 +222,7 @@ impl World for PackWorld {
     }
 
     fn source(&self, id: FileId) -> FileResult<Source> {
-        let loader = self.store.loader();
-        loader
-            .resources
-            .source(&loader.pack, id, || self.store.source(id))
+        self.store.source(id)
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
@@ -273,7 +267,6 @@ enum Clock {
 struct PackLoader {
     pack: Arc<Pack>,
     project_overrides: BTreeMap<String, Bytes>,
-    resources: CompilationResources,
     exact_packages: BTreeMap<String, PackageFiles>,
 }
 
@@ -286,12 +279,8 @@ impl FileLoader for PackLoader {
                 .project_overrides
                 .get(path)
                 .cloned()
-                .map(Ok)
-                .unwrap_or_else(|| {
-                    self.resources
-                        .file(&self.pack, id)
-                        .expect("project requests are handled by Resource Slot resolution")
-                }),
+                .or_else(|| self.pack.file(path).cloned())
+                .ok_or_else(|| FileError::NotFound(PathBuf::from(path))),
             VirtualRoot::Package(spec) => {
                 if self.pack.has_package(spec) {
                     self.pack
@@ -324,7 +313,6 @@ pub(crate) struct PackWorldBuilder {
     extra_fonts: Vec<(BoxedFontSource, FontInfo)>,
     catalog_fonts: Option<Vec<Font>>,
     exact_packages: Option<BTreeMap<String, PackageFiles>>,
-    resource_providers: Vec<Provider>,
     project_overrides: BTreeMap<String, Bytes>,
 }
 
@@ -359,7 +347,6 @@ impl PackWorldBuilder {
             extra_fonts: Vec::new(),
             catalog_fonts: None,
             exact_packages: None,
-            resource_providers: Vec::new(),
             project_overrides: BTreeMap::new(),
         }
     }
@@ -434,19 +421,6 @@ impl PackWorldBuilder {
         self
     }
 
-    pub(crate) fn resource_provider(
-        mut self,
-        provider: impl FileLoader + Send + Sync + 'static,
-    ) -> Self {
-        self.resource_providers.push(Box::new(provider));
-        self
-    }
-
-    pub(crate) fn resource_providers(mut self, providers: Vec<Provider>) -> Self {
-        self.resource_providers.extend(providers);
-        self
-    }
-
     /// Builds the world.
     pub(crate) fn build(self) -> Result<PackWorld, PackWorldBuildError> {
         let missing_packages = self
@@ -503,7 +477,6 @@ impl PackWorldBuilder {
             store: FileStore::new(PackLoader {
                 pack: Arc::new(self.pack),
                 project_overrides: self.project_overrides,
-                resources: CompilationResources::new(self.resource_providers),
                 exact_packages: self.exact_packages.unwrap_or_default(),
             }),
             fonts,

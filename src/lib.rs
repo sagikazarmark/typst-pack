@@ -6,7 +6,8 @@ mod extract;
 mod manifest;
 mod pack;
 mod packer;
-mod resource;
+#[cfg(feature = "fs")]
+mod project_snapshot;
 mod world;
 mod world_trace;
 
@@ -34,9 +35,8 @@ pub use compile::{
 #[cfg(feature = "fs")]
 pub use extract::{ExtractError, ExtractOptions, ExtractReport, extract};
 pub use manifest::{
-    DiscoveryEvidence, DiscoveryObservationEvidence, DiscoveryOverrideEvidence, FORMAT_VERSION,
-    FontManifest, MANIFEST_PATH, PackManifest, PackManifestError, PackMetadata, PackageManifest,
-    PackagesManifest, ProjectManifest,
+    FORMAT_VERSION, FontManifest, MANIFEST_PATH, PackManifest, PackManifestError, PackMetadata,
+    PackageManifest, PackagesManifest, ProjectManifest,
 };
 pub use pack::{
     FILE_EXTENSION, FontCatalogError, FontContainerIdentity, FontFaceIdentity, FontRequirement,
@@ -46,10 +46,7 @@ pub use pack::{
 };
 #[cfg(feature = "fs")]
 pub use packer::{
-    CreationDiagnosticContext, DiscoveryAccessKind, DiscoveryAccessOutcome,
-    DiscoveryInputsInventory, DiscoveryObservation, DiscoveryOverridesInventory, DiscoveryRequest,
-    DiscoveryTarget, DiscoveryTrace, DiscoveryVariantReport, PackOutcome, PackReport, Packer,
-    PackerError,
+    CreationDiagnosticContext, CreationTarget, PackOutcome, PackReport, Packer, PackerError,
 };
 #[cfg(feature = "fs")]
 pub use world::OfflineDownloader;

@@ -13,13 +13,12 @@ type Tests {
       project: self.project,
       input: "main.typ",
       packageDir: self.packages,
-      include: ["notes.txt"],
       certificate: self.project.file("notes.txt"),
     )
   }
 
   """
-  Create a pack and inspect its discovered project files and vendored package.
+  Create a pack and inspect its structural project files and vendored package.
   """
   createInspect: Void @check {
     let pack = self.pack
@@ -286,9 +285,9 @@ type Tests {
   }
 
   """
-  Discover and union dependencies from paged and HTML targets.
+  A representative target does not select structural project files.
   """
-  discoveryTargets: Void @check {
+  creationTarget: Void @check {
     let source = Dagger
       .currentModule
       .source
@@ -296,7 +295,7 @@ type Tests {
     let pack = Dagger.typstPack.create(
       project: source,
       input: "main.typ",
-      targets: [TypstPackDiscoveryTarget.PAGED, TypstPackDiscoveryTarget.HTML],
+      target: TypstPackCreationTarget.HTML,
       features: [TypstPackFeature.HTML],
       diagnosticFormat: TypstPackDiagnosticFormat.SHORT,
       ignoreSystemFonts: true,
@@ -317,18 +316,16 @@ type Tests {
       .currentModule
       .source
       .directory("fixtures/sys-inputs")
-    let discoveryResources = source.directory("resources")
     let pack = Dagger.typstPack.create(
       project: source,
       input: "main.typ",
-      sysInputs: ["phase=discovery"],
-      resourceDirs: [discoveryResources],
+      sysInputs: ["phase=creation"],
       ignoreSystemFonts: true,
       ignoreEmbeddedFonts: true,
     )
     let inspection = Dagger.typstPack.inspect(pack)
 
-    assert { inspection.contains("discovered.txt") }
+    assert { inspection.contains("resources/discovered.txt") }
 
     let output = Dagger.typstPack.compile(
       pack: pack,
@@ -344,7 +341,7 @@ type Tests {
   }
 
   """
-  Embed the fonts used during discovery when requested.
+  Embed the fonts used during creation when requested.
   """
   fontControls: Void @check {
     let pack = Dagger.typstPack.create(
@@ -474,42 +471,4 @@ type Tests {
     null
   }
 
-  """
-  Create and compile a pack with ordered Resource Providers.
-  """
-  resourceSlots: Void @check {
-    let project = Dagger
-      .currentModule
-      .source
-      .directory("fixtures/resource-project")
-    let resources = Dagger
-      .currentModule
-      .source
-      .directory("fixtures/resources")
-    let pack = Dagger.typstPack.create(
-      project: project,
-      input: "main.typ",
-      resourceDirs: [resources.directory("first"), resources.directory("second")],
-      resourceSlots: ["branding/conditional.txt"],
-    )
-    let output = Dagger.typstPack.inspect(pack)
-
-    assert { output.contains("Resource Slots:") }
-    assert { output.contains("branding/name.txt") }
-    assert { output.contains("branding/first-only.txt") }
-    assert { output.contains("branding/from-second-root.txt") }
-    assert { output.contains("branding/conditional.txt") }
-    assert { !output.contains("branding/second-only.txt") }
-
-    let pdf = Dagger
-      .typstPack
-      .compile(
-        pack: pack,
-        resourceDirs: [resources.directory("first"), resources.directory("second")],
-      )
-      .file("output.pdf")
-    assert { pdf.size > 0 }
-
-    null
-  }
 }

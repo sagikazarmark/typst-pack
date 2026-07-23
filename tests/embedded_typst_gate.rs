@@ -25,14 +25,12 @@ fn approved_baseline_covers_the_complete_differential_matrix() {
         categories,
         BTreeSet::from([
             "diagnostics",
-            "discovery",
             "fonts",
             "html",
             "packages",
             "pack-overrides",
             "pdf",
             "png",
-            "replay",
             "shared-requests",
             "svg",
         ])

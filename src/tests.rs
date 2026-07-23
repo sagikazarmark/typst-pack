@@ -1,22 +1,14 @@
 //! Crate tests.
 
 use crate::compile::{CompileError, compile as compile_request, compile_world as compile};
-#[cfg(feature = "fs")]
-use crate::packer::DiscoveryWorld;
 use crate::world::PackWorld;
 use crate::*;
 
-use std::collections::BTreeSet;
-use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, mpsc};
-use std::time::Duration;
 
 use typst::World;
-use typst::diag::{FileError, FileResult};
 use typst::foundations::Bytes;
-use typst::syntax::{FileId, RootedPath, VirtualPath, VirtualRoot};
-use typst_kit::files::FileLoader;
+use typst::syntax::{RootedPath, VirtualPath, VirtualRoot};
 
 fn tiny_png() -> Vec<u8> {
     tiny_skia::Pixmap::new(4, 4).unwrap().encode_png().unwrap()
@@ -39,17 +31,9 @@ fn test_package_manifest(
     vendored: Vec<PackageManifest>,
     unvendored: Vec<PackageManifest>,
 ) -> Vec<u8> {
-    PackManifest::new(
-        "main.typ".to_owned(),
-        BTreeSet::new(),
-        vendored,
-        unvendored,
-        vec![],
-        vec![],
-        None,
-    )
-    .to_toml()
-    .into_bytes()
+    PackManifest::new("main.typ".to_owned(), vendored, unvendored, vec![], None)
+        .to_toml()
+        .into_bytes()
 }
 
 #[test]
@@ -114,143 +98,6 @@ fn two_face_collection(font: &[u8]) -> Vec<u8> {
     collection.resize(second_offset, 0);
     collection.extend_from_slice(&adjusted_font(font, second_offset));
     collection
-}
-
-struct MemoryProjectFile {
-    path: String,
-    data: Bytes,
-    calls: Arc<AtomicUsize>,
-}
-
-impl MemoryProjectFile {
-    fn new(path: &str, data: impl Into<Vec<u8>>) -> Self {
-        Self {
-            path: path.to_owned(),
-            data: Bytes::new(data.into()),
-            calls: Arc::new(AtomicUsize::new(0)),
-        }
-    }
-
-    fn tracked(path: &str, data: impl Into<Vec<u8>>) -> (Self, Arc<AtomicUsize>) {
-        let loader = Self::new(path, data);
-        let calls = Arc::clone(&loader.calls);
-        (loader, calls)
-    }
-}
-
-impl FileLoader for MemoryProjectFile {
-    fn load(&self, id: FileId) -> FileResult<Bytes> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        let path = id.vpath().get_without_slash();
-        if matches!(id.root(), VirtualRoot::Project) && path == self.path {
-            Ok(self.data.clone())
-        } else {
-            Err(FileError::NotFound(PathBuf::from(path)))
-        }
-    }
-}
-
-struct MutableProjectFile {
-    path: String,
-    data: Arc<Mutex<Bytes>>,
-}
-
-impl FileLoader for MutableProjectFile {
-    fn load(&self, id: FileId) -> FileResult<Bytes> {
-        let path = id.vpath().get_without_slash();
-        if matches!(id.root(), VirtualRoot::Project) && path == self.path {
-            Ok(self
-                .data
-                .lock()
-                .expect("mutable provider lock poisoned")
-                .clone())
-        } else {
-            Err(FileError::NotFound(PathBuf::from(path)))
-        }
-    }
-}
-
-struct ErrorProjectLoader {
-    error: FileError,
-    calls: Arc<AtomicUsize>,
-}
-
-struct BlockingProjectFiles {
-    paths: Vec<String>,
-    data: Bytes,
-    entered: mpsc::Sender<String>,
-    release: Arc<Mutex<mpsc::Receiver<()>>>,
-}
-
-impl FileLoader for BlockingProjectFiles {
-    fn load(&self, id: FileId) -> FileResult<Bytes> {
-        let path = id.vpath().get_without_slash();
-        if matches!(id.root(), VirtualRoot::Project)
-            && self.paths.iter().any(|candidate| candidate == path)
-        {
-            self.entered
-                .send(path.to_owned())
-                .map_err(|_| FileError::Other(Some("test entry receiver was dropped".into())))?;
-            self.release
-                .lock()
-                .expect("test release lock poisoned")
-                .recv_timeout(TEST_SYNC_TIMEOUT)
-                .map_err(|_| FileError::Other(Some("timed out waiting for test release".into())))?;
-            Ok(self.data.clone())
-        } else {
-            Err(FileError::NotFound(PathBuf::from(path)))
-        }
-    }
-}
-
-const TEST_SYNC_TIMEOUT: Duration = Duration::from_secs(5);
-
-struct ReleaseGuard {
-    sender: mpsc::Sender<()>,
-    remaining: usize,
-}
-
-impl ReleaseGuard {
-    fn new(sender: mpsc::Sender<()>, remaining: usize) -> Self {
-        Self { sender, remaining }
-    }
-
-    fn release_all(&mut self) {
-        while self.remaining > 0 {
-            let _ = self.sender.send(());
-            self.remaining -= 1;
-        }
-    }
-}
-
-impl Drop for ReleaseGuard {
-    fn drop(&mut self) {
-        self.release_all();
-    }
-}
-
-impl ErrorProjectLoader {
-    fn tracked(error: FileError) -> (Self, Arc<AtomicUsize>) {
-        let calls = Arc::new(AtomicUsize::new(0));
-        (
-            Self {
-                error,
-                calls: Arc::clone(&calls),
-            },
-            calls,
-        )
-    }
-}
-
-impl FileLoader for ErrorProjectLoader {
-    fn load(&self, _id: FileId) -> FileResult<Bytes> {
-        self.calls.fetch_add(1, Ordering::Relaxed);
-        Err(self.error.clone())
-    }
-}
-
-fn project_file_id(path: &str) -> FileId {
-    RootedPath::new(VirtualRoot::Project, VirtualPath::new(path).unwrap()).intern()
 }
 
 fn raw_stored_zip(entries: &[(&str, &[u8])]) -> Vec<u8> {
@@ -361,8 +208,6 @@ fn manifest_roundtrip() {
 
         [project]
         entrypoint = "main.typ"
-        resource-slots = ["logo.png"]
-
         [packages]
         vendored = [{ spec = "@preview/cetz:0.3.4", tree-digest = "00000000000000000000000000000001", tree-identity-kind = "complete-package-tree", tree-identity-schema = "typst-pack-complete-package-tree-v1", tree-identity-algorithm = "typst-hash128-0.15", file-count = 1, byte-length = 1 }]
         unvendored = [{ spec = "@preview/tablex:0.0.9", tree-digest = "00000000000000000000000000000002", tree-identity-kind = "complete-package-tree", tree-identity-schema = "typst-pack-complete-package-tree-v1", tree-identity-algorithm = "typst-hash128-0.15", file-count = 1, byte-length = 1 }]
@@ -381,7 +226,7 @@ fn manifest_roundtrip() {
     assert_eq!(manifest.unvendored_packages().len(), 1);
 
     let serialized = manifest.to_toml();
-    assert!(serialized.contains("resource-slots ="));
+    assert!(!serialized.contains("resource-slots"));
     assert!(serialized.contains("tree-digest ="));
     let reparsed = PackManifest::from_toml(&serialized).unwrap();
     assert_eq!(manifest, reparsed);
@@ -411,6 +256,8 @@ fn manifest_rejects_conflicting_package_requirements_for_one_spec() {
 fn manifest_rejects_legacy_version_one_field_names() {
     for manifest in [
         "format-version = 1\n[project]\nentrypoint = \"main.typ\"\nexternal-resources = [\"logo.png\"]\n",
+        "format-version = 1\n[project]\nentrypoint = \"main.typ\"\nresource-slots = [\"logo.png\"]\n",
+        "format-version = 1\ndiscovery = []\n[project]\nentrypoint = \"main.typ\"\n",
         "format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[packages]\nexternal = [\"@preview/tablex:0.0.9\"]\n",
     ] {
         assert!(matches!(
@@ -428,8 +275,6 @@ fn manifest_declarations_are_exposed_read_only_through_accessors() {
 
         [project]
         entrypoint = "main.typ"
-        resource-slots = ["logo.png"]
-
         [packages]
         vendored = [{ spec = "@preview/cetz:0.3.4", tree-digest = "00000000000000000000000000000001", tree-identity-kind = "complete-package-tree", tree-identity-schema = "typst-pack-complete-package-tree-v1", tree-identity-algorithm = "typst-hash128-0.15", file-count = 1, byte-length = 1 }]
         unvendored = [{ spec = "@preview/tablex:0.0.9", tree-digest = "00000000000000000000000000000002", tree-identity-kind = "complete-package-tree", tree-identity-schema = "typst-pack-complete-package-tree-v1", tree-identity-algorithm = "typst-hash128-0.15", file-count = 1, byte-length = 1 }]
@@ -448,10 +293,6 @@ fn manifest_declarations_are_exposed_read_only_through_accessors() {
 
     assert_eq!(manifest.format_version(), 1);
     assert_eq!(manifest.project().entrypoint(), "main.typ");
-    assert_eq!(
-        manifest.project().resource_slots().collect::<Vec<_>>(),
-        ["logo.png"]
-    );
     let vendored = "@preview/cetz:0.3.4"
         .parse::<typst::syntax::package::PackageSpec>()
         .unwrap();
@@ -468,77 +309,6 @@ fn manifest_declarations_are_exposed_read_only_through_accessors() {
     assert_eq!(manifest.fonts()[0].families(), ["Test"]);
     assert_eq!(manifest.metadata().unwrap().name(), Some("Test pack"));
     assert_eq!(manifest.metadata().unwrap().authors(), ["A. U. Thor"]);
-}
-
-#[test]
-fn manifest_defaults_to_no_resource_slots() {
-    let manifest =
-        PackManifest::from_toml("format-version = 1\n[project]\nentrypoint = \"main.typ\"\n")
-            .unwrap();
-
-    assert!(manifest.project().resource_slots().next().is_none());
-}
-
-#[test]
-fn resource_slot_invariants_have_archive_and_builder_error_wrappers() {
-    let builder_error = Pack::builder("main.typ")
-        .resource_slot("../secret.png")
-        .unwrap_err();
-    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\nresource-slots = [\"../secret.png\"]\n";
-    let bytes = raw_stored_zip(&[(MANIFEST_PATH, manifest), ("project/main.typ", b"Hello")]);
-    let archive_error = Pack::from_bytes(bytes).unwrap_err();
-
-    let PackBuildError::Invariant(builder_invariant) = builder_error else {
-        panic!("builder did not report a Pack invariant: {builder_error}");
-    };
-    let PackReadError::Invariant(archive_invariant) = archive_error else {
-        panic!("archive did not report a Pack invariant: {archive_error}");
-    };
-    assert_eq!(archive_invariant, builder_invariant);
-    assert!(matches!(
-        archive_invariant,
-        PackInvariantError::InvalidPath {
-            role: PackPathRole::ResourceSlot,
-            ref path,
-            ..
-        } if path == "../secret.png"
-    ));
-}
-
-#[test]
-fn pack_normalizes_resource_slots_deterministically() {
-    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\nresource-slots = [\"z.png\", \"assets/../logo.png\", \"./logo.png\"]\n";
-    let pack = Pack::from_bytes(raw_stored_zip(&[
-        (MANIFEST_PATH, manifest),
-        ("project/main.typ", b"Hello"),
-    ]))
-    .unwrap();
-
-    assert_eq!(
-        pack.resource_slots().collect::<Vec<_>>(),
-        ["logo.png", "z.png"]
-    );
-    assert!(
-        pack.manifest()
-            .to_toml()
-            .contains("resource-slots = [\n    \"logo.png\",\n    \"z.png\",\n]")
-    );
-
-    let built = Pack::builder("main.typ")
-        .file("main.typ", b"Hello".to_vec())
-        .unwrap()
-        .resource_slot("z.png")
-        .unwrap()
-        .resource_slot("assets/../logo.png")
-        .unwrap()
-        .resource_slot("./logo.png")
-        .unwrap()
-        .build()
-        .unwrap();
-    assert_eq!(
-        built.resource_slots().collect::<Vec<_>>(),
-        ["logo.png", "z.png"]
-    );
 }
 
 #[test]
@@ -620,13 +390,6 @@ fn pack_builder_rejects_paths_that_cannot_name_root_relative_files() {
             ..
         }))
     ));
-    assert!(matches!(
-        Pack::builder("main.typ").resource_slot("."),
-        Err(PackBuildError::Invariant(PackInvariantError::InvalidPath {
-            role: PackPathRole::ResourceSlot,
-            ..
-        }))
-    ));
     for path in ["C:outside.txt", "./C:/outside.txt"] {
         assert!(matches!(
             Pack::builder("main.typ").file(path, Vec::new()),
@@ -661,7 +424,7 @@ fn pack_construction_rejects_conflicting_project_tree_roles() {
         .unwrap()
         .file("assets-foo", b"interleaved".to_vec())
         .unwrap()
-        .resource_slot("assets/logo.png")
+        .file("assets/logo.png", b"logo".to_vec())
         .unwrap()
         .build();
     assert!(matches!(
@@ -671,16 +434,17 @@ fn pack_construction_rejects_conflicting_project_tree_roles() {
                 ref ancestor,
                 ref descendant,
                 ancestor_role: PackPathRole::ProjectFile,
-                descendant_role: PackPathRole::ResourceSlot,
+                descendant_role: PackPathRole::ProjectFile,
             }
         )) if ancestor == "assets" && descendant == "assets/logo.png"
     ));
 
-    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\nresource-slots = [\"assets/logo.png\"]\n";
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
     let bytes = raw_stored_zip(&[
         (MANIFEST_PATH, manifest),
         ("project/main.typ", b"Hello"),
         ("project/assets", b"packed"),
+        ("project/assets/logo.png", b"logo"),
         ("project/assets-foo", b"interleaved"),
     ]);
     assert!(matches!(
@@ -690,7 +454,7 @@ fn pack_construction_rejects_conflicting_project_tree_roles() {
                 ref ancestor,
                 ref descendant,
                 ancestor_role: PackPathRole::ProjectFile,
-                descendant_role: PackPathRole::ResourceSlot,
+                descendant_role: PackPathRole::ProjectFile,
             }
         )) if ancestor == "assets" && descendant == "assets/logo.png"
     ));
@@ -1227,11 +991,11 @@ fn invariant_diagnostics_do_not_expose_optional_field_formatting() {
         ancestor: "assets".to_owned(),
         ancestor_role: PackPathRole::ProjectFile,
         descendant: "assets/logo.png".to_owned(),
-        descendant_role: PackPathRole::ResourceSlot,
+        descendant_role: PackPathRole::ProjectFile,
     };
     assert_eq!(
         tree.to_string(),
-        "project file path `assets` conflicts with Resource Slot descendant `assets/logo.png`"
+        "project file path `assets` conflicts with project file descendant `assets/logo.png`"
     );
 
     let font = PackBuildError::InvalidFontInput { index: 2 };
@@ -1250,30 +1014,6 @@ fn a_constructed_pack_builds_a_world_without_revalidation() {
         .unwrap();
 
     let _: PackWorld = PackWorld::builder(pack).build().unwrap();
-}
-
-#[test]
-fn pack_world_accepts_a_resource_provider() {
-    let pack = Pack::builder("main.typ")
-        .file("main.typ", Vec::new())
-        .unwrap()
-        .resource_slot("resource.bin")
-        .unwrap()
-        .build()
-        .unwrap();
-
-    let world = PackWorld::builder(pack)
-        .resource_provider(MemoryProjectFile::new("resource.bin", b"provided".to_vec()))
-        .build()
-        .unwrap();
-
-    assert_eq!(
-        world
-            .file(project_file_id("resource.bin"))
-            .unwrap()
-            .as_slice(),
-        b"provided"
-    );
 }
 
 #[test]
@@ -1313,7 +1053,7 @@ fn full_unicode_pack_roundtrip_is_equivalent_and_idempotent() {
         .unwrap()
         .file("资料/说明.txt", b"Notes".to_vec())
         .unwrap()
-        .resource_slot("品牌/图.png")
+        .file("品牌/图.png", tiny_png())
         .unwrap()
         .package_file(vendored, "章节.typ", b"Package".to_vec())
         .unwrap()
@@ -1330,59 +1070,10 @@ fn full_unicode_pack_roundtrip_is_equivalent_and_idempotent() {
 
     assert_eq!(reread.manifest(), pack.manifest());
     assert_eq!(reread.file("资料/说明.txt").unwrap().as_slice(), b"Notes");
-    assert_eq!(reread.resource_slots().collect::<Vec<_>>(), ["品牌/图.png"]);
+    assert!(reread.file("品牌/图.png").is_some());
     assert_eq!(reread.packages().count(), 1);
     assert_eq!(reread.fonts().len(), 1);
     assert_eq!(reread.to_bytes().unwrap(), bytes);
-}
-
-#[test]
-fn manually_declared_resource_slot_survives_archive_roundtrip() {
-    let pack = Pack::builder("main.typ")
-        .file("main.typ", b"#image(\"assets/logo.png\")".to_vec())
-        .unwrap()
-        .resource_slot("assets/logo.png")
-        .unwrap()
-        .build()
-        .unwrap();
-
-    assert!(pack.file("assets/logo.png").is_none());
-    let pack = Pack::from_bytes(pack.to_bytes().unwrap()).unwrap();
-    assert_eq!(
-        pack.resource_slots().collect::<Vec<_>>(),
-        ["assets/logo.png"]
-    );
-}
-
-#[test]
-fn pack_builder_rejects_resource_slot_file_conflicts() {
-    let packed_first = Pack::builder("main.typ")
-        .file("main.typ", Vec::new())
-        .unwrap()
-        .file("logo.png", tiny_png())
-        .unwrap()
-        .resource_slot("logo.png")
-        .unwrap()
-        .build();
-    let declared_first = Pack::builder("main.typ")
-        .file("main.typ", Vec::new())
-        .unwrap()
-        .resource_slot("logo.png")
-        .unwrap()
-        .file("logo.png", tiny_png())
-        .unwrap()
-        .build();
-
-    assert!(matches!(
-        packed_first,
-        Err(PackBuildError::Invariant(PackInvariantError::PathRoleConflict { path, .. }))
-            if path == "logo.png"
-    ));
-    assert!(matches!(
-        declared_first,
-        Err(PackBuildError::Invariant(PackInvariantError::PathRoleConflict { path, .. }))
-            if path == "logo.png"
-    ));
 }
 
 #[test]
@@ -1399,9 +1090,9 @@ fn repeated_builder_calls_replace_data_within_the_same_role() {
         .unwrap()
         .package_file(spec.clone(), "lib.typ", b"second".to_vec())
         .unwrap()
-        .resource_slot("optional.bin")
+        .file("optional.bin", b"first".to_vec())
         .unwrap()
-        .resource_slot("optional.bin")
+        .file("optional.bin", b"second".to_vec())
         .unwrap()
         .build()
         .unwrap();
@@ -1411,7 +1102,7 @@ fn repeated_builder_calls_replace_data_within_the_same_role() {
         pack.package_file(&spec, "lib.typ").unwrap().as_slice(),
         b"second"
     );
-    assert_eq!(pack.resource_slots().collect::<Vec<_>>(), ["optional.bin"]);
+    assert_eq!(pack.file("optional.bin").unwrap().as_slice(), b"second");
 }
 
 #[test]
@@ -1839,32 +1530,6 @@ fn read_accepts_safe_aliases_at_archive_role_boundaries() {
 }
 
 #[test]
-fn read_rejects_resource_slot_file_conflicts() {
-    use std::io::Write;
-
-    let mut buffer = std::io::Cursor::new(Vec::new());
-    let mut zip = zip::ZipWriter::new(&mut buffer);
-    let options = zip::write::SimpleFileOptions::default();
-    zip.start_file(MANIFEST_PATH, options).unwrap();
-    zip.write_all(
-        b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\nresource-slots = [\"logo.png\"]\n",
-    )
-    .unwrap();
-    zip.start_file("project/main.typ", options).unwrap();
-    zip.write_all(b"Hello").unwrap();
-    zip.start_file("project/logo.png", options).unwrap();
-    zip.write_all(&tiny_png()).unwrap();
-    zip.finish().unwrap();
-
-    let result = Pack::from_bytes(buffer.into_inner());
-    assert!(matches!(
-        result,
-        Err(PackReadError::Invariant(PackInvariantError::PathRoleConflict { path, .. }))
-            if path == "logo.png"
-    ));
-}
-
-#[test]
 fn parse_page_selection_understands_ranges() {
     use std::num::NonZeroUsize;
     let one = NonZeroUsize::new(1);
@@ -1954,94 +1619,6 @@ fn compile_in_memory_pack_to_pdf_and_svg() {
 }
 
 #[test]
-fn declared_resource_slot_compiles_through_a_provider() {
-    let pack = Pack::builder("main.typ")
-        .file(
-            "main.typ",
-            b"#set page(width: 20pt, height: 20pt, margin: 0pt)\n#image(\"assets/logo.png\")"
-                .to_vec(),
-        )
-        .unwrap()
-        .resource_slot("assets/logo.png")
-        .unwrap()
-        .build()
-        .unwrap();
-
-    let world = PackWorld::builder(pack.clone())
-        .resource_provider(MemoryProjectFile::new("assets/logo.png", tiny_png()))
-        .build()
-        .unwrap();
-    let pdf = compile(
-        &world,
-        &CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
-    )
-    .unwrap();
-    assert!(pdf.artifacts[0].bytes().starts_with(b"%PDF"));
-    let png = compile(
-        &world,
-        &CompilationOutputSpecification::Png(PngOutputSpecification::default()),
-    )
-    .unwrap();
-    assert!(
-        png.artifacts[0]
-            .bytes()
-            .starts_with(&[0x89, b'P', b'N', b'G'])
-    );
-    let svg = compile(
-        &world,
-        &CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
-    )
-    .unwrap();
-    assert!(
-        std::str::from_utf8(svg.artifacts[0].bytes())
-            .unwrap()
-            .contains("<svg")
-    );
-
-    let world = PackWorld::builder(pack)
-        .resource_provider(MemoryProjectFile::new("assets/logo.png", tiny_png()))
-        .feature(typst::Feature::Html)
-        .build()
-        .unwrap();
-    let html = compile(
-        &world,
-        &CompilationOutputSpecification::Html(HtmlOutputSpecification::default()),
-    )
-    .unwrap();
-    assert!(
-        std::str::from_utf8(html.artifacts[0].bytes())
-            .unwrap()
-            .contains("<html")
-    );
-}
-
-#[test]
-fn source_compilation_cannot_use_a_non_typ_resource_slot_provider() {
-    let pack = Pack::builder("main.typ")
-        .file("main.typ", b"#include \"provided.data\"".to_vec())
-        .unwrap()
-        .resource_slot("provided.data")
-        .unwrap()
-        .build()
-        .unwrap();
-    let (provider, calls) =
-        MemoryProjectFile::tracked("provided.data", b"#rect(width: 1pt, height: 1pt)".to_vec());
-    let world = PackWorld::builder(pack)
-        .resource_provider(provider)
-        .build()
-        .unwrap();
-
-    assert!(
-        compile(
-            &world,
-            &CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
-        )
-        .is_err()
-    );
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
-}
-
-#[test]
 fn pdf_default_timestamp_is_resolved_after_compilation() {
     let pack = Pack::builder("main.typ")
         .file(
@@ -2049,15 +1626,11 @@ fn pdf_default_timestamp_is_resolved_after_compilation() {
             b"#read(\"timestamp-trigger.bin\")\n#rect(width: 1pt, height: 1pt)".to_vec(),
         )
         .unwrap()
-        .resource_slot("timestamp-trigger.bin")
+        .file("timestamp-trigger.bin", b"read".to_vec())
         .unwrap()
         .build()
         .unwrap();
-    let (provider, calls) = MemoryProjectFile::tracked("timestamp-trigger.bin", b"read".to_vec());
-    let world = PackWorld::builder(pack)
-        .resource_provider(provider)
-        .build()
-        .unwrap();
+    let world = PackWorld::builder(pack).build().unwrap();
     let timestamp = typst_pdf::Timestamp::new_utc(
         typst::foundations::Datetime::from_ymd_hms(2000, 1, 2, 3, 4, 5).unwrap(),
     );
@@ -2067,7 +1640,6 @@ fn pdf_default_timestamp_is_resolved_after_compilation() {
         &world,
         &CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
         || {
-            assert_eq!(calls.load(Ordering::Acquire), 1);
             default_resolutions.fetch_add(1, Ordering::Relaxed);
             Some(timestamp)
         },
@@ -2089,256 +1661,6 @@ fn pdf_default_timestamp_is_resolved_after_compilation() {
         default_output.artifacts[0].bytes(),
         explicit_output.artifacts[0].bytes()
     );
-}
-
-#[test]
-fn resource_providers_follow_registration_order() {
-    let pack = Pack::builder("main.typ")
-        .file("main.typ", Vec::new())
-        .unwrap()
-        .resource_slot("resource.bin")
-        .unwrap()
-        .build()
-        .unwrap();
-    let id = project_file_id("resource.bin");
-
-    let (first, first_calls) = MemoryProjectFile::tracked("resource.bin", b"first".to_vec());
-    let (second, second_calls) = MemoryProjectFile::tracked("resource.bin", b"second".to_vec());
-    let world = PackWorld::builder(pack.clone())
-        .resource_provider(first)
-        .resource_provider(second)
-        .build()
-        .unwrap();
-    assert_eq!(world.file(id).unwrap().as_slice(), b"first");
-    assert_eq!(first_calls.load(Ordering::Relaxed), 1);
-    assert_eq!(second_calls.load(Ordering::Relaxed), 0);
-
-    let (missing, missing_calls) = MemoryProjectFile::tracked("other.bin", Vec::new());
-    let (fallback, fallback_calls) =
-        MemoryProjectFile::tracked("resource.bin", b"fallback".to_vec());
-    let world = PackWorld::builder(pack.clone())
-        .resource_provider(missing)
-        .resource_provider(fallback)
-        .build()
-        .unwrap();
-    assert_eq!(world.file(id).unwrap().as_slice(), b"fallback");
-    assert_eq!(missing_calls.load(Ordering::Relaxed), 1);
-    assert_eq!(fallback_calls.load(Ordering::Relaxed), 1);
-
-    let (denied, denied_calls) = ErrorProjectLoader::tracked(FileError::AccessDenied);
-    let (masked, masked_calls) = MemoryProjectFile::tracked("resource.bin", b"masked".to_vec());
-    let world = PackWorld::builder(pack.clone())
-        .resource_provider(denied)
-        .resource_provider(masked)
-        .build()
-        .unwrap();
-    assert_eq!(world.file(id), Err(FileError::AccessDenied));
-    assert_eq!(denied_calls.load(Ordering::Relaxed), 1);
-    assert_eq!(masked_calls.load(Ordering::Relaxed), 0);
-
-    let integrity_error = FileError::Other(Some("checksum mismatch".into()));
-    let (corrupt, corrupt_calls) = ErrorProjectLoader::tracked(integrity_error.clone());
-    let (masked, masked_calls) = MemoryProjectFile::tracked("resource.bin", b"masked".to_vec());
-    let world = PackWorld::builder(pack)
-        .resource_provider(corrupt)
-        .resource_provider(masked)
-        .build()
-        .unwrap();
-    assert_eq!(world.file(id), Err(integrity_error));
-    assert_eq!(corrupt_calls.load(Ordering::Relaxed), 1);
-    assert_eq!(masked_calls.load(Ordering::Relaxed), 0);
-}
-
-#[test]
-fn all_missing_resource_providers_report_the_requested_project_path_lazily() {
-    let pack = Pack::builder("main.typ")
-        .file("main.typ", Vec::new())
-        .unwrap()
-        .resource_slot("requested.bin")
-        .unwrap()
-        .resource_slot("unused.bin")
-        .unwrap()
-        .build()
-        .unwrap();
-    let (provider, calls) = ErrorProjectLoader::tracked(FileError::NotFound(PathBuf::from(
-        "/host-specific/missing.bin",
-    )));
-    let world = PackWorld::builder(pack)
-        .resource_provider(provider)
-        .build()
-        .unwrap();
-
-    assert_eq!(
-        world.file(project_file_id("requested.bin")),
-        Err(FileError::NotFound(PathBuf::from("requested.bin")))
-    );
-    assert_eq!(calls.load(Ordering::Relaxed), 1);
-}
-
-#[test]
-fn source_requests_do_not_consult_resource_providers() {
-    let pack = Pack::builder("main.typ")
-        .file("main.typ", Vec::new())
-        .unwrap()
-        .resource_slot("provided.typ")
-        .unwrap()
-        .build()
-        .unwrap();
-    let (provider, calls) = MemoryProjectFile::tracked("provided.typ", b"injected".to_vec());
-    let world = PackWorld::builder(pack)
-        .resource_provider(provider)
-        .build()
-        .unwrap();
-
-    assert!(matches!(
-        world.source(project_file_id("provided.typ")),
-        Err(FileError::NotFound(_))
-    ));
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
-}
-
-#[test]
-fn raw_reads_use_providers_even_when_a_resource_slot_has_a_typ_extension() {
-    let pack = Pack::builder("main.typ")
-        .file(
-            "main.typ",
-            b"#assert(read(\"provided.typ\") == \"injected\")\n#rect(width: 1pt, height: 1pt)"
-                .to_vec(),
-        )
-        .unwrap()
-        .resource_slot("provided.typ")
-        .unwrap()
-        .build()
-        .unwrap();
-    let (provider, calls) = MemoryProjectFile::tracked("provided.typ", b"injected".to_vec());
-    let world = PackWorld::builder(pack)
-        .resource_provider(provider)
-        .build()
-        .unwrap();
-
-    let output = compile(
-        &world,
-        &CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
-    )
-    .unwrap();
-
-    assert_eq!(output.artifacts.len(), 1);
-    assert_eq!(calls.load(Ordering::Relaxed), 1);
-}
-
-#[test]
-fn concurrent_world_file_and_source_requests_remain_isolated() {
-    let pack = Pack::builder("main.typ")
-        .file("main.typ", Vec::new())
-        .unwrap()
-        .resource_slot("external.typ")
-        .unwrap()
-        .build()
-        .unwrap();
-    let (entered_tx, entered_rx) = mpsc::channel();
-    let (release_tx, release_rx) = mpsc::channel();
-    let world = PackWorld::builder(pack)
-        .resource_provider(BlockingProjectFiles {
-            paths: vec!["external.typ".to_owned()],
-            data: Bytes::new(b"provided".to_vec()),
-            entered: entered_tx,
-            release: Arc::new(Mutex::new(release_rx)),
-        })
-        .build()
-        .unwrap();
-    let id = project_file_id("external.typ");
-
-    std::thread::scope(|scope| {
-        let mut release = ReleaseGuard::new(release_tx, 1);
-        let world = &world;
-        let file = scope.spawn(|| world.file(id));
-        assert_eq!(
-            entered_rx.recv_timeout(TEST_SYNC_TIMEOUT).unwrap(),
-            "external.typ"
-        );
-
-        let (source_finished_tx, source_finished_rx) = mpsc::channel();
-        let source = scope.spawn(move || {
-            let result = world.source(id);
-            let _ = source_finished_tx.send(());
-            result
-        });
-        source_finished_rx.recv_timeout(TEST_SYNC_TIMEOUT).unwrap();
-
-        release.release_all();
-        let file_result = file.join().unwrap();
-        let source_result = source.join().unwrap();
-
-        assert!(matches!(source_result, Err(FileError::NotFound(_))));
-        assert_eq!(file_result.unwrap().as_slice(), b"provided");
-    });
-}
-
-#[test]
-fn packed_and_undeclared_project_paths_do_not_consult_resource_providers() {
-    let packed = Pack::builder("main.typ")
-        .file("main.typ", Vec::new())
-        .unwrap()
-        .file("resource.bin", b"packed".to_vec())
-        .unwrap()
-        .build()
-        .unwrap();
-    let (provider, calls) = MemoryProjectFile::tracked("resource.bin", b"provided".to_vec());
-    let world = PackWorld::builder(packed)
-        .resource_provider(provider)
-        .build()
-        .unwrap();
-    assert_eq!(
-        world
-            .file(project_file_id("resource.bin"))
-            .unwrap()
-            .as_slice(),
-        b"packed"
-    );
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
-
-    let undeclared = Pack::builder("main.typ")
-        .file("main.typ", Vec::new())
-        .unwrap()
-        .build()
-        .unwrap();
-    let (provider, calls) = MemoryProjectFile::tracked("missing.bin", b"provided".to_vec());
-    let world = PackWorld::builder(undeclared)
-        .resource_provider(provider)
-        .build()
-        .unwrap();
-    assert!(matches!(
-        world.file(project_file_id("missing.bin")),
-        Err(FileError::NotFound(_))
-    ));
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
-}
-
-#[test]
-fn package_requests_do_not_consult_resource_providers() {
-    use std::str::FromStr as _;
-
-    let pack = Pack::builder("main.typ")
-        .file("main.typ", Vec::new())
-        .unwrap()
-        .resource_slot("lib.typ")
-        .unwrap()
-        .build()
-        .unwrap();
-    let (provider, calls) = MemoryProjectFile::tracked("lib.typ", b"provided".to_vec());
-    let world = PackWorld::builder(pack)
-        .resource_provider(provider)
-        .build()
-        .unwrap();
-    let spec = typst::syntax::package::PackageSpec::from_str("@local/example:1.0.0").unwrap();
-    let id = RootedPath::new(
-        VirtualRoot::Package(spec),
-        VirtualPath::new("lib.typ").unwrap(),
-    )
-    .intern();
-
-    assert!(world.file(id).is_err());
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
 
 #[test]
@@ -2480,13 +1802,12 @@ Rows: #csv("data.csv").len()
         Packer::new(&project, "main.typ")
             .package_path(&packages)
             .system_fonts(false)
-            .include("notes.txt")
             .pack()
             .unwrap()
     }
 
     #[test]
-    fn discovery_finds_all_used_files_and_packages() {
+    fn structural_creation_packs_all_project_files_and_complete_packages() {
         let dir = tempfile::tempdir().unwrap();
         let outcome = pack_fixture(dir.path());
 
@@ -2518,13 +1839,93 @@ Rows: #csv("data.csv").len()
         assert!(outcome.pack.package_file(spec, "unused.txt").is_some());
 
         let reread = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
-        assert_eq!(outcome.pack.discovery().len(), 1);
-        assert!(!outcome.pack.discovery()[0].observations().is_empty());
-        let mut without_discovery = outcome.pack.clone();
-        without_discovery.set_discovery(vec![]);
-        assert_ne!(without_discovery.identity(), outcome.pack.identity());
-        assert_eq!(reread.discovery(), outcome.pack.discovery());
         assert_eq!(reread.identity(), outcome.pack.identity());
+    }
+
+    #[test]
+    fn structural_creation_applies_the_root_project_ignore_policy() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(project.join("ignored/reincluded")).unwrap();
+        fs::create_dir_all(project.join("nested")).unwrap();
+        fs::write(project.join("main.typ"), "Hello").unwrap();
+        fs::write(project.join("unused.txt"), "packed").unwrap();
+        fs::write(
+            project.join(".typkignore"),
+            "ignored/**\n!ignored/reincluded/keep.txt\n*.secret\n",
+        )
+        .unwrap();
+        fs::write(project.join("ignored/drop.txt"), "drop").unwrap();
+        fs::write(project.join("ignored/reincluded/keep.txt"), "keep").unwrap();
+        fs::write(project.join("nested/.typkignore"), "*.txt\n").unwrap();
+        fs::write(project.join("nested/ordinary.txt"), "packed").unwrap();
+        fs::write(project.join("private.secret"), "drop").unwrap();
+        fs::write(project.join("old.typk"), "drop").unwrap();
+
+        let outcome = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .pack()
+            .unwrap();
+
+        assert_eq!(
+            outcome.report.files,
+            [
+                ".typkignore",
+                "ignored/reincluded/keep.txt",
+                "main.typ",
+                "nested/.typkignore",
+                "nested/ordinary.txt",
+                "unused.txt",
+            ]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn structural_creation_prunes_conclusively_ignored_subtrees() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(project.join("ignored")).unwrap();
+        fs::create_dir_all(project.join("other")).unwrap();
+        fs::write(project.join("main.typ"), "Hello").unwrap();
+        fs::write(project.join(".typkignore"), "ignored/\n!/other/keep.txt\n").unwrap();
+        fs::write(project.join("other/keep.txt"), "keep").unwrap();
+        symlink(dir.path(), project.join("ignored/outside")).unwrap();
+
+        let outcome = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .pack()
+            .unwrap();
+
+        assert_eq!(
+            outcome.report.files,
+            [".typkignore", "main.typ", "other/keep.txt"]
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn structural_creation_rejects_a_symlinked_root_ignore_policy() {
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("main.typ"), "Hello").unwrap();
+        fs::write(dir.path().join("outside-ignore"), "*.txt\n").unwrap();
+        symlink(
+            dir.path().join("outside-ignore"),
+            project.join(".typkignore"),
+        )
+        .unwrap();
+
+        assert!(matches!(
+            Packer::new(&project, "main.typ").system_fonts(false).pack(),
+            Err(PackerError::UnsupportedProjectEntry { ref path })
+                if path == &project.join(".typkignore")
+        ));
     }
 
     #[test]
@@ -2547,7 +1948,7 @@ Rows: #csv("data.csv").len()
     }
 
     #[test]
-    fn discovery_targets_union_target_specific_dependencies() {
+    fn creation_target_does_not_select_project_files() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
         fs::create_dir_all(&project).unwrap();
@@ -2562,79 +1963,11 @@ Rows: #csv("data.csv").len()
         let outcome = Packer::new(&project, "main.typ")
             .system_fonts(false)
             .feature(typst::Feature::Html)
-            .target(DiscoveryTarget::Html)
-            .target(DiscoveryTarget::Paged)
+            .target(CreationTarget::Html)
             .pack()
             .unwrap();
 
         assert_eq!(outcome.report.files, ["html.txt", "main.typ", "paged.txt"]);
-        assert_eq!(outcome.report.discovery_variants.len(), 2);
-        for variant in &outcome.report.discovery_variants {
-            assert_eq!(variant.trace(), variant.replay_trace());
-        }
-        let traces = outcome
-            .report
-            .discovery_variants
-            .iter()
-            .map(|variant| {
-                variant
-                    .trace()
-                    .observations()
-                    .map(|observation| observation.logical_path())
-                    .collect::<BTreeSet<_>>()
-            })
-            .collect::<Vec<_>>();
-        assert_eq!(
-            outcome.report.discovery_variants[0].request().target(),
-            DiscoveryTarget::Html
-        );
-        assert!(traces[0].contains("project:html.txt"));
-        assert!(!traces[0].contains("project:paged.txt"));
-        assert!(traces[1].contains("project:paged.txt"));
-        assert!(!traces[1].contains("project:html.txt"));
-    }
-
-    #[test]
-    fn discovery_targets_union_shared_warnings() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(
-            project.join("main.typ"),
-            "#set text(font: \"Definitely Missing\")\nHello",
-        )
-        .unwrap();
-
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .typst_embedded_fonts(false)
-            .feature(typst::Feature::Html)
-            .target(DiscoveryTarget::Paged)
-            .target(DiscoveryTarget::Html)
-            .pack()
-            .unwrap();
-
-        let missing_font_warnings = outcome
-            .report
-            .compile_warnings
-            .iter()
-            .filter(|warning| warning.message.contains("unknown font family"))
-            .count();
-        assert_eq!(
-            missing_font_warnings, 2,
-            "{:?}",
-            outcome.report.compile_warnings
-        );
-        assert_eq!(outcome.report.discovery_variants.len(), 2);
-        assert!(outcome.report.discovery_variants.iter().all(|variant| {
-            variant
-                .warnings()
-                .iter()
-                .filter(|warning| warning.message.contains("unknown font family"))
-                .count()
-                == 1
-                && variant.warnings() == variant.replay_warnings()
-        }));
     }
 
     #[test]
@@ -2647,7 +1980,7 @@ Rows: #csv("data.csv").len()
 
         let result = Packer::new(&project, "main.typ")
             .system_fonts(false)
-            .after_discovery_hook({
+            .after_creation_hook({
                 let main = main.clone();
                 move || fs::write(&main, "changed").unwrap()
             })
@@ -2659,36 +1992,49 @@ Rows: #csv("data.csv").len()
         ));
     }
 
-    #[cfg(unix)]
     #[test]
-    fn unreadable_included_directory_prevents_pack_issuance() {
-        use std::os::unix::fs::PermissionsExt as _;
-
+    fn changed_project_membership_prevents_pack_issuance() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
-        let included = project.join("included");
-        fs::create_dir_all(&included).unwrap();
-        fs::write(project.join("main.typ"), "Hello").unwrap();
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("main.typ"), "original").unwrap();
+        let added = project.join("added.txt");
 
         let result = Packer::new(&project, "main.typ")
             .system_fonts(false)
-            .include("included")
-            .before_evidence_revalidation_hook({
-                let included = included.clone();
-                move || fs::set_permissions(&included, fs::Permissions::from_mode(0o000)).unwrap()
+            .after_creation_hook({
+                let added = added.clone();
+                move || fs::write(&added, "added").unwrap()
             })
             .pack();
-        fs::set_permissions(&included, fs::Permissions::from_mode(0o700)).unwrap();
 
         assert!(matches!(
             result,
             Err(PackerError::CreationEvidenceChanged { ref path })
-                if path == &included.display().to_string()
+                if path == &added.display().to_string()
         ));
     }
 
     #[test]
-    fn exact_inputs_and_document_time_drive_discovery_and_replay_traces() {
+    fn changes_in_conclusively_ignored_subtrees_do_not_block_issuance() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(project.join("ignored")).unwrap();
+        fs::write(project.join("main.typ"), "original").unwrap();
+        fs::write(project.join(".typkignore"), "ignored/\n").unwrap();
+        let ignored = project.join("ignored/added.txt");
+
+        let outcome = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .after_creation_hook(move || fs::write(&ignored, "added").unwrap())
+            .pack()
+            .unwrap();
+
+        assert!(outcome.pack.file("ignored/added.txt").is_none());
+    }
+
+    #[test]
+    fn exact_inputs_and_document_time_drive_representative_creation() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
         fs::create_dir_all(&project).unwrap();
@@ -2711,70 +2057,10 @@ Rows: #csv("data.csv").len()
             .unwrap();
 
         assert_eq!(outcome.report.files, ["input.txt", "main.typ", "time.txt"]);
-        let variant = &outcome.report.discovery_variants[0];
-        assert_eq!(variant.request().document_timestamp(), 1_704_067_200);
-        assert_eq!(variant.request().inputs().entry_count(), 1);
-        assert_eq!(variant.trace(), variant.replay_trace());
     }
 
     #[test]
-    fn discovery_only_overrides_drive_trace_without_replacing_pack_baseline() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("main.typ"), "#include \"choice.typ\"").unwrap();
-        fs::write(project.join("choice.typ"), "baseline").unwrap();
-        fs::write(project.join("override.txt"), "selected").unwrap();
-
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .discovery_override("choice.typ", "#read(\"override.txt\")".as_bytes())
-            .pack()
-            .unwrap();
-
-        assert_eq!(
-            outcome.pack.file("choice.typ").unwrap().as_slice(),
-            b"baseline"
-        );
-        let variant = &outcome.report.discovery_variants[0];
-        assert_eq!(variant.request().overrides().len(), 1);
-        assert_eq!(variant.trace(), variant.replay_trace());
-        assert!(
-            variant
-                .trace()
-                .observations()
-                .any(|observation| observation.logical_path() == "project:override.txt")
-        );
-        let persisted = outcome.pack.discovery()[0]
-            .observations()
-            .iter()
-            .find(|observation| observation.logical_path() == "project:choice.typ")
-            .unwrap();
-        assert_eq!(persisted.authority(), "project");
-        assert_eq!(persisted.project_provenance(), Some("override"));
-        assert!(persisted.digest().is_none());
-        assert!(persisted.commitment().is_some());
-    }
-
-    #[test]
-    fn package_discovery_does_not_consult_resource_providers() {
-        let dir = tempfile::tempdir().unwrap();
-        let (project, packages) = fixture(dir.path());
-        let (provider, calls) = MemoryProjectFile::tracked("lib.typ", b"injected".to_vec());
-
-        let outcome = Packer::new(&project, "main.typ")
-            .package_path(&packages)
-            .system_fonts(false)
-            .resource_provider(provider)
-            .pack()
-            .unwrap();
-
-        assert_eq!(calls.load(Ordering::Relaxed), 0);
-        assert_eq!(outcome.report.packages_vendored.len(), 1);
-    }
-
-    #[test]
-    fn package_data_precedes_package_cache_during_discovery() {
+    fn package_data_precedes_package_cache_during_creation() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
         fs::create_dir_all(&project).unwrap();
@@ -2812,7 +2098,7 @@ Rows: #csv("data.csv").len()
     }
 
     #[test]
-    fn package_cache_resolves_during_online_and_offline_discovery() {
+    fn package_cache_resolves_during_online_and_offline_creation() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
         fs::create_dir_all(&project).unwrap();
@@ -2853,458 +2139,6 @@ Rows: #csv("data.csv").len()
     }
 
     #[test]
-    fn provider_supplied_resource_survives_the_pack_lifecycle() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(
-            project.join("main.typ"),
-            "#set page(width: 20pt, height: 20pt, margin: 0pt)\n#image(\"assets/logo.png\")",
-        )
-        .unwrap();
-
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_provider(MemoryProjectFile::new("assets/logo.png", tiny_png()))
-            .pack()
-            .unwrap();
-
-        assert_eq!(outcome.report.files, ["main.typ"]);
-        assert_eq!(outcome.report.resource_slots, ["assets/logo.png"]);
-        assert!(outcome.pack.file("assets/logo.png").is_none());
-
-        let pack = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
-        assert_eq!(
-            pack.resource_slots().collect::<Vec<_>>(),
-            ["assets/logo.png"]
-        );
-        let world = PackWorld::builder(pack.clone()).build().unwrap();
-        match compile(
-            &world,
-            &CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
-        ) {
-            Err(CompileError::Diagnostics { errors, .. }) => assert!(
-                errors
-                    .iter()
-                    .any(|diagnostic| diagnostic.message.contains("file not found"))
-            ),
-            _ => panic!("missing Resource Slot did not produce a file diagnostic"),
-        }
-
-        let world = PackWorld::builder(pack)
-            .resource_provider(MemoryProjectFile::new("assets/logo.png", tiny_png()))
-            .build()
-            .unwrap();
-        let output = compile(
-            &world,
-            &CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
-        )
-        .unwrap();
-        assert!(
-            std::str::from_utf8(output.artifacts[0].bytes())
-                .unwrap()
-                .contains("<svg")
-        );
-    }
-
-    #[test]
-    fn explicit_resource_slot_source_project_bytes_are_omitted() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(project.join("assets")).unwrap();
-        fs::write(
-            project.join("main.typ"),
-            "#set page(width: 20pt, height: 20pt, margin: 0pt)\n#image(\"assets/logo.png\")",
-        )
-        .unwrap();
-        fs::write(project.join("assets/logo.png"), tiny_png()).unwrap();
-        let (provider, provider_calls) =
-            MemoryProjectFile::tracked("assets/logo.png", b"provider bytes".to_vec());
-
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_slot("assets/logo.png")
-            .resource_provider(provider)
-            .pack()
-            .unwrap();
-
-        assert_eq!(provider_calls.load(Ordering::Relaxed), 0);
-        assert_eq!(outcome.report.resource_slots, ["assets/logo.png"]);
-        assert!(outcome.pack.file("assets/logo.png").is_none());
-        assert_eq!(
-            outcome.pack.resource_slots().collect::<Vec<_>>(),
-            ["assets/logo.png"]
-        );
-
-        let pack = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
-        let world = PackWorld::builder(pack.clone()).build().unwrap();
-        match compile(
-            &world,
-            &CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
-        ) {
-            Err(CompileError::Diagnostics { errors, .. }) => assert!(
-                errors
-                    .iter()
-                    .any(|diagnostic| diagnostic.message.contains("file not found"))
-            ),
-            _ => panic!("missing Resource Slot did not produce a file diagnostic"),
-        }
-        let world = PackWorld::builder(pack.clone())
-            .resource_provider(MemoryProjectFile::new("assets/logo.png", tiny_png()))
-            .build()
-            .unwrap();
-        assert!(
-            compile(
-                &world,
-                &CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
-            )
-            .is_ok()
-        );
-
-        let target = dir.path().join("extracted");
-        let report = extract(&pack, &target, &ExtractOptions::default()).unwrap();
-        assert_eq!(report.resource_slots, [PathBuf::from("assets/logo.png")]);
-        assert!(
-            !report
-                .written
-                .iter()
-                .any(|path| path == Path::new("assets/logo.png"))
-        );
-        assert!(!target.join("assets/logo.png").exists());
-    }
-
-    #[test]
-    fn explicit_typst_manifest_resource_remains_a_slot_after_discovery() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("main.typ"), "#read(\"typst.toml\")").unwrap();
-        fs::write(
-            project.join("typst.toml"),
-            "[package]\nname = \"representative\"\nversion = \"1.0.0\"\nentrypoint = \"main.typ\"\n",
-        )
-        .unwrap();
-
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_slot("typst.toml")
-            .pack()
-            .unwrap();
-
-        assert_eq!(outcome.report.resource_slots, ["typst.toml"]);
-        assert!(!outcome.report.files.iter().any(|path| path == "typst.toml"));
-        assert!(outcome.pack.file("typst.toml").is_none());
-        assert_eq!(
-            outcome.pack.resource_slots().collect::<Vec<_>>(),
-            ["typst.toml"]
-        );
-    }
-
-    #[test]
-    fn unrequested_resource_slot_is_still_declared() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("main.typ"), "#rect(width: 1pt, height: 1pt)").unwrap();
-
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_slot("conditional/logo.png")
-            .pack()
-            .unwrap();
-
-        assert_eq!(
-            outcome.pack.resource_slots().collect::<Vec<_>>(),
-            ["conditional/logo.png"]
-        );
-        assert!(outcome.report.warnings.is_empty());
-        assert!(outcome.report.compile_warnings.is_empty());
-    }
-
-    #[test]
-    fn explicitly_included_file_cannot_be_a_resource_slot() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("main.typ"), "#rect(width: 1pt, height: 1pt)").unwrap();
-        fs::write(project.join("conditional.txt"), "packed").unwrap();
-
-        let result = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_slot("conditional.txt")
-            .include("conditional.txt")
-            .pack();
-
-        assert!(matches!(
-            result,
-            Err(PackerError::Build(PackBuildError::Invariant(
-                PackInvariantError::PathRoleConflict { path, .. }
-            ))) if path == "conditional.txt"
-        ));
-    }
-
-    #[test]
-    fn resource_slot_entrypoint_declaration_fails_before_discovery() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("main.typ"), "Hello").unwrap();
-
-        let result = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_slot("main.typ")
-            .resource_slot("assets")
-            .resource_slot("assets/logo.png")
-            .pack();
-
-        assert!(matches!(
-            result,
-            Err(PackerError::Build(PackBuildError::Invariant(
-                PackInvariantError::PathRoleConflict {
-                    ref path,
-                    first: PackPathRole::ProjectFile,
-                    second: PackPathRole::ResourceSlot,
-                }
-            ))) if path == "main.typ"
-        ));
-    }
-
-    #[test]
-    fn invalid_explicit_resource_slot_fails_before_discovery() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("main.typ"), "#panic(\"discovery ran\")").unwrap();
-
-        let result = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_slot("../outside.bin")
-            .pack();
-
-        assert!(matches!(
-            result,
-            Err(PackerError::Build(PackBuildError::Invariant(
-                PackInvariantError::InvalidPath {
-                    role: PackPathRole::ResourceSlot,
-                    ..
-                }
-            )))
-        ));
-    }
-
-    #[test]
-    fn resource_slot_tree_conflicts_fail_before_discovery() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("main.typ"), "#panic(\"discovery ran\")").unwrap();
-
-        let result = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_slot("assets")
-            .resource_slot("assets/logo.png")
-            .pack();
-
-        assert!(matches!(
-            result,
-            Err(PackerError::Build(PackBuildError::Invariant(
-                PackInvariantError::PathTreeConflict {
-                    ancestor_role: PackPathRole::ResourceSlot,
-                    descendant_role: PackPathRole::ResourceSlot,
-                    ..
-                }
-            )))
-        ));
-
-        let result = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_slot("main.typ/child")
-            .pack();
-
-        assert!(matches!(
-            result,
-            Err(PackerError::Build(PackBuildError::Invariant(
-                PackInvariantError::PathTreeConflict {
-                    ancestor_role: PackPathRole::ProjectFile,
-                    descendant_role: PackPathRole::ResourceSlot,
-                    ..
-                }
-            )))
-        ));
-    }
-
-    #[test]
-    fn resource_providers_keep_source_project_files_authoritative() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(project.join("assets")).unwrap();
-        fs::write(
-            project.join("main.typ"),
-            "#set page(width: 20pt, height: 20pt, margin: 0pt)\n#image(\"assets/logo.png\")",
-        )
-        .unwrap();
-
-        fs::write(project.join("assets/logo.png"), tiny_png()).unwrap();
-        let (fallback, fallback_calls) =
-            MemoryProjectFile::tracked("assets/logo.png", b"not the packed image".to_vec());
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_provider(fallback)
-            .pack()
-            .unwrap();
-        assert!(outcome.pack.file("assets/logo.png").is_some());
-        assert!(outcome.report.resource_slots.is_empty());
-        assert_eq!(fallback_calls.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn discovery_uses_resource_providers_in_registration_order() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("main.typ"), "#read(\"resource.bin\")").unwrap();
-
-        let (missing, missing_calls) = MemoryProjectFile::tracked("other.bin", Vec::new());
-        let (fallback, fallback_calls) =
-            MemoryProjectFile::tracked("resource.bin", b"fallback".to_vec());
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_provider(missing)
-            .resource_provider(fallback)
-            .pack()
-            .unwrap();
-
-        // Discovery plus the pre-replay and issuance evidence fences.
-        assert_eq!(missing_calls.load(Ordering::Relaxed), 3);
-        assert_eq!(fallback_calls.load(Ordering::Relaxed), 3);
-        assert_eq!(outcome.report.resource_slots, ["resource.bin"]);
-        assert!(outcome.pack.file("resource.bin").is_none());
-    }
-
-    #[test]
-    fn discovery_all_missing_providers_report_the_requested_project_path() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("main.typ"), "#read(\"requested.bin\")").unwrap();
-
-        let (provider, calls) = ErrorProjectLoader::tracked(FileError::NotFound(PathBuf::from(
-            "/host-specific/missing.bin",
-        )));
-        let result = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_provider(provider)
-            .pack();
-        let Err(PackerError::Compile { world, .. }) = result else {
-            panic!("missing provider unexpectedly satisfied discovery")
-        };
-
-        assert_eq!(
-            world.world().file(project_file_id("requested.bin")),
-            Err(FileError::NotFound(PathBuf::from("requested.bin")))
-        );
-        assert_eq!(calls.load(Ordering::Relaxed), 1);
-    }
-
-    #[test]
-    fn discovery_propagates_provider_errors_without_falling_through() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("main.typ"), "#read(\"resource.bin\")").unwrap();
-
-        let (denied, denied_calls) = ErrorProjectLoader::tracked(FileError::AccessDenied);
-        let (masked, masked_calls) = MemoryProjectFile::tracked("resource.bin", b"masked".to_vec());
-        let result = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_provider(denied)
-            .resource_provider(masked)
-            .pack();
-        let Err(PackerError::Compile { world, .. }) = result else {
-            panic!("provider error was unexpectedly masked")
-        };
-
-        assert_eq!(
-            world.world().file(project_file_id("resource.bin")),
-            Err(FileError::AccessDenied)
-        );
-        assert_eq!(denied_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(masked_calls.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn registering_a_resource_provider_enables_discovery_inference() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("main.typ"), "#read(\"resource.bin\")").unwrap();
-
-        let (provider, calls) = MemoryProjectFile::tracked("resource.bin", b"provided".to_vec());
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_provider(provider)
-            .pack()
-            .unwrap();
-
-        assert_eq!(calls.load(Ordering::Relaxed), 3);
-        assert_eq!(outcome.report.resource_slots, ["resource.bin"]);
-        assert_eq!(
-            outcome.pack.resource_slots().collect::<Vec<_>>(),
-            ["resource.bin"]
-        );
-        assert!(outcome.pack.file("resource.bin").is_none());
-    }
-
-    #[test]
-    fn changed_resource_provider_evidence_prevents_pack_issuance() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("main.typ"), "#read(\"resource.bin\")").unwrap();
-        let data = Arc::new(Mutex::new(Bytes::new(b"first".to_vec())));
-
-        let result = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_provider(MutableProjectFile {
-                path: "resource.bin".to_owned(),
-                data: Arc::clone(&data),
-            })
-            .after_discovery_hook(move || {
-                *data.lock().expect("mutable provider lock poisoned") =
-                    Bytes::new(b"second".to_vec());
-            })
-            .pack();
-
-        assert!(matches!(
-            result,
-            Err(PackerError::CreationEvidenceChanged { ref path }) if path == "resource.bin"
-        ));
-    }
-
-    #[test]
-    fn newly_authoritative_project_resource_prevents_pack_issuance() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("main.typ"), "#read(\"resource.bin\")").unwrap();
-        let appeared = project.join("resource.bin");
-
-        let result = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_provider(MemoryProjectFile::new(
-                "resource.bin",
-                b"representative".to_vec(),
-            ))
-            .after_discovery_hook(move || fs::write(&appeared, b"representative").unwrap())
-            .pack();
-
-        assert!(matches!(
-            result,
-            Err(PackerError::CreationEvidenceChanged { ref path }) if path == "resource.bin"
-        ));
-    }
-
-    #[test]
     fn changed_selected_font_evidence_prevents_pack_issuance() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
@@ -3328,7 +2162,7 @@ Rows: #csv("data.csv").len()
             .system_fonts(false)
             .typst_embedded_fonts(false)
             .font_path(&fonts)
-            .after_discovery_hook(move || fs::write(&font_path, b"changed").unwrap())
+            .after_creation_hook(move || fs::write(&font_path, b"changed").unwrap())
             .pack();
 
         assert!(matches!(
@@ -3336,247 +2170,6 @@ Rows: #csv("data.csv").len()
             Err(PackerError::CreationEvidenceChanged { ref path })
                 if path.starts_with("font catalog")
         ));
-    }
-
-    #[test]
-    fn requested_unavailable_resource_slot_has_discovery_guidance() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("main.typ"), "#read(\"branding/logo.bin\")").unwrap();
-
-        let result = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_slot("branding/logo.bin")
-            .pack();
-        let Err(error) = result else {
-            panic!("missing representative bytes unexpectedly satisfied discovery")
-        };
-
-        assert!(matches!(
-            error,
-            PackerError::ResourceSlotUnavailable { ref path }
-                if path == "branding/logo.bin"
-        ));
-        let message = error.to_string();
-        assert!(message.contains("Resource Provider"), "{message}");
-        assert!(message.contains("source project"), "{message}");
-        assert!(!message.contains("--resource-path"), "{message}");
-        assert!(message.contains("not stored in the Pack"), "{message}");
-    }
-
-    #[test]
-    fn tolerated_missing_resource_slot_request_still_fails_discovery() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("main.typ"), "#image(\"outer.svg\")").unwrap();
-        fs::write(
-            project.join("outer.svg"),
-            r#"<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
-<image href="missing.png" width="10" height="10"/>
-</svg>"#,
-        )
-        .unwrap();
-
-        let result = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_slot("missing.png")
-            .pack();
-
-        assert!(matches!(
-            result,
-            Err(PackerError::ResourceSlotUnavailable { ref path }) if path == "missing.png"
-        ));
-    }
-
-    #[test]
-    fn timing_export_errors_take_precedence_over_discovery_errors() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("main.typ"), "#read(\"branding/logo.bin\")").unwrap();
-
-        let result = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_slot("branding/logo.bin")
-            .timings(Some(dir.path().to_path_buf()))
-            .pack();
-
-        assert!(matches!(
-            result,
-            Err(PackerError::Timings(ref message)) if message.contains("failed to create file")
-        ));
-    }
-
-    #[test]
-    fn discovery_does_not_mask_a_non_missing_primary_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(project.join("resource.bin")).unwrap();
-        fs::write(project.join("main.typ"), "#read(\"resource.bin\")").unwrap();
-
-        let (provider, calls) = MemoryProjectFile::tracked("resource.bin", b"provided".to_vec());
-        let result = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_provider(provider)
-            .pack();
-
-        assert!(matches!(result, Err(PackerError::Compile { .. })));
-        assert_eq!(calls.load(Ordering::Relaxed), 0);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn unavailable_project_source_evidence_prevents_issuance_without_provider_fallback() {
-        use std::io::Write as _;
-        use std::process::Command;
-
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(
-            project.join("main.typ"),
-            "#import \"chapter.typ\": chapter\n#chapter",
-        )
-        .unwrap();
-
-        let chapter = project.join("chapter.typ");
-        assert!(
-            Command::new("mkfifo")
-                .arg(&chapter)
-                .status()
-                .unwrap()
-                .success()
-        );
-        let writer = std::thread::spawn({
-            let chapter = chapter.clone();
-            move || {
-                let mut file = std::fs::OpenOptions::new()
-                    .write(true)
-                    .open(&chapter)
-                    .unwrap();
-                fs::remove_file(&chapter).unwrap();
-                file.write_all(b"#let chapter = rect(width: 1pt, height: 1pt)")
-                    .unwrap();
-            }
-        });
-
-        let (provider, calls) = MemoryProjectFile::tracked(
-            "chapter.typ",
-            b"#let chapter = rect(width: 2pt, height: 2pt)".to_vec(),
-        );
-        let result = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_provider(provider)
-            .pack();
-        writer.join().unwrap();
-
-        assert!(matches!(
-            result,
-            Err(PackerError::CreationEvidenceChanged { ref path })
-                if path == &chapter.display().to_string()
-        ));
-        assert_eq!(calls.load(Ordering::Relaxed), 0);
-    }
-
-    #[test]
-    fn concurrent_resource_provenance_is_complete_deduplicated_and_source_isolated() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("main.typ"), "#rect(width: 1pt, height: 1pt)").unwrap();
-
-        let (raw_entered_tx, raw_entered_rx) = mpsc::channel();
-        let (raw_release_tx, raw_release_rx) = mpsc::channel();
-        let first = project_file_id("external-a.typ");
-        let second = project_file_id("external-b.typ");
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_slot("z.bin")
-            .resource_slot("a.bin")
-            .resource_slot("z.bin")
-            .resource_provider(BlockingProjectFiles {
-                paths: vec!["external-a.typ".to_owned(), "external-b.typ".to_owned()],
-                data: Bytes::new(b"#let injected = true".to_vec()),
-                entered: raw_entered_tx,
-                release: Arc::new(Mutex::new(raw_release_rx)),
-            })
-            .discovery_hook(move |world| {
-                let (source_entered_tx, source_entered_rx) = mpsc::channel();
-                let (source_release_tx, source_release_rx) = mpsc::channel();
-                let source_release_rx = Arc::new(Mutex::new(source_release_rx));
-                world.set_source_request_hook(move |source_id| {
-                    if source_id == first {
-                        let _ = source_entered_tx.send(());
-                        source_release_rx
-                            .lock()
-                            .expect("source release lock poisoned")
-                            .recv_timeout(TEST_SYNC_TIMEOUT)
-                            .expect("timed out waiting to release source request");
-                    }
-                });
-                let world: &DiscoveryWorld = world;
-
-                std::thread::scope(|scope| {
-                    let mut raw_release = ReleaseGuard::new(raw_release_tx.clone(), 2);
-                    let mut source_release = ReleaseGuard::new(source_release_tx, 1);
-                    let first_file = scope.spawn(|| world.resolve_resource(first));
-                    let second_file = scope.spawn(|| world.resolve_resource(second));
-                    let entered = BTreeSet::from([
-                        raw_entered_rx.recv_timeout(TEST_SYNC_TIMEOUT).unwrap(),
-                        raw_entered_rx.recv_timeout(TEST_SYNC_TIMEOUT).unwrap(),
-                    ]);
-                    assert_eq!(
-                        entered,
-                        BTreeSet::from(["external-a.typ".to_owned(), "external-b.typ".to_owned(),])
-                    );
-
-                    let source = scope.spawn(|| world.source(first));
-                    source_entered_rx.recv_timeout(TEST_SYNC_TIMEOUT).unwrap();
-                    source_release.release_all();
-                    assert!(matches!(
-                        source.join().unwrap(),
-                        Err(FileError::NotFound(_))
-                    ));
-
-                    raw_release.release_all();
-                    assert!(first_file.join().unwrap().is_ok());
-                    assert!(second_file.join().unwrap().is_ok());
-                });
-            })
-            .pack()
-            .unwrap();
-        let expected = ["a.bin", "external-a.typ", "external-b.typ", "z.bin"];
-        let reread = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
-
-        assert_eq!(outcome.report.resource_slots, expected);
-        assert_eq!(outcome.pack.resource_slots().collect::<Vec<_>>(), expected);
-        assert_eq!(reread.resource_slots().collect::<Vec<_>>(), expected);
-    }
-
-    #[test]
-    fn explicit_and_inferred_provenance_yield_one_packer_declaration() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("main.typ"), "#read(\"shared.bin\")").unwrap();
-        let (provider, calls) = MemoryProjectFile::tracked("shared.bin", b"provided".to_vec());
-
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .resource_slot("shared.bin")
-            .resource_provider(provider)
-            .pack()
-            .unwrap();
-
-        assert_eq!(calls.load(Ordering::Relaxed), 3);
-        assert_eq!(outcome.report.resource_slots, ["shared.bin"]);
-        assert_eq!(
-            outcome.pack.resource_slots().collect::<Vec<_>>(),
-            ["shared.bin"]
-        );
-        assert!(outcome.pack.file("shared.bin").is_none());
     }
 
     #[cfg(feature = "embedded-fonts")]
@@ -3631,14 +2224,14 @@ Rows: #csv("data.csv").len()
 
     #[cfg(feature = "embedded-fonts")]
     #[test]
-    fn html_discovery_embeds_fonts_used_inside_frames() {
+    fn html_creation_embeds_fonts_used_inside_frames() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
         fs::create_dir_all(&project).unwrap();
         fs::write(project.join("main.typ"), "#html.frame[Hello]").unwrap();
 
         let outcome = Packer::new(&project, "main.typ")
-            .target(DiscoveryTarget::Html)
+            .target(CreationTarget::Html)
             .feature(typst::Feature::Html)
             .system_fonts(false)
             .embed_fonts(true)
@@ -3708,48 +2301,6 @@ Rows: #csv("data.csv").len()
             ));
             assert!(!target.exists());
         }
-    }
-
-    #[test]
-    fn extraction_reserves_resource_slot_paths_before_writing() {
-        let spec = "@local/example:1.0.0".parse().unwrap();
-        let slot = "packages/local/example/1.0.0/lib.typ";
-        let pack = Pack::builder("main.typ")
-            .file("main.typ", b"main".to_vec())
-            .unwrap()
-            .package_file(spec, "lib.typ", b"package".to_vec())
-            .unwrap()
-            .resource_slot(slot)
-            .unwrap()
-            .build()
-            .unwrap();
-        let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("extracted");
-
-        let result = extract(
-            &pack,
-            &target,
-            &ExtractOptions {
-                packages: true,
-                fonts: false,
-                force: true,
-            },
-        );
-
-        assert!(matches!(
-            result,
-            Err(ExtractError::PlannedPathConflict {
-                first_role: PackPathRole::PackageFile,
-                second_role: PackPathRole::ResourceSlot,
-                ..
-            }) | Err(ExtractError::PlannedPathConflict {
-                first_role: PackPathRole::ResourceSlot,
-                second_role: PackPathRole::PackageFile,
-                ..
-            })
-        ));
-        assert!(!target.exists());
-        assert!(!target.join(slot).exists());
     }
 
     #[test]

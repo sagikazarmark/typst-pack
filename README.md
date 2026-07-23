@@ -11,8 +11,6 @@ A *pack* (`.typk`) captures the compilation contract of one Typst project:
 
 - the packed project files: the entrypoint, other Typst sources, images, and
   data files,
-- optionally Resource Slot paths whose bytes are supplied when
-  requested instead of being stored in the reusable pack,
 - optionally the files of the [Typst Universe](https://typst.app/universe)
   packages the project imports, so compiling needs no network access,
 - optionally the fonts the document uses, so compiling produces identical
@@ -30,12 +28,12 @@ archive: a portable form of a project's sources and resources.
 
 - **Portable project archives**: bundle Typst sources, resources, packages, and
   fonts into one `.typk` file.
-- **Automatic discovery**: observe the files a real Typst compilation reads and
-  include additional conditional files explicitly.
+- **Structural project closure**: include every eligible regular file beneath
+  the selected project root, independently of compiler control flow.
 - **Reproducible compilation**: compile without network or system font access,
   with support for fixed timestamps and vendored packages.
-- **Resource Slots**: keep declared non-source project bytes outside a
-  reusable pack and supply them for each compilation.
+- **Pack Overrides**: replace any contained project file for one compilation
+  without mutating the Pack.
 - **Library and CLI APIs**: create, inspect, compile, and extract packs in memory
   or on the file system.
 
@@ -60,9 +58,8 @@ typst-pack inspect project.typk
 # Compile a pack without network access:
 typst-pack compile project.typk output.pdf
 
-# Discover a resource outside the source project, then supply it when compiling:
-typst-pack create invoice/main.typ invoice.typk --resource-path representative-branding/
-typst-pack compile invoice.typk customer.pdf --resource-path customer-branding/
+# Replace a contained placeholder for one compilation:
+typst-pack compile invoice.typk customer.pdf --override assets/logo.png customer-logo.png
 
 # PNG or SVG output, page selection, reproducible builds:
 typst-pack compile project.typk "page-{0p}.png" --ppi 300 --pages 1-3
@@ -74,7 +71,7 @@ typst-pack compile project.typk --offline
 # Experimental HTML export (the output format enables its required feature):
 typst-pack compile project.typk out.html
 
-# HTML discovery still selects the feature explicitly:
+# An HTML representative creation compile still selects the feature explicitly:
 typst-pack create project/main.typ --target html --features html
 
 # Unpack a pack back into an editable project directory:
@@ -87,48 +84,25 @@ count before page selection. Multi-page output requires an explicit `{p}`,
 `{0p}`, or `{n}` template. All target paths are checked for duplicates before
 writing. Document Format output paths are literal.
 
-### How files are discovered
+### Project files
 
-`create` runs a *discovery compile* of the project and records every file Typst
-actually reads. Select paged or HTML discovery with repeatable,
-comma-delimited `--target`; paged is the default.
-Sources, images, data files, and package files are picked up automatically,
-including files accessed dynamically. Because discovery observes one
-concrete compile, files that would only be read under different
-`--input` values or on a different date are not seen; add those with
-`--include <path>` (a file or directory inside the project root).
+`create` stabilizes every eligible regular file beneath the physical project
+root before compiling. Project membership is independent of the representative
+compile's target, inputs, date, features, and control flow. The root
+`.typkignore` applies Gitignore-style ordered rules; it is always packed, nested
+`.typkignore` files are ordinary project files, and every `.typk` path is always
+excluded. Symlinks and other unignored non-regular entries are rejected.
 
-A `typst.toml` next to the entrypoint (Typst's own package/template
-manifest, not to be confused with the pack's `typst-pack.toml`) is always
-packed as a regular project file, even though compiles don't read it. That
-way template and package metadata survives the round trip through
-`create` and `extract`.
+Creation runs one representative compile from those stabilized bytes to select
+exact package and font dependencies. `--target paged|html` is optional and
+defaults to `paged`; it does not restrict later output formats. This concrete
+evaluation is a temporary dependency-selection mechanism because Typst does not
+report every package or font a different request might reach.
 
-### Resource Slots
-
-A **Resource Slot** is one exact normalized project-relative location whose
-non-source bytes are supplied to a compilation instead of stored in the Pack.
-For example, one invoice Pack can declare `assets/logo.png` while a Resource
-Provider supplies different valid bytes for each compilation.
-
-The filesystem CLI registers ordered Resource Providers with repeated
-`--resource-path <DIR>`. During creation, the source project is checked first;
-only a missing resource falls through to providers in command-line order. A
-successful provider load is inferred as a Resource Slot and serialized under
-`[project].resource-slots` without storing its representative bytes.
-
-Use `create --resource-slot <PATH>` for an unexercised slot or for a present
-representative file whose bytes must be omitted. An unrequested slot may remain
-unfilled. If discovery requests an unavailable explicit slot, creation explains
-that representative bytes can be placed in the source project or supplied with
-`--resource-path`; those bytes are not stored in the Pack.
-
-During Pack compilation, providers are consulted only for declared Resource
-Slots. Contained project files remain authoritative, and providers cannot
-supply Typst source, packages, undeclared paths, or replacements. Only a missing
-provider result falls through; success and non-missing errors stop resolution.
-Inspection and extraction list Resource Slots, but extraction does not create
-empty files for them.
+Every project path in a Pack has baseline bytes. For per-document variation,
+pack a valid placeholder and use compile-time `--override PACK_PATH FILE`.
+Overrides may replace source, assets, data, or the entrypoint, but cannot add or
+delete paths or authorize undeclared packages and fonts.
 
 ### Packages
 
@@ -166,7 +140,7 @@ Page Number and are emitted once each in source-document order.
 
 HTML export is experimental in Typst itself, and Typst emits a warning that its
 behavior may change. Pack compilation derives the required engine feature from
-`CompilationOutputSpecification::Html`; HTML discovery still requires
+`CompilationOutputSpecification::Html`; HTML creation still requires
 `--features html` (or `TYPST_FEATURES=html`).
 
 The Dagger `compile` function returns a directory for every format. Document
@@ -243,32 +217,21 @@ let pack = Pack::builder("main.typ")
 let bytes = pack.to_bytes()?;
 ```
 
-Packs issued by `Packer` additionally persist each successful Discovery
-Variant's safe request commitments and canonical Discovery Trace. This evidence
-survives archive round trips and contributes to Pack Identity. Manually assembled
-Packs carry no discovery claim.
-
-Resource Slots can also be declared and supplied in memory. A Resource Provider
-uses typst-kit's standard synchronous `FileLoader` interface, so callers can
-adapt memory, object storage, or prefetched application data:
+Compilation-time Pack Overrides replace contained baseline bytes in memory:
 
 ```rust,ignore
 let pack = Pack::builder("main.typ")
     .file("main.typ", source_text.as_bytes().to_vec())?
-    .resource_slot("assets/logo.png")?
+    .file("assets/logo.png", placeholder_png)?
     .build()?;
+let overrides = PackOverrideSet::new(&pack)
+    .replace("assets/logo.png", customer_png)?;
 let request = PackCompilationRequest::new(
     pack,
     CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
-);
-let controls = CompilationExecutionControls::default()
-    .resource_provider(resource_provider);
-let output = compile(CompilationAttempt::new(request, controls))?;
+).overrides(overrides);
+let output = compile(request)?;
 ```
-
-For filesystem discovery, add one or more `Packer::resource_provider`
-implementations. Registering a provider enables successful missing-resource
-loads to be inferred as Resource Slots; no separate fallback policy is needed.
 
 ### Compilation authority
 
@@ -296,12 +259,12 @@ fn arbitrary_world(world: &dyn typst::World) {
 Typst 0.15.0 owns language evaluation, layout, official diagnostics, document
 structures, and PDF, PNG, SVG, and HTML export behavior. typst-pack owns Pack
 creation and validity, the fixed project namespace, exact package and font
-verification, Resource Slots, Pack Overrides, request identities and reports,
+verification, Pack Overrides, request identities and reports,
 and later CLI or Dagger publication. Artifact bytes and official diagnostics
 are not reinterpreted by destination, transport, cache, or presentation code.
 
 Intentional differences from `typst compile` are Pack confinement, Pack input
-instead of a source root, declared Resource Slots, exact dependency
+instead of a source root, a fixed contained project namespace, exact dependency
 fulfillment, Pack Overrides, unsupported Bundle output, and publication rules
 for immutable artifacts. The complete version-bound inventory is in
 [`docs/cli-parity.md`](docs/cli-parity.md).
@@ -311,15 +274,12 @@ for immutable artifacts. The complete version-bound inventory is in
 Version 0.4 makes clean naming and invariant-boundary breaks without retaining
 compatibility aliases:
 
-- Replace Resource APIs using `external_resource` or
-  `external_resource_reference` with `resource_slot` and `resource_provider`.
-- Replace CLI `--source-reference <DIR>` with `--resource-path <DIR>` and
-  `--external-resource <PATH>` with `--resource-slot <PATH>`.
+- Remove Resource Slot and Resource Provider APIs; pack valid baseline
+  placeholders and replace contained files with Pack Overrides.
 - Rename Dagger arguments: `source` -> `project`, `entrypoint` -> `input`,
   `inputs` -> `sysInputs`, `noPackages` -> `noVendorPackages`,
-  `sourceReferenceDir`/`sourceReferences` -> `resourceDirs`,
-  `externalResources` -> `resourceSlots`, and `sourceDateEpoch` ->
-  `creationTimestamp`.
+  and `sourceDateEpoch` -> `creationTimestamp`. Removed resource and inclusion
+  arguments have no replacements.
 - Change creation from a directory plus `--entrypoint`/`--output` to
   `create <INPUT> [OUTPUT]`.
 - Replace `compile_pack(request)` with `compile(request)`. The provisional
@@ -339,10 +299,8 @@ compatibility aliases:
 - `ExtractError` adds `PlannedPathConflict` and `DestinationConflict`; exhaustive
   matches must handle both variants.
 
-The unstable Pack format remains version 1, but its fields change in place to
-`project.resource-slots` and `packages.unvendored`; old field aliases are not
-accepted. Resource Providers remain compilation inputs rather than serialized
-Pack content.
+The unstable Pack format remains version 1, but discovery and Resource Slot
+fields are removed in place. Old fields and aliases are not accepted.
 
 ### Feature flags
 
@@ -351,7 +309,7 @@ Pack content.
   for wasm targets.
 - `cli`: the `typst-pack` binary.
 - `embedded-fonts`: make Typst's bundled fonts available as intentional
-  discovery and external-fulfillment sources.
+  creation and external-fulfillment sources.
 
 All crate features are opt-in.
 
@@ -374,7 +332,6 @@ format-version = 1
 
 [project]
 entrypoint = "main.typ"
-resource-slots = ["assets/logo.png"]
 
 [packages]
 vendored = ["@preview/cetz:0.3.4"]
@@ -394,11 +351,9 @@ Readers ignore unknown top-level archive entries and reject manifests with a
 validated, root-relative virtual paths, so a pack can never read or write
 outside its own tree.
 
-`resource-slots` is an ordered, deduplicated allowlist. Its entries have no
-corresponding `project/` archive entry, and readers reject a path that is both
-packed and declared as a Resource Slot. The format version remains 1 and is
-explicitly unstable: readers reject the old `external-resources` and
-`packages.external` version-1 fields rather than retaining aliases.
+The format version remains 1 and is explicitly unstable: readers reject old
+discovery, Resource Slot, `external-resources`, and `packages.external` fields
+rather than retaining aliases.
 
 ## Development
 
