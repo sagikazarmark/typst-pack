@@ -407,12 +407,6 @@ impl PackWorldBuilder {
         Ok(self)
     }
 
-    #[cfg(feature = "cli")]
-    pub(crate) fn fixed_time(mut self, time: typst_kit::datetime::Time) -> Self {
-        self.clock = Clock::FixedTimestamp(time);
-        self
-    }
-
     /// Uses the system clock for `datetime.today()`.
     #[cfg(feature = "fs")]
     pub fn system_date(mut self) -> Self {
@@ -490,6 +484,11 @@ impl PackWorldBuilder {
     /// ```
     pub fn resource_provider(mut self, provider: impl FileLoader + Send + Sync + 'static) -> Self {
         self.resource_providers.push(Box::new(provider));
+        self
+    }
+
+    pub(crate) fn resource_providers(mut self, providers: Vec<Provider>) -> Self {
+        self.resource_providers.extend(providers);
         self
     }
 

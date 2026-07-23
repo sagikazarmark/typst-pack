@@ -1,6 +1,7 @@
 type TypstPack {
   let rust: Rust!
   let packageCache: CacheVolume!
+  let officialTypst: File!
 
   new(
     """
@@ -10,7 +11,7 @@ type TypstPack {
   ) {
     let rustVersion: String! = "1.97-slim-trixie@sha256:14c4fe50ea427dc42381a1a09a9a839c1d2346a2e508cd491bf02c659dbc0ed7"
 
-    let packages = ["pkg-config", "libssl-dev"]
+    let packages = ["pkg-config", "libssl-dev", "curl", "xz-utils"]
 
     let container = Dagger
       .container
@@ -23,6 +24,19 @@ type TypstPack {
 
     self.rust = Dagger.rust(version: rustVersion, container: container)
     self.packageCache = packageCache
+    self.officialTypst = container
+      .withExec(["mkdir", "-p", "/opt/typst"])
+      .withExec([
+        "curl", "--proto", "=https", "--tlsv1.2", "-LsSf",
+        "https://github.com/typst/typst/releases/download/v0.15.0/typst-x86_64-unknown-linux-musl.tar.xz",
+        "-o", "/tmp/typst.tar.xz",
+      ])
+      .withExec([
+        "bash", "-c",
+        "printf '%s  %s\\n' '59b207df01be2dab9f13e80f73d04d7ff8273ffd46b3dd1b9eef5c60f3eeabea' '/tmp/typst.tar.xz' | sha256sum --check",
+      ])
+      .withExec(["tar", "-xJf", "/tmp/typst.tar.xz", "-C", "/opt/typst", "--strip-components=1"])
+      .file("/opt/typst/typst")
 
     self
   }
@@ -103,6 +117,19 @@ type TypstPack {
       .rust
       .withEnvVariable("CARGO_TARGET_DIR", "/target/cli")
       .test(feature: ["cli"], test: ["cli"])
+  }
+
+  """
+  Differential-gate shared CLI behavior against the exact embedded Typst release.
+  """
+  testCliParity: String! @check {
+    self
+      .rust
+      .withFile("/usr/local/bin/typst", self.officialTypst)
+      .withEnvVariable("TYPST_PACK_OFFICIAL_TYPST", "/usr/local/bin/typst")
+      .withEnvVariable("TYPST_PACK_REQUIRE_OFFICIAL_TYPST", "1")
+      .withEnvVariable("CARGO_TARGET_DIR", "/target/cli-parity")
+      .test(allFeatures: true, test: ["official_typst_cli"])
   }
 
   """

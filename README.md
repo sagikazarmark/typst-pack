@@ -343,6 +343,10 @@ Run CI's containerized checks with [Dagger](https://dagger.io):
 
 - `dagger check`
 
+The containerized suite includes the
+[embedded Typst CLI differential gate](docs/cli-parity.md), pinned to the exact
+official release used by the library.
+
 ## License
 
 Licensed under either of

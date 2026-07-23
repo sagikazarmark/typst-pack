@@ -23,9 +23,11 @@ use typst_kit::fonts::FontSource;
 use typst_pdf::{PdfStandard, Timestamp};
 
 use crate::compile::{
-    CompilationArtifact, CompilationOperationOutcome, CompileError, CompileOptions,
-    CreationTimestamp, OutputFormat, PageRange, PageSelection, compile_with_default_pdf_timestamp,
-    parse_page_selection, pdf_standard_requiring_tags, validate_pdf_standards,
+    CompilationArtifact, CompilationOperationOutcome, CompilationStatus, CompileOptions,
+    CreationTimestamp, FontContainerFulfillment, OutputFormat, PackCompilationContext,
+    PackCompilationPresentation, PackCompilationRequest, PackageTreeFulfillment, PageRange,
+    PageSelection, compile_pack_kernel, parse_page_selection, pdf_standard_requiring_tags,
+    prepare_pack_compilation, validate_pdf_standards,
 };
 use crate::extract::{ExtractOptions, extract};
 use crate::manifest::PackMetadata;
@@ -951,10 +953,9 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
 
     let creation_timestamp_seconds = args.automation.creation_timestamp;
     let creation_timestamp = validate_creation_timestamp(creation_timestamp_seconds)?;
-    let fixed_time = creation_timestamp_seconds
-        .map(typst_kit::datetime::Time::fixed_timestamp)
-        .transpose()
-        .map_err(|_| "creation timestamp is out of range")?;
+    let system_time = creation_timestamp_seconds
+        .is_none()
+        .then(chrono::Local::now);
     initialize_jobs(args.automation.jobs);
 
     let pack = read_pack_input(&args.pack)?;
@@ -990,10 +991,6 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
             }
         }
     }
-    let exact_font_catalog = pack
-        .materialize_font_catalog(&supplied_fonts)
-        .map_err(|error| CliError::Message(error.to_string()))?;
-
     let packages = crate::world::system_packages(
         args.packages.package_path.as_deref(),
         args.packages.package_cache_path.as_deref(),
@@ -1001,7 +998,7 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         cert,
     );
     let mut package_roots = BTreeMap::new();
-    let mut package_fulfillments = BTreeMap::new();
+    let mut package_fulfillments = Vec::new();
     for requirement in pack
         .package_requirements()
         .iter()
@@ -1019,36 +1016,16 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         let files =
             crate::world::read_complete_package_tree(root.path()).map_err(CliError::Message)?;
         package_roots.insert(requirement.spec().to_string(), root.path().to_owned());
-        package_fulfillments.insert(requirement.spec().to_string(), files);
+        package_fulfillments.push((requirement.spec().clone(), files));
     }
-    let exact_packages = pack
-        .materialize_package_trees(package_fulfillments)
-        .map_err(|error| {
-            CliError::Message(crate::compile::package_tree_outcome(error).to_string())
-        })?;
-
     let host_dependencies = Arc::new(Mutex::new(BTreeSet::new()));
-    let mut builder = PackWorld::builder(pack)
-        .embedded_fonts(false)
-        .exact_font_catalog(exact_font_catalog)
-        .exact_packages(exact_packages)
-        .inputs(parse_inputs(&args.compilation.inputs));
-    for feature in &args.compilation.features {
-        builder = builder.feature((*feature).into());
-    }
+    let mut context = PackCompilationContext::default();
     for path in &args.resource_paths {
-        builder = builder.resource_provider(FilesystemResourceProvider::tracked(
+        context = context.resource_provider(FilesystemResourceProvider::tracked(
             path.clone(),
             Arc::clone(&host_dependencies),
         ));
     }
-    builder = match fixed_time {
-        Some(time) => builder.fixed_time(time),
-        None => builder.system_date(),
-    };
-    let mut world = builder
-        .build()
-        .map_err(|error| CliError::Message(error.to_string()))?;
 
     let options = CompileOptions {
         page_selection,
@@ -1067,9 +1044,43 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
             Some(timestamp) => convert_datetime(timestamp)
                 .map(Timestamp::new_utc)
                 .map_or(CreationTimestamp::Omit, CreationTimestamp::Explicit),
-            None => CreationTimestamp::Automatic,
+            None => system_time
+                .as_ref()
+                .and_then(local_timestamp)
+                .map(CreationTimestamp::Explicit)
+                .unwrap_or(CreationTimestamp::Omit),
         },
     };
+
+    let document_timestamp = creation_timestamp_seconds.unwrap_or_else(|| {
+        system_time
+            .as_ref()
+            .expect("system time is frozen when no explicit timestamp is supplied")
+            .with_timezone(&chrono::Utc)
+            .timestamp()
+    });
+    let mut request = PackCompilationRequest::new(pack, format)
+        .adapter_resolved_inputs(parse_inputs(&args.compilation.inputs))
+        .adapter_resolved_options(options)
+        .adapter_resolved_document_timestamp(document_timestamp)
+        .map_err(|_| "creation timestamp is out of range")?;
+    for feature in &args.compilation.features {
+        request = request.adapter_resolved_feature((*feature).into());
+    }
+    for (identity, data) in supplied_fonts {
+        request = request.font_fulfillment(identity, FontContainerFulfillment::new(data.to_vec()));
+    }
+    for (spec, files) in package_fulfillments {
+        request = request.package_fulfillment(
+            spec,
+            PackageTreeFulfillment::new(
+                files.into_iter().map(|(path, data)| (path, data.to_vec())),
+            ),
+        );
+    }
+    let prepared = prepare_pack_compilation(request, context)
+        .map_err(|error| CliError::Message(error.to_string()))?;
+    let (mut world, kernel) = prepared.into_parts();
 
     let diagnostic_format = args.automation.diagnostic_format.into();
     let write_requested_dependencies = |outputs: Option<&[PathBuf]>| {
@@ -1090,8 +1101,7 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     let mut command_result = None;
     let timings = timer.record(&mut world, |world| {
         command_result = Some((|| -> CliResult {
-            let compiled =
-                compile_with_default_pdf_timestamp(world, format, &options, local_timestamp);
+            let execution = compile_pack_kernel(world, kernel);
             for id in world.file_dependencies() {
                 if let VirtualRoot::Package(spec) = id.root()
                     && let Some(root) = package_roots.get(&spec.to_string())
@@ -1102,33 +1112,31 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
                         .insert(root.join(id.vpath().get_without_slash()));
                 }
             }
-            let output = match compiled {
-                Ok(output) => output,
-                Err(CompileError::Diagnostics {
+            match &execution.presentation {
+                PackCompilationPresentation::Succeeded { .. } => {}
+                PackCompilationPresentation::Diagnostics {
                     errors,
                     warnings,
                     pack_warnings,
-                    ..
-                }) => {
+                } => {
                     emit_diagnostics_with(
                         world,
-                        warnings.iter().chain(&pack_warnings).chain(&errors),
+                        warnings
+                            .iter()
+                            .chain(pack_warnings.iter())
+                            .chain(errors.iter()),
                         diagnostic_format,
                         color,
                     );
                     write_requested_dependencies(None)?;
                     return Err(CliError::Reported);
                 }
-                Err(error @ CompileError::PngExport { .. }) => {
-                    emit_owned_error(&error.to_string(), color);
-                    let CompileError::PngExport {
-                        warnings,
-                        pack_warnings,
-                        ..
-                    } = &error
-                    else {
-                        unreachable!()
-                    };
+                PackCompilationPresentation::PngExport {
+                    error,
+                    warnings,
+                    pack_warnings,
+                } => {
+                    emit_owned_error(error, color);
                     emit_diagnostics_with(
                         world,
                         warnings.iter().chain(pack_warnings.iter()),
@@ -1138,11 +1146,9 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
                     write_requested_dependencies(None)?;
                     return Err(CliError::Reported);
                 }
-                Err(CompileError::InvalidPdfStandards(error)) => {
-                    let (message, hints) = error.into_parts();
-                    return Err(CliError::Hinted { message, hints });
-                }
-            };
+            }
+            debug_assert_eq!(execution.result.status(), CompilationStatus::Succeeded);
+            let output = &execution.result;
 
             let export_result = (|| {
                 let default_output = args.pack.with_extension(format.extension());
@@ -1153,16 +1159,20 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
                     }
                     Some(path) => expand_output_template(
                         path,
-                        &output.artifacts,
-                        output.source_page_count().unwrap_or(output.artifacts.len()),
+                        output.artifacts(),
+                        output
+                            .source_page_count()
+                            .unwrap_or(output.artifacts().len()),
                     )?,
                     None if matches!(format, OutputFormat::Pdf | OutputFormat::Html) => {
                         vec![default_output]
                     }
                     None => expand_output_template(
                         &default_output,
-                        &output.artifacts,
-                        output.source_page_count().unwrap_or(output.artifacts.len()),
+                        output.artifacts(),
+                        output
+                            .source_page_count()
+                            .unwrap_or(output.artifacts().len()),
                     )?,
                 };
                 let mut unique_targets = std::collections::HashSet::with_capacity(targets.len());
@@ -1177,7 +1187,7 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
 
                 let output_is_stdout = targets.iter().any(|target| target == Path::new("-"));
                 if output_is_stdout {
-                    if output.artifacts.len() != 1 {
+                    if output.artifacts().len() != 1 {
                         return Err(
                             "cannot write output to stdout unless exactly one file is emitted"
                                 .to_owned(),
@@ -1185,10 +1195,10 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
                     }
                     std::io::stdout()
                         .lock()
-                        .write_all(output.artifacts[0].bytes())
+                        .write_all(output.artifacts()[0].bytes())
                         .map_err(|err| format!("cannot write output to stdout: {err}"))?;
                 } else {
-                    for (target, artifact) in targets.iter().zip(&output.artifacts) {
+                    for (target, artifact) in targets.iter().zip(output.artifacts()) {
                         std::fs::write(target, artifact.bytes())
                             .map_err(|err| format!("cannot write `{}`: {err}", target.display()))?;
                     }
@@ -1199,23 +1209,35 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
                 Ok(exported) => exported,
                 Err(error) => {
                     emit_owned_error(&error, color);
-                    emit_diagnostics_with(
-                        world,
-                        output.warnings.iter().chain(output.pack_warnings()),
-                        diagnostic_format,
-                        color,
-                    );
+                    if let PackCompilationPresentation::Succeeded {
+                        warnings,
+                        pack_warnings,
+                    } = &execution.presentation
+                    {
+                        emit_diagnostics_with(
+                            world,
+                            warnings.iter().chain(pack_warnings),
+                            diagnostic_format,
+                            color,
+                        );
+                    }
                     write_requested_dependencies(None)?;
                     return Err(CliError::Reported);
                 }
             };
 
-            emit_diagnostics_with(
-                world,
-                output.warnings.iter().chain(output.pack_warnings()),
-                diagnostic_format,
-                color,
-            );
+            if let PackCompilationPresentation::Succeeded {
+                warnings,
+                pack_warnings,
+            } = &execution.presentation
+            {
+                emit_diagnostics_with(
+                    world,
+                    warnings.iter().chain(pack_warnings),
+                    diagnostic_format,
+                    color,
+                );
+            }
 
             if !output_is_stdout
                 && let Some(viewer) = args.open.as_ref()
@@ -1557,8 +1579,7 @@ fn convert_datetime<Tz: chrono::TimeZone>(date_time: chrono::DateTime<Tz>) -> Op
     )
 }
 
-fn local_timestamp() -> Option<Timestamp> {
-    let local = chrono::Local::now();
+fn local_timestamp(local: &chrono::DateTime<chrono::Local>) -> Option<Timestamp> {
     let datetime = Datetime::from_ymd_hms(
         local.year(),
         local.month().try_into().ok()?,

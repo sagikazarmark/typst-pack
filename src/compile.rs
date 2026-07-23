@@ -17,6 +17,8 @@ use typst_pdf::{PdfOptions, PdfStandard, PdfStandards, Timestamp};
 
 use crate::embedded::EmbeddedTypst;
 use crate::pack::{FontCatalogError, PackageTreeError};
+#[cfg(feature = "cli")]
+use crate::resource::Provider;
 use crate::{FontContainerIdentity, Pack, PackWorld, PackageTreeIdentity};
 
 /// The exact embedded Typst compiler implementation that produced a result.
@@ -291,6 +293,7 @@ pub struct CompilationRequestInventory {
     selected_features: Vec<EffectiveEngineFeature>,
     features: Vec<EffectiveEngineFeature>,
     document_time: EffectiveRequestValue<Option<Datetime>>,
+    document_timestamp: EffectiveRequestValue<Option<i64>>,
 }
 
 impl CompilationRequestInventory {
@@ -342,6 +345,13 @@ impl CompilationRequestInventory {
     /// The exact Compilation Document Time, including explicit absence.
     pub fn document_time(&self) -> &EffectiveRequestValue<Option<Datetime>> {
         &self.document_time
+    }
+
+    /// The exact effective Unix timestamp used for offset-aware document-time requests.
+    ///
+    /// This is `None` when document time is absent or represented by [`Self::document_time`].
+    pub fn document_timestamp(&self) -> &EffectiveRequestValue<Option<i64>> {
+        &self.document_timestamp
     }
 }
 
@@ -521,6 +531,7 @@ pub struct PackCompilationRequest {
     overrides: EffectiveRequestValue<PackOverrideSet>,
     features: Vec<EffectiveEngineFeature>,
     document_time: EffectiveRequestValue<Option<Datetime>>,
+    document_timestamp: EffectiveRequestValue<Option<i64>>,
     package_fulfillments: BTreeMap<String, PackageTreeFulfillment>,
     font_fulfillments: BTreeMap<FontContainerIdentity, FontContainerFulfillment>,
 }
@@ -604,6 +615,7 @@ impl PackCompilationRequest {
             overrides: EffectiveRequestValue::new(overrides, RequestValueOrigin::CoreDefaulted),
             features: Vec::new(),
             document_time: EffectiveRequestValue::new(None, RequestValueOrigin::CoreDefaulted),
+            document_timestamp: EffectiveRequestValue::new(None, RequestValueOrigin::CoreDefaulted),
             package_fulfillments: BTreeMap::new(),
             font_fulfillments: BTreeMap::new(),
         }
@@ -612,6 +624,12 @@ impl PackCompilationRequest {
     /// Sets the official exporter controls for this request.
     pub fn options(mut self, options: CompileOptions) -> Self {
         self.options = EffectiveRequestValue::new(options, RequestValueOrigin::CallerSupplied);
+        self
+    }
+
+    /// Sets exporter controls after an adapter has resolved its external defaults.
+    pub fn adapter_resolved_options(mut self, options: CompileOptions) -> Self {
+        self.options = EffectiveRequestValue::new(options, RequestValueOrigin::AdapterResolved);
         self
     }
 
@@ -655,6 +673,8 @@ impl PackCompilationRequest {
     pub fn document_time(mut self, document_time: Datetime) -> Self {
         self.document_time =
             EffectiveRequestValue::new(Some(document_time), RequestValueOrigin::CallerSupplied);
+        self.document_timestamp =
+            EffectiveRequestValue::new(None, RequestValueOrigin::CoreDefaulted);
         self
     }
 
@@ -662,7 +682,22 @@ impl PackCompilationRequest {
     pub fn adapter_resolved_document_time(mut self, document_time: Option<Datetime>) -> Self {
         self.document_time =
             EffectiveRequestValue::new(document_time, RequestValueOrigin::AdapterResolved);
+        self.document_timestamp =
+            EffectiveRequestValue::new(None, RequestValueOrigin::CoreDefaulted);
         self
+    }
+
+    /// Sets the exact Unix timestamp resolved by an adapter for document-time requests.
+    #[cfg(feature = "cli")]
+    pub fn adapter_resolved_document_timestamp(
+        mut self,
+        timestamp: i64,
+    ) -> typst::diag::StrResult<Self> {
+        typst_kit::datetime::Time::fixed_timestamp(timestamp)?;
+        self.document_time = EffectiveRequestValue::new(None, RequestValueOrigin::CoreDefaulted);
+        self.document_timestamp =
+            EffectiveRequestValue::new(Some(timestamp), RequestValueOrigin::AdapterResolved);
+        Ok(self)
     }
 
     /// Supplies bytes for one exact external Font Container requirement.
@@ -1267,6 +1302,74 @@ pub fn compile(
 pub fn compile_pack(
     request: PackCompilationRequest,
 ) -> Result<CompilationResult, PackCompileError> {
+    let prepared = prepare_pack_compilation(request, PackCompilationContext::default())?;
+    let (world, kernel) = prepared.into_parts();
+    Ok(compile_pack_kernel(&world, kernel).result)
+}
+
+#[derive(Default)]
+pub(crate) struct PackCompilationContext {
+    #[cfg(feature = "cli")]
+    resource_providers: Vec<Provider>,
+}
+
+impl PackCompilationContext {
+    #[cfg(feature = "cli")]
+    pub(crate) fn resource_provider(
+        mut self,
+        provider: impl typst_kit::files::FileLoader + Send + Sync + 'static,
+    ) -> Self {
+        self.resource_providers.push(Box::new(provider));
+        self
+    }
+}
+
+pub(crate) struct PreparedPackCompilation {
+    world: PackWorld,
+    kernel: PreparedPackCompilationKernel,
+}
+
+impl PreparedPackCompilation {
+    pub(crate) fn into_parts(self) -> (PackWorld, PreparedPackCompilationKernel) {
+        (self.world, self.kernel)
+    }
+}
+
+pub(crate) struct PreparedPackCompilationKernel {
+    format: OutputFormat,
+    request_inventory: CompilationRequestInventory,
+    compilation_identity: CompilationIdentity,
+    engine_identity: EngineIdentity,
+    exporter_identity: ExporterIdentity,
+    page_selection_implies_untagged_pdf: bool,
+}
+
+pub(crate) struct PackCompilationExecution {
+    pub(crate) result: CompilationResult,
+    pub(crate) presentation: PackCompilationPresentation,
+}
+
+pub(crate) enum PackCompilationPresentation {
+    Succeeded {
+        warnings: EcoVec<SourceDiagnostic>,
+        pack_warnings: EcoVec<SourceDiagnostic>,
+    },
+    Diagnostics {
+        errors: EcoVec<SourceDiagnostic>,
+        warnings: EcoVec<SourceDiagnostic>,
+        pack_warnings: EcoVec<SourceDiagnostic>,
+    },
+    PngExport {
+        error: String,
+        warnings: EcoVec<SourceDiagnostic>,
+        pack_warnings: EcoVec<SourceDiagnostic>,
+    },
+}
+
+pub(crate) fn prepare_pack_compilation(
+    request: PackCompilationRequest,
+    context: PackCompilationContext,
+) -> Result<PreparedPackCompilation, PackCompileError> {
     let PackCompilationRequest {
         pack,
         format,
@@ -1275,6 +1378,7 @@ pub fn compile_pack(
         overrides,
         features,
         document_time,
+        document_timestamp,
         package_fulfillments,
         font_fulfillments,
     } = request;
@@ -1414,6 +1518,7 @@ pub fn compile_pack(
         selected_features,
         features: effective_features,
         document_time,
+        document_timestamp,
     };
     if let Some(rejection) = CompilationRequestRejection::from_issues(request_issues) {
         return Err(PackCompileError::RequestRejected {
@@ -1484,38 +1589,85 @@ pub fn compile_pack(
     for feature in &request_inventory.features {
         world = world.feature(feature.value);
     }
+    #[cfg(feature = "fs")]
+    if let Some(timestamp) = request_inventory.document_timestamp.value {
+        world = world
+            .fixed_timestamp(timestamp)
+            .expect("validated adapter-resolved timestamp must remain valid");
+    } else if let Some(document_time) = request_inventory.document_time.value {
+        world = world.fixed_date(document_time);
+    }
+    #[cfg(not(feature = "fs"))]
     if let Some(document_time) = request_inventory.document_time.value {
         world = world.fixed_date(document_time);
     }
+    #[cfg(feature = "cli")]
+    let world = world.resource_providers(context.resource_providers);
     let world = world
         .build()
         .expect("verified Pack dependency snapshots must build a World");
 
+    Ok(PreparedPackCompilation {
+        world,
+        kernel: PreparedPackCompilationKernel {
+            format,
+            request_inventory,
+            compilation_identity,
+            engine_identity,
+            exporter_identity,
+            page_selection_implies_untagged_pdf,
+        },
+    })
+}
+
+pub(crate) fn compile_pack_kernel(
+    world: &PackWorld,
+    kernel: PreparedPackCompilationKernel,
+) -> PackCompilationExecution {
+    let PreparedPackCompilationKernel {
+        format,
+        request_inventory,
+        compilation_identity,
+        engine_identity,
+        exporter_identity,
+        page_selection_implies_untagged_pdf,
+    } = kernel;
     let result = match compile_with_default_pdf_timestamp(
-        &world,
+        world,
         format,
         request_inventory.options.value(),
         || None,
     ) {
         Ok(output) => {
+            let warnings = output.warnings.clone();
+            let mut presentation_pack_warnings = output.pack_warnings.clone();
+            if page_selection_implies_untagged_pdf {
+                presentation_pack_warnings.push(page_selection_pdf_tags_warning());
+            }
             let diagnostics = project_diagnostics(
-                &world,
+                world,
                 output.warnings,
                 DiagnosticPhase::Compilation,
                 DiagnosticProducer::Engine(engine_identity),
             );
             let pack_warnings =
                 project_pack_warnings(output.pack_warnings, page_selection_implies_untagged_pdf);
-            CompilationResult {
-                status: CompilationStatus::Succeeded,
-                artifacts: output.artifacts,
-                diagnostics,
-                pack_warnings,
-                source_page_count: output.source_page_count,
-                request_inventory: request_inventory.clone(),
-                compilation_identity,
-                engine_identity,
-                exporter_identity,
+            PackCompilationExecution {
+                result: CompilationResult {
+                    status: CompilationStatus::Succeeded,
+                    artifacts: output.artifacts,
+                    diagnostics,
+                    pack_warnings,
+                    source_page_count: output.source_page_count,
+                    request_inventory: request_inventory.clone(),
+                    compilation_identity,
+                    engine_identity,
+                    exporter_identity,
+                },
+                presentation: PackCompilationPresentation::Succeeded {
+                    warnings,
+                    pack_warnings: presentation_pack_warnings,
+                },
             }
         }
         Err(CompileError::Diagnostics {
@@ -1525,8 +1677,17 @@ pub fn compile_pack(
             phase,
             source_page_count,
         }) => {
+            let mut presentation_pack_warnings = pack_warnings.clone();
+            if page_selection_implies_untagged_pdf {
+                presentation_pack_warnings.push(page_selection_pdf_tags_warning());
+            }
+            let presentation = PackCompilationPresentation::Diagnostics {
+                errors: errors.clone(),
+                warnings: warnings.clone(),
+                pack_warnings: presentation_pack_warnings,
+            };
             let mut diagnostics = project_diagnostics(
-                &world,
+                world,
                 warnings,
                 DiagnosticPhase::Compilation,
                 DiagnosticProducer::Engine(engine_identity),
@@ -1535,20 +1696,23 @@ pub fn compile_pack(
                 DiagnosticPhase::Compilation => DiagnosticProducer::Engine(engine_identity),
                 DiagnosticPhase::Export => DiagnosticProducer::Exporter(exporter_identity),
             };
-            diagnostics.extend(project_diagnostics(&world, errors, phase, producer));
-            CompilationResult {
-                status: CompilationStatus::Rejected,
-                artifacts: vec![],
-                diagnostics,
-                pack_warnings: project_pack_warnings(
-                    pack_warnings,
-                    page_selection_implies_untagged_pdf,
-                ),
-                source_page_count,
-                request_inventory: request_inventory.clone(),
-                compilation_identity,
-                engine_identity,
-                exporter_identity,
+            diagnostics.extend(project_diagnostics(world, errors, phase, producer));
+            PackCompilationExecution {
+                result: CompilationResult {
+                    status: CompilationStatus::Rejected,
+                    artifacts: vec![],
+                    diagnostics,
+                    pack_warnings: project_pack_warnings(
+                        pack_warnings,
+                        page_selection_implies_untagged_pdf,
+                    ),
+                    source_page_count,
+                    request_inventory: request_inventory.clone(),
+                    compilation_identity,
+                    engine_identity,
+                    exporter_identity,
+                },
+                presentation,
             }
         }
         Err(CompileError::PngExport {
@@ -1558,8 +1722,17 @@ pub fn compile_pack(
             source_page_count,
             source_page_number,
         }) => {
+            let mut presentation_pack_warnings = pack_warnings.clone();
+            if page_selection_implies_untagged_pdf {
+                presentation_pack_warnings.push(page_selection_pdf_tags_warning());
+            }
+            let presentation = PackCompilationPresentation::PngExport {
+                error: format!("PNG export failed for source page {source_page_number}: {message}"),
+                warnings: warnings.clone(),
+                pack_warnings: presentation_pack_warnings,
+            };
             let mut diagnostics = project_diagnostics(
-                &world,
+                world,
                 warnings,
                 DiagnosticPhase::Compilation,
                 DiagnosticProducer::Engine(engine_identity),
@@ -1577,29 +1750,29 @@ pub fn compile_pack(
                 producer: DiagnosticProducer::Exporter(exporter_identity),
                 source_page_number: Some(source_page_number),
             });
-            CompilationResult {
-                status: CompilationStatus::Rejected,
-                artifacts: vec![],
-                diagnostics,
-                pack_warnings: project_pack_warnings(
-                    pack_warnings,
-                    page_selection_implies_untagged_pdf,
-                ),
-                source_page_count: Some(source_page_count),
-                request_inventory: request_inventory.clone(),
-                compilation_identity,
-                engine_identity,
-                exporter_identity,
+            PackCompilationExecution {
+                result: CompilationResult {
+                    status: CompilationStatus::Rejected,
+                    artifacts: vec![],
+                    diagnostics,
+                    pack_warnings: project_pack_warnings(
+                        pack_warnings,
+                        page_selection_implies_untagged_pdf,
+                    ),
+                    source_page_count: Some(source_page_count),
+                    request_inventory: request_inventory.clone(),
+                    compilation_identity,
+                    engine_identity,
+                    exporter_identity,
+                },
+                presentation,
             }
         }
         Err(CompileError::InvalidPdfStandards(error)) => {
-            return Err(PackCompileError::RequestRejected {
-                rejection: CompilationRequestRejection::InvalidPdfStandards(error),
-                request_inventory: Box::new(request_inventory),
-            });
+            unreachable!("PDF standards are validated during request preparation: {error}");
         }
     };
-    Ok(result)
+    result
 }
 
 pub(crate) fn package_tree_outcome(error: PackageTreeError) -> CompilationOperationOutcome {
@@ -1693,6 +1866,7 @@ fn compilation_identity(
             .collect::<Vec<_>>(),
         feature_values,
         inventory.document_time.value,
+        inventory.document_timestamp.value,
         engine_identity,
         exporter_identity,
     )))

@@ -371,6 +371,54 @@ fn adapter_resolved_shared_values_remain_distinguishable() {
     );
 }
 
+#[cfg(feature = "cli")]
+#[test]
+fn offset_aware_document_timestamps_on_the_same_utc_date_have_distinct_identities() {
+    let pack = Pack::builder("main.typ")
+        .file(
+            "main.typ",
+            b"#set page(width: datetime.today(offset: 2).day() * 1pt, height: 10pt, margin: 0pt)"
+                .to_vec(),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+    let early = 1_704_069_000; // 2024-01-01 00:30:00 UTC.
+    let late = 1_704_151_800; // 2024-01-01 23:30:00 UTC.
+    assert_eq!(
+        typst_kit::datetime::Time::fixed_timestamp(early)
+            .unwrap()
+            .today(None),
+        typst_kit::datetime::Time::fixed_timestamp(late)
+            .unwrap()
+            .today(None)
+    );
+
+    let first = compile_pack(
+        PackCompilationRequest::new(pack.clone(), OutputFormat::Svg)
+            .adapter_resolved_document_timestamp(early)
+            .unwrap(),
+    )
+    .unwrap();
+    let second = compile_pack(
+        PackCompilationRequest::new(pack, OutputFormat::Svg)
+            .adapter_resolved_document_timestamp(late)
+            .unwrap(),
+    )
+    .unwrap();
+
+    assert_eq!(
+        first.request_inventory().document_timestamp().value(),
+        &Some(early)
+    );
+    assert_eq!(
+        first.request_inventory().document_timestamp().origin(),
+        RequestValueOrigin::AdapterResolved
+    );
+    assert_ne!(first.compilation_identity(), second.compilation_identity());
+    assert_ne!(first.artifacts()[0].bytes(), second.artifacts()[0].bytes());
+}
+
 #[test]
 fn pack_bound_compilation_does_not_use_package_caches_or_network() {
     let package = "@preview/example:1.0.0".parse().unwrap();
