@@ -142,16 +142,15 @@ self-contained.
 
 ### Fonts
 
-Fonts are *not* embedded by default. With `--embed-fonts`, the fonts used by
-the rendered document are stored in the pack, except fonts identical to Typst's
-embedded fonts (Libertinus Serif, New Computer Modern, Deja Vu Sans Mono).
-Consumers need the `embedded-fonts` feature to supply omitted fonts; pass
-`--include-typst-embedded-fonts` to make the pack independent of that feature.
-Mind font licenses when redistributing packs with embedded fonts.
+Every selected face is recorded in the ordered Pack Font Catalog with its exact
+container identity. Fonts are *not* embedded by default: compilation must find
+the declared exact containers among the configured system, Typst-embedded, or
+`--font-path` sources. Other available fonts are not exposed to Typst.
 
-When compiling a pack, fonts are used in this order of preference:
-pack fonts, system fonts, Typst's embedded fonts, and `--font-path` fonts
-(disable system fonts with `--ignore-system-fonts`).
+With `--embed-fonts`, selected containers are stored in the pack, except those
+identical to Typst's embedded fonts. Pass `--include-typst-embedded-fonts` to
+store those too. Mind font licenses when redistributing embedded containers;
+licensing and acquisition metadata do not change font selection.
 
 ### Output formats
 
@@ -280,7 +279,8 @@ Pack content.
   system font scanning. Requires a file system, so disable this (and `cli`)
   for wasm targets.
 - `cli`: the `typst-pack` binary.
-- `embedded-fonts`: compile packs against Typst's embedded fonts.
+- `embedded-fonts`: make Typst's bundled fonts available as intentional
+  discovery and external-fulfillment sources.
 
 All crate features are opt-in.
 

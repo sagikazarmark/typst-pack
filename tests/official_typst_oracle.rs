@@ -4,9 +4,10 @@ use std::num::NonZeroUsize;
 
 use support::official_typst::{
     ArtifactRole, DiagnosticObservation, DiagnosticSeverity, Fixture, ObservationStatus,
-    OutputRequest, ReferenceRequest, Target, TraceKind, observe,
+    OutputRequest, ReferenceRequest, Target, TraceKind, observe, select_font,
 };
-use typst::foundations::{Datetime, Dict, Smart, Value};
+use typst::World;
+use typst::foundations::{Bytes, Datetime, Dict, Smart, Value};
 use typst_pack::{
     CompilationDiagnostic, CompilationStatus, CompileOptions, CreationTimestamp, DiagnosticPhase,
     DiagnosticProducer, DiagnosticSeverity as PackDiagnosticSeverity, OutputFormat, Pack,
@@ -24,7 +25,125 @@ fn stabilized_pack(fixture: &Fixture) -> Pack {
             .package_file(spec.parse().unwrap(), path, text.as_bytes().to_vec())
             .unwrap();
     }
+    for (data, index) in fixture.fonts() {
+        builder = builder.font(data.clone(), *index).unwrap();
+    }
     Pack::from_bytes(builder.build().unwrap().to_bytes().unwrap()).unwrap()
+}
+
+#[cfg(feature = "embedded-fonts")]
+#[test]
+fn exact_pack_font_catalog_matches_the_independent_oracle_and_external_fulfillment() {
+    let font = typst_kit::fonts::embedded()
+        .find(|(_, info)| info.family == "Libertinus Serif")
+        .unwrap()
+        .0;
+    let data = font.data().to_vec();
+    let index = font.index();
+    let fixture = Fixture::font_selection().font(data.clone(), index);
+    let request = ReferenceRequest {
+        inputs: Dict::new(),
+        features: vec![],
+        document_time: None,
+        output: OutputRequest::Svg {
+            source_pages: vec![],
+            render_bleed: false,
+            pretty: false,
+        },
+    };
+    let expected = observe(&fixture, &request);
+    assert_eq!(expected.font_catalog.len(), 1);
+    assert_eq!(expected.font_catalog[0].1, data);
+    assert_eq!(expected.font_catalog[0].2, index);
+
+    let embedded_pack = stabilized_pack(&fixture);
+    assert_eq!(embedded_pack.fonts()[0].info(), &expected.font_catalog[0].0);
+    assert_eq!(
+        embedded_pack.fonts()[0].data().as_slice(),
+        expected.font_catalog[0].1
+    );
+    let embedded = compile_pack(PackCompilationRequest::new(
+        embedded_pack,
+        OutputFormat::Svg,
+    ))
+    .unwrap();
+    assert_eq!(embedded.artifacts()[0].bytes(), expected.artifacts[0].bytes);
+
+    let external_pack = Pack::builder("main.typ")
+        .file("main.typ", fixture.project()[0].1.as_bytes().to_vec())
+        .unwrap()
+        .external_font(data.clone(), index)
+        .unwrap()
+        .build()
+        .unwrap();
+    let identity = external_pack.font_requirements()[0].container_identity();
+    let external = compile_pack(
+        PackCompilationRequest::new(external_pack, OutputFormat::Svg)
+            .font_fulfillment(identity, typst_pack::FontContainerFulfillment::new(data)),
+    )
+    .unwrap();
+    assert_eq!(external.artifacts()[0].bytes(), expected.artifacts[0].bytes);
+    assert_eq!(external.diagnostics().len(), expected.diagnostics.len());
+}
+
+#[cfg(feature = "embedded-fonts")]
+#[test]
+fn catalog_order_drives_the_same_official_font_selection_on_every_path() {
+    let base = typst_kit::fonts::embedded()
+        .find(|(_, info)| info.family == "Libertinus Serif")
+        .unwrap()
+        .0;
+    let mut first = base.data().to_vec();
+    first.push(1);
+    let mut second = base.data().to_vec();
+    second.push(2);
+    let parsed = typst::text::Font::new(Bytes::new(first.clone()), base.index()).unwrap();
+    let family = parsed.info().family.to_lowercase();
+    let variant = parsed.info().variant;
+
+    for (expected, ordered) in [
+        (first.as_slice(), [first.clone(), second.clone()]),
+        (second.as_slice(), [second.clone(), first.clone()]),
+    ] {
+        let fixture = Fixture::font_selection()
+            .font(ordered[0].clone(), base.index())
+            .font(ordered[1].clone(), base.index());
+        assert_eq!(select_font(&fixture, &family, variant).unwrap().0, expected);
+
+        let embedded_pack = stabilized_pack(&fixture);
+        let embedded_world = typst_pack::PackWorld::builder(embedded_pack)
+            .build()
+            .unwrap();
+        let selected = embedded_world.book().select(&family, variant).unwrap();
+        assert_eq!(
+            embedded_world.font(selected).unwrap().data().as_slice(),
+            expected
+        );
+
+        let external_pack = Pack::builder("main.typ")
+            .file("main.typ", fixture.project()[0].1.as_bytes().to_vec())
+            .unwrap()
+            .external_font(ordered[0].clone(), base.index())
+            .unwrap()
+            .external_font(ordered[1].clone(), base.index())
+            .unwrap()
+            .build()
+            .unwrap();
+        let supplied = ordered.iter().map(|data| {
+            let font = typst::text::Font::new(Bytes::new(data.clone()), base.index()).unwrap();
+            let info = font.info().clone();
+            (font, info)
+        });
+        let external_world = typst_pack::PackWorld::builder(external_pack)
+            .extra_fonts(supplied)
+            .build()
+            .unwrap();
+        let selected = external_world.book().select(&family, variant).unwrap();
+        assert_eq!(
+            external_world.font(selected).unwrap().data().as_slice(),
+            expected
+        );
+    }
 }
 
 fn string_inputs<const N: usize>(entries: [(&str, &str); N]) -> Dict {

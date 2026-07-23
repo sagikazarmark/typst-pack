@@ -1,8 +1,8 @@
 use typst_pack::{
     CompilationOperationOutcome, CompilationRequestRejection, CompilationStatus, CompileOptions,
-    CreationTimestamp, DiagnosticPhase, DiagnosticProducer, OutputFormat, Pack,
-    PackCompilationRequest, PackCompileError, PackMetadata, PackWorld, RequestValueOrigin, compile,
-    compile_pack,
+    CreationTimestamp, DiagnosticPhase, DiagnosticProducer, FontContainerFulfillment, OutputFormat,
+    Pack, PackCompilationRequest, PackCompileError, PackMetadata, PackWorld, RequestValueOrigin,
+    compile, compile_pack,
 };
 
 fn five_page_world() -> PackWorld {
@@ -20,7 +20,7 @@ fn five_page_world() -> PackWorld {
         .build()
         .unwrap();
 
-    PackWorld::builder(pack).build()
+    PackWorld::builder(pack).build().unwrap()
 }
 
 #[test]
@@ -237,6 +237,76 @@ fn pack_bound_compilation_does_not_use_package_caches_or_network() {
     ));
 }
 
+#[cfg(feature = "embedded-fonts")]
+#[test]
+fn external_font_fulfillment_is_verified_before_official_compilation() {
+    let font = typst_kit::fonts::embedded().next().unwrap().0;
+    let data = font.data().to_vec();
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"Exact font".to_vec())
+        .unwrap()
+        .external_font(data.clone(), font.index())
+        .unwrap()
+        .build()
+        .unwrap();
+    let requirement = pack.font_requirements()[0].clone();
+
+    let missing = compile_pack(PackCompilationRequest::new(pack.clone(), OutputFormat::Svg));
+    assert!(matches!(
+        missing,
+        Err(PackCompileError::Operation {
+            outcome: CompilationOperationOutcome::MissingExternalFontFulfillment { containers },
+            ..
+        }) if containers == vec![requirement.container_identity()]
+    ));
+
+    let mut wrong = data.clone();
+    wrong.push(0);
+    let mismatched = compile_pack(
+        PackCompilationRequest::new(pack.clone(), OutputFormat::Svg).font_fulfillment(
+            requirement.container_identity(),
+            FontContainerFulfillment::new(wrong),
+        ),
+    );
+    assert!(matches!(
+        mismatched,
+        Err(PackCompileError::Operation {
+            outcome: CompilationOperationOutcome::MismatchedExternalFontContainer { expected, .. },
+            ..
+        }) if expected == requirement.container_identity()
+    ));
+
+    let baseline = compile_pack(
+        PackCompilationRequest::new(pack.clone(), OutputFormat::Svg).font_fulfillment(
+            requirement.container_identity(),
+            FontContainerFulfillment::new(data.clone()),
+        ),
+    )
+    .unwrap();
+    let with_metadata = compile_pack(
+        PackCompilationRequest::new(pack, OutputFormat::Svg).font_fulfillment(
+            requirement.container_identity(),
+            FontContainerFulfillment::new(data)
+                .provenance("memory:test")
+                .licensing("advisory:test"),
+        ),
+    )
+    .unwrap();
+    assert_eq!(with_metadata.status(), CompilationStatus::Succeeded);
+    assert_eq!(
+        baseline.compilation_identity(),
+        with_metadata.compilation_identity()
+    );
+    assert_eq!(
+        baseline.artifacts()[0].bytes(),
+        with_metadata.artifacts()[0].bytes()
+    );
+    assert_eq!(
+        baseline.diagnostics().len(),
+        with_metadata.diagnostics().len()
+    );
+}
+
 #[test]
 fn pack_bound_compilation_rejects_the_bundle_feature() {
     let pack = Pack::builder("main.typ")
@@ -339,7 +409,7 @@ fn pdf_is_one_document_format_artifact() {
         .unwrap()
         .build()
         .unwrap();
-    let world = PackWorld::builder(pack).build();
+    let world = PackWorld::builder(pack).build().unwrap();
 
     let output = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap();
 
@@ -362,7 +432,7 @@ fn page_format_selection_matching_no_source_page_produces_no_artifacts() {
         .unwrap()
         .build()
         .unwrap();
-    let world = PackWorld::builder(pack).build();
+    let world = PackWorld::builder(pack).build().unwrap();
     for expression in ["9", "9-"] {
         let options = CompileOptions {
             page_selection: typst_pack::parse_page_selection(expression).unwrap(),
@@ -670,7 +740,8 @@ fn html_is_one_document_format_artifact() {
         .unwrap();
     let world = PackWorld::builder(pack)
         .feature(typst::Feature::Html)
-        .build();
+        .build()
+        .unwrap();
 
     let output = compile(&world, OutputFormat::Html, &CompileOptions::default()).unwrap();
 
@@ -695,7 +766,8 @@ fn pretty_affects_html_svg_and_pdf_but_not_png() {
         .unwrap();
     let world = PackWorld::builder(pack)
         .feature(typst::Feature::Html)
-        .build();
+        .build()
+        .unwrap();
     let compact = CompileOptions::default();
     let pretty = CompileOptions {
         pretty: true,
@@ -724,7 +796,7 @@ fn empty_page_format_output_retains_compilation_warnings() {
         .unwrap()
         .build()
         .unwrap();
-    let world = PackWorld::builder(pack).build();
+    let world = PackWorld::builder(pack).build().unwrap();
     let options = CompileOptions {
         page_selection: typst_pack::parse_page_selection("9").unwrap(),
         ..CompileOptions::default()

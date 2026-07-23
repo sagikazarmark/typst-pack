@@ -17,18 +17,20 @@ pub use compile::{
     CompilationOutput, CompilationRequestInventory, CompilationRequestRejection, CompilationResult,
     CompilationStatus, CompileError, CompileOptions, CreationTimestamp, DiagnosticHint,
     DiagnosticPhase, DiagnosticProducer, DiagnosticSeverity, DiagnosticTracepoint,
-    EffectiveEngineFeature, EffectiveRequestValue, EngineIdentity, ExporterIdentity, LogicalSpan,
-    OutputFormat, PackCompilationRequest, PackCompilationWarning, PackCompileError, PageRange,
-    PageSelection, PdfStandardsValidationError, RequestValueOrigin, TracepointKind,
-    TypstInputsInventory, compile, compile_pack, parse_page_selection,
+    EffectiveEngineFeature, EffectiveRequestValue, EngineIdentity, ExporterIdentity,
+    FontContainerFulfillment, LogicalSpan, OutputFormat, PackCompilationRequest,
+    PackCompilationWarning, PackCompileError, PageRange, PageSelection,
+    PdfStandardsValidationError, RequestValueOrigin, TracepointKind, TypstInputsInventory, compile,
+    compile_pack, parse_page_selection,
 };
 pub use manifest::{
     FORMAT_VERSION, FontManifest, MANIFEST_PATH, PackManifest, PackManifestError, PackMetadata,
     PackagesManifest, ProjectManifest,
 };
 pub use pack::{
-    FILE_EXTENSION, Pack, PackBuildError, PackBuilder, PackFont, PackIdentity, PackInvariantError,
-    PackPathRole, PackReadError, PackWriteError,
+    FILE_EXTENSION, FontCatalogError, FontContainerIdentity, FontFaceIdentity, FontRequirement,
+    Pack, PackBuildError, PackBuilder, PackFont, PackFontCatalogFace, PackIdentity,
+    PackInvariantError, PackPathRole, PackReadError, PackWriteError,
 };
 pub use world::{PackWorld, PackWorldBuilder};
 

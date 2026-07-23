@@ -1,5 +1,6 @@
 //! Compiling a pack into Compilation Output Artifacts.
 
+use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 use std::ops::Range;
 
@@ -7,7 +8,7 @@ use ecow::EcoVec;
 #[cfg(feature = "cli")]
 use rayon::prelude::*;
 use typst::diag::{Severity, SourceDiagnostic, Tracepoint, Warned};
-use typst::foundations::{Datetime, Dict, Repr, Smart};
+use typst::foundations::{Bytes, Datetime, Dict, Repr, Smart};
 use typst::syntax::package::PackageSpec;
 use typst::syntax::{DiagSpan, FileId, Span, VirtualRoot};
 use typst::{Feature, World, WorldExt};
@@ -15,7 +16,8 @@ use typst_layout::PagedDocument;
 use typst_pdf::{PdfOptions, PdfStandard, PdfStandards, Timestamp};
 
 use crate::embedded::EmbeddedTypst;
-use crate::{Pack, PackWorld};
+use crate::pack::FontCatalogError;
+use crate::{FontContainerIdentity, Pack, PackWorld};
 
 /// The exact embedded Typst compiler implementation that produced a result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -411,6 +413,35 @@ pub struct PackCompilationRequest {
     inputs: EffectiveRequestValue<Dict>,
     features: Vec<EffectiveEngineFeature>,
     document_time: EffectiveRequestValue<Option<Datetime>>,
+    font_fulfillments: BTreeMap<FontContainerIdentity, FontContainerFulfillment>,
+}
+
+/// Exact externally supplied Font Container bytes and non-semantic metadata.
+#[derive(Debug, Clone)]
+pub struct FontContainerFulfillment {
+    data: Bytes,
+    provenance: Option<String>,
+    licensing: Option<String>,
+}
+
+impl FontContainerFulfillment {
+    pub fn new(data: impl Into<Vec<u8>>) -> Self {
+        Self {
+            data: Bytes::new(data.into()),
+            provenance: None,
+            licensing: None,
+        }
+    }
+
+    pub fn provenance(mut self, provenance: impl Into<String>) -> Self {
+        self.provenance = Some(provenance.into());
+        self
+    }
+
+    pub fn licensing(mut self, licensing: impl Into<String>) -> Self {
+        self.licensing = Some(licensing.into());
+        self
+    }
 }
 
 impl PackCompilationRequest {
@@ -426,6 +457,7 @@ impl PackCompilationRequest {
             inputs: EffectiveRequestValue::new(Dict::new(), RequestValueOrigin::CoreDefaulted),
             features: Vec::new(),
             document_time: EffectiveRequestValue::new(None, RequestValueOrigin::CoreDefaulted),
+            font_fulfillments: BTreeMap::new(),
         }
     }
 
@@ -476,6 +508,16 @@ impl PackCompilationRequest {
     pub fn adapter_resolved_document_time(mut self, document_time: Option<Datetime>) -> Self {
         self.document_time =
             EffectiveRequestValue::new(document_time, RequestValueOrigin::AdapterResolved);
+        self
+    }
+
+    /// Supplies bytes for one exact external Font Container requirement.
+    pub fn font_fulfillment(
+        mut self,
+        expected: FontContainerIdentity,
+        fulfillment: FontContainerFulfillment,
+    ) -> Self {
+        self.font_fulfillments.insert(expected, fulfillment);
         self
     }
 }
@@ -948,6 +990,25 @@ pub enum CompilationOperationOutcome {
     /// The request supplied no authority for declared external packages.
     #[error("external package fulfillment is unavailable for {packages:?}")]
     MissingExternalPackageFulfillment { packages: Vec<PackageSpec> },
+    /// No fulfillment was supplied for declared external Font Containers.
+    #[error("external font fulfillment is unavailable for {containers:?}")]
+    MissingExternalFontFulfillment {
+        containers: Vec<FontContainerIdentity>,
+    },
+    /// Supplied bytes do not match the exact required Font Container.
+    #[error("external font fulfillment for {expected:?} supplied {actual:?}")]
+    MismatchedExternalFontContainer {
+        expected: FontContainerIdentity,
+        actual: FontContainerIdentity,
+        expected_length: u64,
+        actual_length: u64,
+    },
+    /// Verified container bytes do not contain one declared face.
+    #[error("external font container {container:?} has no valid face at index {index}")]
+    MalformedExternalFontContainer {
+        container: FontContainerIdentity,
+        index: u32,
+    },
 }
 
 /// A failed Pack-bound request or operation, never an official rejection.
@@ -1016,6 +1077,7 @@ pub fn compile_pack(
         inputs,
         features,
         document_time,
+        font_fulfillments,
     } = request;
     let options_value = options.value();
     let mut request_issues = vec![];
@@ -1154,7 +1216,42 @@ pub fn compile_pack(
         });
     }
 
-    let mut world = PackWorld::builder(pack).inputs(raw_inputs);
+    let fulfillment_bytes = font_fulfillments
+        .into_iter()
+        .map(|(identity, fulfillment)| (identity, fulfillment.data))
+        .collect();
+    let catalog_fonts = pack
+        .materialize_font_catalog(&fulfillment_bytes)
+        .map_err(|error| {
+            let outcome = match error {
+                FontCatalogError::Missing { containers } => {
+                    CompilationOperationOutcome::MissingExternalFontFulfillment { containers }
+                }
+                FontCatalogError::Mismatched {
+                    expected,
+                    actual,
+                    expected_length,
+                    actual_length,
+                } => CompilationOperationOutcome::MismatchedExternalFontContainer {
+                    expected,
+                    actual,
+                    expected_length,
+                    actual_length,
+                },
+                FontCatalogError::Malformed { container, index } => {
+                    CompilationOperationOutcome::MalformedExternalFontContainer { container, index }
+                }
+            };
+            PackCompileError::Operation {
+                outcome,
+                request_inventory: Box::new(request_inventory.clone()),
+                compilation_identity,
+            }
+        })?;
+
+    let mut world = PackWorld::builder(pack)
+        .inputs(raw_inputs)
+        .exact_font_catalog(catalog_fonts);
     #[cfg(feature = "embedded-fonts")]
     {
         world = world.embedded_fonts(false);
@@ -1165,7 +1262,9 @@ pub fn compile_pack(
     if let Some(document_time) = request_inventory.document_time.value {
         world = world.fixed_date(document_time);
     }
-    let world = world.build();
+    let world = world
+        .build()
+        .expect("verified Pack Font Catalog must build a World");
 
     let result = match compile_with_default_pdf_timestamp(
         &world,

@@ -37,10 +37,13 @@ embedded-fonts = ["typst-kit/embedded-fonts"]
 # Filesystem-based packing: directory discovery, package download and caching,
 # system font scanning. Not available on wasm targets.
 fs = [
+    "dep:env_proxy",
+    "dep:rustls-pemfile",
+    "dep:ureq",
     "dep:walkdir",
+    "dep:webpki-roots",
     "typst-kit/datetime",
     "typst-kit/scan-fonts",
-    "typst-kit/system-downloader",
     "typst-kit/system-files",
     "typst-kit/timer",
 ]
@@ -49,6 +52,7 @@ fs = [
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }
 clap = { version = "4", features = ["derive", "env"], optional = true }
 ecow = "0.2"
+env_proxy = { version = "0.4", optional = true }
 open = { version = "5", optional = true }
 rayon = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"] }
@@ -56,6 +60,7 @@ serde_json = { version = "1", optional = true }
 sigpipe = { version = "0.1", optional = true }
 thiserror = "2"
 toml = "1.1"
+rustls-pemfile = { version = "2", optional = true }
 # Typst crates share internal types and must resolve to the same exact release.
 typst = "=0.15.0"
 typst-html = "=0.15.0"
@@ -66,6 +71,8 @@ typst-render = "=0.15.0"
 typst-svg = "=0.15.0"
 typst-timing = "=0.15.1"
 walkdir = { version = "2", optional = true }
+ureq = { version = "2", default-features = false, features = ["tls"], optional = true }
+webpki-roots = { version = "1", optional = true }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]

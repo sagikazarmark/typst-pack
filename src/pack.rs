@@ -34,6 +34,8 @@ pub struct Pack {
     /// Vendored packages, keyed by spec string for deterministic order.
     packages: BTreeMap<String, PackageFiles>,
     fonts: Vec<PackFont>,
+    font_catalog: Vec<PackFontCatalogFace>,
+    font_requirements: Vec<FontRequirement>,
 }
 
 /// The canonical semantic identity of a [`Pack`].
@@ -107,6 +109,107 @@ pub struct PackFont {
     font: Font,
 }
 
+/// The canonical content identity of one exact Font Container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FontContainerIdentity(u128);
+
+impl FontContainerIdentity {
+    /// Derives the identity from exact container bytes.
+    pub fn from_bytes(data: &[u8]) -> Self {
+        Self(typst::utils::hash128(&data))
+    }
+
+    /// The identity digest in big-endian order.
+    pub fn digest(self) -> [u8; 16] {
+        self.0.to_be_bytes()
+    }
+
+    pub fn kind(self) -> &'static str {
+        "font-container"
+    }
+
+    pub fn schema(self) -> &'static str {
+        "typst-pack-font-container-identity-v1"
+    }
+
+    pub fn algorithm(self) -> &'static str {
+        "typst-hash128-0.15"
+    }
+
+    fn encode(self) -> String {
+        format!("{:032x}", self.0)
+    }
+
+    fn decode(value: &str) -> Option<Self> {
+        u128::from_str_radix(value, 16).ok().map(Self)
+    }
+}
+
+/// The exact identity of one face within a Font Container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct FontFaceIdentity {
+    container: FontContainerIdentity,
+    index: u32,
+}
+
+impl FontFaceIdentity {
+    /// The containing font file or collection.
+    pub fn container(self) -> FontContainerIdentity {
+        self.container
+    }
+
+    /// The face's container-local index.
+    pub fn index(self) -> u32 {
+        self.index
+    }
+}
+
+/// One ordered face in the exact Pack Font Catalog.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackFontCatalogFace {
+    identity: FontFaceIdentity,
+    embedded: bool,
+}
+
+impl PackFontCatalogFace {
+    /// The exact container and face index.
+    pub fn identity(&self) -> FontFaceIdentity {
+        self.identity
+    }
+
+    /// Whether the Font Container bytes are stored in the Pack.
+    pub fn is_embedded(&self) -> bool {
+        self.embedded
+    }
+}
+
+/// One exact Font Container and the faces required from it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FontRequirement {
+    container: FontContainerIdentity,
+    length: u64,
+    face_indices: Vec<u32>,
+    embedded: bool,
+}
+
+impl FontRequirement {
+    pub fn container_identity(&self) -> FontContainerIdentity {
+        self.container
+    }
+
+    pub fn container_length(&self) -> u64 {
+        self.length
+    }
+
+    pub fn face_indices(&self) -> &[u32] {
+        &self.face_indices
+    }
+
+    pub fn is_embedded(&self) -> bool {
+        self.embedded
+    }
+}
+
 impl PackFont {
     /// The declaration describing this font face.
     pub fn manifest(&self) -> &FontManifest {
@@ -118,8 +221,9 @@ impl PackFont {
         &self.data
     }
 
-    pub(crate) fn font(&self) -> &Font {
-        &self.font
+    /// Official selection metadata derived from the verified container bytes.
+    pub fn info(&self) -> &FontInfo {
+        self.font.info()
     }
 }
 
@@ -127,6 +231,7 @@ impl PackFont {
 struct PackFontInput {
     entry: FontManifest,
     data: Bytes,
+    embedded: bool,
 }
 
 impl Pack {
@@ -287,30 +392,121 @@ impl Pack {
         }
 
         let mut canonical_fonts = Vec::new();
+        let mut canonical_font_entries = Vec::new();
+        let mut font_catalog = Vec::new();
+        let mut font_requirements = Vec::<FontRequirement>::new();
         let mut font_faces = BTreeSet::new();
         for (path, entry) in font_entries {
             let index = entry.index();
-            if !font_faces.insert((path.clone(), index)) {
+            let (data, parsed, container, length) = if entry.is_external() {
+                if font_data.contains_key(&path) {
+                    return Err(PackInvariantError::ExternalFontHasContainedData {
+                        path: path.to_string(),
+                    });
+                }
+                if entry.container_identity_kind() != Some("font-container")
+                    || entry.container_identity_schema()
+                        != Some("typst-pack-font-container-identity-v1")
+                    || entry.container_identity_algorithm() != Some("typst-hash128-0.15")
+                {
+                    return Err(PackInvariantError::InvalidExternalFontIdentity {
+                        path: path.to_string(),
+                    });
+                }
+                let container = entry
+                    .container_digest()
+                    .and_then(FontContainerIdentity::decode)
+                    .ok_or_else(|| PackInvariantError::InvalidExternalFontIdentity {
+                        path: path.to_string(),
+                    })?;
+                let length = entry
+                    .container_length()
+                    .filter(|length| *length > 0)
+                    .ok_or_else(|| PackInvariantError::InvalidExternalFontIdentity {
+                        path: path.to_string(),
+                    })?;
+                (None, None, container, length)
+            } else {
+                let data = font_data
+                    .get(&path)
+                    .cloned()
+                    .ok_or_else(|| PackInvariantError::MissingFontData(path.to_string()))?;
+                let parsed = Font::new(data.clone(), index).ok_or_else(|| {
+                    PackInvariantError::InvalidFontData {
+                        path: path.to_string(),
+                        index,
+                    }
+                })?;
+                let container = FontContainerIdentity::from_bytes(data.as_slice());
+                let length = data.len() as u64;
+                if entry
+                    .container_digest()
+                    .is_some_and(|digest| FontContainerIdentity::decode(digest) != Some(container))
+                    || entry
+                        .container_length()
+                        .is_some_and(|declared| declared != length)
+                    || entry
+                        .container_identity_kind()
+                        .is_some_and(|kind| kind != container.kind())
+                    || entry
+                        .container_identity_schema()
+                        .is_some_and(|schema| schema != container.schema())
+                    || entry
+                        .container_identity_algorithm()
+                        .is_some_and(|algorithm| algorithm != container.algorithm())
+                {
+                    return Err(PackInvariantError::MismatchedEmbeddedFontIdentity {
+                        path: path.to_string(),
+                    });
+                }
+                (Some(data), Some(parsed), container, length)
+            };
+            if !font_faces.insert((container, index)) {
                 return Err(PackInvariantError::DuplicateFontFace {
                     path: path.to_string(),
                     index,
                 });
             }
-            let data = font_data
-                .get(&path)
-                .cloned()
-                .ok_or_else(|| PackInvariantError::MissingFontData(path.to_string()))?;
-            let parsed = Font::new(data.clone(), index).ok_or_else(|| {
-                PackInvariantError::InvalidFontData {
-                    path: path.to_string(),
-                    index,
-                }
-            })?;
-            canonical_fonts.push(PackFont {
-                entry: FontManifest::new(path.into_string(), index, entry.families().to_vec()),
-                data,
-                font: parsed,
+            let embedded = !entry.is_external();
+            font_catalog.push(PackFontCatalogFace {
+                identity: FontFaceIdentity { container, index },
+                embedded,
             });
+            match font_requirements
+                .iter_mut()
+                .find(|requirement| requirement.container == container)
+            {
+                Some(requirement)
+                    if requirement.length != length || requirement.embedded != embedded =>
+                {
+                    return Err(PackInvariantError::InconsistentFontContainer {
+                        path: path.to_string(),
+                    });
+                }
+                Some(requirement) => requirement.face_indices.push(index),
+                None => font_requirements.push(FontRequirement {
+                    container,
+                    length,
+                    face_indices: vec![index],
+                    embedded,
+                }),
+            }
+            let canonical_entry = FontManifest::new(
+                path.into_string(),
+                index,
+                entry.families().to_vec(),
+                !embedded,
+                container.encode(),
+                length,
+            );
+            canonical_font_entries.push(canonical_entry.clone());
+            if let (Some(data), Some(font)) = (data, parsed) {
+                canonical_fonts.push(PackFont {
+                    entry: canonical_entry,
+                    data,
+                    font,
+                });
+            }
         }
 
         let manifest = PackManifest::new(
@@ -321,10 +517,7 @@ impl Pack {
                 .collect(),
             vendored_packages.into_values().collect(),
             unvendored_packages.into_values().collect(),
-            canonical_fonts
-                .iter()
-                .map(|font| font.entry.clone())
-                .collect(),
+            canonical_font_entries,
             manifest.metadata().cloned(),
         );
 
@@ -333,6 +526,8 @@ impl Pack {
             files: canonical_files,
             packages: canonical_packages,
             fonts: canonical_fonts,
+            font_catalog,
+            font_requirements,
         })
     }
 
@@ -367,9 +562,15 @@ impl Pack {
             .map(ToString::to_string)
             .collect::<Vec<_>>();
         let fonts = self
-            .fonts()
+            .font_catalog()
             .iter()
-            .map(|font| (font.manifest().index(), typst::utils::hash128(font.data())))
+            .map(|face| {
+                (
+                    face.identity.container.0,
+                    face.identity.index,
+                    face.embedded,
+                )
+            })
             .collect::<Vec<_>>();
         PackIdentity(typst::utils::hash128(&(
             "typst-pack-identity-v1",
@@ -434,6 +635,74 @@ impl Pack {
     /// The fonts embedded in the pack.
     pub fn fonts(&self) -> &[PackFont] {
         &self.fonts
+    }
+
+    /// The exact candidate faces exposed to official Typst, in stable order.
+    pub fn font_catalog(&self) -> &[PackFontCatalogFace] {
+        &self.font_catalog
+    }
+
+    /// The exact Font Containers required by this Pack.
+    pub fn font_requirements(&self) -> &[FontRequirement] {
+        &self.font_requirements
+    }
+
+    pub(crate) fn materialize_font_catalog(
+        &self,
+        fulfillments: &BTreeMap<FontContainerIdentity, Bytes>,
+    ) -> Result<Vec<Font>, FontCatalogError> {
+        let missing = self
+            .font_requirements
+            .iter()
+            .filter(|requirement| !requirement.embedded)
+            .map(|requirement| requirement.container)
+            .filter(|container| !fulfillments.contains_key(container))
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(FontCatalogError::Missing {
+                containers: missing,
+            });
+        }
+        self.font_catalog
+            .iter()
+            .map(|face| {
+                let identity = face.identity;
+                if face.embedded {
+                    return Ok(self
+                        .fonts
+                        .iter()
+                        .find(|font| {
+                            FontContainerIdentity::from_bytes(font.data.as_slice())
+                                == identity.container
+                                && font.entry.index() == identity.index
+                        })
+                        .expect("Pack Font Catalog embedded face invariant violated")
+                        .font
+                        .clone());
+                }
+                let data = &fulfillments[&identity.container];
+                let actual = FontContainerIdentity::from_bytes(data.as_slice());
+                let actual_length = data.len() as u64;
+                let expected_length = self
+                    .font_requirements
+                    .iter()
+                    .find(|requirement| requirement.container == identity.container)
+                    .expect("Pack Font Catalog requirement invariant violated")
+                    .length;
+                if actual != identity.container || actual_length != expected_length {
+                    return Err(FontCatalogError::Mismatched {
+                        expected: identity.container,
+                        actual,
+                        expected_length,
+                        actual_length,
+                    });
+                }
+                Font::new(data.clone(), identity.index).ok_or(FontCatalogError::Malformed {
+                    container: identity.container,
+                    index: identity.index,
+                })
+            })
+            .collect()
     }
 
     /// Reads a pack from a seekable reader.
@@ -686,6 +955,27 @@ impl Pack {
     }
 }
 
+/// A Pack-owned failure to materialize its exact Font Catalog.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum FontCatalogError {
+    #[error("exact font containers {containers:?} are unavailable")]
+    Missing {
+        containers: Vec<FontContainerIdentity>,
+    },
+    #[error("font container fulfillment does not match {expected:?}")]
+    Mismatched {
+        expected: FontContainerIdentity,
+        actual: FontContainerIdentity,
+        expected_length: u64,
+        actual_length: u64,
+    },
+    #[error("font container {container:?} has no valid face at index {index}")]
+    Malformed {
+        container: FontContainerIdentity,
+        index: u32,
+    },
+}
+
 fn zip_file_options(size: usize) -> SimpleFileOptions {
     // Deflate may expand incompressible input. Nine bits per input byte plus
     // framing is a conservative bound for the configured encoder.
@@ -900,8 +1190,41 @@ impl PackBuilder {
         let family = info.family.to_string();
         let path = self.font_path(&family, &data);
         self.fonts.push(PackFontInput {
-            entry: FontManifest::new(path, index, vec![family]),
+            entry: FontManifest::new(
+                path,
+                index,
+                vec![family],
+                false,
+                FontContainerIdentity::from_bytes(&data).encode(),
+                data.len() as u64,
+            ),
             data: Bytes::new(data),
+            embedded: true,
+        });
+        Ok(self)
+    }
+
+    /// Records an exact font dependency without storing its container bytes.
+    pub fn external_font(
+        mut self,
+        data: impl Into<Vec<u8>>,
+        index: u32,
+    ) -> Result<Self, PackBuildError> {
+        let data = data.into();
+        let info = FontInfo::new(&data, index).ok_or(PackBuildError::InvalidFontInput { index })?;
+        let family = info.family.to_string();
+        let path = self.font_path(&family, &data);
+        self.fonts.push(PackFontInput {
+            entry: FontManifest::new(
+                path,
+                index,
+                vec![family],
+                true,
+                FontContainerIdentity::from_bytes(&data).encode(),
+                data.len() as u64,
+            ),
+            data: Bytes::new(data),
+            embedded: false,
         });
         Ok(self)
     }
@@ -918,6 +1241,7 @@ impl PackBuilder {
         let font_data = self
             .fonts
             .iter()
+            .filter(|font| font.embedded)
             .map(|font| {
                 Ok((
                     canonical_path(PackPathRole::FontData, font.entry.path())?,
@@ -1269,6 +1593,18 @@ pub enum PackInvariantError {
     /// Contained font bytes do not contain the declared face.
     #[error("font data `{path}` does not contain a valid face at index {index}")]
     InvalidFontData { path: String, index: u32 },
+    /// An external font declaration has no valid exact container identity.
+    #[error("external font `{path}` has an invalid container identity or length")]
+    InvalidExternalFontIdentity { path: String },
+    /// Embedded font bytes disagree with their declared exact identity.
+    #[error("embedded font `{path}` does not match its declared container identity")]
+    MismatchedEmbeddedFontIdentity { path: String },
+    /// Faces from one exact container disagree about its length or fulfillment role.
+    #[error("font `{path}` conflicts with another declaration for the same container")]
+    InconsistentFontContainer { path: String },
+    /// An externally fulfilled declaration also has bytes in the Pack.
+    #[error("external font `{path}` cannot also have contained data")]
+    ExternalFontHasContainedData { path: String },
     /// The same contained font face was declared more than once.
     #[error("font `{path}` declares face index {index} more than once")]
     DuplicateFontFace { path: String, index: u32 },

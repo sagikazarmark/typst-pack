@@ -2080,11 +2080,15 @@ fn platform_delimited_typst_font_paths_are_used_by_compile() {
         "#text(font: \"{}\")[First]\n#text(font: \"{}\")[Second]",
         fonts[0].1, fonts[1].1
     );
-    let pack = Pack::builder("main.typ")
+    let mut builder = Pack::builder("main.typ")
         .file("main.typ", source.into_bytes())
-        .unwrap()
-        .build()
         .unwrap();
+    for (path, _) in &fonts {
+        builder = builder
+            .external_font(std::fs::read(path.join("font.ttf")).unwrap(), 0)
+            .unwrap();
+    }
+    let pack = builder.build().unwrap();
     let pack_path = directory.path().join("fonts.typk");
     let output = directory.path().join("fonts.pdf");
     std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();

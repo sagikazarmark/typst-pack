@@ -884,6 +884,90 @@ fn pack_accepts_shared_multi_face_custom_font_data_and_informational_families() 
 
 #[cfg(feature = "embedded-fonts")]
 #[test]
+fn pack_font_catalog_preserves_declared_faces_and_container_disposition() {
+    let collection = two_face_collection(&embedded_font_data());
+    let mut embedded_collection = collection.clone();
+    embedded_collection.push(0);
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"catalog".to_vec())
+        .unwrap()
+        .external_font(collection.clone(), 1)
+        .unwrap()
+        .font(embedded_collection, 0)
+        .unwrap()
+        .build()
+        .unwrap();
+
+    assert_eq!(
+        pack.font_catalog()
+            .iter()
+            .map(|face| (face.identity().index(), face.is_embedded()))
+            .collect::<Vec<_>>(),
+        [(1, false), (0, true)]
+    );
+    assert_eq!(pack.font_requirements().len(), 2);
+    let external = pack
+        .font_requirements()
+        .iter()
+        .find(|requirement| !requirement.is_embedded())
+        .unwrap();
+    assert_eq!(external.face_indices(), &[1]);
+
+    let reread = Pack::from_bytes(pack.to_bytes().unwrap()).unwrap();
+    assert_eq!(
+        reread
+            .font_catalog()
+            .iter()
+            .map(|face| (face.identity().index(), face.is_embedded()))
+            .collect::<Vec<_>>(),
+        [(1, false), (0, true)]
+    );
+}
+
+#[test]
+fn malformed_external_font_is_a_pack_owned_pre_compilation_outcome() {
+    let data = b"not a font";
+    let identity = FontContainerIdentity::from_bytes(data);
+    let digest = identity
+        .digest()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let manifest = format!(
+        "format-version = 1\n[project]\nentrypoint = \"main.typ\"\n\
+         [[fonts]]\npath = \"fonts/external.ttf\"\nexternal = true\n\
+         container-digest = \"{digest}\"\n\
+         container-identity-kind = \"font-container\"\n\
+         container-identity-schema = \"typst-pack-font-container-identity-v1\"\n\
+         container-identity-algorithm = \"typst-hash128-0.15\"\n\
+         container-length = {}\n",
+        data.len()
+    );
+    let archive = raw_stored_zip(&[
+        (MANIFEST_PATH, manifest.as_bytes()),
+        ("project/main.typ", b"unreached"),
+    ]);
+    let pack = Pack::from_bytes(archive).unwrap();
+
+    let result = compile_pack(
+        PackCompilationRequest::new(pack, OutputFormat::Svg)
+            .font_fulfillment(identity, FontContainerFulfillment::new(data.to_vec())),
+    );
+
+    assert!(matches!(
+        result,
+        Err(PackCompileError::Operation {
+            outcome: CompilationOperationOutcome::MalformedExternalFontContainer {
+                container,
+                index: 0,
+            },
+            ..
+        }) if container == identity
+    ));
+}
+
+#[cfg(feature = "embedded-fonts")]
+#[test]
 fn pack_rejects_duplicate_font_faces() {
     let font = embedded_font_data();
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"font.data\"\nfamilies = [\"A\"]\n[[fonts]]\npath = \"font.data\"\nfamilies = [\"B\"]\n";
@@ -1020,7 +1104,7 @@ fn a_constructed_pack_builds_a_world_without_revalidation() {
         .build()
         .unwrap();
 
-    let _: PackWorld = PackWorld::builder(pack).build();
+    let _: PackWorld = PackWorld::builder(pack).build().unwrap();
 }
 
 #[test]
@@ -1035,7 +1119,8 @@ fn pack_world_accepts_a_resource_provider() {
 
     let world = PackWorld::builder(pack)
         .resource_provider(MemoryProjectFile::new("resource.bin", b"provided".to_vec()))
-        .build();
+        .build()
+        .unwrap();
 
     assert_eq!(
         world
@@ -1682,7 +1767,7 @@ fn compile_in_memory_pack_to_pdf_and_svg() {
         .build()
         .unwrap();
 
-    let world = PackWorld::builder(pack).build();
+    let world = PackWorld::builder(pack).build().unwrap();
 
     let pdf = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap();
     assert_eq!(pdf.artifacts.len(), 1);
@@ -1720,7 +1805,8 @@ fn declared_resource_slot_compiles_through_a_provider() {
 
     let world = PackWorld::builder(pack.clone())
         .resource_provider(MemoryProjectFile::new("assets/logo.png", tiny_png()))
-        .build();
+        .build()
+        .unwrap();
     let pdf = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap();
     assert!(pdf.artifacts[0].bytes().starts_with(b"%PDF"));
     let png = compile(&world, OutputFormat::Png, &CompileOptions::default()).unwrap();
@@ -1739,7 +1825,8 @@ fn declared_resource_slot_compiles_through_a_provider() {
     let world = PackWorld::builder(pack)
         .resource_provider(MemoryProjectFile::new("assets/logo.png", tiny_png()))
         .feature(typst::Feature::Html)
-        .build();
+        .build()
+        .unwrap();
     let html = compile(&world, OutputFormat::Html, &CompileOptions::default()).unwrap();
     assert!(
         std::str::from_utf8(html.artifacts[0].bytes())
@@ -1759,7 +1846,10 @@ fn source_compilation_cannot_use_a_non_typ_resource_slot_provider() {
         .unwrap();
     let (provider, calls) =
         MemoryProjectFile::tracked("provided.data", b"#rect(width: 1pt, height: 1pt)".to_vec());
-    let world = PackWorld::builder(pack).resource_provider(provider).build();
+    let world = PackWorld::builder(pack)
+        .resource_provider(provider)
+        .build()
+        .unwrap();
 
     assert!(compile(&world, OutputFormat::Svg, &CompileOptions::default()).is_err());
     assert_eq!(calls.load(Ordering::Relaxed), 0);
@@ -1778,7 +1868,10 @@ fn pdf_default_timestamp_is_resolved_after_compilation() {
         .build()
         .unwrap();
     let (provider, calls) = MemoryProjectFile::tracked("timestamp-trigger.bin", b"read".to_vec());
-    let world = PackWorld::builder(pack).resource_provider(provider).build();
+    let world = PackWorld::builder(pack)
+        .resource_provider(provider)
+        .build()
+        .unwrap();
     let timestamp = typst_pdf::Timestamp::new_utc(
         typst::foundations::Datetime::from_ymd_hms(2000, 1, 2, 3, 4, 5).unwrap(),
     );
@@ -1830,7 +1923,8 @@ fn resource_providers_follow_registration_order() {
     let world = PackWorld::builder(pack.clone())
         .resource_provider(first)
         .resource_provider(second)
-        .build();
+        .build()
+        .unwrap();
     assert_eq!(world.file(id).unwrap().as_slice(), b"first");
     assert_eq!(first_calls.load(Ordering::Relaxed), 1);
     assert_eq!(second_calls.load(Ordering::Relaxed), 0);
@@ -1841,7 +1935,8 @@ fn resource_providers_follow_registration_order() {
     let world = PackWorld::builder(pack.clone())
         .resource_provider(missing)
         .resource_provider(fallback)
-        .build();
+        .build()
+        .unwrap();
     assert_eq!(world.file(id).unwrap().as_slice(), b"fallback");
     assert_eq!(missing_calls.load(Ordering::Relaxed), 1);
     assert_eq!(fallback_calls.load(Ordering::Relaxed), 1);
@@ -1851,7 +1946,8 @@ fn resource_providers_follow_registration_order() {
     let world = PackWorld::builder(pack.clone())
         .resource_provider(denied)
         .resource_provider(masked)
-        .build();
+        .build()
+        .unwrap();
     assert_eq!(world.file(id), Err(FileError::AccessDenied));
     assert_eq!(denied_calls.load(Ordering::Relaxed), 1);
     assert_eq!(masked_calls.load(Ordering::Relaxed), 0);
@@ -1862,7 +1958,8 @@ fn resource_providers_follow_registration_order() {
     let world = PackWorld::builder(pack)
         .resource_provider(corrupt)
         .resource_provider(masked)
-        .build();
+        .build()
+        .unwrap();
     assert_eq!(world.file(id), Err(integrity_error));
     assert_eq!(corrupt_calls.load(Ordering::Relaxed), 1);
     assert_eq!(masked_calls.load(Ordering::Relaxed), 0);
@@ -1882,7 +1979,10 @@ fn all_missing_resource_providers_report_the_requested_project_path_lazily() {
     let (provider, calls) = ErrorProjectLoader::tracked(FileError::NotFound(PathBuf::from(
         "/host-specific/missing.bin",
     )));
-    let world = PackWorld::builder(pack).resource_provider(provider).build();
+    let world = PackWorld::builder(pack)
+        .resource_provider(provider)
+        .build()
+        .unwrap();
 
     assert_eq!(
         world.file(project_file_id("requested.bin")),
@@ -1901,7 +2001,10 @@ fn source_requests_do_not_consult_resource_providers() {
         .build()
         .unwrap();
     let (provider, calls) = MemoryProjectFile::tracked("provided.typ", b"injected".to_vec());
-    let world = PackWorld::builder(pack).resource_provider(provider).build();
+    let world = PackWorld::builder(pack)
+        .resource_provider(provider)
+        .build()
+        .unwrap();
 
     assert!(matches!(
         world.source(project_file_id("provided.typ")),
@@ -1924,7 +2027,10 @@ fn raw_reads_use_providers_even_when_a_resource_slot_has_a_typ_extension() {
         .build()
         .unwrap();
     let (provider, calls) = MemoryProjectFile::tracked("provided.typ", b"injected".to_vec());
-    let world = PackWorld::builder(pack).resource_provider(provider).build();
+    let world = PackWorld::builder(pack)
+        .resource_provider(provider)
+        .build()
+        .unwrap();
 
     let output = compile(&world, OutputFormat::Svg, &CompileOptions::default()).unwrap();
 
@@ -1950,7 +2056,8 @@ fn concurrent_world_file_and_source_requests_remain_isolated() {
             entered: entered_tx,
             release: Arc::new(Mutex::new(release_rx)),
         })
-        .build();
+        .build()
+        .unwrap();
     let id = project_file_id("external.typ");
 
     std::thread::scope(|scope| {
@@ -1991,7 +2098,8 @@ fn packed_and_undeclared_project_paths_do_not_consult_resource_providers() {
     let (provider, calls) = MemoryProjectFile::tracked("resource.bin", b"provided".to_vec());
     let world = PackWorld::builder(packed)
         .resource_provider(provider)
-        .build();
+        .build()
+        .unwrap();
     assert_eq!(
         world
             .file(project_file_id("resource.bin"))
@@ -2009,7 +2117,8 @@ fn packed_and_undeclared_project_paths_do_not_consult_resource_providers() {
     let (provider, calls) = MemoryProjectFile::tracked("missing.bin", b"provided".to_vec());
     let world = PackWorld::builder(undeclared)
         .resource_provider(provider)
-        .build();
+        .build()
+        .unwrap();
     assert!(matches!(
         world.file(project_file_id("missing.bin")),
         Err(FileError::NotFound(_))
@@ -2029,7 +2138,10 @@ fn package_requests_do_not_consult_resource_providers() {
         .build()
         .unwrap();
     let (provider, calls) = MemoryProjectFile::tracked("lib.typ", b"provided".to_vec());
-    let world = PackWorld::builder(pack).resource_provider(provider).build();
+    let world = PackWorld::builder(pack)
+        .resource_provider(provider)
+        .build()
+        .unwrap();
     let spec = typst::syntax::package::PackageSpec::from_str("@local/example:1.0.0").unwrap();
     let id = RootedPath::new(
         VirtualRoot::Package(spec),
@@ -2049,7 +2161,10 @@ fn project_requests_do_not_consult_package_loader() {
         .build()
         .unwrap();
     let (loader, calls) = MemoryProjectFile::tracked("missing.txt", b"host file".to_vec());
-    let world = PackWorld::builder(pack).package_loader(loader).build();
+    let world = PackWorld::builder(pack)
+        .package_loader(loader)
+        .build()
+        .unwrap();
 
     assert!(compile(&world, OutputFormat::Svg, &CompileOptions::default()).is_err());
     assert_eq!(calls.load(Ordering::Relaxed), 0);
@@ -2082,7 +2197,10 @@ fn vendored_package_compiles_without_consulting_package_loader() {
         .build()
         .unwrap();
     let (loader, calls) = MemoryProjectFile::tracked("unused", Vec::new());
-    let world = PackWorld::builder(pack).package_loader(loader).build();
+    let world = PackWorld::builder(pack)
+        .package_loader(loader)
+        .build()
+        .unwrap();
 
     assert!(compile(&world, OutputFormat::Svg, &CompileOptions::default()).is_ok());
     assert_eq!(calls.load(Ordering::Relaxed), 0);
@@ -2112,7 +2230,10 @@ fn missing_vendored_package_file_does_not_fall_through_to_package_loader() {
         "missing.typ",
         b"#let mark = rect(width: 1pt, height: 1pt)".to_vec(),
     );
-    let world = PackWorld::builder(pack).package_loader(loader).build();
+    let world = PackWorld::builder(pack)
+        .package_loader(loader)
+        .build()
+        .unwrap();
 
     assert!(compile(&world, OutputFormat::Svg, &CompileOptions::default()).is_err());
     assert_eq!(calls.load(Ordering::Relaxed), 0);
@@ -2425,7 +2546,7 @@ Rows: #csv("data.csv").len()
             pack.resource_slots().collect::<Vec<_>>(),
             ["assets/logo.png"]
         );
-        let world = PackWorld::builder(pack.clone()).build();
+        let world = PackWorld::builder(pack.clone()).build().unwrap();
         match compile(&world, OutputFormat::Svg, &CompileOptions::default()) {
             Err(CompileError::Diagnostics { errors, .. }) => assert!(
                 errors
@@ -2437,7 +2558,8 @@ Rows: #csv("data.csv").len()
 
         let world = PackWorld::builder(pack)
             .resource_provider(MemoryProjectFile::new("assets/logo.png", tiny_png()))
-            .build();
+            .build()
+            .unwrap();
         let output = compile(&world, OutputFormat::Svg, &CompileOptions::default()).unwrap();
         assert!(
             std::str::from_utf8(output.artifacts[0].bytes())
@@ -2476,7 +2598,7 @@ Rows: #csv("data.csv").len()
         );
 
         let pack = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
-        let world = PackWorld::builder(pack.clone()).build();
+        let world = PackWorld::builder(pack.clone()).build().unwrap();
         match compile(&world, OutputFormat::Svg, &CompileOptions::default()) {
             Err(CompileError::Diagnostics { errors, .. }) => assert!(
                 errors
@@ -2487,7 +2609,8 @@ Rows: #csv("data.csv").len()
         }
         let world = PackWorld::builder(pack.clone())
             .resource_provider(MemoryProjectFile::new("assets/logo.png", tiny_png()))
-            .build();
+            .build()
+            .unwrap();
         assert!(compile(&world, OutputFormat::Svg, &CompileOptions::default()).is_ok());
 
         let target = dir.path().join("extracted");
@@ -3030,7 +3153,10 @@ Rows: #csv("data.csv").len()
 
         // Round-trip through bytes: nothing may depend on the file system.
         let pack = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
-        let world = PackWorld::builder(pack).build();
+        let world = PackWorld::builder(pack)
+            .embedded_fonts(true)
+            .build()
+            .unwrap();
         let output = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap();
         assert!(output.artifacts[0].bytes().starts_with(b"%PDF"));
     }
@@ -3052,7 +3178,10 @@ Rows: #csv("data.csv").len()
         let pack = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
 
         // Without a loader, compilation must fail...
-        let world = PackWorld::builder(pack.clone()).build();
+        let world = PackWorld::builder(pack.clone())
+            .embedded_fonts(true)
+            .build()
+            .unwrap();
         let error = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap_err();
         let CompileError::Diagnostics { errors, .. } = error else {
             panic!("unvendored package did not produce a compilation diagnostic");
@@ -3068,14 +3197,17 @@ Rows: #csv("data.csv").len()
         );
 
         // ...with a loader pointed at the package path, it succeeds.
-        use typst_kit::downloader::SystemDownloader;
         use typst_kit::packages::{FsPackages, SystemPackages, UniversePackages};
         let loader = SystemPackageLoader(SystemPackages::from_parts(
             Some(FsPackages::new(&packages)),
             None,
-            UniversePackages::new(SystemDownloader::new("typst-pack-test")),
+            UniversePackages::new(OfflineDownloader),
         ));
-        let world = PackWorld::builder(pack).package_loader(loader).build();
+        let world = PackWorld::builder(pack)
+            .package_loader(loader)
+            .embedded_fonts(true)
+            .build()
+            .unwrap();
         let output = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap();
         assert!(output.artifacts[0].bytes().starts_with(b"%PDF"));
     }
@@ -3107,7 +3239,7 @@ Rows: #csv("data.csv").len()
         assert!(!full.pack.fonts().is_empty());
         // The embedded fonts must load again from the pack.
         let pack = Pack::from_bytes(full.pack.to_bytes().unwrap()).unwrap();
-        PackWorld::builder(pack).build();
+        PackWorld::builder(pack).build().unwrap();
     }
 
     #[cfg(feature = "embedded-fonts")]
@@ -3389,13 +3521,14 @@ fn html_output_is_gated_by_the_html_feature() {
         .unwrap();
 
     // Without the feature, Typst itself rejects HTML export.
-    let world = PackWorld::builder(pack.clone()).build();
+    let world = PackWorld::builder(pack.clone()).build().unwrap();
     assert!(compile(&world, OutputFormat::Html, &CompileOptions::default()).is_err());
 
     // With the feature, it produces a document plus an "experimental" warning.
     let world = PackWorld::builder(pack)
         .feature(typst::Feature::Html)
-        .build();
+        .build()
+        .unwrap();
     let output = compile(&world, OutputFormat::Html, &CompileOptions::default()).unwrap();
     let html = std::str::from_utf8(output.artifacts[0].bytes()).unwrap();
     assert!(html.contains("<html"));
@@ -3428,7 +3561,8 @@ fn pack_font_faces_remain_authoritative_over_host_and_typst_embedded_fonts() {
     let world = PackWorld::builder(pack)
         .embedded_fonts(true)
         .extra_fonts([(host_font.clone(), host_font.info().clone())])
-        .build();
+        .build()
+        .unwrap();
     let selected = world.book().select(&family, variant).unwrap();
     let selected = world.font(selected).unwrap();
 

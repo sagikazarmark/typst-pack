@@ -1,7 +1,9 @@
 //! A complete Typst [`World`] backed by a [`Pack`].
 
+#[cfg(feature = "fs")]
+use std::io::{self, BufReader, Read};
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use typst::diag::{FileError, FileResult};
 use typst::foundations::{Bytes, Datetime, Dict, Duration};
@@ -13,7 +15,7 @@ use typst::{Feature, Library, LibraryExt, World};
 use typst_kit::files::{FileLoader, FileStore};
 use typst_kit::fonts::{FontSource, FontStore};
 
-use crate::pack::Pack;
+use crate::pack::{FontCatalogError, FontContainerIdentity, Pack};
 use crate::resource::{CompilationResources, Provider};
 
 #[cfg(feature = "fs")]
@@ -34,7 +36,6 @@ pub(crate) fn system_packages(
     offline: bool,
     certificate: Option<&std::path::Path>,
 ) -> typst_kit::packages::SystemPackages {
-    use typst_kit::downloader::SystemDownloader;
     use typst_kit::packages::UniversePackages;
 
     system_packages_with_online(
@@ -51,13 +52,84 @@ pub(crate) fn system_packages(
                 });
             }
 
-            let downloader = match certificate {
-                Some(path) => SystemDownloader::with_cert_path(USER_AGENT, path.to_path_buf()),
-                None => SystemDownloader::new(USER_AGENT),
-            };
+            let downloader = RustlsDownloader::new(USER_AGENT, certificate.map(PathBuf::from));
             UniversePackages::new(downloader)
         },
     )
+}
+
+#[cfg(feature = "fs")]
+struct RustlsDownloader {
+    user_agent: &'static str,
+    certificate: Option<PathBuf>,
+    tls: OnceLock<Result<Option<Arc<ureq::rustls::ClientConfig>>, String>>,
+}
+
+#[cfg(feature = "fs")]
+impl RustlsDownloader {
+    fn new(user_agent: &'static str, certificate: Option<PathBuf>) -> Self {
+        Self {
+            user_agent,
+            certificate,
+            tls: OnceLock::new(),
+        }
+    }
+
+    fn tls_config(&self) -> io::Result<Option<Arc<ureq::rustls::ClientConfig>>> {
+        match self.tls.get_or_init(|| {
+            let Some(path) = &self.certificate else {
+                return Ok(None);
+            };
+            let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+            let mut reader = BufReader::new(file);
+            let mut roots = ureq::rustls::RootCertStore {
+                roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+            };
+            for certificate in rustls_pemfile::certs(&mut reader) {
+                let certificate = certificate.map_err(|error| error.to_string())?;
+                roots.add(certificate).map_err(|error| error.to_string())?;
+            }
+            let tls = ureq::rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_no_client_auth();
+            Ok(Some(Arc::new(tls)))
+        }) {
+            Ok(tls) => Ok(tls.clone()),
+            Err(error) => Err(io::Error::other(error.clone())),
+        }
+    }
+}
+
+#[cfg(feature = "fs")]
+impl typst_kit::downloader::Downloader for RustlsDownloader {
+    fn stream(
+        &self,
+        _key: &dyn std::any::Any,
+        url: &str,
+    ) -> io::Result<(Option<usize>, Box<dyn Read>)> {
+        let mut builder = ureq::AgentBuilder::new().user_agent(self.user_agent);
+        if let Some(proxy) = env_proxy::for_url_str(url)
+            .to_url()
+            .and_then(|url| ureq::Proxy::new(url).ok())
+        {
+            builder = builder.proxy(proxy);
+        }
+        if let Some(tls) = self.tls_config()? {
+            builder = builder.tls_config(tls);
+        }
+        let response = builder
+            .build()
+            .get(url)
+            .call()
+            .map_err(|error| match error {
+                ureq::Error::Status(404, _) => io::Error::new(io::ErrorKind::NotFound, error),
+                error => io::Error::other(error),
+            })?;
+        let content_length = response
+            .header("Content-Length")
+            .and_then(|value| value.parse().ok());
+        Ok((content_length, response.into_reader()))
+    }
 }
 
 #[cfg(feature = "fs")]
@@ -109,7 +181,7 @@ impl PackWorld {
     }
 
     /// Creates a world with default configuration.
-    pub fn new(pack: Pack) -> Self {
+    pub fn new(pack: Pack) -> Result<Self, FontCatalogError> {
         Self::builder(pack).build()
     }
 
@@ -223,6 +295,7 @@ pub struct PackWorldBuilder {
     #[cfg_attr(not(feature = "embedded-fonts"), allow(dead_code))]
     embedded_fonts: bool,
     extra_fonts: Vec<(BoxedFontSource, FontInfo)>,
+    catalog_fonts: Option<Vec<Font>>,
     resource_providers: Vec<Provider>,
     package_loader: Option<Box<dyn FileLoader + Send + Sync>>,
 }
@@ -243,8 +316,9 @@ impl PackWorldBuilder {
             inputs: Dict::new(),
             features: Vec::new(),
             clock: Clock::None,
-            embedded_fonts: cfg!(feature = "embedded-fonts"),
+            embedded_fonts: false,
             extra_fonts: Vec::new(),
+            catalog_fonts: None,
             resource_providers: Vec::new(),
             package_loader: None,
         }
@@ -317,6 +391,11 @@ impl PackWorldBuilder {
         self
     }
 
+    pub(crate) fn exact_font_catalog(mut self, fonts: Vec<Font>) -> Self {
+        self.catalog_fonts = Some(fonts);
+        self
+    }
+
     /// Serves files of packages that are not vendored in the pack, e.g. from
     /// a package cache or the network.
     pub fn package_loader(mut self, loader: impl FileLoader + Send + Sync + 'static) -> Self {
@@ -357,21 +436,36 @@ impl PackWorldBuilder {
     }
 
     /// Builds the world.
-    pub fn build(self) -> PackWorld {
+    pub fn build(self) -> Result<PackWorld, FontCatalogError> {
         let entrypoint = typst::syntax::VirtualPath::new(self.pack.entrypoint())
             .expect("Pack entrypoint invariant violated");
         let main = RootedPath::new(VirtualRoot::Project, entrypoint).intern();
 
+        let catalog = if let Some(catalog) = self.catalog_fonts {
+            catalog
+        } else {
+            let mut fulfillments = std::collections::BTreeMap::new();
+            for (source, _) in self.extra_fonts {
+                if let Some(font) = source.load() {
+                    fulfillments
+                        .entry(FontContainerIdentity::from_bytes(font.data().as_slice()))
+                        .or_insert_with(|| font.data().clone());
+                }
+            }
+            #[cfg(feature = "embedded-fonts")]
+            if self.embedded_fonts {
+                for (font, _) in typst_kit::fonts::embedded() {
+                    fulfillments
+                        .entry(FontContainerIdentity::from_bytes(font.data().as_slice()))
+                        .or_insert_with(|| font.data().clone());
+                }
+            }
+            self.pack.materialize_font_catalog(&fulfillments)?
+        };
         let mut fonts = FontStore::new();
-        for pack_font in self.pack.fonts() {
-            let font = pack_font.font().clone();
+        for font in catalog {
             let info = font.info().clone();
             fonts.push((font, info));
-        }
-        fonts.extend(self.extra_fonts);
-        #[cfg(feature = "embedded-fonts")]
-        if self.embedded_fonts {
-            fonts.extend(typst_kit::fonts::embedded());
         }
 
         let library = Library::builder()
@@ -379,7 +473,7 @@ impl PackWorldBuilder {
             .with_features(self.features.into_iter().collect())
             .build();
 
-        PackWorld {
+        Ok(PackWorld {
             library: LazyHash::new(library),
             main,
             store: FileStore::new(PackLoader {
@@ -389,7 +483,7 @@ impl PackWorldBuilder {
             }),
             fonts,
             clock: self.clock,
-        }
+        })
     }
 }
 

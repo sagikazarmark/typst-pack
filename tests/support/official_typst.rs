@@ -10,7 +10,7 @@ use typst::foundations::{Bytes, Datetime, Dict, Duration, Smart};
 use typst::layout::PageRanges;
 use typst::syntax::package::PackageSpec;
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
-use typst::text::{Font, FontBook};
+use typst::text::{Font, FontBook, FontInfo};
 use typst::utils::LazyHash;
 use typst::{Feature, Features, Library, LibraryExt, World, WorldExt};
 use typst_layout::{Page, PagedDocument};
@@ -25,6 +25,8 @@ const SEMANTIC_REQUEST: &str = "#let width = int(sys.inputs.width)\n\
                                 #pdf.table-summary(table(columns: 1, [feature enabled]))";
 const STATIC_SHAPE: &str =
     "#set page(width: 10pt, height: 10pt, margin: 0pt)\n#rect(width: 5pt, height: 5pt)";
+const FONT_SELECTION: &str = "#set page(width: 100pt, height: 20pt, margin: 0pt)\n\
+                              #set text(font: \"Libertinus Serif\", size: 12pt)\nExact font";
 const PACKAGE_MANIFEST: &str =
     include_str!("../fixtures/official-oracle/packages/local/oracle/1.0.0/typst.toml");
 const PACKAGE_ENTRYPOINT: &str =
@@ -35,6 +37,7 @@ pub struct Fixture {
     entrypoint: &'static str,
     project: &'static [(&'static str, &'static str)],
     packages: &'static [(&'static str, &'static str, &'static str)],
+    fonts: Vec<(Vec<u8>, u32)>,
 }
 
 impl Fixture {
@@ -46,6 +49,7 @@ impl Fixture {
                 (ORACLE_PACKAGE_SPEC, "typst.toml", PACKAGE_MANIFEST),
                 (ORACLE_PACKAGE_SPEC, "lib.typ", PACKAGE_ENTRYPOINT),
             ],
+            fonts: vec![],
         }
     }
 
@@ -54,6 +58,7 @@ impl Fixture {
             entrypoint: "main.typ",
             project: &[("main.typ", EXPORT_REJECTION)],
             packages: &[],
+            fonts: vec![],
         }
     }
 
@@ -62,6 +67,7 @@ impl Fixture {
             entrypoint: "main.typ",
             project: &[("main.typ", SEMANTIC_REQUEST)],
             packages: &[],
+            fonts: vec![],
         }
     }
 
@@ -70,6 +76,16 @@ impl Fixture {
             entrypoint: "main.typ",
             project: &[("main.typ", STATIC_SHAPE)],
             packages: &[],
+            fonts: vec![],
+        }
+    }
+
+    pub fn font_selection() -> Self {
+        Self {
+            entrypoint: "main.typ",
+            project: &[("main.typ", FONT_SELECTION)],
+            packages: &[],
+            fonts: vec![],
         }
     }
 
@@ -83,6 +99,15 @@ impl Fixture {
 
     pub fn packages(&self) -> &'static [(&'static str, &'static str, &'static str)] {
         self.packages
+    }
+
+    pub fn font(mut self, data: Vec<u8>, index: u32) -> Self {
+        self.fonts.push((data, index));
+        self
+    }
+
+    pub fn fonts(&self) -> &[(Vec<u8>, u32)] {
+        &self.fonts
     }
 }
 
@@ -196,13 +221,14 @@ pub struct ArtifactObservation {
     pub bytes: Vec<u8>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Observation {
     pub status: ObservationStatus,
     pub target: Target,
     pub source_page_count: Option<usize>,
     pub diagnostics: Vec<DiagnosticObservation>,
     pub artifacts: Vec<ArtifactObservation>,
+    pub font_catalog: Vec<(FontInfo, Vec<u8>, u32)>,
 }
 
 pub fn observe(fixture: &Fixture, request: &ReferenceRequest) -> Observation {
@@ -213,6 +239,25 @@ pub fn observe(fixture: &Fixture, request: &ReferenceRequest) -> Observation {
     }
 }
 
+pub fn select_font(
+    fixture: &Fixture,
+    family: &str,
+    variant: typst::text::FontVariant,
+) -> Option<(Vec<u8>, u32)> {
+    let fonts = fixture
+        .fonts
+        .iter()
+        .map(|(data, index)| Font::new(Bytes::new(data.clone()), *index).unwrap())
+        .collect::<Vec<_>>();
+    let mut book = FontBook::new();
+    for font in &fonts {
+        book.push(font.info().clone());
+    }
+    let selected = book.select(family, variant)?;
+    let font = &fonts[selected];
+    Some((font.data().to_vec(), font.index()))
+}
+
 fn observe_html(world: &ReferenceWorld, pretty: bool) -> Observation {
     let Warned { output, warnings } = typst::compile::<typst_html::HtmlDocument>(world);
     let mut observation = Observation {
@@ -221,6 +266,7 @@ fn observe_html(world: &ReferenceWorld, pretty: bool) -> Observation {
         source_page_count: None,
         diagnostics: project_diagnostics(world, warnings),
         artifacts: vec![],
+        font_catalog: world.font_catalog(),
     };
     let document = match output {
         Ok(document) => document,
@@ -258,6 +304,7 @@ fn observe_paged(world: &ReferenceWorld, output: &OutputRequest) -> Observation 
         source_page_count: None,
         diagnostics: project_diagnostics(world, warnings),
         artifacts: vec![],
+        font_catalog: world.font_catalog(),
     };
     let document = match document {
         Ok(document) => document,
@@ -489,6 +536,7 @@ struct ReferenceWorld {
     sources: HashMap<FileId, Source>,
     files: HashMap<FileId, Bytes>,
     document_time: Option<Datetime>,
+    fonts: Vec<Font>,
 }
 
 impl ReferenceWorld {
@@ -519,14 +567,35 @@ impl ReferenceWorld {
             );
         }
 
+        let fonts = fixture
+            .fonts
+            .iter()
+            .map(|(data, index)| {
+                Font::new(Bytes::new(data.clone()), *index)
+                    .expect("frozen font declaration contains a valid face")
+            })
+            .collect::<Vec<_>>();
+        let mut book = FontBook::new();
+        for font in &fonts {
+            book.push(font.info().clone());
+        }
+
         Self {
             library,
-            book: LazyHash::new(FontBook::new()),
+            book: LazyHash::new(book),
             main: file_id(VirtualRoot::Project, fixture.entrypoint),
             sources,
             files,
             document_time: request.document_time,
+            fonts,
         }
+    }
+
+    fn font_catalog(&self) -> Vec<(FontInfo, Vec<u8>, u32)> {
+        self.fonts
+            .iter()
+            .map(|font| (font.info().clone(), font.data().to_vec(), font.index()))
+            .collect()
     }
 }
 
@@ -573,8 +642,8 @@ impl World for ReferenceWorld {
             .ok_or_else(|| FileError::NotFound(PathBuf::from(logical_path(id))))
     }
 
-    fn font(&self, _index: usize) -> Option<Font> {
-        None
+    fn font(&self, index: usize) -> Option<Font> {
+        self.fonts.get(index).cloned()
     }
 
     fn today(&self, _offset: Option<Duration>) -> Option<Datetime> {

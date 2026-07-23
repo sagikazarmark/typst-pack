@@ -2,7 +2,7 @@
 
 #![cfg(feature = "cli")]
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::File;
 use std::io::{BufReader, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -19,6 +19,7 @@ use typst_kit::diagnostics::termcolor::{
 };
 use typst_kit::diagnostics::{DiagnosticFormat, DiagnosticWorld};
 use typst_kit::files::{FileLoader, FsRoot};
+use typst_kit::fonts::FontSource;
 use typst_pdf::{PdfStandard, Timestamp};
 
 use crate::compile::{
@@ -28,7 +29,7 @@ use crate::compile::{
 };
 use crate::extract::{ExtractOptions, extract};
 use crate::manifest::PackMetadata;
-use crate::pack::{FILE_EXTENSION, Pack};
+use crate::pack::{FILE_EXTENSION, FontContainerIdentity, Pack};
 use crate::packer::{DiscoveryTarget, DiscoveryWorld, Packer, PackerError};
 use crate::world::PackWorld;
 
@@ -958,9 +959,45 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
 
     let pack = read_pack_input(&args.pack)?;
 
+    let mut supplied_fonts = BTreeMap::<FontContainerIdentity, Bytes>::new();
+    if pack
+        .font_requirements()
+        .iter()
+        .any(|requirement| !requirement.is_embedded())
+    {
+        let mut load = |font: typst::text::Font| {
+            supplied_fonts
+                .entry(FontContainerIdentity::from_bytes(font.data().as_slice()))
+                .or_insert_with(|| font.data().clone());
+        };
+        if !args.fonts.ignore_system_fonts {
+            for (source, _) in typst_kit::fonts::system() {
+                if let Some(font) = source.load() {
+                    load(font);
+                }
+            }
+        }
+        if !args.fonts.ignore_embedded_fonts {
+            for (font, _) in typst_kit::fonts::embedded() {
+                load(font);
+            }
+        }
+        for path in &args.fonts.font_paths {
+            for (source, _) in typst_kit::fonts::scan(path) {
+                if let Some(font) = source.load() {
+                    load(font);
+                }
+            }
+        }
+    }
+    let exact_font_catalog = pack
+        .materialize_font_catalog(&supplied_fonts)
+        .map_err(|error| CliError::Message(error.to_string()))?;
+
     let host_dependencies = Arc::new(Mutex::new(BTreeSet::new()));
     let mut builder = PackWorld::builder(pack)
         .embedded_fonts(false)
+        .exact_font_catalog(exact_font_catalog)
         .inputs(parse_inputs(&args.compilation.inputs))
         .package_loader(FilesystemPackageLoader {
             packages: crate::world::system_packages(
@@ -984,17 +1021,9 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         Some(time) => builder.fixed_time(time),
         None => builder.system_date(),
     };
-    if !args.fonts.ignore_system_fonts {
-        builder = builder.extra_fonts(typst_kit::fonts::system());
-    }
-    if !args.fonts.ignore_embedded_fonts {
-        builder = builder.extra_fonts(typst_kit::fonts::embedded());
-    }
-    for path in &args.fonts.font_paths {
-        builder = builder.extra_fonts(typst_kit::fonts::scan(path));
-    }
-
-    let mut world = builder.build();
+    let mut world = builder
+        .build()
+        .map_err(|error| CliError::Message(error.to_string()))?;
 
     let options = CompileOptions {
         page_selection,

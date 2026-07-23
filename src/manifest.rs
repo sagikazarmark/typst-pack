@@ -151,10 +151,32 @@ pub struct FontManifest {
     /// Family names provided by this face, informational only.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     families: Vec<String>,
+    /// Whether the exact container must be supplied when compiling.
+    #[serde(default, skip_serializing_if = "is_false")]
+    external: bool,
+    /// The canonical container digest, encoded as 32 lowercase hexadecimal digits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    container_digest: Option<String>,
+    /// Canonical identity kind.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    container_identity_kind: Option<String>,
+    /// Canonical identity schema.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    container_identity_schema: Option<String>,
+    /// Canonical identity digest algorithm.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    container_identity_algorithm: Option<String>,
+    /// The exact container byte length.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    container_length: Option<u64>,
 }
 
 fn is_zero(index: &u32) -> bool {
     *index == 0
+}
+
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// The optional `[metadata]` section.
@@ -217,11 +239,49 @@ impl FontManifest {
         &self.families
     }
 
-    pub(crate) fn new(path: String, index: u32, families: Vec<String>) -> Self {
+    /// Whether this face's container is externally fulfilled.
+    pub fn is_external(&self) -> bool {
+        self.external
+    }
+
+    pub(crate) fn container_digest(&self) -> Option<&str> {
+        self.container_digest.as_deref()
+    }
+
+    pub(crate) fn container_length(&self) -> Option<u64> {
+        self.container_length
+    }
+
+    pub(crate) fn container_identity_kind(&self) -> Option<&str> {
+        self.container_identity_kind.as_deref()
+    }
+
+    pub(crate) fn container_identity_schema(&self) -> Option<&str> {
+        self.container_identity_schema.as_deref()
+    }
+
+    pub(crate) fn container_identity_algorithm(&self) -> Option<&str> {
+        self.container_identity_algorithm.as_deref()
+    }
+
+    pub(crate) fn new(
+        path: String,
+        index: u32,
+        families: Vec<String>,
+        external: bool,
+        container_digest: String,
+        container_length: u64,
+    ) -> Self {
         Self {
             path,
             index,
             families,
+            external,
+            container_digest: Some(container_digest),
+            container_identity_kind: Some("font-container".to_owned()),
+            container_identity_schema: Some("typst-pack-font-container-identity-v1".to_owned()),
+            container_identity_algorithm: Some("typst-hash128-0.15".to_owned()),
+            container_length: Some(container_length),
         }
     }
 }

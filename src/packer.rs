@@ -10,13 +10,11 @@ use std::sync::{Arc, Mutex, OnceLock};
 use ecow::EcoVec;
 use typst::diag::{FileResult, SourceDiagnostic, Warned};
 use typst::foundations::{Bytes, Datetime, Dict, Duration};
-use typst::layout::{Frame, FrameItem};
 use typst::syntax::package::PackageSpec;
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Feature, Library, LibraryExt, World};
-use typst_html::HtmlNode;
 use typst_kit::datetime::Time;
 use typst_kit::files::{FileLoader, FileStore, FsRoot, SystemFiles};
 use typst_kit::fonts::FontStore;
@@ -350,6 +348,7 @@ impl Packer {
                 ),
             }),
             fonts,
+            used_font_indices: Mutex::new(BTreeSet::new()),
             time,
             #[cfg(test)]
             source_request_hook: None,
@@ -419,7 +418,7 @@ impl Packer {
         *timing_error = timings
             .err()
             .map(|error| PackerError::Timings(error.to_string()));
-        let (paged_documents, html_documents, compile_warnings) = match discovery {
+        let (_paged_documents, _html_documents, compile_warnings) = match discovery {
             Ok(discovery) => discovery,
             Err((errors, warnings)) => {
                 return discovery_compile_error(world, errors, warnings);
@@ -596,23 +595,15 @@ impl Packer {
             }
         }
 
-        // Fonts actually used by the rendered document.
-        if self.embed_fonts {
-            let mut used: Vec<Font> = Vec::new();
-            for document in &paged_documents {
-                for page in document.pages() {
-                    collect_fonts(&page.frame, &mut used);
-                }
-            }
-            for document in &html_documents {
-                collect_html_fonts(document.root_node(), &mut used);
-            }
-            for font in used {
-                if !self.include_typst_embedded_fonts && is_typst_embedded_font(&font) {
-                    continue;
-                }
-                builder = builder.font(font.data().to_vec(), font.index())?;
-            }
+        // Project selected faces back into the original candidate catalog order.
+        for font in world.used_fonts() {
+            let embed = self.embed_fonts
+                && (self.include_typst_embedded_fonts || !is_typst_embedded_font(&font));
+            builder = if embed {
+                builder.font(font.data().to_vec(), font.index())?
+            } else {
+                builder.external_font(font.data().to_vec(), font.index())?
+            };
         }
 
         if let Some(metadata) = self.metadata {
@@ -621,9 +612,10 @@ impl Packer {
 
         let pack = builder.build()?;
         report.fonts = pack
+            .manifest()
             .fonts()
             .iter()
-            .map(|font| font.manifest().path().to_owned())
+            .map(|font| font.path().to_owned())
             .collect();
 
         Ok(PackOutcome {
@@ -743,12 +735,21 @@ pub struct DiscoveryWorld {
     sources: FileStore<Arc<PrimaryLoader>>,
     files: FileStore<DiscoveryLoader>,
     fonts: FontStore,
+    used_font_indices: Mutex<BTreeSet<usize>>,
     time: Time,
     #[cfg(test)]
     source_request_hook: Option<Arc<dyn Fn(FileId) + Send + Sync>>,
 }
 
 impl DiscoveryWorld {
+    fn used_fonts(&self) -> Vec<Font> {
+        self.used_font_indices
+            .lock()
+            .expect("used font index lock poisoned")
+            .iter()
+            .filter_map(|index| self.fonts.font(*index))
+            .collect()
+    }
     /// The canonicalized project root.
     pub fn root(&self) -> &Path {
         &self.root
@@ -812,7 +813,14 @@ impl World for DiscoveryWorld {
     }
 
     fn font(&self, index: usize) -> Option<Font> {
-        self.fonts.font(index)
+        let font = self.fonts.font(index);
+        if font.is_some() {
+            self.used_font_indices
+                .lock()
+                .expect("used font index lock poisoned")
+                .insert(index);
+        }
+        font
     }
 
     fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
@@ -863,35 +871,6 @@ impl DiscoveryLoader {
 impl FileLoader for DiscoveryLoader {
     fn load(&self, id: FileId) -> FileResult<Bytes> {
         self.resources.file(id, || self.primary.load(id))
-    }
-}
-
-/// Collects the distinct fonts used in a frame tree.
-fn collect_fonts(frame: &Frame, used: &mut Vec<Font>) {
-    for (_, item) in frame.items() {
-        match item {
-            FrameItem::Group(group) => collect_fonts(&group.frame, used),
-            FrameItem::Text(text) => {
-                let font = text.font.font();
-                if !used.contains(font) {
-                    used.push(font.clone());
-                }
-            }
-            _ => {}
-        }
-    }
-}
-
-/// Collects fonts from frames embedded anywhere in an HTML document.
-fn collect_html_fonts(node: &HtmlNode, used: &mut Vec<Font>) {
-    match node {
-        HtmlNode::Element(element) => {
-            for child in &element.children {
-                collect_html_fonts(child, used);
-            }
-        }
-        HtmlNode::Frame(frame) => collect_fonts(&frame.inner, used),
-        _ => {}
     }
 }
 
