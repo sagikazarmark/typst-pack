@@ -169,7 +169,9 @@ emits a warning that its behavior may change. In the library, enable it with
 
 The Dagger `compile` function returns a directory for every format. Document
 Formats use `output.pdf` or `output.html`; Page Formats use deterministic names
-such as `page-2.png`, derived from Source Page Numbers.
+such as `page-2.png`, derived from Source Page Numbers. Its typed mapping,
+staging, failure boundary, and intentional transport omissions are documented
+in the [Dagger adapter contract](docs/dagger-adapter.md).
 
 ## Library
 

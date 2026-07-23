@@ -1,5 +1,7 @@
 type TypstPack {
   let rust: Rust!
+  let rustVersion: String!
+  let rustContainer: Container!
   let packageCache: CacheVolume!
   let officialTypst: File!
 
@@ -23,6 +25,8 @@ type TypstPack {
       .withExec(["apt-get", "install", "-y", "--no-install-recommends"] + packages)
 
     self.rust = Dagger.rust(version: rustVersion, container: container)
+    self.rustVersion = rustVersion
+    self.rustContainer = container
     self.packageCache = packageCache
     self.officialTypst = container
       .withExec(["mkdir", "-p", "/opt/typst"])
@@ -123,9 +127,11 @@ type TypstPack {
   Differential-gate shared CLI behavior against the exact embedded Typst release.
   """
   testCliParity: String! @check {
-    self
-      .rust
-      .withFile("/usr/local/bin/typst", self.officialTypst)
+    Dagger
+      .rust(
+        version: self.rustVersion,
+        container: self.rustContainer.withFile("/usr/local/bin/typst", self.officialTypst),
+      )
       .withEnvVariable("TYPST_PACK_OFFICIAL_TYPST", "/usr/local/bin/typst")
       .withEnvVariable("TYPST_PACK_REQUIRE_OFFICIAL_TYPST", "1")
       .withEnvVariable("CARGO_TARGET_DIR", "/target/cli-parity")
@@ -402,6 +408,14 @@ type TypstPack {
     """
     sysInputs: [String!]! = [],
     """
+    Project-shaped directory containing Pack Override source files.
+    """
+    overrideDir: Directory,
+    """
+    Root-relative contained project paths to replace from overrideDir.
+    """
+    overridePaths: [String!]! = [],
+    """
     Ordered project-shaped directories that provide Resource Slot bytes.
     """
     resourceDirs: [Directory!]! = [],
@@ -458,6 +472,9 @@ type TypstPack {
     """
     certificate: File,
   ): Directory! {
+    if (overrideDir == null and overridePaths.length > 0) {
+      raise "overrideDir is required when overridePaths are supplied"
+    }
     let outputPath = "/work/out/output." + outputFormatName(format)
     if (format == OutputFormat.PNG or format == OutputFormat.SVG) {
       outputPath = "/work/out/page-{0p}." + outputFormatName(format)
@@ -481,6 +498,11 @@ type TypstPack {
     }
     if (ppi != null) { args += ["--ppi", ppi] }
     sysInputs.each { input => args += ["--input", input] }
+    if (overrideDir != null) {
+      overridePaths.each { path =>
+        args += ["--override", path, "/work/overrides/" + path]
+      }
+    }
     fontPaths.each { path => args += ["--font-path", path] }
     if (ignoreSystemFonts) { args += ["--ignore-system-fonts"] }
     if (ignoreEmbeddedFonts) { args += ["--ignore-embedded-fonts"] }
@@ -503,6 +525,9 @@ type TypstPack {
 
     if (fontDir != null) {
       container = container.withMountedDirectory("/work/fonts", fontDir)
+    }
+    if (overrideDir != null) {
+      container = container.withMountedDirectory("/work/overrides", overrideDir)
     }
     let resourceIndex = 0
     resourceDirs.each { resourceDir =>

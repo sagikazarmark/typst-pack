@@ -517,6 +517,147 @@ fn resource_paths_preserve_order_for_create_and_compile() {
 }
 
 #[test]
+fn compile_applies_pack_overrides_without_mutating_the_pack() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = write_minimal_project(directory.path());
+    let input = project.join("main=final.typ");
+    std::fs::rename(project.join("main.typ"), &input).unwrap();
+    let pack = directory.path().join("project.typk");
+    let baseline = directory.path().join("baseline.svg");
+    let overridden = directory.path().join("overridden.svg");
+    let dependencies = directory.path().join("dependencies.json");
+    let repeated = directory.path().join("repeated.svg");
+    let replacement = directory.path().join("replacement.typ");
+    std::fs::write(&replacement, "#rect(width: 20pt, height: 1pt, fill: red)").unwrap();
+
+    let created = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
+        .args([
+            "create",
+            input.to_str().unwrap(),
+            pack.to_str().unwrap(),
+            "--ignore-system-fonts",
+            "--ignore-embedded-fonts",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+
+    for output in [&baseline, &repeated] {
+        let compiled = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
+            .args([
+                "compile",
+                pack.to_str().unwrap(),
+                output.to_str().unwrap(),
+                "--format",
+                "svg",
+                "--ignore-system-fonts",
+                "--ignore-embedded-fonts",
+            ])
+            .output()
+            .unwrap();
+        assert!(
+            compiled.status.success(),
+            "{}",
+            String::from_utf8_lossy(&compiled.stderr)
+        );
+    }
+
+    let compiled = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
+        .args([
+            "compile",
+            pack.to_str().unwrap(),
+            overridden.to_str().unwrap(),
+            "--format",
+            "svg",
+            "--override",
+            "main=final.typ",
+            replacement.to_str().unwrap(),
+            "--deps",
+            dependencies.to_str().unwrap(),
+            "--ignore-system-fonts",
+            "--ignore-embedded-fonts",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+
+    assert_eq!(
+        std::fs::read(&baseline).unwrap(),
+        std::fs::read(&repeated).unwrap()
+    );
+    assert_ne!(
+        std::fs::read(&baseline).unwrap(),
+        std::fs::read(&overridden).unwrap()
+    );
+    assert!(
+        std::fs::read_to_string(dependencies)
+            .unwrap()
+            .contains(replacement.to_str().unwrap())
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn compile_accepts_a_non_unicode_pack_override_source_path() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    let project = write_minimal_project(directory.path());
+    let input = project.join("main.typ");
+    let pack = directory.path().join("project.typk");
+    let output = directory.path().join("output.svg");
+    let replacement = directory.path().join(std::ffi::OsString::from_vec(
+        b"replacement-\xff.typ".to_vec(),
+    ));
+    std::fs::write(&replacement, "#rect(width: 20pt, height: 1pt)").unwrap();
+
+    let created = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
+        .args([
+            "create",
+            input.to_str().unwrap(),
+            pack.to_str().unwrap(),
+            "--ignore-system-fonts",
+            "--ignore-embedded-fonts",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        created.status.success(),
+        "{}",
+        String::from_utf8_lossy(&created.stderr)
+    );
+
+    let compiled = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
+        .args([
+            "compile",
+            pack.to_str().unwrap(),
+            output.to_str().unwrap(),
+            "--format",
+            "svg",
+            "--override",
+            "main.typ",
+        ])
+        .arg(&replacement)
+        .args(["--ignore-system-fonts", "--ignore-embedded-fonts"])
+        .output()
+        .unwrap();
+    assert!(
+        compiled.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compiled.stderr)
+    );
+    assert!(output.is_file());
+}
+
+#[test]
 fn unavailable_resource_slot_creation_reports_the_complete_remedy() {
     let directory = tempfile::tempdir().unwrap();
     let project = directory.path().join("project");

@@ -65,6 +65,146 @@ type Tests {
   }
 
   """
+  Delegate typed creation and compilation values through the public Pack lifecycle.
+  """
+  publicCompilationLifecycle: Void @check {
+    let source = Dagger
+      .currentModule
+      .source
+      .directory("fixtures/adapter-lifecycle")
+    let overrides = Dagger
+      .currentModule
+      .source
+      .directory("fixtures/adapter-lifecycle-overrides")
+    let pack = Dagger.typstPack.create(
+      project: source,
+      input: "main.typ",
+      noVendorPackages: true,
+      packageDir: self.packages,
+      sysInputs: ["mode=creation"],
+      features: [TypstPackFeature.A11Y_EXTRAS],
+      creationTimestamp: 1700000000,
+      offline: true,
+    )
+
+    let pdf = Dagger
+      .typstPack
+      .compile(
+        pack: pack,
+        features: [TypstPackFeature.A11Y_EXTRAS],
+        sysInputs: ["mode=compilation"],
+        overrideDir: overrides,
+        overridePaths: ["main.typ"],
+        creationTimestamp: 1700000000,
+        packageDir: self.packages,
+        offline: true,
+      )
+      .file("output.pdf")
+    let pages = Dagger.typstPack.compile(
+      pack: pack,
+      format: TypstPackOutputFormat.PNG,
+      features: [TypstPackFeature.A11Y_EXTRAS],
+      pages: "2,1",
+      ppi: "72.5",
+      sysInputs: ["mode=compilation"],
+      overrideDir: overrides,
+      overridePaths: ["main.typ"],
+      creationTimestamp: 1700000000,
+      packageDir: self.packages,
+      offline: true,
+    )
+
+    assert { pdf.name == "output.pdf" }
+    assert { pdf.size > 0 }
+    assert { pages.entries.length == 2 }
+    assert { pages.entries.contains("page-1.png") }
+    assert { pages.entries.contains("page-2.png") }
+    assert { pages.file("page-1.png").size > 0 }
+    assert { pages.file("page-2.png").size > 0 }
+
+    # A later compilation and staging query cannot rewrite the first File value.
+    let stagedDigest = pdf.digest
+    let baseline = Dagger
+      .typstPack
+      .compile(
+        pack: pack,
+        sysInputs: ["mode=creation"],
+        creationTimestamp: 1700000000,
+        packageDir: self.packages,
+        offline: true,
+      )
+      .file("output.pdf")
+    assert { pdf.digest != baseline.digest }
+    assert { pdf.digest == stagedDigest }
+    assert { pdf.size > 0 }
+
+    null
+  }
+
+  """
+  Keep compilation failures distinct from failures querying staged delivery values.
+  """
+  compilationAndDeliveryFailures: Void @check {
+    let source = Dagger
+      .currentModule
+      .source
+      .directory("fixtures/adapter-lifecycle")
+    let invalid = Dagger
+      .currentModule
+      .source
+      .directory("fixtures/adapter-lifecycle-invalid")
+    let pack = Dagger.typstPack.create(
+      project: source,
+      input: "main.typ",
+      packageDir: self.packages,
+      sysInputs: ["mode=creation"],
+    )
+
+    #nofmt Dagger's embedded Dang still requires try/catch.
+    let compilationFailed = try {
+      let count = Dagger
+        .typstPack
+        .compile(
+          pack: pack,
+          sysInputs: ["mode=compilation"],
+          overrideDir: invalid,
+          overridePaths: ["main.typ"],
+        )
+        .entries
+        .length
+      count < 0
+    } catch {
+      error: Error => {
+        assert { error.message.contains("typstPack.compile error: expected expression") }
+        true
+      }
+    }
+    assert { compilationFailed }
+
+    #nofmt Dagger's embedded Dang still requires try/catch.
+    let deliveryFailed = try {
+      let size = Dagger
+        .typstPack
+        .compile(
+          pack: pack,
+          sysInputs: ["mode=creation"],
+        )
+        .file("missing.pdf")
+        .size
+      size < 0
+    } catch {
+      error: Error => {
+        assert { error.message.contains("missing.pdf") }
+        assert { !error.message.contains("typstPack.compile error") }
+        true
+      }
+    }
+    assert { deliveryFailed }
+
+    null
+  }
+
+  """
   Extract a pack back into project files and vendored packages.
   """
   extract: Void @check {

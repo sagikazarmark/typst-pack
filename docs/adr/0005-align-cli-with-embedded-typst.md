@@ -84,6 +84,7 @@ Pack-specific additions remain explicit:
 - `--offline` prevents package downloads;
 - `create --resource-slot <PATH>` declares Resource Slots;
 - `create --no-vendor-packages` controls package storage; and
+- `compile --override PACK_PATH FILE` supplies one Pack Override; and
 - creation retains project inclusion, font embedding, and Pack metadata
   controls.
 
@@ -114,6 +115,8 @@ registered automatically, and explicit declarations are `resourceSlots`.
 - `compile` has no `--root` and consumes a Pack rather than a Typst source file.
 - Pack-contained fonts and vendored packages remain authoritative layers ahead
   of host configuration.
+- Pack Overrides replace only contained project files for one compilation and
+  never mutate the Pack.
 - The hidden deprecated `--make-deps` compatibility option is not adopted.
 
 ## Consequences

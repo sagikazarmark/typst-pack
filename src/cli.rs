@@ -3,6 +3,7 @@
 #![cfg(feature = "cli")]
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::OsString;
 use std::fs::File;
 use std::io::{BufReader, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
@@ -25,9 +26,9 @@ use typst_pdf::{PdfStandard, Timestamp};
 use crate::compile::{
     CompilationArtifact, CompilationOperationOutcome, CompilationStatus, CompileOptions,
     CreationTimestamp, FontContainerFulfillment, OutputFormat, PackCompilationContext,
-    PackCompilationPresentation, PackCompilationRequest, PackageTreeFulfillment, PageRange,
-    PageSelection, compile_pack_kernel, parse_page_selection, pdf_standard_requiring_tags,
-    prepare_pack_compilation, validate_pdf_standards,
+    PackCompilationPresentation, PackCompilationRequest, PackOverrideSet, PackageTreeFulfillment,
+    PageRange, PageSelection, compile_pack_kernel, parse_page_selection,
+    pdf_standard_requiring_tags, prepare_pack_compilation, validate_pdf_standards,
 };
 use crate::extract::{ExtractOptions, extract};
 use crate::manifest::PackMetadata;
@@ -329,6 +330,15 @@ struct CompileArgs {
 
     #[command(flatten, next_help_heading = "Compilation")]
     compilation: SharedCompilationArgs,
+
+    /// Replaces one contained project file for this compilation.
+    #[arg(
+        long = "override",
+        value_names = ["PACK_PATH", "FILE"],
+        num_args = 2,
+        help_heading = "Compilation"
+    )]
+    overrides: Vec<OsString>,
 
     /// Which pages to export. When unspecified, all pages are exported.
     ///
@@ -959,6 +969,36 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     initialize_jobs(args.automation.jobs);
 
     let pack = read_pack_input(&args.pack)?;
+    let mut override_preflight = PackOverrideSet::new(&pack);
+    for pair in args.overrides.chunks_exact(2) {
+        let pack_path = pair[0]
+            .to_str()
+            .ok_or("Pack Override project path must be valid UTF-8")?;
+        override_preflight = override_preflight
+            .replace(pack_path, Vec::new())
+            .map_err(|error| CliError::Message(error.to_string()))?;
+    }
+    let host_dependencies = Arc::new(Mutex::new(BTreeSet::new()));
+    let mut overrides = PackOverrideSet::new(&pack);
+    for pair in args.overrides.chunks_exact(2) {
+        let pack_path = pair[0]
+            .to_str()
+            .expect("Pack Override paths were validated before filesystem access");
+        let source = PathBuf::from(&pair[1]);
+        let data = std::fs::read(&source).map_err(|error| {
+            CliError::Message(format!(
+                "failed to read Pack Override source `{}`: {error}",
+                source.display()
+            ))
+        })?;
+        overrides = overrides
+            .replace(pack_path, data)
+            .map_err(|error| CliError::Message(error.to_string()))?;
+        host_dependencies
+            .lock()
+            .expect("host dependency lock poisoned")
+            .insert(source);
+    }
 
     let mut supplied_fonts = BTreeMap::<FontContainerIdentity, Bytes>::new();
     if pack
@@ -1018,7 +1058,6 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         package_roots.insert(requirement.spec().to_string(), root.path().to_owned());
         package_fulfillments.push((requirement.spec().clone(), files));
     }
-    let host_dependencies = Arc::new(Mutex::new(BTreeSet::new()));
     let mut context = PackCompilationContext::default();
     for path in &args.resource_paths {
         context = context.resource_provider(FilesystemResourceProvider::tracked(
@@ -1064,6 +1103,9 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         .adapter_resolved_options(options)
         .adapter_resolved_document_timestamp(document_timestamp)
         .map_err(|_| "creation timestamp is out of range")?;
+    if !args.overrides.is_empty() {
+        request = request.overrides(overrides);
+    }
     for feature in &args.compilation.features {
         request = request.adapter_resolved_feature((*feature).into());
     }

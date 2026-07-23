@@ -56,6 +56,7 @@ test in the same Typst upgrade.
 | --- | --- | --- |
 | Compile consumes a Pack and has no `--root` | The Pack owns its fixed virtual project tree | Pack file/stdin and help omission cases in `tests/cli.rs` |
 | Resource Slots use ordered `--resource-path` providers | Only declared non-source paths may receive compilation-specific bytes | Resource Provider order, missing, authority, and help cases in `tests/cli.rs` and `src/tests.rs` |
+| Pack Overrides use `--override PACK_PATH FILE` | A compilation may replace only contained project files without mutating the Pack | Pack Override cases in `tests/cli.rs`, `tests/compilation.rs`, and `tests/official_typst_oracle.rs` |
 | `--offline` is explicit | Exact Package Requirements must not fall through to an undeclared network source | offline package cases in `tests/cli.rs` and `tests/compilation.rs` |
 | Pack fonts and vendored packages precede host configuration | Contained exact dependencies remain authoritative | package and font authority cases in `tests/cli.rs`, `tests/compilation.rs`, and `tests/official_typst_oracle.rs` |
 | Bundle output and the Bundle feature are rejected | Bundle is outside the Pack output contract | feature acceptance/rejection and help omission cases in `tests/cli.rs` and `tests/compilation.rs` |
