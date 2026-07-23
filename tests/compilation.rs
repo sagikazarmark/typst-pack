@@ -1,8 +1,8 @@
 use typst_pack::{
     CompilationOperationOutcome, CompilationRequestRejection, CompilationStatus, CompileOptions,
     CreationTimestamp, DiagnosticPhase, DiagnosticProducer, FontContainerFulfillment, OutputFormat,
-    Pack, PackCompilationRequest, PackCompileError, PackMetadata, PackWorld, RequestValueOrigin,
-    compile, compile_pack,
+    Pack, PackCompilationRequest, PackCompileError, PackMetadata, PackOverrideSet,
+    PackOverrideSetError, PackWorld, RequestValueOrigin, compile, compile_pack,
 };
 
 fn five_page_world() -> PackWorld {
@@ -49,6 +49,163 @@ fn pack_bound_compilation_does_not_read_an_ambient_clock() {
     let result = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Svg));
 
     assert_eq!(result.unwrap().status(), CompilationStatus::Rejected);
+}
+
+#[test]
+fn pack_override_preflight_rejects_paths_outside_the_bound_pack() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"baseline".to_vec())
+        .unwrap()
+        .resource_slot("runtime.txt")
+        .unwrap()
+        .package_file(
+            "@local/example:1.0.0".parse().unwrap(),
+            "lib.typ",
+            b"package".to_vec(),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+    for path in [
+        "missing.typ",
+        "runtime.txt",
+        "packages/local/example/1.0.0/lib.typ",
+    ] {
+        let error = PackOverrideSet::new(&pack)
+            .replace(path, b"replacement".to_vec())
+            .unwrap_err();
+        assert!(matches!(
+            error,
+            PackOverrideSetError::MissingProjectPath { path: rejected } if rejected == path
+        ));
+    }
+
+    let error = PackOverrideSet::new(&pack)
+        .replace("main.typ", b"first".to_vec())
+        .unwrap()
+        .replace("./main.typ", b"second".to_vec())
+        .unwrap_err();
+    assert!(matches!(
+        error,
+        PackOverrideSetError::DuplicateProjectPath { path } if path == "main.typ"
+    ));
+}
+
+#[test]
+fn pack_overrides_replace_contained_bytes_without_mutating_the_pack() {
+    let baseline = b"#set page(width: 20pt, height: 10pt, margin: 0pt)\nbaseline".to_vec();
+    let replacement = b"#set page(width: 40pt, height: 10pt, margin: 0pt)\nreplacement".to_vec();
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", baseline.clone())
+        .unwrap()
+        .file("unused.txt", b"unused baseline".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let pack_identity = pack.identity();
+    let baseline_result =
+        compile_pack(PackCompilationRequest::new(pack.clone(), OutputFormat::Svg)).unwrap();
+    let overrides = PackOverrideSet::new(&pack)
+        .replace("main.typ", replacement)
+        .unwrap()
+        .replace("unused.txt", b"unused replacement".to_vec())
+        .unwrap();
+
+    let overridden = compile_pack(
+        PackCompilationRequest::new(pack.clone(), OutputFormat::Svg).overrides(overrides),
+    )
+    .unwrap();
+
+    assert_ne!(
+        overridden.artifacts()[0].bytes(),
+        baseline_result.artifacts()[0].bytes()
+    );
+    assert_ne!(
+        overridden.compilation_identity(),
+        baseline_result.compilation_identity()
+    );
+    assert_eq!(overridden.request_inventory().overrides().value().len(), 2);
+    assert!(
+        overridden
+            .request_inventory()
+            .overrides()
+            .value()
+            .iter()
+            .all(|entry| entry.byte_len() > 0 && entry.commitment() != [0; 16])
+    );
+    assert_eq!(pack.identity(), pack_identity);
+    assert_eq!(pack.file("main.typ").unwrap().as_slice(), baseline);
+    assert_eq!(
+        pack.file("unused.txt").unwrap().as_slice(),
+        b"unused baseline"
+    );
+
+    let unused_override = PackOverrideSet::new(&pack)
+        .replace("unused.txt", b"another unused value".to_vec())
+        .unwrap();
+    let unused_result = compile_pack(
+        PackCompilationRequest::new(pack.clone(), OutputFormat::Svg).overrides(unused_override),
+    )
+    .unwrap();
+    assert_eq!(
+        unused_result.artifacts()[0].bytes(),
+        baseline_result.artifacts()[0].bytes()
+    );
+    assert_ne!(
+        unused_result.compilation_identity(),
+        baseline_result.compilation_identity()
+    );
+}
+
+#[test]
+fn pack_override_set_cannot_be_applied_to_a_different_pack() {
+    let first = Pack::builder("main.typ")
+        .file("main.typ", b"first".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let second = Pack::builder("main.typ")
+        .file("main.typ", b"second".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let overrides = PackOverrideSet::new(&first)
+        .replace("main.typ", b"replacement".to_vec())
+        .unwrap();
+    let accepted = compile_pack(
+        PackCompilationRequest::new(first, OutputFormat::Svg).overrides(overrides.clone()),
+    )
+    .unwrap();
+    let accepted_commitment = accepted
+        .request_inventory()
+        .overrides()
+        .value()
+        .iter()
+        .next()
+        .unwrap()
+        .commitment();
+
+    let result =
+        compile_pack(PackCompilationRequest::new(second, OutputFormat::Svg).overrides(overrides));
+
+    let Err(PackCompileError::RequestRejected {
+        rejection: CompilationRequestRejection::OverrideSetPackMismatch,
+        request_inventory,
+    }) = result
+    else {
+        panic!("expected a Pack Override Set binding rejection");
+    };
+    assert_eq!(
+        request_inventory
+            .overrides()
+            .value()
+            .iter()
+            .next()
+            .unwrap()
+            .commitment(),
+        accepted_commitment
+    );
 }
 
 #[test]

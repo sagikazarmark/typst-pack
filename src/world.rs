@@ -1,9 +1,12 @@
 //! A complete Typst [`World`] backed by a [`Pack`].
 
+use std::collections::BTreeMap;
 #[cfg(feature = "fs")]
 use std::io::{self, BufReader, Read};
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
+#[cfg(feature = "fs")]
+use std::sync::OnceLock;
 
 use typst::diag::{FileError, FileResult};
 use typst::foundations::{Bytes, Datetime, Dict, Duration};
@@ -251,6 +254,7 @@ enum Clock {
 /// that are not vendored.
 struct PackLoader {
     pack: Arc<Pack>,
+    project_overrides: BTreeMap<String, Bytes>,
     resources: CompilationResources,
     package_loader: Option<Box<dyn FileLoader + Send + Sync>>,
 }
@@ -261,9 +265,15 @@ impl FileLoader for PackLoader {
         let path = id.vpath().get_without_slash();
         match id.root() {
             VirtualRoot::Project => self
-                .resources
-                .file(&self.pack, id)
-                .expect("project requests are handled by Resource Slot resolution"),
+                .project_overrides
+                .get(path)
+                .cloned()
+                .map(Ok)
+                .unwrap_or_else(|| {
+                    self.resources
+                        .file(&self.pack, id)
+                        .expect("project requests are handled by Resource Slot resolution")
+                }),
             VirtualRoot::Package(spec) => {
                 if self.pack.has_package(spec) {
                     self.pack
@@ -298,6 +308,7 @@ pub struct PackWorldBuilder {
     catalog_fonts: Option<Vec<Font>>,
     resource_providers: Vec<Provider>,
     package_loader: Option<Box<dyn FileLoader + Send + Sync>>,
+    project_overrides: BTreeMap<String, Bytes>,
 }
 
 /// Adapter that lets heterogeneous font sources live in one list.
@@ -321,6 +332,7 @@ impl PackWorldBuilder {
             catalog_fonts: None,
             resource_providers: Vec::new(),
             package_loader: None,
+            project_overrides: BTreeMap::new(),
         }
     }
 
@@ -393,6 +405,11 @@ impl PackWorldBuilder {
 
     pub(crate) fn exact_font_catalog(mut self, fonts: Vec<Font>) -> Self {
         self.catalog_fonts = Some(fonts);
+        self
+    }
+
+    pub(crate) fn exact_project_overrides(mut self, overrides: BTreeMap<String, Bytes>) -> Self {
+        self.project_overrides = overrides;
         self
     }
 
@@ -478,6 +495,7 @@ impl PackWorldBuilder {
             main,
             store: FileStore::new(PackLoader {
                 pack: Arc::new(self.pack),
+                project_overrides: self.project_overrides,
                 resources: CompilationResources::new(self.resource_providers),
                 package_loader: self.package_loader,
             }),

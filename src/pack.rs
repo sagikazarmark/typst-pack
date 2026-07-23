@@ -598,6 +598,12 @@ impl Pack {
         self.files.get(path)
     }
 
+    pub(crate) fn canonical_project_path(path: &str) -> Result<String, String> {
+        canonical_path(PackPathRole::ProjectFile, path)
+            .map(CanonicalPath::into_string)
+            .map_err(|error| error.to_string())
+    }
+
     /// The root-relative Resource Slot paths.
     pub fn resource_slots(&self) -> impl Iterator<Item = &str> {
         self.manifest.project().resource_slots()

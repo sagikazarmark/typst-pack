@@ -4,14 +4,16 @@ use std::num::NonZeroUsize;
 
 use support::official_typst::{
     ArtifactRole, DiagnosticObservation, DiagnosticSeverity, Fixture, ObservationStatus,
-    OutputRequest, ReferenceRequest, Target, TraceKind, observe, select_font,
+    OutputRequest, ReferenceRequest, Target, TraceKind, observe, observe_with_project_overrides,
+    select_font,
 };
 use typst::World;
 use typst::foundations::{Bytes, Datetime, Dict, Smart, Value};
 use typst_pack::{
     CompilationDiagnostic, CompilationStatus, CompileOptions, CreationTimestamp, DiagnosticPhase,
     DiagnosticProducer, DiagnosticSeverity as PackDiagnosticSeverity, OutputFormat, Pack,
-    PackCompilationRequest, RequestValueOrigin, TracepointKind, compile_pack, parse_page_selection,
+    PackCompilationRequest, PackOverrideSet, RequestValueOrigin, TracepointKind, compile_pack,
+    parse_page_selection,
 };
 use typst_pdf::PdfStandard;
 
@@ -324,6 +326,63 @@ fn stabilized_project_round_trips_and_matches_pack_svg_compilation() {
     assert_eq!(actual.exporter_identity().version(), "0.15.0");
     assert!(!actual.exporter_identity().source_checksum().is_empty());
     assert!(!actual.exporter_identity().target().is_empty());
+}
+
+#[test]
+fn pack_source_and_non_source_overrides_match_the_independent_oracle() {
+    let fixture = Fixture::override_behavior();
+    let reference_request = ReferenceRequest {
+        inputs: Dict::new(),
+        features: vec![],
+        document_time: None,
+        output: OutputRequest::Svg {
+            source_pages: vec![],
+            render_bleed: false,
+            pretty: false,
+        },
+    };
+    let baseline = observe(&fixture, &reference_request);
+    let source_only = observe_with_project_overrides(
+        &fixture,
+        &reference_request,
+        &[("chapter.typ", "#let source-width = 20")],
+    );
+    let data_only =
+        observe_with_project_overrides(&fixture, &reference_request, &[("data.txt", "20")]);
+    let unused_only = observe_with_project_overrides(
+        &fixture,
+        &reference_request,
+        &[("unused.txt", "replacement unused")],
+    );
+    assert_ne!(source_only.artifacts[0].bytes, baseline.artifacts[0].bytes);
+    assert_ne!(data_only.artifacts[0].bytes, baseline.artifacts[0].bytes);
+    assert_eq!(unused_only.artifacts[0].bytes, baseline.artifacts[0].bytes);
+
+    let pack = stabilized_pack(&fixture);
+    let overrides = PackOverrideSet::new(&pack)
+        .replace("chapter.typ", b"#let source-width = 20".to_vec())
+        .unwrap()
+        .replace("data.txt", b"20".to_vec())
+        .unwrap()
+        .replace("unused.txt", b"replacement unused".to_vec())
+        .unwrap();
+    let actual =
+        compile_pack(PackCompilationRequest::new(pack, OutputFormat::Svg).overrides(overrides))
+            .unwrap();
+    let expected = observe_with_project_overrides(
+        &fixture,
+        &reference_request,
+        &[
+            ("chapter.typ", "#let source-width = 20"),
+            ("data.txt", "20"),
+            ("unused.txt", "replacement unused"),
+        ],
+    );
+
+    assert_eq!(actual.status(), CompilationStatus::Succeeded);
+    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
+    assert_eq!(actual.artifacts().len(), expected.artifacts.len());
+    assert_eq!(actual.artifacts()[0].bytes(), expected.artifacts[0].bytes);
 }
 
 #[test]

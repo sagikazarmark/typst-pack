@@ -19,7 +19,8 @@ pub use compile::{
     DiagnosticPhase, DiagnosticProducer, DiagnosticSeverity, DiagnosticTracepoint,
     EffectiveEngineFeature, EffectiveRequestValue, EngineIdentity, ExporterIdentity,
     FontContainerFulfillment, LogicalSpan, OutputFormat, PackCompilationRequest,
-    PackCompilationWarning, PackCompileError, PageRange, PageSelection,
+    PackCompilationWarning, PackCompileError, PackOverrideInventoryEntry, PackOverrideSet,
+    PackOverrideSetError, PackOverridesInventory, PageRange, PageSelection,
     PdfStandardsValidationError, RequestValueOrigin, TracepointKind, TypstInputsInventory, compile,
     compile_pack, parse_page_selection,
 };

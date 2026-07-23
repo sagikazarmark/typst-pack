@@ -1,6 +1,6 @@
 //! Compiling a pack into Compilation Output Artifacts.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::ops::Range;
 
@@ -287,6 +287,7 @@ pub struct CompilationRequestInventory {
     pdf_tags_origin: RequestValueOrigin,
     pdf_creation_time_origin: RequestValueOrigin,
     inputs: EffectiveRequestValue<TypstInputsInventory>,
+    overrides: EffectiveRequestValue<PackOverridesInventory>,
     selected_features: Vec<EffectiveEngineFeature>,
     features: Vec<EffectiveEngineFeature>,
     document_time: EffectiveRequestValue<Option<Datetime>>,
@@ -306,6 +307,11 @@ impl CompilationRequestInventory {
     /// Safe evidence for the exact `sys.inputs` dictionary.
     pub fn inputs(&self) -> &EffectiveRequestValue<TypstInputsInventory> {
         &self.inputs
+    }
+
+    /// Safe evidence for the exact Pack Override Set.
+    pub fn overrides(&self) -> &EffectiveRequestValue<PackOverridesInventory> {
+        &self.overrides
     }
 
     /// How the effective PNG PPI was established.
@@ -375,6 +381,107 @@ impl TypstInputsInventory {
     }
 }
 
+/// Safe, role-bound evidence for one replacement in a Pack Override Set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackOverrideInventoryEntry {
+    path: String,
+    byte_len: usize,
+    commitment: u128,
+}
+
+impl PackOverrideInventoryEntry {
+    /// The commitment schema, including the pinned value-hash implementation.
+    pub fn schema(&self) -> &'static str {
+        "typst-pack-override-v1+typst-0.15"
+    }
+
+    /// The canonical contained project path being replaced.
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+
+    /// The exact replacement byte length.
+    pub fn byte_len(&self) -> usize {
+        self.byte_len
+    }
+
+    /// The role-bound commitment digest in big-endian order.
+    pub fn commitment(&self) -> [u8; 16] {
+        self.commitment.to_be_bytes()
+    }
+}
+
+/// Safe evidence for an immutable Pack Override Set.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PackOverridesInventory(Vec<PackOverrideInventoryEntry>);
+
+impl PackOverridesInventory {
+    pub fn len(&self) -> usize {
+        self.0.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &PackOverrideInventoryEntry> {
+        self.0.iter()
+    }
+}
+
+/// An immutable set of contained project-file replacements bound to one Pack.
+#[derive(Debug, Clone)]
+pub struct PackOverrideSet {
+    pack_identity: crate::PackIdentity,
+    project_paths: BTreeSet<String>,
+    replacements: BTreeMap<String, Bytes>,
+}
+
+impl PackOverrideSet {
+    /// Starts an empty override set bound to `pack`.
+    pub fn new(pack: &Pack) -> Self {
+        Self {
+            pack_identity: pack.identity(),
+            project_paths: pack.files().map(|(path, _)| path.to_owned()).collect(),
+            replacements: BTreeMap::new(),
+        }
+    }
+
+    /// Adds one replacement after strict Pack-owned preflight.
+    pub fn replace(
+        mut self,
+        path: impl AsRef<str>,
+        data: impl Into<Vec<u8>>,
+    ) -> Result<Self, PackOverrideSetError> {
+        let supplied = path.as_ref();
+        let path = Pack::canonical_project_path(supplied).map_err(|message| {
+            PackOverrideSetError::InvalidProjectPath {
+                path: supplied.to_owned(),
+                message,
+            }
+        })?;
+        if self.replacements.contains_key(&path) {
+            return Err(PackOverrideSetError::DuplicateProjectPath { path });
+        }
+        if !self.project_paths.contains(&path) {
+            return Err(PackOverrideSetError::MissingProjectPath { path });
+        }
+        self.replacements.insert(path, Bytes::new(data.into()));
+        Ok(self)
+    }
+}
+
+/// A Pack-owned Pack Override preflight rejection.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PackOverrideSetError {
+    #[error("invalid Pack Override project path `{path}`: {message}")]
+    InvalidProjectPath { path: String, message: String },
+    #[error("Pack Override path `{path}` is declared more than once")]
+    DuplicateProjectPath { path: String },
+    #[error("Pack Override path `{path}` is not a contained project file")]
+    MissingProjectPath { path: String },
+}
+
 /// The pre-execution identity of a fully specified semantic compilation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CompilationIdentity(u128);
@@ -411,6 +518,7 @@ pub struct PackCompilationRequest {
     format: OutputFormat,
     options: EffectiveRequestValue<CompileOptions>,
     inputs: EffectiveRequestValue<Dict>,
+    overrides: EffectiveRequestValue<PackOverrideSet>,
     features: Vec<EffectiveEngineFeature>,
     document_time: EffectiveRequestValue<Option<Datetime>>,
     font_fulfillments: BTreeMap<FontContainerIdentity, FontContainerFulfillment>,
@@ -447,6 +555,7 @@ impl FontContainerFulfillment {
 impl PackCompilationRequest {
     /// Binds a validated Pack to an output format and deterministic defaults.
     pub fn new(pack: Pack, format: OutputFormat) -> Self {
+        let overrides = PackOverrideSet::new(&pack);
         Self {
             pack,
             format,
@@ -455,6 +564,7 @@ impl PackCompilationRequest {
                 RequestValueOrigin::CoreDefaulted,
             ),
             inputs: EffectiveRequestValue::new(Dict::new(), RequestValueOrigin::CoreDefaulted),
+            overrides: EffectiveRequestValue::new(overrides, RequestValueOrigin::CoreDefaulted),
             features: Vec::new(),
             document_time: EffectiveRequestValue::new(None, RequestValueOrigin::CoreDefaulted),
             font_fulfillments: BTreeMap::new(),
@@ -476,6 +586,12 @@ impl PackCompilationRequest {
     /// Sets `sys.inputs` after an adapter has resolved its external defaults.
     pub fn adapter_resolved_inputs(mut self, inputs: Dict) -> Self {
         self.inputs = EffectiveRequestValue::new(inputs, RequestValueOrigin::AdapterResolved);
+        self
+    }
+
+    /// Applies one immutable Pack-bound Pack Override Set.
+    pub fn overrides(mut self, overrides: PackOverrideSet) -> Self {
+        self.overrides = EffectiveRequestValue::new(overrides, RequestValueOrigin::CallerSupplied);
         self
     }
 
@@ -969,6 +1085,9 @@ pub enum CompilationRequestRejection {
     /// A selected PDF standard requires accessibility tags.
     #[error("cannot disable PDF tags for a standard that requires them")]
     PdfStandardRequiresTags,
+    /// The Pack Override Set was preflighted against a different Pack.
+    #[error("the Pack Override Set is bound to a different Pack")]
+    OverrideSetPackMismatch,
     /// Multiple independently detectable request issues in stable order.
     #[error("the compilation request contains multiple invalid values")]
     Multiple { issues: Vec<Self> },
@@ -1083,12 +1202,16 @@ pub fn compile_pack(
         format,
         mut options,
         inputs,
+        overrides,
         features,
         document_time,
         font_fulfillments,
     } = request;
     let options_value = options.value();
     let mut request_issues = vec![];
+    if overrides.value.pack_identity != pack.identity() {
+        request_issues.push(CompilationRequestRejection::OverrideSetPackMismatch);
+    }
     if features
         .iter()
         .any(|feature| feature.value == Feature::Bundle)
@@ -1182,6 +1305,25 @@ pub fn compile_pack(
         total_value_repr_bytes,
         &raw_inputs,
     ));
+    let override_inventory = PackOverridesInventory(
+        overrides
+            .value
+            .replacements
+            .iter()
+            .map(|(path, data)| PackOverrideInventoryEntry {
+                path: path.clone(),
+                byte_len: data.len(),
+                commitment: typst::utils::hash128(&(
+                    "typst-pack-override-v1+typst-0.15",
+                    "project-file",
+                    overrides.value.pack_identity,
+                    path,
+                    data.len(),
+                    data,
+                )),
+            })
+            .collect(),
+    );
     let request_inventory = CompilationRequestInventory {
         format: EffectiveRequestValue::new(format, RequestValueOrigin::CallerSupplied),
         options,
@@ -1197,6 +1339,7 @@ pub fn compile_pack(
             },
             inputs.origin,
         ),
+        overrides: EffectiveRequestValue::new(override_inventory, overrides.origin),
         selected_features,
         features: effective_features,
         document_time,
@@ -1259,6 +1402,7 @@ pub fn compile_pack(
 
     let mut world = PackWorld::builder(pack)
         .inputs(raw_inputs)
+        .exact_project_overrides(overrides.value.replacements)
         .exact_font_catalog(catalog_fonts);
     #[cfg(feature = "embedded-fonts")]
     {
@@ -1434,6 +1578,12 @@ fn compilation_identity(
         inventory.format.value,
         output_digest,
         inventory.inputs.value.commitment,
+        inventory
+            .overrides
+            .value
+            .iter()
+            .map(|entry| (&entry.path, entry.byte_len, entry.commitment))
+            .collect::<Vec<_>>(),
         feature_values,
         inventory.document_time.value,
         engine_identity,
