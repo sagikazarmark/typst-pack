@@ -18,6 +18,8 @@ use typst_pdf::{PdfStandard, PdfStandards, Timestamp};
 
 const MAIN: &str = include_str!("../fixtures/official-oracle/main.typ");
 const CHAPTER: &str = include_str!("../fixtures/official-oracle/chapter.typ");
+const EXPORT_REJECTION: &str = "#pdf.attach(\"duplicate.txt\", bytes(\"first\"))\n\
+                                #pdf.attach(\"duplicate.txt\", bytes(\"second\"))";
 const PACKAGE_MANIFEST: &str =
     include_str!("../fixtures/official-oracle/packages/local/oracle/1.0.0/typst.toml");
 const PACKAGE_ENTRYPOINT: &str =
@@ -39,6 +41,14 @@ impl Fixture {
                 (ORACLE_PACKAGE_SPEC, "typst.toml", PACKAGE_MANIFEST),
                 (ORACLE_PACKAGE_SPEC, "lib.typ", PACKAGE_ENTRYPOINT),
             ],
+        }
+    }
+
+    pub fn exporter_rejection() -> Self {
+        Self {
+            entrypoint: "main.typ",
+            project: &[("main.typ", EXPORT_REJECTION)],
+            packages: &[],
         }
     }
 

@@ -1,6 +1,7 @@
 use typst_pack::{
-    CompileError, CompileOptions, OutputFormat, Pack, PackCompilationRequest, PackCompileError,
-    PackWorld, compile, compile_pack,
+    CompilationOperationOutcome, CompilationRequestRejection, CompilationStatus, CompileOptions,
+    DiagnosticPhase, DiagnosticProducer, OutputFormat, Pack, PackCompilationRequest,
+    PackCompileError, PackWorld, compile, compile_pack,
 };
 
 fn five_page_world() -> PackWorld {
@@ -33,12 +34,7 @@ fn pack_bound_compilation_does_not_read_ambient_project_files() {
 
     let result = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Svg));
 
-    assert!(matches!(
-        result,
-        Err(PackCompileError::Compilation(
-            CompileError::Diagnostics { .. }
-        ))
-    ));
+    assert_eq!(result.unwrap().status(), CompilationStatus::Rejected);
 }
 
 #[test]
@@ -51,12 +47,7 @@ fn pack_bound_compilation_does_not_read_an_ambient_clock() {
 
     let result = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Svg));
 
-    assert!(matches!(
-        result,
-        Err(PackCompileError::Compilation(
-            CompileError::Diagnostics { .. }
-        ))
-    ));
+    assert_eq!(result.unwrap().status(), CompilationStatus::Rejected);
 }
 
 #[test]
@@ -76,9 +67,9 @@ fn pack_bound_compilation_does_not_use_package_caches_or_network() {
 
     assert!(matches!(
         result,
-        Err(PackCompileError::Compilation(
-            CompileError::Diagnostics { .. }
-        ))
+        Err(PackCompileError::Operation(
+            CompilationOperationOutcome::MissingExternalPackageFulfillment { packages }
+        )) if packages.len() == 1
     ));
 }
 
@@ -94,7 +85,9 @@ fn pack_bound_compilation_rejects_the_bundle_feature() {
 
     assert!(matches!(
         compile_pack(request),
-        Err(PackCompileError::UnsupportedBundleFeature)
+        Err(PackCompileError::RequestRejected(
+            CompilationRequestRejection::UnsupportedBundleFeature
+        ))
     ));
 }
 
@@ -114,10 +107,35 @@ fn pack_bound_compilation_does_not_use_unpacked_embedded_fonts() {
 
     assert!(
         output
-            .warnings
+            .diagnostics()
             .iter()
-            .any(|warning| warning.message.contains("unknown font family"))
+            .any(|warning| warning.message().contains("unknown font family"))
     );
+}
+
+#[test]
+fn official_exporter_rejection_is_a_scoped_compilation_result() {
+    let pack = Pack::builder("main.typ")
+        .file(
+            "main.typ",
+            b"#pdf.attach(\"duplicate.txt\", bytes(\"first\"))\n\
+              #pdf.attach(\"duplicate.txt\", bytes(\"second\"))"
+                .to_vec(),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let result = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Pdf)).unwrap();
+
+    assert_eq!(result.status(), CompilationStatus::Rejected);
+    assert!(result.artifacts().is_empty());
+    assert_eq!(result.source_page_count(), Some(1));
+    assert!(result.diagnostics().iter().any(|diagnostic| {
+        diagnostic.phase() == DiagnosticPhase::Export
+            && diagnostic.producer() == DiagnosticProducer::Exporter(result.exporter_identity())
+            && diagnostic.message().contains("attempted to attach file")
+    }));
 }
 
 #[test]
@@ -319,7 +337,7 @@ fn pdf_page_selection_warns_that_accessibility_tags_are_disabled() {
 
     assert!(
         output
-            .warnings
+            .pack_warnings()
             .iter()
             .any(|warning| warning.message.contains("--pages implies --no-pdf-tags"))
     );
@@ -332,9 +350,34 @@ fn pdf_page_selection_warns_that_accessibility_tags_are_disabled() {
     let output = compile(&world, OutputFormat::Pdf, &options).unwrap();
     assert!(
         output
-            .warnings
+            .pack_warnings()
             .iter()
             .all(|warning| !warning.message.contains("--pages implies --no-pdf-tags"))
+    );
+}
+
+#[test]
+fn pack_owned_pdf_warning_is_not_attributed_to_the_engine() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"Pack warning".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let options = CompileOptions {
+        page_selection: typst_pack::parse_page_selection("1").unwrap(),
+        ..CompileOptions::default()
+    };
+
+    let result =
+        compile_pack(PackCompilationRequest::new(pack, OutputFormat::Pdf).options(options))
+            .unwrap();
+
+    assert!(result.diagnostics().is_empty());
+    assert_eq!(result.pack_warnings().len(), 1);
+    assert!(
+        result.pack_warnings()[0]
+            .message()
+            .contains("--pages implies --no-pdf-tags")
     );
 }
 

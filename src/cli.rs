@@ -1043,19 +1043,34 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
                 local_timestamp,
             ) {
                 Ok(output) => output,
-                Err(CompileError::Diagnostics { errors, warnings }) => {
+                Err(CompileError::Diagnostics {
+                    errors,
+                    warnings,
+                    pack_warnings,
+                    ..
+                }) => {
                     emit_diagnostics_with(
                         world,
-                        errors.iter().chain(&warnings),
+                        warnings.iter().chain(&pack_warnings).chain(&errors),
                         diagnostic_format,
                         color,
                     );
                     write_requested_dependencies(None)?;
                     return Err(CliError::Reported);
                 }
-                Err(CompileError::PngExport { message, warnings }) => {
+                Err(CompileError::PngExport {
+                    message,
+                    warnings,
+                    pack_warnings,
+                    ..
+                }) => {
                     emit_owned_error(&format!("PNG export failed: {message}"), color);
-                    emit_diagnostics_with(world, warnings.iter(), diagnostic_format, color);
+                    emit_diagnostics_with(
+                        world,
+                        warnings.iter().chain(&pack_warnings),
+                        diagnostic_format,
+                        color,
+                    );
                     write_requested_dependencies(None)?;
                     return Err(CliError::Reported);
                 }
@@ -1116,13 +1131,23 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
                 Ok(exported) => exported,
                 Err(error) => {
                     emit_owned_error(&error, color);
-                    emit_diagnostics_with(world, output.warnings.iter(), diagnostic_format, color);
+                    emit_diagnostics_with(
+                        world,
+                        output.warnings.iter().chain(output.pack_warnings()),
+                        diagnostic_format,
+                        color,
+                    );
                     write_requested_dependencies(None)?;
                     return Err(CliError::Reported);
                 }
             };
 
-            emit_diagnostics_with(world, output.warnings.iter(), diagnostic_format, color);
+            emit_diagnostics_with(
+                world,
+                output.warnings.iter().chain(output.pack_warnings()),
+                diagnostic_format,
+                color,
+            );
 
             if !output_is_stdout
                 && let Some(viewer) = args.open.as_ref()

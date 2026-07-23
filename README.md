@@ -197,10 +197,10 @@ let request = PackCompilationRequest::new(pack, OutputFormat::Pdf);
 let output = compile_pack(request)?;
 assert_eq!(output.engine_identity().implementation(), "typst");
 assert_eq!(output.exporter_identity().implementation(), "typst-pdf");
-let artifact = output.artifacts.into_iter().next().expect("PDF artifact");
+let artifact = output.artifacts().first().expect("PDF artifact");
 assert_eq!(artifact.format(), OutputFormat::Pdf);
 assert_eq!(artifact.source_page_number(), None);
-let pdf = artifact.into_bytes();
+let pdf = artifact.bytes();
 ```
 
 For PNG and SVG, `source_page_number()` identifies each artifact independently

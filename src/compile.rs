@@ -1,14 +1,16 @@
 //! Compiling a pack into Compilation Output Artifacts.
 
 use std::num::NonZeroUsize;
+use std::ops::Range;
 
 use ecow::EcoVec;
 #[cfg(feature = "cli")]
 use rayon::prelude::*;
-use typst::diag::{SourceDiagnostic, Warned};
+use typst::diag::{Severity, SourceDiagnostic, Tracepoint, Warned};
 use typst::foundations::{Datetime, Dict};
-use typst::syntax::Span;
-use typst::{Feature, World};
+use typst::syntax::package::PackageSpec;
+use typst::syntax::{DiagSpan, FileId, Span, VirtualRoot};
+use typst::{Feature, World, WorldExt};
 use typst_layout::PagedDocument;
 use typst_pdf::{PdfOptions, PdfStandards, Timestamp};
 
@@ -357,6 +359,203 @@ pub struct CompilationArtifact {
     source_page_number: Option<NonZeroUsize>,
 }
 
+/// Whether the official compiler and exporter accepted the compilation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CompilationStatus {
+    Succeeded,
+    Rejected,
+}
+
+/// The official phase that emitted a diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticPhase {
+    Compilation,
+    Export,
+}
+
+/// The exact embedded implementation that emitted a diagnostic.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticProducer {
+    Engine(EngineIdentity),
+    Exporter(ExporterIdentity),
+}
+
+/// Official Typst diagnostic severity.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DiagnosticSeverity {
+    Error,
+    Warning,
+}
+
+/// A source location expressed in the Pack's logical namespace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LogicalSpan {
+    logical_path: Option<String>,
+    byte_range: Option<Range<usize>>,
+}
+
+impl LogicalSpan {
+    /// The logical project or package path, independent of transport location.
+    pub fn logical_path(&self) -> Option<&str> {
+        self.logical_path.as_deref()
+    }
+
+    /// The exact source byte range when Typst attached one.
+    pub fn byte_range(&self) -> Option<&Range<usize>> {
+        self.byte_range.as_ref()
+    }
+}
+
+/// A structured hint attached to an official diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticHint {
+    message: String,
+    span: LogicalSpan,
+}
+
+impl DiagnosticHint {
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn span(&self) -> &LogicalSpan {
+        &self.span
+    }
+}
+
+/// The kind of one official diagnostic tracepoint.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TracepointKind {
+    Call,
+    Show,
+    Import,
+    Include,
+}
+
+/// One structured tracepoint attached to an official diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DiagnosticTracepoint {
+    kind: TracepointKind,
+    value: Option<String>,
+    span: LogicalSpan,
+}
+
+impl DiagnosticTracepoint {
+    pub fn kind(&self) -> TracepointKind {
+        self.kind
+    }
+
+    pub fn value(&self) -> Option<&str> {
+        self.value.as_deref()
+    }
+
+    pub fn span(&self) -> &LogicalSpan {
+        &self.span
+    }
+}
+
+/// A lossless projection of the exposed fields of an official Typst diagnostic.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompilationDiagnostic {
+    severity: DiagnosticSeverity,
+    message: String,
+    span: LogicalSpan,
+    hints: Vec<DiagnosticHint>,
+    trace: Vec<DiagnosticTracepoint>,
+    phase: DiagnosticPhase,
+    producer: DiagnosticProducer,
+}
+
+impl CompilationDiagnostic {
+    pub fn severity(&self) -> DiagnosticSeverity {
+        self.severity
+    }
+
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn span(&self) -> &LogicalSpan {
+        &self.span
+    }
+
+    pub fn hints(&self) -> &[DiagnosticHint] {
+        &self.hints
+    }
+
+    pub fn trace(&self) -> &[DiagnosticTracepoint] {
+        &self.trace
+    }
+
+    pub fn phase(&self) -> DiagnosticPhase {
+        self.phase
+    }
+
+    pub fn producer(&self) -> DiagnosticProducer {
+        self.producer
+    }
+}
+
+/// The semantic result of an accepted Pack compilation request.
+#[derive(Debug, Clone)]
+pub struct CompilationResult {
+    status: CompilationStatus,
+    artifacts: Vec<CompilationArtifact>,
+    diagnostics: Vec<CompilationDiagnostic>,
+    pack_warnings: Vec<PackCompilationWarning>,
+    source_page_count: Option<usize>,
+    engine_identity: EngineIdentity,
+    exporter_identity: ExporterIdentity,
+}
+
+impl CompilationResult {
+    pub fn status(&self) -> CompilationStatus {
+        self.status
+    }
+
+    pub fn artifacts(&self) -> &[CompilationArtifact] {
+        &self.artifacts
+    }
+
+    pub fn diagnostics(&self) -> &[CompilationDiagnostic] {
+        &self.diagnostics
+    }
+
+    /// Pack-owned warnings kept separate from official diagnostics.
+    pub fn pack_warnings(&self) -> &[PackCompilationWarning] {
+        &self.pack_warnings
+    }
+
+    pub fn source_page_count(&self) -> Option<usize> {
+        self.source_page_count
+    }
+
+    pub fn engine_identity(&self) -> EngineIdentity {
+        self.engine_identity
+    }
+
+    pub fn exporter_identity(&self) -> ExporterIdentity {
+        self.exporter_identity
+    }
+}
+
+/// A Pack-owned semantic request warning.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackCompilationWarning {
+    message: String,
+    hints: Vec<String>,
+}
+
+impl PackCompilationWarning {
+    pub fn message(&self) -> &str {
+        &self.message
+    }
+
+    pub fn hints(&self) -> &[String] {
+        &self.hints
+    }
+}
+
 impl CompilationArtifact {
     /// The format of this artifact.
     pub fn format(&self) -> OutputFormat {
@@ -388,12 +587,18 @@ pub struct CompilationOutput {
     pub artifacts: Vec<CompilationArtifact>,
     /// Warnings emitted during compilation.
     pub warnings: EcoVec<SourceDiagnostic>,
+    pack_warnings: EcoVec<SourceDiagnostic>,
     source_page_count: Option<usize>,
     engine_identity: EngineIdentity,
     exporter_identity: ExporterIdentity,
 }
 
 impl CompilationOutput {
+    /// Pack-owned warnings kept separate from official Typst warnings.
+    pub fn pack_warnings(&self) -> &[SourceDiagnostic] {
+        &self.pack_warnings
+    }
+
     /// Total pages in the source document before page selection.
     ///
     /// HTML output is unpaged and returns `None`.
@@ -421,6 +626,9 @@ pub enum CompileError {
     Diagnostics {
         errors: EcoVec<SourceDiagnostic>,
         warnings: EcoVec<SourceDiagnostic>,
+        pack_warnings: EcoVec<SourceDiagnostic>,
+        phase: DiagnosticPhase,
+        source_page_count: Option<usize>,
     },
     /// PNG export failed after compilation completed.
     #[error("PNG export failed: {message}")]
@@ -428,18 +636,34 @@ pub enum CompileError {
         message: String,
         /// Warnings emitted before PNG export failed.
         warnings: EcoVec<SourceDiagnostic>,
+        pack_warnings: EcoVec<SourceDiagnostic>,
+        source_page_count: usize,
     },
 }
 
-/// A failed Pack-bound compilation request or engine execution.
+/// A Pack-owned semantic request rejection.
 #[derive(Debug, thiserror::Error)]
-pub enum PackCompileError {
+pub enum CompilationRequestRejection {
     /// The Pack compilation contract intentionally excludes Typst Bundle.
     #[error("the Typst Bundle feature is not supported for Pack compilation")]
     UnsupportedBundleFeature,
-    /// The embedded compiler or exporter rejected the request.
+}
+
+/// A Pack-owned operational outcome before official compilation begins.
+#[derive(Debug, thiserror::Error)]
+pub enum CompilationOperationOutcome {
+    /// The request supplied no authority for declared external packages.
+    #[error("external package fulfillment is unavailable for {packages:?}")]
+    MissingExternalPackageFulfillment { packages: Vec<PackageSpec> },
+}
+
+/// A failed Pack-bound request or operation, never an official rejection.
+#[derive(Debug, thiserror::Error)]
+pub enum PackCompileError {
     #[error(transparent)]
-    Compilation(#[from] CompileError),
+    RequestRejected(#[from] CompilationRequestRejection),
+    #[error(transparent)]
+    Operation(#[from] CompilationOperationOutcome),
 }
 
 /// Compiles the world's document and exports it in the requested format.
@@ -459,7 +683,7 @@ pub fn compile(
 /// Compiles a validated Pack through the private Pack Compilation Kernel.
 pub fn compile_pack(
     request: PackCompilationRequest,
-) -> Result<CompilationOutput, PackCompileError> {
+) -> Result<CompilationResult, PackCompileError> {
     let PackCompilationRequest {
         pack,
         format,
@@ -469,7 +693,16 @@ pub fn compile_pack(
         document_time,
     } = request;
     if features.contains(&Feature::Bundle) {
-        return Err(PackCompileError::UnsupportedBundleFeature);
+        return Err(CompilationRequestRejection::UnsupportedBundleFeature.into());
+    }
+    let external_packages = pack.manifest().packages().unvendored().to_vec();
+    if !external_packages.is_empty() {
+        return Err(
+            CompilationOperationOutcome::MissingExternalPackageFulfillment {
+                packages: external_packages,
+            }
+            .into(),
+        );
     }
     if format == OutputFormat::Html && !features.contains(&Feature::Html) {
         features.push(Feature::Html);
@@ -487,12 +720,91 @@ pub fn compile_pack(
     }
     let world = world.build();
 
-    Ok(compile_with_default_pdf_timestamp(
-        &world,
-        format,
-        &options,
-        || None,
-    )?)
+    let engine_identity = EmbeddedTypst::engine_identity();
+    let exporter_identity = EmbeddedTypst::exporter_identity(format);
+    let result = match compile_with_default_pdf_timestamp(&world, format, &options, || None) {
+        Ok(output) => {
+            let diagnostics = project_diagnostics(
+                &world,
+                output.warnings,
+                DiagnosticPhase::Compilation,
+                DiagnosticProducer::Engine(engine_identity),
+            );
+            let pack_warnings = project_pack_warnings(output.pack_warnings);
+            CompilationResult {
+                status: CompilationStatus::Succeeded,
+                artifacts: output.artifacts,
+                diagnostics,
+                pack_warnings,
+                source_page_count: output.source_page_count,
+                engine_identity,
+                exporter_identity,
+            }
+        }
+        Err(CompileError::Diagnostics {
+            errors,
+            warnings,
+            pack_warnings,
+            phase,
+            source_page_count,
+        }) => {
+            let mut diagnostics = project_diagnostics(
+                &world,
+                warnings,
+                DiagnosticPhase::Compilation,
+                DiagnosticProducer::Engine(engine_identity),
+            );
+            let producer = match phase {
+                DiagnosticPhase::Compilation => DiagnosticProducer::Engine(engine_identity),
+                DiagnosticPhase::Export => DiagnosticProducer::Exporter(exporter_identity),
+            };
+            diagnostics.extend(project_diagnostics(&world, errors, phase, producer));
+            CompilationResult {
+                status: CompilationStatus::Rejected,
+                artifacts: vec![],
+                diagnostics,
+                pack_warnings: project_pack_warnings(pack_warnings),
+                source_page_count,
+                engine_identity,
+                exporter_identity,
+            }
+        }
+        Err(CompileError::PngExport {
+            message,
+            warnings,
+            pack_warnings,
+            source_page_count,
+        }) => {
+            let mut diagnostics = project_diagnostics(
+                &world,
+                warnings,
+                DiagnosticPhase::Compilation,
+                DiagnosticProducer::Engine(engine_identity),
+            );
+            diagnostics.push(CompilationDiagnostic {
+                severity: DiagnosticSeverity::Error,
+                message,
+                span: LogicalSpan {
+                    logical_path: None,
+                    byte_range: None,
+                },
+                hints: vec![],
+                trace: vec![],
+                phase: DiagnosticPhase::Export,
+                producer: DiagnosticProducer::Exporter(exporter_identity),
+            });
+            CompilationResult {
+                status: CompilationStatus::Rejected,
+                artifacts: vec![],
+                diagnostics,
+                pack_warnings: project_pack_warnings(pack_warnings),
+                source_page_count: Some(source_page_count),
+                engine_identity,
+                exporter_identity,
+            }
+        }
+    };
+    Ok(result)
 }
 
 pub(crate) fn compile_with_default_pdf_timestamp(
@@ -503,10 +815,14 @@ pub(crate) fn compile_with_default_pdf_timestamp(
 ) -> Result<CompilationOutput, CompileError> {
     let _compilation_timing = typst_timing::TimingScope::new("typst-pack compilation");
     if format == OutputFormat::Html {
+        let pack_warnings = EcoVec::new();
         let Warned { output, warnings } = EmbeddedTypst::compile_html(world);
         let document = output.map_err(|errors| CompileError::Diagnostics {
             errors,
             warnings: warnings.clone(),
+            pack_warnings: pack_warnings.clone(),
+            phase: DiagnosticPhase::Compilation,
+            source_page_count: None,
         })?;
         let _export_timing = typst_timing::TimingScope::new("export");
         let bytes = EmbeddedTypst::export_html(
@@ -518,6 +834,9 @@ pub(crate) fn compile_with_default_pdf_timestamp(
         .map_err(|errors| CompileError::Diagnostics {
             errors,
             warnings: warnings.clone(),
+            pack_warnings: pack_warnings.clone(),
+            phase: DiagnosticPhase::Export,
+            source_page_count: None,
         })?;
         return Ok(CompilationOutput {
             artifacts: vec![CompilationArtifact {
@@ -526,6 +845,7 @@ pub(crate) fn compile_with_default_pdf_timestamp(
                 source_page_number: None,
             }],
             warnings,
+            pack_warnings,
             source_page_count: None,
             engine_identity: EmbeddedTypst::engine_identity(),
             exporter_identity: EmbeddedTypst::exporter_identity(format),
@@ -536,12 +856,13 @@ pub(crate) fn compile_with_default_pdf_timestamp(
         output,
         warnings: compile_warnings,
     } = EmbeddedTypst::compile_paged(world);
-    let mut warnings = compile_warnings;
+    let warnings = compile_warnings;
+    let mut pack_warnings = EcoVec::new();
     if format == OutputFormat::Pdf
         && !options.page_selection.ranges().is_empty()
         && options.pdf_tags
     {
-        warnings.push(
+        pack_warnings.push(
             SourceDiagnostic::warning(Span::detached(), "using --pages implies --no-pdf-tags")
                 .with_hints([
                     "the resulting PDF will be inaccessible".into(),
@@ -552,7 +873,11 @@ pub(crate) fn compile_with_default_pdf_timestamp(
     let document = output.map_err(|errors| CompileError::Diagnostics {
         errors,
         warnings: warnings.clone(),
+        pack_warnings: pack_warnings.clone(),
+        phase: DiagnosticPhase::Compilation,
+        source_page_count: None,
     })?;
+    let source_page_count = document.pages().len();
     let artifacts = {
         let _export_timing = typst_timing::TimingScope::new("export");
         match format {
@@ -574,6 +899,9 @@ pub(crate) fn compile_with_default_pdf_timestamp(
                     CompileError::Diagnostics {
                         errors,
                         warnings: warnings.clone(),
+                        pack_warnings: pack_warnings.clone(),
+                        phase: DiagnosticPhase::Export,
+                        source_page_count: Some(source_page_count),
                     }
                 })?;
                 vec![CompilationArtifact {
@@ -595,6 +923,8 @@ pub(crate) fn compile_with_default_pdf_timestamp(
                             CompileError::PngExport {
                                 message,
                                 warnings: warnings.clone(),
+                                pack_warnings: pack_warnings.clone(),
+                                source_page_count,
                             }
                         })?;
                     Ok::<_, CompileError>(CompilationArtifact {
@@ -638,7 +968,8 @@ pub(crate) fn compile_with_default_pdf_timestamp(
     Ok(CompilationOutput {
         artifacts,
         warnings,
-        source_page_count: Some(document.pages().len()),
+        pack_warnings,
+        source_page_count: Some(source_page_count),
         engine_identity: EmbeddedTypst::engine_identity(),
         exporter_identity: EmbeddedTypst::exporter_identity(format),
     })
@@ -659,4 +990,81 @@ fn selected_pages<'a>(
             })
         })
         .map(|(index, page)| (NonZeroUsize::new(index + 1).unwrap(), page))
+}
+
+fn project_diagnostics(
+    world: &dyn World,
+    diagnostics: impl IntoIterator<Item = SourceDiagnostic>,
+    phase: DiagnosticPhase,
+    producer: DiagnosticProducer,
+) -> Vec<CompilationDiagnostic> {
+    diagnostics
+        .into_iter()
+        .map(|diagnostic| CompilationDiagnostic {
+            severity: match diagnostic.severity {
+                Severity::Error => DiagnosticSeverity::Error,
+                Severity::Warning => DiagnosticSeverity::Warning,
+            },
+            message: diagnostic.message.into(),
+            span: logical_span(world, diagnostic.span),
+            hints: diagnostic
+                .hints
+                .into_iter()
+                .map(|hint| DiagnosticHint {
+                    message: hint.v.into(),
+                    span: logical_span(world, hint.span),
+                })
+                .collect(),
+            trace: diagnostic
+                .trace
+                .into_iter()
+                .map(|trace| {
+                    let (kind, value) = match trace.v {
+                        Tracepoint::Call(value) => (TracepointKind::Call, value.map(String::from)),
+                        Tracepoint::Show(value) => (TracepointKind::Show, Some(value.into())),
+                        Tracepoint::Import(value) => (TracepointKind::Import, Some(value.into())),
+                        Tracepoint::Include(value) => (TracepointKind::Include, Some(value.into())),
+                    };
+                    DiagnosticTracepoint {
+                        kind,
+                        value,
+                        span: logical_span(world, trace.span.into()),
+                    }
+                })
+                .collect(),
+            phase,
+            producer,
+        })
+        .collect()
+}
+
+fn project_pack_warnings(
+    warnings: impl IntoIterator<Item = SourceDiagnostic>,
+) -> Vec<PackCompilationWarning> {
+    warnings
+        .into_iter()
+        .map(|warning| PackCompilationWarning {
+            message: warning.message.into(),
+            hints: warning
+                .hints
+                .into_iter()
+                .map(|hint| hint.v.into())
+                .collect(),
+        })
+        .collect()
+}
+
+fn logical_span(world: &dyn World, span: DiagSpan) -> LogicalSpan {
+    LogicalSpan {
+        logical_path: span.id().map(logical_path),
+        byte_range: world.range(span),
+    }
+}
+
+fn logical_path(id: FileId) -> String {
+    let path = id.vpath().get_without_slash();
+    match id.root() {
+        VirtualRoot::Project => format!("project:{path}"),
+        VirtualRoot::Package(spec) => format!("package:{spec}/{path}"),
+    }
 }

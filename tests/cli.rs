@@ -1646,8 +1646,8 @@ fn failed_pdf_compilation_retains_the_pages_warning() {
     let error = stderr.find("unknown-function").unwrap();
     let compiler_warning = stderr.find("Definitely Missing").unwrap();
     let static_warning = stderr.find("using --pages implies --no-pdf-tags").unwrap();
-    assert!(error < compiler_warning, "{stderr}");
     assert!(compiler_warning < static_warning, "{stderr}");
+    assert!(static_warning < error, "{stderr}");
     assert!(!output.exists());
 }
 

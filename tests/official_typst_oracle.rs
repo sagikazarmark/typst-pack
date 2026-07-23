@@ -3,12 +3,70 @@ mod support;
 use std::num::NonZeroUsize;
 
 use support::official_typst::{
-    ArtifactRole, Fixture, ObservationStatus, OutputRequest, ReferenceRequest, Target, observe,
+    ArtifactRole, DiagnosticObservation, DiagnosticSeverity, Fixture, ObservationStatus,
+    OutputRequest, ReferenceRequest, Target, TraceKind, observe,
 };
 use typst::foundations::{Datetime, Dict, Smart, Value};
 use typst_pack::{
-    CompileOptions, OutputFormat, Pack, PackCompilationRequest, compile_pack, parse_page_selection,
+    CompilationDiagnostic, CompilationStatus, CompileOptions, DiagnosticPhase, DiagnosticProducer,
+    DiagnosticSeverity as PackDiagnosticSeverity, OutputFormat, Pack, PackCompilationRequest,
+    TracepointKind, compile_pack, parse_page_selection,
 };
+
+fn assert_diagnostics_match(actual: &[CompilationDiagnostic], expected: &[DiagnosticObservation]) {
+    assert_eq!(actual.len(), expected.len());
+    for (actual, expected) in actual.iter().zip(expected) {
+        assert_eq!(
+            actual.severity(),
+            match expected.severity {
+                DiagnosticSeverity::Error => PackDiagnosticSeverity::Error,
+                DiagnosticSeverity::Warning => PackDiagnosticSeverity::Warning,
+            }
+        );
+        assert_eq!(actual.message(), expected.message);
+        assert_eq!(
+            actual.span().logical_path(),
+            expected.span.logical_path.as_deref()
+        );
+        assert_eq!(
+            actual.span().byte_range(),
+            expected.span.byte_range.as_ref()
+        );
+        assert_eq!(actual.hints().len(), expected.hints.len());
+        for (actual, expected) in actual.hints().iter().zip(&expected.hints) {
+            assert_eq!(actual.message(), expected.message);
+            assert_eq!(
+                actual.span().logical_path(),
+                expected.span.logical_path.as_deref()
+            );
+            assert_eq!(
+                actual.span().byte_range(),
+                expected.span.byte_range.as_ref()
+            );
+        }
+        assert_eq!(actual.trace().len(), expected.trace.len());
+        for (actual, expected) in actual.trace().iter().zip(&expected.trace) {
+            assert_eq!(
+                actual.kind(),
+                match expected.kind {
+                    TraceKind::Call => TracepointKind::Call,
+                    TraceKind::Show => TracepointKind::Show,
+                    TraceKind::Import => TracepointKind::Import,
+                    TraceKind::Include => TracepointKind::Include,
+                }
+            );
+            assert_eq!(actual.value(), expected.value.as_deref());
+            assert_eq!(
+                actual.span().logical_path(),
+                expected.span.logical_path.as_deref()
+            );
+            assert_eq!(
+                actual.span().byte_range(),
+                expected.span.byte_range.as_ref()
+            );
+        }
+    }
+}
 
 #[test]
 fn frozen_fixture_and_request_produce_a_stable_official_observation() {
@@ -111,24 +169,14 @@ fn stabilized_project_round_trips_and_matches_pack_svg_compilation() {
     );
 
     assert_eq!(actual.source_page_count(), expected.source_page_count);
-    assert_eq!(actual.warnings.len(), expected.diagnostics.len());
-    for (actual, expected) in actual.warnings.iter().zip(&expected.diagnostics) {
-        assert_eq!(actual.message.as_str(), expected.message);
-        assert_eq!(
-            actual
-                .hints
-                .iter()
-                .map(|hint| hint.v.as_str())
-                .collect::<Vec<_>>(),
-            expected
-                .hints
-                .iter()
-                .map(|hint| hint.message.as_str())
-                .collect::<Vec<_>>()
-        );
-    }
-    assert_eq!(actual.artifacts.len(), expected.artifacts.len());
-    for (actual, expected) in actual.artifacts.iter().zip(&expected.artifacts) {
+    assert_eq!(actual.status(), CompilationStatus::Succeeded);
+    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
+    assert!(actual.diagnostics().iter().all(|diagnostic| {
+        diagnostic.phase() == DiagnosticPhase::Compilation
+            && diagnostic.producer() == DiagnosticProducer::Engine(actual.engine_identity())
+    }));
+    assert_eq!(actual.artifacts().len(), expected.artifacts.len());
+    for (actual, expected) in actual.artifacts().iter().zip(&expected.artifacts) {
         let ArtifactRole::Svg { source_page_number } = expected.role else {
             panic!("oracle produced a non-SVG artifact");
         };
@@ -144,6 +192,88 @@ fn stabilized_project_round_trips_and_matches_pack_svg_compilation() {
     assert_eq!(actual.exporter_identity().version(), "0.15.0");
     assert!(!actual.exporter_identity().source_checksum().is_empty());
     assert!(!actual.exporter_identity().target().is_empty());
+}
+
+#[test]
+fn pack_rejection_matches_official_diagnostics_and_remains_a_result() {
+    let fixture = Fixture::official_oracle();
+    let mut inputs = Dict::new();
+    inputs.insert("width".into(), Value::Str("24".into()));
+    let mut builder = Pack::builder(fixture.entrypoint());
+    for &(path, text) in fixture.project() {
+        builder = builder.file(path, text.as_bytes().to_vec()).unwrap();
+    }
+    for &(spec, path, text) in fixture.packages() {
+        builder = builder
+            .package_file(spec.parse().unwrap(), path, text.as_bytes().to_vec())
+            .unwrap();
+    }
+    let pack = Pack::from_bytes(builder.build().unwrap().to_bytes().unwrap()).unwrap();
+
+    let actual = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Svg).inputs(inputs))
+        .expect("the accepted Pack request must produce a Compilation Result");
+    let expected = observe(
+        &fixture,
+        &ReferenceRequest {
+            inputs: vec![("width", "24")],
+            features: vec![],
+            document_time: None,
+            output: OutputRequest::Svg {
+                source_pages: vec![],
+                render_bleed: false,
+                pretty: false,
+            },
+        },
+    );
+
+    assert_eq!(expected.status, ObservationStatus::Rejected);
+    assert_eq!(actual.status(), CompilationStatus::Rejected);
+    assert!(actual.artifacts().is_empty());
+    assert_eq!(actual.source_page_count(), None);
+    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
+    assert!(actual.diagnostics().iter().all(|diagnostic| {
+        diagnostic.phase() == DiagnosticPhase::Compilation
+            && diagnostic.producer() == DiagnosticProducer::Engine(actual.engine_identity())
+    }));
+}
+
+#[test]
+fn pack_exporter_rejection_matches_official_diagnostics() {
+    let fixture = Fixture::exporter_rejection();
+    let mut builder = Pack::builder(fixture.entrypoint());
+    for &(path, text) in fixture.project() {
+        builder = builder.file(path, text.as_bytes().to_vec()).unwrap();
+    }
+    let pack = Pack::from_bytes(builder.build().unwrap().to_bytes().unwrap()).unwrap();
+
+    let actual = compile_pack(PackCompilationRequest::new(pack, OutputFormat::Pdf)).unwrap();
+    let expected = observe(
+        &fixture,
+        &ReferenceRequest {
+            inputs: vec![],
+            features: vec![],
+            document_time: None,
+            output: OutputRequest::Pdf {
+                source_pages: vec![],
+                ident: Smart::Auto,
+                creator: Smart::Auto,
+                creation_time: None,
+                standards: vec![],
+                tagged: true,
+                pretty: false,
+            },
+        },
+    );
+
+    assert_eq!(expected.status, ObservationStatus::Rejected);
+    assert_eq!(actual.status(), CompilationStatus::Rejected);
+    assert!(actual.artifacts().is_empty());
+    assert_eq!(actual.source_page_count(), expected.source_page_count);
+    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
+    assert!(actual.diagnostics().iter().all(|diagnostic| {
+        diagnostic.phase() == DiagnosticPhase::Export
+            && diagnostic.producer() == DiagnosticProducer::Exporter(actual.exporter_identity())
+    }));
 }
 
 #[test]

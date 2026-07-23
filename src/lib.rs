@@ -13,9 +13,12 @@ mod world;
 pub mod cli;
 
 pub use compile::{
-    CompilationArtifact, CompilationOutput, CompileError, CompileOptions, CreationTimestamp,
-    EngineIdentity, ExporterIdentity, OutputFormat, PackCompilationRequest, PackCompileError,
-    PageRange, PageSelection, compile, compile_pack, parse_page_selection,
+    CompilationArtifact, CompilationDiagnostic, CompilationOperationOutcome, CompilationOutput,
+    CompilationRequestRejection, CompilationResult, CompilationStatus, CompileError,
+    CompileOptions, CreationTimestamp, DiagnosticHint, DiagnosticPhase, DiagnosticProducer,
+    DiagnosticSeverity, DiagnosticTracepoint, EngineIdentity, ExporterIdentity, LogicalSpan,
+    OutputFormat, PackCompilationRequest, PackCompilationWarning, PackCompileError, PageRange,
+    PageSelection, TracepointKind, compile, compile_pack, parse_page_selection,
 };
 pub use manifest::{
     FORMAT_VERSION, FontManifest, MANIFEST_PATH, PackManifest, PackManifestError, PackMetadata,
