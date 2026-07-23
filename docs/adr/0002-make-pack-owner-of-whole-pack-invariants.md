@@ -27,7 +27,6 @@ The Pack module owns:
 
 - canonical, portable paths and coherent project and package file trees;
 - entrypoint presence;
-- disjoint packed-file and Resource Slot roles;
 - agreement between vendored/unvendored package declarations and package bytes;
 - font path, byte, face-index, and declaration consistency;
 - immutable canonical Pack state; and
@@ -58,6 +57,5 @@ Consequently, the private Pack-backed World does not revalidate Pack content.
 - Deleting the private construction seam would redistribute canonicalization
   and declaration/content agreement into both construction adapters.
 
-Pack Override remains a separate future concept: it is a compilation-scoped
-replacement for contained Pack content, not Pack mutation and not a Resource
-Slot.
+Pack Override remains a separate compilation concept: it replaces contained
+project content for one compilation and never mutates the Pack.

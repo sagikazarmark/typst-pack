@@ -5,46 +5,34 @@ This context describes portable Typst projects and the values that vary between 
 ## Language
 
 **Pack**:
-A portable, reusable Typst compilation closure with one fixed entrypoint, established by successful Discovery Variants. It contains every observed or explicitly included project file, identifies each complete package and exact font dependency, and permits no undeclared dependency fallback. A value exists as a Pack only after canonical semantic and content-integrity validation; trust policy never weakens its validity rules.
+A portable, reusable Typst compilation closure with one fixed entrypoint. Its project closure contains every eligible regular file in its Project Snapshot except paths excluded by the Project Ignore Policy, independently of which files creation compilation reads. Every project path needed by its Creation Request has contained baseline bytes; later compilation may replace those bytes only through Pack Overrides. It identifies each complete package and exact font dependency selected by successful creation compilation and permits no undeclared dependency fallback. A value exists as a Pack only after canonical semantic and content-integrity validation; trust policy never weakens its validity rules.
 
-**Discovery Variant**:
-One member of a nonempty, explicitly ordered creation list, containing one exact representative compilation request: target, Typst inputs, time, enabled features, and any discovery-only project overrides. Its canonical identity is derived solely from its Discovery Coverage Request; an optional public label and declaration order aid reporting without changing coverage identity. Canonical identities must be unique within one creation. A Pack's completeness guarantee covers the union of its recorded successful Discovery Variants and Explicit Conditional Inclusions, not arbitrary future variation; variants document coverage rather than restrict later compilation requests.
+**Creation Request**:
+The one exact representative source-evaluation request used during Pack creation. It contains the effective Typst target, inputs, Compilation Document Time, and engine features, but no Pack Overrides or exporter controls. It selects package and font dependencies and must compile successfully, but it does not select project files or restrict the Pack's later output formats. It is transient operation state and does not contribute to Pack Identity.
 
-**Discovery Coverage Request**:
-The canonical source-evaluation projection shared by a Discovery Variant and a later compilation request. It contains the effective Typst target, inputs, Compilation Document Time, engine features, and project overrides, using Discovery Request Commitments for sensitive values. It excludes output format beyond its derived target, exporter controls, PDF Creation Time, implementation identities, authorities, and operational controls. Exact identity equality is the only coverage match; a match is evidence of replayed closure for that request under the recorded discovery engine, not an allowlist, artifact-reproducibility claim, or Session Currentness claim.
-
-**Discovery World**:
-The fixed logical project tree, entrypoint, Typst engine configuration, and package and font authorities against which every Discovery Variant in one Pack creation runs. Environment variables, wall-clock time, host fonts, caches, and other adapter defaults are resolved into this world or exact variant request values before semantic creation begins. Materially different Discovery Worlds produce separate Packs rather than variants of one Pack.
+**Creation World**:
+The fixed Project Snapshot, entrypoint, Typst engine configuration, and package and font authorities against which the Creation Request runs. Environment variables, wall-clock time, host fonts, caches, and other adapter defaults are resolved into this world or exact request values before semantic creation begins.
 
 **Project Snapshot**:
-The finite immutable canonical project tree and fixed entrypoint admitted as the project input to one Pack creation attempt. Every file is a Stable Byte Value, so editors, filesystems, Dagger, and other mutable or remote sources must be stabilized before crossing the creation seam. Source locators, Dependency Evidence Keys, and revalidation capabilities remain operation state outside this semantic value. A Project Snapshot may contain files that no Discovery Variant observes and is neither a Pack nor persisted Pack state; successful project observations regardless of baseline or override provenance, together with Explicit Conditional Inclusions, determine which baseline files enter the Pack.
+The finite immutable canonical project tree and fixed entrypoint admitted as the project input to one Pack creation attempt. It contains only regular files beneath the physical project root; symlinks and other filesystem entry kinds are not project files. Every eligible regular file is a Stable Byte Value, so editors, filesystems, Dagger, and other mutable or remote sources must be stabilized before crossing the creation seam. The Project Ignore Policy determines which root-relative paths are excluded from the project closure; compiler observations do not select project files. A mutable filesystem adapter must prove stable eligible membership and bytes through the Creation Evidence Fence, while changes confined to conclusively ignored subtrees are irrelevant. Unsupported unignored entries, unreadable eligible files, unrepresentable paths, traversal failures, and invalid ignore policy representations prevent snapshot construction. Source locators, Dependency Evidence Keys, and revalidation capabilities remain operation state outside this semantic value. A Project Snapshot is neither a Pack nor persisted Pack state.
 
-**Discovery Snapshot**:
-The stable project, package, and font bytes, relevant directory membership, logical absences, and exact request values retained during one Pack creation. Operation-scoped source and authority evidence links these values to a Creation Evidence Fence without becoming semantic state. Assembled-Pack replay uses this frozen snapshot without reacquisition; sensitive raw request values and operational evidence are discarded after the attempt.
+**Project Ignore Policy**:
+The root-scoped exclusion policy applied before Pack creation. Every `.typk` file is excluded by a non-overridable built-in rule so prior Pack outputs cannot recursively enter Pack Identity. Additional ordered rules use a Gitignore-style matching model: comments and blank rules, negation with last-match precedence, root anchoring, directory-only rules, basename matching, and recursive wildcards. A negated descendant may require traversal through an otherwise excluded directory. The root policy representation is always included regardless of its rules. Package trees and font sources are outside its scope. A filesystem CLI reads additional rules from the project root's `.typkignore`; nested files of that name are ordinary project files.
+
+**Creation Snapshot**:
+The stable project, package, and font bytes, relevant directory membership, logical absences, and exact request values retained during one Pack creation. Operation-scoped source and authority evidence links these values to a Creation Evidence Fence without becoming semantic state. Sensitive raw request values and operational evidence are discarded after the attempt.
 
 **Creation Evidence Fence**:
-The operation-scoped proof established after discovery fixes the project closure and before assembly and replay that every mutable source fact causally used to stabilize creation inputs or select project, package, and font state still agrees with the Discovery Snapshot. A source satisfies the fence through immutable or versioned evidence, or through race-closing revalidation of all relevant content, absence, membership, order, metadata, and source-choice Dependency Evidence Keys. A changed, incomplete, or concurrently dirtied fact prevents Pack Issuance; keys, revalidation capabilities, and backing locations are never Pack state.
-
-**Discovery Trace**:
-The canonical per-variant observation set of successful project and package reads, exact used font faces, and logical missing probes, including authority, request outcome, and effective baseline or override provenance. A baseline project read identifies the contained baseline content; a discovery-override read identifies its Discovery Request Commitment and exact size without making the private replacement bytes Pack content. It is the persisted portable semantic projection of the same observation schema used by a Compilation Access Trace; source-specific Dependency Evidence Keys remain operation state. Access order and repeat counts are not semantic. Every successfully observed project path contributes its baseline bytes to the Pack's project closure regardless of effective provenance; Explicit Conditional Inclusions add the only unobserved paths. The trace is persisted as discovery evidence; rendered compiler warnings and diagnostic text are not Pack state.
-
-**Discovery Coverage Identity**:
-The canonical identity binding one Discovery Variant identity to its exact Discovery Trace identity. A Pack's completeness claim is identified by the set of these bindings; variant labels and declaration order remain reporting concerns.
-
-**Explicit Conditional Inclusion**:
-An existing root-relative project file and its baseline bytes added to a Pack's compilation closure without being successfully read by a Discovery Variant. Directory and glob inputs are adapter conveniences expanded into this exact file set during creation. There is no implicit third project-file provenance category.
-
-**Discovery Request Commitment**:
-A canonical digest that identifies a potentially sensitive Discovery Coverage Request input value or discovery-only override without storing the raw value. Later compilation preparation derives the same role-bound commitment transiently when evaluating coverage, independently of its Compilation Request Commitment. A commitment supports exact matching when the value is supplied again, but does not claim confidentiality against guessing.
+The operation-scoped proof established after creation compilation selects package and font state and before assembly that every mutable source fact causally used to stabilize creation inputs or select project, package, and font state still agrees with the Creation Snapshot. A source satisfies the fence through immutable or versioned evidence, or through race-closing revalidation of all relevant content, absence, membership, order, metadata, and source-choice Dependency Evidence Keys. A changed, incomplete, or concurrently dirtied fact prevents Pack Issuance; keys, revalidation capabilities, and backing locations are never Pack state.
 
 **Pack Issuance**:
-The point at which semantic creation returns a Pack after every Discovery Variant succeeds, the Discovery Snapshot is revalidated, whole-Pack invariants hold, and assembled-Pack replay reproduces every Discovery Trace. Archive or transport writing happens after issuance and commits atomically where its sink permits.
+The point at which semantic creation returns a Pack after its Creation Request succeeds, the Creation Snapshot is revalidated, and whole-Pack invariants hold. Archive or transport writing happens after issuance and commits atomically where its sink permits.
 
 **Creation Report**:
-The transient diagnostics from a Pack creation attempt, presented deterministically by validation, discovery, snapshot and assembly, replay, and issuance phase. Discovery and replay diagnostics follow Discovery Variant declaration order and identify the variant without making rendered messages part of the Pack.
+The transient diagnostics and dependency observations from a Pack creation attempt, presented deterministically by validation, snapshot, compilation, assembly, and issuance phase. Rendered compiler messages and access observations are not Pack state.
 
 **Pack Identity**:
-The content identity of a Pack's canonical logical compilation state: its fixed entrypoint, discovery coverage identities, contained project files, ordered Pack Font Catalog, dependency requirements, and whether each dependency is embedded or externally fulfilled. Non-identifying provenance, archive encoding, and source-host filesystem metadata do not affect it. Matching an externally trusted expected Pack Identity detects replacement but does not authenticate a publisher; publisher identity and trust policy remain outside Pack and the semantic core.
+The content identity of a Pack's canonical logical compilation state: its fixed entrypoint, contained project files, ordered Pack Font Catalog, dependency requirements, and whether each dependency is embedded or externally fulfilled. The transient Creation Request, non-identifying provenance, archive encoding, and source-host filesystem metadata do not affect it. Matching an externally trusted expected Pack Identity detects replacement but does not authenticate a publisher; publisher identity and trust policy remain outside Pack and the semantic core.
 
 **Canonical Identity**:
 A typed, schema-versioned digest of exact bytes or a deterministic semantic projection. Identity equality includes its kind, identity schema, algorithm, and digest; a bare digest is never sufficient and acquisition provenance never changes it.
@@ -139,7 +127,7 @@ A versioned, deterministic, namespaced filesystem representation of all semantic
 A Pack dependency identified by both its exact Typst package specification and the content identity of its complete logical package tree. Acquisition authority and source location are provenance rather than identity. Identical content under different package specifications remains distinct, while different content supplied for one specification is an integrity conflict.
 
 **Complete Package Tree**:
-Every addressable regular file beneath an acquired package root, represented by its canonical package-relative path and bytes. It includes files not read during discovery and package metadata, but excludes empty directories, archive encoding, and source-host filesystem metadata.
+Every addressable regular file beneath an acquired package root, represented by its canonical package-relative path and bytes. It includes files not read by the Creation Request and package metadata, but excludes empty directories, archive encoding, and source-host filesystem metadata.
 
 **Package Authority**:
 An explicit operation-scoped source capability for Complete Package Trees under exact Typst package specifications. It owns namespace support, source routing, fallback, acquisition, and offline policy, and reports acquisition provenance. Semantic Pack operations never consult ambient package locations outside their supplied Package Authority. Authority over acquisition does not establish trust in package bytes or publisher authenticity; every supplied tree remains independently validated.
@@ -154,7 +142,7 @@ A Package Authority that performs no network acquisition. It may still serve exp
 Supplying a non-embedded Package Requirement through the compilation's explicit Package Authority. Fulfillment is directed by the requirement's logical and content identities rather than a serialized source location, and the supplied Complete Package Tree is independently verified before use.
 
 **Package Embedding Policy**:
-A deterministic choice, made independently for each Package Requirement after discovery, to embed its Complete Package Tree or require External Package Fulfillment. The choices affect Pack Identity and determine whether the Pack is self-contained.
+A deterministic choice, made independently for each Package Requirement after creation dependency selection, to embed its Complete Package Tree or require External Package Fulfillment. The choices affect Pack Identity and determine whether the Pack is self-contained.
 
 **Font Container**:
 The exact bytes of one standalone font file or multi-face font collection. Its canonical content identity is independent of source location, and all faces in a collection travel as one container.
@@ -163,13 +151,13 @@ The exact bytes of one standalone font file or multi-face font collection. Its c
 An exact face within a Font Container, identified by the container's content identity and the face's container-local index. Names, style, coverage, and other face metadata are derived from the verified container rather than independent identity.
 
 **Font Requirement**:
-A Pack dependency consisting of one Font Container identity and the nonempty set of Font Face Identities observed across Discovery Variants. Identical container bytes acquired from different locations form one requirement.
+A Pack dependency consisting of one Font Container identity and the nonempty set of Font Face Identities selected by the Creation Request. Identical container bytes acquired from different locations form one requirement.
 
 **Font Catalog Snapshot**:
-The finite, explicitly ordered set of candidate face metadata and stable Font Container acquisition identities fixed for one Discovery World. An adapter prepares it from intentional sources before semantic discovery; selected container bytes are frozen on first use rather than every candidate being read eagerly.
+The finite, explicitly ordered set of candidate face metadata and stable Font Container acquisition identities fixed for one Creation World. An adapter prepares it from intentional sources before creation compilation; selected container bytes are frozen on first use rather than every candidate being read eagerly.
 
 **Font Authority**:
-An explicit operation-scoped source capability for a Font Catalog Snapshot during discovery and exact Font Containers during external fulfillment. It owns source composition and provenance, while Typst selects faces from the supplied catalog. Authority over acquisition does not establish trust in font bytes or publisher authenticity; every supplied container remains independently validated.
+An explicit operation-scoped source capability for a Font Catalog Snapshot during creation and exact Font Containers during external fulfillment. It owns source composition and provenance, while Typst selects faces from the supplied catalog. Authority over acquisition does not establish trust in font bytes or publisher authenticity; every supplied container remains independently validated.
 
 **Offline Font Authority**:
 A Font Authority that performs no network acquisition. It may still serve explicitly supplied, in-memory, configured local, system, engine-embedded, or previously cached Font Containers.
@@ -178,16 +166,16 @@ A Font Authority that performs no network acquisition. It may still serve explic
 A sanitized, non-identifying summary of the authority and source class from which a Font Container was acquired. It excludes credentials, transient attempts, and absolute host paths, and does not contribute to Font Requirement or Pack Identity.
 
 **Font Scan Policy**:
-The declared rules a Font Authority uses to omit, warn about, or reject invalid and unreadable candidates while constructing a Font Catalog Snapshot. The policy is fixed within one Discovery World, and its diagnostics are never silently discarded.
+The declared rules a Font Authority uses to omit, warn about, or reject invalid and unreadable candidates while constructing a Font Catalog Snapshot. The policy is fixed within one Creation World, and its diagnostics are never silently discarded.
 
 **Font Licensing Metadata**:
 Advisory standardized licensing and embedding fields derived from a verified Font Container for policy and reporting. They do not establish legal permission to redistribute or embed the font.
 
 **Pack Font Catalog**:
-The ordered projection of a Discovery World's Font Catalog Snapshot containing exactly the Font Face Identities required by a Pack. It preserves their relative discovery order; other faces physically present in a required Font Container remain unavailable to compilation.
+The ordered projection of a Creation World's Font Catalog Snapshot containing exactly the Font Face Identities required by a Pack. It preserves their relative creation-selection order; other faces physically present in a required Font Container remain unavailable to compilation.
 
 **Font Embedding Policy**:
-A deterministic choice, made independently for each Font Requirement after discovery, to embed its Font Container or require External Font Fulfillment. The policy may inspect Font Licensing Metadata, and its choices affect Pack Identity and self-containment.
+A deterministic choice, made independently for each Font Requirement after creation dependency selection, to embed its Font Container or require External Font Fulfillment. The policy may inspect Font Licensing Metadata, and its choices affect Pack Identity and self-containment.
 
 **External Font Fulfillment**:
 Supplying a non-embedded Font Requirement through the compilation's explicit Font Authority. Fulfillment is directed by the requirement's exact identity rather than creation-time source location or fresh family and style selection.
@@ -221,7 +209,7 @@ The required tagged semantic output request whose variant determines both format
 The canonical description of every value supplied to or deterministically resolved for one compilation, including values that Typst does not observe. It records whether an effective value was caller-supplied, core-defaulted, core-derived, or adapter-resolved and marks each entry as semantic or operational. Semantic entries contribute to Compilation Identity, while the Deployment Trust Profile, capability scopes, authorities, caches, retries, deadlines, isolation, transport, output destinations, filename templates, terminal rendering, and other operational controls do not unless they resolve an explicit semantic value. A Prepared Compilation owns the semantic portion; each execution report adds the operational controls used for that attempt. Safe projections represent potentially sensitive Typst inputs and Pack Overrides only by role-bound Compilation Request Commitments and exact sizes, never by raw bytes, replacement Content Identities, baseline-comparison identities, or byte-equality status. Observed use belongs to the Compilation Access Trace rather than this pre-execution inventory.
 
 **Compilation Request Commitment**:
-A canonical domain-separated digest that binds a potentially sensitive compilation input value without exposing its raw bytes. A Pack Override commitment binds its schema and role, Pack Identity, canonical project path, exact byte length, and exact replacement bytes; other roles have equally explicit transcripts. The raw value lives only in the active request unless a caller explicitly requests an authorized sensitive projection. A commitment and exact size may appear in safe inventories and identities, but the commitment does not provide confidentiality against guessing. Discovery Request Commitments use a separate domain and are never substituted for Compilation Request Commitments.
+A canonical domain-separated digest that binds a potentially sensitive compilation input value without exposing its raw bytes. A Pack Override commitment binds its schema and role, Pack Identity, canonical project path, exact byte length, and exact replacement bytes; other roles have equally explicit transcripts. The raw value lives only in the active request unless a caller explicitly requests an authorized sensitive projection. A commitment and exact size may appear in safe inventories and identities, but the commitment does not provide confidentiality against guessing.
 
 **Engine Identity**:
 The exact implementation identity attested by the Typst compiler used for semantic compilation. It includes every build, backend, feature, or platform compatibility distinction for which the producer does not guarantee exact behavior; callers cannot replace it with a compatibility label.
@@ -374,7 +362,7 @@ The canonical semantic address of a dependency, independent of where its bytes w
 The canonical set of revalidatable facts that determined how a logical dependency request resolved, including content selection, authority choice, every higher-priority miss that enabled fallback, final logical missing outcomes, and relevant absence or membership. A fact is included when changing it while holding the compilation request fixed could change resolution, diagnostics, success, or artifacts. Access order, repeat counts, retries, and other causally irrelevant attempts are not semantic. A failed compilation retains the evidence accumulated through its terminal failure.
 
 **Dependency Evidence Key**:
-A sanitized stable identity and immutable version, content, absence, or membership fact supplied by an authority for Dependency Resolution Evidence. It can be revalidated or subscribed to without making credentials, absolute host paths, or transport details part of semantic identity. A backing-source notification dirties the evidence; equal revalidation preserves semantic identities and caches. Full keys live in operation results and active sessions; Packs retain portable Discovery Traces and sanitized provenance rather than source-specific revalidation handles.
+A sanitized stable identity and immutable version, content, absence, or membership fact supplied by an authority for Dependency Resolution Evidence. It can be revalidated or subscribed to without making credentials, absolute host paths, or transport details part of semantic identity. A backing-source notification dirties the evidence; equal revalidation preserves semantic identities and caches. Full keys live in operation results and active sessions; Packs retain sanitized creation provenance rather than source-specific revalidation handles.
 
 **Dependency Resolution Cache**:
 An authority-owned operational facility that retains one complete source-selection or failure outcome together with all causal Dependency Resolution Evidence within the same Cache Isolation Domain and authority composition. Its mutable resolution records are lookup hints rather than authority of truth: every dirty fact must be revalidated, equal revalidation preserves the record, and failed or incomplete revalidation leaves it unusable. Transient acquisition, cancellation, deadline, and incomplete outcomes are never entries.
@@ -395,7 +383,7 @@ A normative, testable relation from one baseline Compilation Result to the resul
 A Reproducibility Claim that every Compilation Result produced for one Compilation Identity has the baseline Compilation Result Identity. Engine and exporter platform qualification is already carried by that Compilation Identity. Compilation Operation Outcomes do not compete with or refute the claim unless a separate operational guarantee promised their absence.
 
 **Cross-Engine Compatibility Claim**:
-A Reproducibility Claim comparing distinct Compilation Identities derived from one Engine-Neutral Compilation Intent under named source and target Engine Identities, Exporter Identities, scope, and Cross-Engine Compatibility Level. It never makes the engine-specific Compilation Identities or Compilation Result Identities equal and never extends beyond its explicit compilation intent or finite set of Discovery Variants.
+A Reproducibility Claim comparing distinct Compilation Identities derived from one Engine-Neutral Compilation Intent under named source and target Engine Identities, Exporter Identities, scope, and Cross-Engine Compatibility Level. It never makes the engine-specific Compilation Identities or Compilation Result Identities equal and never extends beyond its explicit compilation intent.
 
 **Cross-Engine Compatibility Level**:
 One of four cumulative, testable strengths. Request Compatible means both implementations can prepare the same fully explicit Engine-Neutral Compilation Intent. Closure Compatible additionally means the target reaches a Compilation Result using only the Pack contract and exact declared fulfillments, without undeclared fallback. Structurally Compatible additionally requires equal result status, Compilation Document Summary, Canonical Diagnostic Envelope structure and completion state, semantic dependency projection, and ordered artifact roles, but not equal artifact bytes, diagnostic wording or hints, or engine-specific diagnostic detail. Exactly Reproducible additionally requires equality of the complete engine-neutral result projection, including the complete Canonical Diagnostic Envelope and exact artifact bytes.

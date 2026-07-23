@@ -37,8 +37,8 @@ The Pack Manifest continues to call that persisted role `entrypoint`.
 
 `compile` retains `<PACK>` rather than calling it `<INPUT>`. `PACK=-` reads a
 Pack from stdin and then requires an explicit output. There is no compile-time
-`--root`: the Pack owns the virtual project tree, and Resource Providers can
-fill only declared Resource Slots. `OUTPUT=-` writes stdout when exactly one
+`--root`: the Pack owns the fixed virtual project tree, and Pack Overrides can
+replace only contained project files. `OUTPUT=-` writes stdout when exactly one
 output file is emitted and is rejected for multi-file output.
 
 Shared Typst behavior includes:
@@ -68,28 +68,28 @@ Format output paths are literal. Valid multi-output paths may still be
 preflighted before writing to avoid partial output or duplicate destinations.
 
 Dependency output has Pack-aware host-rebuild semantics. It reports the Pack
-path once for contained content, plus actual filesystem-backed Resource Slot
-and unvendored package files read during compilation. It does not invent host
-paths for archive members or opaque providers.
+path once for contained content, plus actual filesystem-backed unvendored
+package files read during compilation. It does not invent host paths for
+archive members or opaque authorities.
 
-Pack creation performs one strict discovery compile for each selected
-`--target <paged|html>` and unions their dependencies. The option is repeatable
-and comma-delimited and defaults to `paged`. `create` reuses every
-target-independent compilation control that affects discovery, including
-inputs, timestamps, features, jobs, diagnostics, timings, fonts, packages,
+Pack creation performs one representative compile. The optional
+`--target <paged|html>` selects its effective Typst target and defaults to
+`paged`; it is neither repeatable nor Pack output policy. The target is required
+internally because Typst evaluates one concrete target and reports only the
+dependencies reached by that evaluation. This is a temporary workaround until
+typst-pack has a better way to establish potential package and font closure
+without target-specific evaluation. `create` reuses every target-independent
+compilation control that affects the representative run, including inputs,
+timestamps, features, jobs, diagnostics, timings, fonts, packages,
 certificates, and color. Export-, page-, and PDF-specific options remain
 compile-only.
 
 Pack-specific additions remain explicit:
 
-- `--resource-path <DIR>` configures ordered filesystem Resource Providers as
-  established by ADR-0004;
 - `--offline` prevents package downloads;
-- `create --resource-slot <PATH>` declares Resource Slots;
-- `create --no-vendor-packages` controls package storage; and
+- `create --no-vendor-packages` controls package storage;
 - `compile --override PACK_PATH FILE` supplies one Pack Override; and
-- creation retains project inclusion, font embedding, and Pack metadata
-  controls.
+- creation retains `.typkignore`, font embedding, and Pack metadata controls.
 
 Routine CLI help uses Typst's plain output-file, output-format, and page-number
 wording. Formal terms such as Compilation Output Artifact, Document Format,
@@ -97,16 +97,14 @@ Page Format, and Source Page Number remain available to library and domain
 documentation where their distinctions matter.
 
 Help is grouped by user task rather than copied as Typst's flat list.
-`compile` uses Compilation, Output, PDF, Resource Slots, Fonts, Packages, and
-Diagnostics & Automation sections. `create` uses Project, Discovery, Pack
-Contents, Resource Slots, Fonts, Packages, Metadata, and Diagnostics &
-Automation sections.
+`compile` uses Compilation, Output, PDF, Overrides, Fonts, Packages, and
+Diagnostics & Automation sections. `create` uses Project, Creation, Pack
+Contents, Fonts, Packages, Metadata, and Diagnostics & Automation sections.
 
 The Dagger API follows semantic rather than transport parity. It exposes
 compiler behavior that has a meaningful typed representation, but not terminal
 viewing, stdout, color, or arbitrary local output paths. Its creation inputs use
-`project`, `input`, and `sysInputs`; ordered `resourceDirs` are mounted and
-registered automatically, and explicit declarations are `resourceSlots`.
+`project`, `input`, and `sysInputs`.
 
 Async compilation, Sessions, watch mode, and semantic result caching are not
 currently exposed. Issue #83 establishes that any future implementation must
@@ -118,7 +116,7 @@ their Pack-specific operational contracts are designed.
 
 - Typst Bundle output and its feature are not supported.
 - A `watch` command is deferred because correctly watching Packs, selected
-  Resource Provider files, packages, and font paths requires a separate
+  package authorities, and font authorities requires a separate
   dependency/provenance design.
 - `create` does not accept source input from stdin.
 - `compile` has no `--root` and consumes a Pack rather than a Typst source file.
