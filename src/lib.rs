@@ -13,22 +13,27 @@ mod world;
 pub mod cli;
 
 pub use compile::{
-    CompilationArtifact, CompilationAttempt, CompilationDiagnostic, CompilationExecutionControls,
-    CompilationIdentity, CompilationOperationOutcome, CompilationRequestInventory,
-    CompilationRequestRejection, CompilationResult, CompilationStatus, CompileOptions,
+    CompilationAccessKind, CompilationAccessObservation, CompilationAccessOutcome,
+    CompilationAccessTrace, CompilationArtifact, CompilationAttempt, CompilationDiagnostic,
+    CompilationDocumentSummary, CompilationExecutionControls, CompilationFulfillmentReport,
+    CompilationIdentity, CompilationOperationOutcome, CompilationReport, CompilationReportOutcome,
+    CompilationRequestInventory, CompilationRequestRejection, CompilationResult,
+    CompilationResultIdentity, CompilationStatus, CompilationTarget, CompileOptions,
     CreationTimestamp, DiagnosticHint, DiagnosticPhase, DiagnosticProducer, DiagnosticSeverity,
     DiagnosticTracepoint, EffectiveEngineFeature, EffectiveRequestValue, EngineIdentity,
-    ExporterIdentity, FontContainerFulfillment, LogicalSpan, OutputFormat, PackCompilationRequest,
-    PackCompilationWarning, PackCompileError, PackOverrideInventoryEntry, PackOverrideSet,
-    PackOverrideSetError, PackOverridesInventory, PackageTreeFulfillment, PageRange, PageSelection,
-    PdfStandardsValidationError, RequestValueOrigin, TracepointKind, TypstInputsInventory, compile,
+    ExporterIdentity, FontContainerFulfillment, FontFulfillmentReport, LogicalSpan, OutputFormat,
+    PackCompilationRequest, PackCompilationWarning, PackCompileError, PackOverrideInventoryEntry,
+    PackOverrideSet, PackOverrideSetError, PackOverridesInventory, PackageFulfillmentReport,
+    PackageTreeFulfillment, PageRange, PageSelection, PdfStandardsValidationError,
+    RequestValueOrigin, TracepointKind, TypstInputsInventory, compile, compile_report,
     parse_page_selection,
 };
 #[cfg(feature = "fs")]
 pub use extract::{ExtractError, ExtractOptions, ExtractReport, extract};
 pub use manifest::{
-    FORMAT_VERSION, FontManifest, MANIFEST_PATH, PackManifest, PackManifestError, PackMetadata,
-    PackageManifest, PackagesManifest, ProjectManifest,
+    DiscoveryEvidence, DiscoveryObservationEvidence, DiscoveryOverrideEvidence, FORMAT_VERSION,
+    FontManifest, MANIFEST_PATH, PackManifest, PackManifestError, PackMetadata, PackageManifest,
+    PackagesManifest, ProjectManifest,
 };
 pub use pack::{
     FILE_EXTENSION, FontCatalogError, FontContainerIdentity, FontFaceIdentity, FontRequirement,

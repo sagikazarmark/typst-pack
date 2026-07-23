@@ -12,7 +12,7 @@ use typst::diag::{FileError, FileResult, SourceDiagnostic, Warned};
 use typst::foundations::{Bytes, Datetime, Dict, Duration};
 use typst::syntax::package::PackageSpec;
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
-use typst::text::{Font, FontBook};
+use typst::text::{Font, FontBook, FontInfo};
 use typst::utils::LazyHash;
 use typst::{Feature, Library, LibraryExt, World};
 use typst_kit::datetime::Time;
@@ -20,13 +20,16 @@ use typst_kit::files::{FileLoader, FileStore, FsRoot, SystemFiles};
 use typst_kit::fonts::FontStore;
 
 use crate::embedded::EmbeddedTypst;
-use crate::manifest::PackMetadata;
+use crate::manifest::{
+    DiscoveryEvidence, DiscoveryObservationEvidence, DiscoveryOverrideEvidence, PackMetadata,
+};
 use crate::pack::{Pack, PackBuildError, PackageFiles};
 use crate::resource::{DiscoveryResources, Provider};
 use crate::world::system_packages;
 
 #[cfg(test)]
 type DiscoveryHook = Box<dyn Fn(&mut DiscoveryWorld)>;
+type PackageEvidence = (PackageSpec, PathBuf, Vec<(String, Bytes)>);
 
 /// Packs a Typst project directory into a [`Pack`].
 ///
@@ -343,17 +346,11 @@ impl Packer {
             self.certificate.as_deref(),
         );
 
-        let mut fonts = FontStore::new();
-        if self.system_fonts {
-            fonts.extend(typst_kit::fonts::system());
-        }
-        #[cfg(feature = "embedded-fonts")]
-        if self.typst_embedded_fonts {
-            fonts.extend(typst_kit::fonts::embedded());
-        }
-        for path in &self.font_paths {
-            fonts.extend(typst_kit::fonts::scan(path));
-        }
+        let fonts = font_store(
+            self.system_fonts,
+            self.typst_embedded_fonts,
+            &self.font_paths,
+        );
 
         let primary = Arc::new(PrimaryLoader {
             system: SystemFiles::new(FsRoot::new(root.clone()), packages),
@@ -492,6 +489,7 @@ impl Packer {
         let mut directory_evidence = Vec::new();
         let mut external_package_trees = BTreeMap::new();
         let mut resource_snapshot = BTreeMap::new();
+        let mut resource_evidence = Vec::new();
 
         // Partition the observed dependencies.
         let source_dependencies: Vec<FileId> = discovered_sources.into_iter().collect();
@@ -500,6 +498,9 @@ impl Packer {
             .used_font_indices
             .lock()
             .expect("used font index lock poisoned") = discovered_font_indices;
+        let font_evidence = FontEvidence {
+            catalog: font_catalog_evidence(&world.fonts),
+        };
         enum ProjectFileOrigin {
             Source,
             File,
@@ -520,7 +521,13 @@ impl Packer {
             match id.root() {
                 VirtualRoot::Project if world.files.loader().is_resource_slot(id) => {
                     if let Ok(data) = world.files.file(id) {
-                        resource_snapshot.insert(id.vpath().get_without_slash().to_owned(), data);
+                        let path = id.vpath().get_without_slash().to_owned();
+                        resource_evidence.push(ResourceEvidence {
+                            path: path.clone(),
+                            data: data.clone(),
+                            provider: world.files.loader().resources.selected_provider(&path),
+                        });
+                        resource_snapshot.insert(path, data);
                     }
                 }
                 VirtualRoot::Project if project_files.iter().any(|(source, _)| *source == id) => {}
@@ -679,7 +686,14 @@ impl Packer {
             &package_evidence,
             &directory_evidence,
         )?;
-        let pack = builder.build()?;
+        revalidate_resource_evidence(&root, &world.files.loader().resources, &resource_evidence)?;
+        revalidate_font_evidence(
+            self.system_fonts,
+            self.typst_embedded_fonts,
+            &self.font_paths,
+            &font_evidence,
+        )?;
+        let mut pack = builder.build()?;
         report.fonts = pack
             .manifest()
             .fonts()
@@ -710,6 +724,25 @@ impl Packer {
             exact_fonts,
             resource_snapshot,
         )?;
+        revalidate_creation_evidence(
+            &project_evidence,
+            &project_absence_evidence,
+            &package_evidence,
+            &directory_evidence,
+        )?;
+        revalidate_resource_evidence(&root, &world.files.loader().resources, &resource_evidence)?;
+        revalidate_font_evidence(
+            self.system_fonts,
+            self.typst_embedded_fonts,
+            &self.font_paths,
+            &font_evidence,
+        )?;
+        pack.set_discovery(
+            discovery_variants
+                .iter()
+                .map(|variant| variant.persisted_evidence(&pack))
+                .collect(),
+        );
         report.discovery_variants = discovery_variants;
 
         Ok(PackOutcome {
@@ -852,6 +885,12 @@ impl DiscoveryOverridesInventory {
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
+
+    pub fn iter(&self) -> impl Iterator<Item = (&str, usize, [u8; 16])> + '_ {
+        self.0
+            .iter()
+            .map(|(path, length, commitment)| (path.as_str(), *length, *commitment))
+    }
 }
 
 /// Safe commitment evidence for the exact Typst inputs used during discovery.
@@ -931,6 +970,93 @@ impl DiscoveryVariantReport {
     pub fn replay_trace(&self) -> &DiscoveryTrace {
         &self.replay_trace
     }
+
+    fn persisted_evidence(&self, pack: &Pack) -> DiscoveryEvidence {
+        let observations = self
+            .trace
+            .observations()
+            .map(|observation| {
+                let kind = match observation.kind() {
+                    DiscoveryAccessKind::Source => "source",
+                    DiscoveryAccessKind::File => "file",
+                    DiscoveryAccessKind::Font => "font",
+                };
+                let project_path = observation.logical_path().strip_prefix("project:");
+                let replacement = project_path.and_then(|path| {
+                    self.request
+                        .overrides
+                        .iter()
+                        .find(|(candidate, _, _)| *candidate == path)
+                });
+                let (outcome, mut byte_length, mut digest) = match observation.outcome() {
+                    DiscoveryAccessOutcome::Read {
+                        byte_length,
+                        digest,
+                    } => ("read", Some(*byte_length as u64), Some(hex_digest(*digest))),
+                    DiscoveryAccessOutcome::Missing => ("missing", None, None),
+                    DiscoveryAccessOutcome::Failed => ("failed", None, None),
+                };
+                let (authority, project_provenance, commitment) =
+                    if let Some((_, length, value)) = replacement {
+                        byte_length = Some(length as u64);
+                        digest = None;
+                        ("project", Some("override"), Some(hex_digest(value)))
+                    } else if project_path.is_some_and(|path| pack.is_resource_slot(path)) {
+                        ("resource-provider", Some("resource-slot"), None)
+                    } else if project_path.is_some() {
+                        ("project", Some("baseline"), None)
+                    } else if observation.logical_path().starts_with("package:") {
+                        ("package", None, None)
+                    } else {
+                        ("font-catalog", None, None)
+                    };
+                DiscoveryObservationEvidence::new(
+                    kind.to_owned(),
+                    observation.logical_path().to_owned(),
+                    authority.to_owned(),
+                    project_provenance.map(str::to_owned),
+                    observation.font_index().map(|index| index as u64),
+                    outcome.to_owned(),
+                    byte_length,
+                    digest,
+                    commitment,
+                )
+            })
+            .collect();
+        DiscoveryEvidence::new(
+            match self.request.target {
+                DiscoveryTarget::Paged => "paged",
+                DiscoveryTarget::Html => "html",
+            }
+            .to_owned(),
+            hex_digest(self.request.inputs.commitment()),
+            self.request.inputs.entry_count() as u64,
+            self.request
+                .overrides
+                .iter()
+                .map(|(path, length, commitment)| {
+                    DiscoveryOverrideEvidence::new(
+                        path.to_owned(),
+                        length as u64,
+                        hex_digest(commitment),
+                    )
+                })
+                .collect(),
+            self.request
+                .features
+                .iter()
+                .map(|feature| format!("{feature:?}"))
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect(),
+            self.request.document_timestamp,
+            observations,
+        )
+    }
+}
+
+fn hex_digest(digest: [u8; 16]) -> String {
+    format!("{:032x}", u128::from_be_bytes(digest))
 }
 
 /// The canonical causal observations made by one engine execution.
@@ -1388,7 +1514,7 @@ fn compile_discovery_target(
 fn revalidate_creation_evidence(
     project: &[(PathBuf, Bytes)],
     project_absences: &[PathBuf],
-    packages: &[(PackageSpec, PathBuf, Vec<(String, Bytes)>)],
+    packages: &[PackageEvidence],
     directories: &[(PathBuf, Vec<PathBuf>)],
 ) -> Result<(), PackerError> {
     for (path, expected) in project {
@@ -1433,6 +1559,103 @@ fn revalidate_creation_evidence(
         }
     }
     Ok(())
+}
+
+struct ResourceEvidence {
+    path: String,
+    data: Bytes,
+    provider: Option<usize>,
+}
+
+fn revalidate_resource_evidence(
+    root: &Path,
+    resources: &DiscoveryResources,
+    evidence: &[ResourceEvidence],
+) -> Result<(), PackerError> {
+    for expected in evidence {
+        let actual = if expected.provider.is_none() {
+            std::fs::read(root.join(&expected.path))
+                .ok()
+                .map(Bytes::new)
+        } else {
+            if root.join(&expected.path).try_exists().unwrap_or(true) {
+                return Err(PackerError::CreationEvidenceChanged {
+                    path: expected.path.clone(),
+                });
+            }
+            let id = RootedPath::new(
+                VirtualRoot::Project,
+                VirtualPath::new(&expected.path)
+                    .expect("recorded Resource Slot path remains canonical"),
+            )
+            .intern();
+            resources
+                .resolve_provider(id)
+                .ok()
+                .and_then(|(provider, data)| (Some(provider) == expected.provider).then_some(data))
+        };
+        if actual.as_ref() != Some(&expected.data) {
+            return Err(PackerError::CreationEvidenceChanged {
+                path: expected.path.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn font_store(system_fonts: bool, typst_embedded_fonts: bool, font_paths: &[PathBuf]) -> FontStore {
+    let mut fonts = FontStore::new();
+    if system_fonts {
+        fonts.extend(typst_kit::fonts::system());
+    }
+    #[cfg(feature = "embedded-fonts")]
+    if typst_embedded_fonts {
+        fonts.extend(typst_kit::fonts::embedded());
+    }
+    #[cfg(not(feature = "embedded-fonts"))]
+    let _ = typst_embedded_fonts;
+    for path in font_paths {
+        fonts.extend(typst_kit::fonts::scan(path));
+    }
+    fonts
+}
+
+fn revalidate_font_evidence(
+    system_fonts: bool,
+    typst_embedded_fonts: bool,
+    font_paths: &[PathBuf],
+    evidence: &FontEvidence,
+) -> Result<(), PackerError> {
+    let fonts = font_store(system_fonts, typst_embedded_fonts, font_paths);
+    if font_catalog_evidence(&fonts) != evidence.catalog {
+        return Err(PackerError::CreationEvidenceChanged {
+            path: "font catalog".to_owned(),
+        });
+    }
+    Ok(())
+}
+
+struct FontEvidence {
+    catalog: Vec<(FontInfo, Option<Bytes>)>,
+}
+
+fn font_book_infos(book: &FontBook) -> Vec<FontInfo> {
+    let count = book
+        .families()
+        .flat_map(|(_, indices)| indices)
+        .max()
+        .map_or(0, |index| index + 1);
+    (0..count)
+        .filter_map(|index| book.info(index).cloned())
+        .collect()
+}
+
+fn font_catalog_evidence(fonts: &FontStore) -> Vec<(FontInfo, Option<Bytes>)> {
+    font_book_infos(fonts.book())
+        .into_iter()
+        .enumerate()
+        .map(|(index, info)| (info, fonts.font(index).map(|font| font.data().clone())))
+        .collect()
 }
 
 #[derive(Clone)]

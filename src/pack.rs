@@ -609,10 +609,11 @@ impl Pack {
                 .map(package_requirement_manifest)
                 .collect(),
             canonical_font_entries,
+            manifest.discovery().to_vec(),
             manifest.metadata().cloned(),
         );
 
-        Ok(Self {
+        let pack = Self {
             manifest,
             files: canonical_files,
             packages: canonical_packages,
@@ -620,7 +621,9 @@ impl Pack {
             fonts: canonical_fonts,
             font_catalog,
             font_requirements,
-        })
+        };
+        pack.validate_discovery_evidence()?;
+        Ok(pack)
     }
 
     /// The pack manifest.
@@ -666,6 +669,7 @@ impl Pack {
             resource_slots,
             packages,
             fonts,
+            self.manifest.discovery(),
         )))
     }
 
@@ -693,6 +697,116 @@ impl Pack {
     /// The root-relative Resource Slot paths.
     pub fn resource_slots(&self) -> impl Iterator<Item = &str> {
         self.manifest.project().resource_slots()
+    }
+
+    /// Persisted discovery coverage for Packs issued through filesystem discovery.
+    pub fn discovery(&self) -> &[crate::manifest::DiscoveryEvidence] {
+        self.manifest.discovery()
+    }
+
+    fn validate_discovery_evidence(&self) -> Result<(), PackInvariantError> {
+        for variant in self.discovery() {
+            for observation in variant.observations() {
+                let project_path = observation.logical_path().strip_prefix("project:");
+                if observation.authority() == "resource-provider"
+                    && !project_path.is_some_and(|path| self.is_resource_slot(path))
+                {
+                    return Err(PackInvariantError::InvalidDiscoveryEvidence {
+                        path: observation.logical_path().to_owned(),
+                    });
+                }
+                if observation.project_provenance() == Some("override")
+                    && project_path.is_none_or(|path| self.file(path).is_none())
+                {
+                    return Err(PackInvariantError::InvalidDiscoveryEvidence {
+                        path: observation.logical_path().to_owned(),
+                    });
+                }
+                if observation.outcome() == "missing"
+                    && observation.authority() == "project"
+                    && project_path.is_some_and(|path| self.file(path).is_some())
+                {
+                    return Err(PackInvariantError::InvalidDiscoveryEvidence {
+                        path: observation.logical_path().to_owned(),
+                    });
+                }
+                if observation.outcome() != "read" || observation.commitment().is_some() {
+                    continue;
+                }
+                if observation.authority() == "package"
+                    && self
+                        .package_requirements
+                        .iter()
+                        .filter(|requirement| !requirement.embedded)
+                        .any(|requirement| {
+                            observation
+                                .logical_path()
+                                .starts_with(&format!("package:{}/", requirement.spec))
+                        })
+                {
+                    continue;
+                }
+                let expected = match observation.authority() {
+                    "project" if observation.project_provenance() == Some("baseline") => {
+                        observation
+                            .logical_path()
+                            .strip_prefix("project:")
+                            .and_then(|path| self.file(path))
+                    }
+                    "package" => self.packages.values().find_map(|package| {
+                        let prefix = format!("package:{}/", package.spec);
+                        observation
+                            .logical_path()
+                            .strip_prefix(&prefix)
+                            .and_then(|path| package.file(path))
+                    }),
+                    "font-catalog" => {
+                        let identity = observation.logical_path().strip_prefix("font:");
+                        let requirement = self.font_requirements.iter().find(|requirement| {
+                            identity.and_then(FontContainerIdentity::decode)
+                                == Some(requirement.container)
+                        });
+                        let Some(requirement) = requirement else {
+                            return Err(PackInvariantError::InvalidDiscoveryEvidence {
+                                path: observation.logical_path().to_owned(),
+                            });
+                        };
+                        if observation.byte_length() != Some(requirement.length)
+                            || observation.digest() != identity
+                            || !observation.font_index().is_some_and(|index| {
+                                u32::try_from(index)
+                                    .is_ok_and(|index| requirement.face_indices.contains(&index))
+                            })
+                        {
+                            return Err(PackInvariantError::InvalidDiscoveryEvidence {
+                                path: observation.logical_path().to_owned(),
+                            });
+                        }
+                        continue;
+                    }
+                    _ => continue,
+                };
+                let Some(expected) = expected else {
+                    return Err(PackInvariantError::InvalidDiscoveryEvidence {
+                        path: observation.logical_path().to_owned(),
+                    });
+                };
+                let digest = format!("{:032x}", typst::utils::hash128(&expected.as_slice()));
+                if observation.byte_length() != Some(expected.len() as u64)
+                    || observation.digest() != Some(digest.as_str())
+                {
+                    return Err(PackInvariantError::InvalidDiscoveryEvidence {
+                        path: observation.logical_path().to_owned(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(feature = "fs")]
+    pub(crate) fn set_discovery(&mut self, discovery: Vec<crate::manifest::DiscoveryEvidence>) {
+        self.manifest.set_discovery(discovery);
     }
 
     pub(crate) fn is_resource_slot(&self, path: &str) -> bool {
@@ -1568,6 +1682,7 @@ impl PackBuilder {
             vendored_requirements,
             external_requirements,
             self.fonts.iter().map(|font| font.entry.clone()).collect(),
+            vec![],
             self.metadata,
         );
 
@@ -1828,6 +1943,9 @@ pub enum PackBuildError {
 /// A violation of the invariants shared by every [`Pack`] construction path.
 #[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
 pub enum PackInvariantError {
+    /// Persisted discovery evidence disagrees with contained Pack state.
+    #[error("discovery evidence for `{path}` disagrees with the Pack")]
+    InvalidDiscoveryEvidence { path: String },
     /// A path cannot identify a canonical file for its declared role.
     #[error("invalid {role} path `{path}`: {message}")]
     InvalidPath {

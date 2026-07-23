@@ -45,6 +45,7 @@ fn test_package_manifest(
         vendored,
         unvendored,
         vec![],
+        vec![],
         None,
     )
     .to_toml()
@@ -143,6 +144,26 @@ impl FileLoader for MemoryProjectFile {
         let path = id.vpath().get_without_slash();
         if matches!(id.root(), VirtualRoot::Project) && path == self.path {
             Ok(self.data.clone())
+        } else {
+            Err(FileError::NotFound(PathBuf::from(path)))
+        }
+    }
+}
+
+struct MutableProjectFile {
+    path: String,
+    data: Arc<Mutex<Bytes>>,
+}
+
+impl FileLoader for MutableProjectFile {
+    fn load(&self, id: FileId) -> FileResult<Bytes> {
+        let path = id.vpath().get_without_slash();
+        if matches!(id.root(), VirtualRoot::Project) && path == self.path {
+            Ok(self
+                .data
+                .lock()
+                .expect("mutable provider lock poisoned")
+                .clone())
         } else {
             Err(FileError::NotFound(PathBuf::from(path)))
         }
@@ -2444,6 +2465,15 @@ Rows: #csv("data.csv").len()
         assert!(outcome.pack.package_file(spec, "lib.typ").is_some());
         assert!(outcome.pack.package_file(spec, "typst.toml").is_some());
         assert!(outcome.pack.package_file(spec, "unused.txt").is_some());
+
+        let reread = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
+        assert_eq!(outcome.pack.discovery().len(), 1);
+        assert!(!outcome.pack.discovery()[0].observations().is_empty());
+        let mut without_discovery = outcome.pack.clone();
+        without_discovery.set_discovery(vec![]);
+        assert_ne!(without_discovery.identity(), outcome.pack.identity());
+        assert_eq!(reread.discovery(), outcome.pack.discovery());
+        assert_eq!(reread.identity(), outcome.pack.identity());
     }
 
     #[test]
@@ -2636,6 +2666,15 @@ Rows: #csv("data.csv").len()
                 .observations()
                 .any(|observation| observation.logical_path() == "project:override.txt")
         );
+        let persisted = outcome.pack.discovery()[0]
+            .observations()
+            .iter()
+            .find(|observation| observation.logical_path() == "project:choice.typ")
+            .unwrap();
+        assert_eq!(persisted.authority(), "project");
+        assert_eq!(persisted.project_provenance(), Some("override"));
+        assert!(persisted.digest().is_none());
+        assert!(persisted.commitment().is_some());
     }
 
     #[test]
@@ -3040,8 +3079,9 @@ Rows: #csv("data.csv").len()
             .pack()
             .unwrap();
 
-        assert_eq!(missing_calls.load(Ordering::Relaxed), 1);
-        assert_eq!(fallback_calls.load(Ordering::Relaxed), 1);
+        // Discovery plus the pre-replay and issuance evidence fences.
+        assert_eq!(missing_calls.load(Ordering::Relaxed), 3);
+        assert_eq!(fallback_calls.load(Ordering::Relaxed), 3);
         assert_eq!(outcome.report.resource_slots, ["resource.bin"]);
         assert!(outcome.pack.file("resource.bin").is_none());
     }
@@ -3111,13 +3151,96 @@ Rows: #csv("data.csv").len()
             .pack()
             .unwrap();
 
-        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
         assert_eq!(outcome.report.resource_slots, ["resource.bin"]);
         assert_eq!(
             outcome.pack.resource_slots().collect::<Vec<_>>(),
             ["resource.bin"]
         );
         assert!(outcome.pack.file("resource.bin").is_none());
+    }
+
+    #[test]
+    fn changed_resource_provider_evidence_prevents_pack_issuance() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("main.typ"), "#read(\"resource.bin\")").unwrap();
+        let data = Arc::new(Mutex::new(Bytes::new(b"first".to_vec())));
+
+        let result = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .resource_provider(MutableProjectFile {
+                path: "resource.bin".to_owned(),
+                data: Arc::clone(&data),
+            })
+            .after_discovery_hook(move || {
+                *data.lock().expect("mutable provider lock poisoned") =
+                    Bytes::new(b"second".to_vec());
+            })
+            .pack();
+
+        assert!(matches!(
+            result,
+            Err(PackerError::CreationEvidenceChanged { ref path }) if path == "resource.bin"
+        ));
+    }
+
+    #[test]
+    fn newly_authoritative_project_resource_prevents_pack_issuance() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(&project).unwrap();
+        fs::write(project.join("main.typ"), "#read(\"resource.bin\")").unwrap();
+        let appeared = project.join("resource.bin");
+
+        let result = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .resource_provider(MemoryProjectFile::new(
+                "resource.bin",
+                b"representative".to_vec(),
+            ))
+            .after_discovery_hook(move || fs::write(&appeared, b"representative").unwrap())
+            .pack();
+
+        assert!(matches!(
+            result,
+            Err(PackerError::CreationEvidenceChanged { ref path }) if path == "resource.bin"
+        ));
+    }
+
+    #[test]
+    fn changed_selected_font_evidence_prevents_pack_issuance() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        let fonts = dir.path().join("fonts");
+        fs::create_dir_all(&project).unwrap();
+        fs::create_dir_all(&fonts).unwrap();
+        let data = embedded_font_data();
+        let family = typst::text::FontInfo::new(&data, 0)
+            .unwrap()
+            .family
+            .to_string();
+        let font_path = fonts.join("selected.ttf");
+        fs::write(&font_path, &data).unwrap();
+        fs::write(
+            project.join("main.typ"),
+            format!("#set text(font: \"{family}\")\nselected"),
+        )
+        .unwrap();
+
+        let result = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .typst_embedded_fonts(false)
+            .font_path(&fonts)
+            .after_discovery_hook(move || fs::write(&font_path, b"changed").unwrap())
+            .pack();
+
+        assert!(matches!(
+            result,
+            Err(PackerError::CreationEvidenceChanged { ref path })
+                if path.starts_with("font catalog")
+        ));
     }
 
     #[test]
@@ -3352,7 +3475,7 @@ Rows: #csv("data.csv").len()
             .pack()
             .unwrap();
 
-        assert_eq!(calls.load(Ordering::Relaxed), 1);
+        assert_eq!(calls.load(Ordering::Relaxed), 3);
         assert_eq!(outcome.report.resource_slots, ["shared.bin"]);
         assert_eq!(
             outcome.pack.resource_slots().collect::<Vec<_>>(),

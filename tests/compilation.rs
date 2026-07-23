@@ -1,9 +1,10 @@
 use typst_pack::{
     CompilationAttempt, CompilationExecutionControls, CompilationOperationOutcome,
-    CompilationRequestRejection, CompilationStatus, CompileOptions, CreationTimestamp,
-    DiagnosticPhase, DiagnosticProducer, FontContainerFulfillment, OutputFormat, Pack,
-    PackCompilationRequest, PackCompileError, PackMetadata, PackOverrideSet, PackOverrideSetError,
-    PackageTreeFulfillment, RequestValueOrigin, compile,
+    CompilationReportOutcome, CompilationRequestRejection, CompilationStatus, CompilationTarget,
+    CompileOptions, CreationTimestamp, DiagnosticPhase, DiagnosticProducer,
+    FontContainerFulfillment, OutputFormat, Pack, PackCompilationRequest, PackCompileError,
+    PackMetadata, PackOverrideSet, PackOverrideSetError, PackageTreeFulfillment,
+    RequestValueOrigin, compile, compile_report,
 };
 
 struct RuntimeResource;
@@ -41,6 +42,20 @@ fn pack_bound_compilation_resolves_declared_resource_slots() {
 
     assert_eq!(result.status(), CompilationStatus::Succeeded);
     assert_eq!(result.artifacts().len(), 1);
+    assert_eq!(result.document().target(), CompilationTarget::Paged);
+    assert!(
+        result
+            .result_identity()
+            .digest()
+            .iter()
+            .any(|byte| *byte != 0)
+    );
+    assert!(
+        result
+            .access_trace()
+            .observations()
+            .any(|observation| { observation.logical_path() == "project:main.typ" })
+    );
 }
 
 fn five_page_pack() -> Pack {
@@ -69,7 +84,7 @@ fn pack_bound_compilation_does_not_read_ambient_project_files() {
         .build()
         .unwrap();
 
-    let result = compile(PackCompilationRequest::new(pack, OutputFormat::Svg));
+    let result = compile(PackCompilationRequest::new(pack.clone(), OutputFormat::Svg));
 
     assert_eq!(result.unwrap().status(), CompilationStatus::Rejected);
 }
@@ -463,7 +478,7 @@ fn pack_bound_compilation_does_not_use_package_caches_or_network() {
         .build()
         .unwrap();
 
-    let result = compile(PackCompilationRequest::new(pack, OutputFormat::Svg));
+    let result = compile(PackCompilationRequest::new(pack.clone(), OutputFormat::Svg));
 
     assert!(matches!(
         result,
@@ -472,6 +487,16 @@ fn pack_bound_compilation_does_not_use_package_caches_or_network() {
             ..
         }) if packages.len() == 1
     ));
+    let report = compile_report(PackCompilationRequest::new(pack, OutputFormat::Svg)).unwrap();
+    assert!(matches!(
+        report.outcome(),
+        CompilationReportOutcome::Operation {
+            outcome: CompilationOperationOutcome::MissingExternalPackageFulfillment { .. },
+            ..
+        }
+    ));
+    assert_eq!(report.fulfillments().packages().len(), 1);
+    assert!(!report.fulfillments().packages()[0].embedded());
 }
 
 #[test]
@@ -534,7 +559,7 @@ fn external_package_fulfillment_is_verified_before_official_compilation() {
         ),
     )
     .unwrap();
-    let with_telemetry = compile(
+    let with_telemetry = compile_report(
         PackCompilationRequest::new(pack, OutputFormat::Svg).package_fulfillment(
             package,
             PackageTreeFulfillment::new([("lib.typ", source), ("typst.toml", manifest)])
@@ -543,17 +568,35 @@ fn external_package_fulfillment_is_verified_before_official_compilation() {
         ),
     )
     .unwrap();
+    let telemetry_result = with_telemetry.result().unwrap();
 
     assert_eq!(baseline.status(), CompilationStatus::Succeeded);
     assert_eq!(
         baseline.compilation_identity(),
-        with_telemetry.compilation_identity()
+        telemetry_result.compilation_identity()
+    );
+    assert_eq!(
+        baseline.result_identity(),
+        telemetry_result.result_identity()
     );
     assert_eq!(
         baseline.artifacts()[0].bytes(),
-        with_telemetry.artifacts()[0].bytes()
+        telemetry_result.artifacts()[0].bytes()
     );
-    assert_eq!(baseline.diagnostics(), with_telemetry.diagnostics());
+    assert_eq!(baseline.diagnostics(), telemetry_result.diagnostics());
+    let fulfillment = &with_telemetry.fulfillments().packages()[0];
+    assert_eq!(fulfillment.provenance(), Some("memory:test"));
+    assert!(fulfillment.cache_hit());
+    assert!(
+        telemetry_result
+            .access_trace()
+            .observations()
+            .any(|observation| {
+                observation
+                    .logical_path()
+                    .contains("@local/example:1.0.0/lib.typ")
+            })
+    );
 }
 
 #[cfg(feature = "embedded-fonts")]
@@ -602,7 +645,7 @@ fn external_font_fulfillment_is_verified_before_official_compilation() {
         ),
     )
     .unwrap();
-    let with_metadata = compile(
+    let with_metadata = compile_report(
         PackCompilationRequest::new(pack, OutputFormat::Svg).font_fulfillment(
             requirement.container_identity(),
             FontContainerFulfillment::new(data)
@@ -611,19 +654,27 @@ fn external_font_fulfillment_is_verified_before_official_compilation() {
         ),
     )
     .unwrap();
-    assert_eq!(with_metadata.status(), CompilationStatus::Succeeded);
+    let metadata_result = with_metadata.result().unwrap();
+    assert_eq!(metadata_result.status(), CompilationStatus::Succeeded);
     assert_eq!(
         baseline.compilation_identity(),
-        with_metadata.compilation_identity()
+        metadata_result.compilation_identity()
+    );
+    assert_eq!(
+        baseline.result_identity(),
+        metadata_result.result_identity()
     );
     assert_eq!(
         baseline.artifacts()[0].bytes(),
-        with_metadata.artifacts()[0].bytes()
+        metadata_result.artifacts()[0].bytes()
     );
     assert_eq!(
         baseline.diagnostics().len(),
-        with_metadata.diagnostics().len()
+        metadata_result.diagnostics().len()
     );
+    let fulfillment = &with_metadata.fulfillments().fonts()[0];
+    assert_eq!(fulfillment.provenance(), Some("memory:test"));
+    assert_eq!(fulfillment.licensing(), Some("advisory:test"));
 }
 
 #[test]
@@ -1109,6 +1160,39 @@ fn pretty_affects_html_svg_and_pdf_but_not_png() {
     assert_eq!(
         compact.artifacts()[0].bytes(),
         pretty.artifacts()[0].bytes()
+    );
+}
+
+#[test]
+fn compilation_result_identity_binds_status_document_trace_and_artifacts() {
+    let compile_source = |source: &[u8]| {
+        let pack = Pack::builder("main.typ")
+            .file("main.typ", source.to_vec())
+            .unwrap()
+            .build()
+            .unwrap();
+        compile(PackCompilationRequest::new(pack, OutputFormat::Svg)).unwrap()
+    };
+    let first = compile_source(
+        b"#set page(width: 20pt, height: 10pt, margin: 0pt)\n#rect(width: 1pt, height: 1pt)",
+    );
+    let changed = compile_source(
+        b"#set page(width: 30pt, height: 10pt, margin: 0pt)\n#rect(width: 1pt, height: 1pt)#pagebreak()#rect(width: 2pt, height: 2pt)",
+    );
+    let rejected = compile_source(b"#unknown-name");
+
+    assert_eq!(first.status(), CompilationStatus::Succeeded);
+    assert_eq!(rejected.status(), CompilationStatus::Rejected);
+    assert_ne!(first.result_identity(), changed.result_identity());
+    assert_ne!(first.result_identity(), rejected.result_identity());
+    assert_ne!(first.document(), changed.document());
+    assert_ne!(first.artifacts()[0].bytes(), changed.artifacts()[0].bytes());
+    assert!(!rejected.diagnostics().is_empty());
+    assert!(
+        !first
+            .access_trace()
+            .observations()
+            .eq(rejected.access_trace().observations())
     );
 }
 

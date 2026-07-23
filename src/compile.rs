@@ -3,15 +3,18 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroUsize;
 use std::ops::Range;
+use std::sync::Mutex;
 
 use ecow::EcoVec;
 #[cfg(feature = "cli")]
 use rayon::prelude::*;
-use typst::diag::{Severity, SourceDiagnostic, Tracepoint, Warned};
-use typst::foundations::{Bytes, Datetime, Dict, Repr, Smart};
+use typst::diag::{FileError, FileResult, Severity, SourceDiagnostic, Tracepoint, Warned};
+use typst::foundations::{Bytes, Datetime, Dict, Duration, Repr, Smart};
 use typst::syntax::package::PackageSpec;
-use typst::syntax::{DiagSpan, FileId, Span, VirtualRoot};
-use typst::{Feature, World, WorldExt};
+use typst::syntax::{DiagSpan, FileId, Source, Span, VirtualRoot};
+use typst::text::{Font, FontBook};
+use typst::utils::LazyHash;
+use typst::{Feature, Library, World, WorldExt};
 use typst_layout::PagedDocument;
 use typst_pdf::{PdfOptions, PdfStandard, PdfStandards, Timestamp};
 
@@ -857,35 +860,35 @@ pub struct CompilationArtifact {
 }
 
 /// Whether the official compiler and exporter accepted the compilation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum CompilationStatus {
     Succeeded,
     Rejected,
 }
 
 /// The official phase that emitted a diagnostic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiagnosticPhase {
     Compilation,
     Export,
 }
 
 /// The exact embedded implementation that emitted a diagnostic.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiagnosticProducer {
     Engine(EngineIdentity),
     Exporter(ExporterIdentity),
 }
 
 /// Official Typst diagnostic severity.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiagnosticSeverity {
     Error,
     Warning,
 }
 
 /// A source location expressed in the Pack's logical namespace.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct LogicalSpan {
     logical_path: Option<String>,
     byte_range: Option<Range<usize>>,
@@ -904,7 +907,7 @@ impl LogicalSpan {
 }
 
 /// A structured hint attached to an official diagnostic.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DiagnosticHint {
     message: String,
     span: LogicalSpan,
@@ -921,7 +924,7 @@ impl DiagnosticHint {
 }
 
 /// The kind of one official diagnostic tracepoint.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TracepointKind {
     Call,
     Show,
@@ -930,7 +933,7 @@ pub enum TracepointKind {
 }
 
 /// One structured tracepoint attached to an official diagnostic.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct DiagnosticTracepoint {
     kind: TracepointKind,
     value: Option<String>,
@@ -952,7 +955,7 @@ impl DiagnosticTracepoint {
 }
 
 /// A structured compiler or exporter diagnostic.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CompilationDiagnostic {
     severity: DiagnosticSeverity,
     message: String,
@@ -999,6 +1002,227 @@ impl CompilationDiagnostic {
     }
 }
 
+/// The Typst document shape reached by semantic compilation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CompilationTarget {
+    Paged,
+    Html,
+}
+
+/// The stable document facts reached before complete export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CompilationDocumentSummary {
+    target: CompilationTarget,
+    source_page_count: Option<usize>,
+}
+
+impl CompilationDocumentSummary {
+    pub fn target(self) -> CompilationTarget {
+        self.target
+    }
+
+    pub fn source_page_count(self) -> Option<usize> {
+        self.source_page_count
+    }
+}
+
+/// The kind of dependency request made by the embedded engine.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CompilationAccessKind {
+    Source,
+    File,
+    Font,
+}
+
+/// The stable outcome of one dependency request.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum CompilationAccessOutcome {
+    Read {
+        byte_length: usize,
+        digest: [u8; 16],
+    },
+    Missing,
+    Failed,
+}
+
+/// One canonical dependency observation made by the embedded engine.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct CompilationAccessObservation {
+    kind: CompilationAccessKind,
+    logical_path: String,
+    font_index: Option<usize>,
+    outcome: CompilationAccessOutcome,
+}
+
+impl CompilationAccessObservation {
+    pub fn kind(&self) -> CompilationAccessKind {
+        self.kind
+    }
+
+    pub fn logical_path(&self) -> &str {
+        &self.logical_path
+    }
+
+    pub fn font_index(&self) -> Option<usize> {
+        self.font_index
+    }
+
+    pub fn outcome(&self) -> &CompilationAccessOutcome {
+        &self.outcome
+    }
+}
+
+/// Canonical accesses retained by a semantic compilation result.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
+pub struct CompilationAccessTrace {
+    observations: BTreeSet<CompilationAccessObservation>,
+}
+
+impl CompilationAccessTrace {
+    pub fn observations(&self) -> impl Iterator<Item = &CompilationAccessObservation> {
+        self.observations.iter()
+    }
+}
+
+/// The identity of one complete compiler and exporter result.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct CompilationResultIdentity(u128);
+
+impl CompilationResultIdentity {
+    pub fn kind(self) -> &'static str {
+        "compilation-result"
+    }
+
+    pub fn schema(self) -> &'static str {
+        "typst-pack-compilation-result-v1"
+    }
+
+    pub fn algorithm(self) -> &'static str {
+        "typst-hash128-0.15"
+    }
+
+    pub fn digest(self) -> [u8; 16] {
+        self.0.to_be_bytes()
+    }
+}
+
+/// Operational evidence retained for one exact package fulfillment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageFulfillmentReport {
+    spec: PackageSpec,
+    tree_identity: PackageTreeIdentity,
+    embedded: bool,
+    provenance: Option<String>,
+    cache_hit: bool,
+}
+
+impl PackageFulfillmentReport {
+    pub fn spec(&self) -> &PackageSpec {
+        &self.spec
+    }
+    pub fn tree_identity(&self) -> PackageTreeIdentity {
+        self.tree_identity
+    }
+    pub fn embedded(&self) -> bool {
+        self.embedded
+    }
+    pub fn provenance(&self) -> Option<&str> {
+        self.provenance.as_deref()
+    }
+    pub fn cache_hit(&self) -> bool {
+        self.cache_hit
+    }
+}
+
+/// Operational evidence retained for one exact font fulfillment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FontFulfillmentReport {
+    container_identity: FontContainerIdentity,
+    embedded: bool,
+    provenance: Option<String>,
+    licensing: Option<String>,
+}
+
+impl FontFulfillmentReport {
+    pub fn container_identity(&self) -> FontContainerIdentity {
+        self.container_identity
+    }
+    pub fn embedded(&self) -> bool {
+        self.embedded
+    }
+    pub fn provenance(&self) -> Option<&str> {
+        self.provenance.as_deref()
+    }
+    pub fn licensing(&self) -> Option<&str> {
+        self.licensing.as_deref()
+    }
+}
+
+/// Operational dependency evidence surrounding one official semantic result.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct CompilationFulfillmentReport {
+    packages: Vec<PackageFulfillmentReport>,
+    fonts: Vec<FontFulfillmentReport>,
+}
+
+impl CompilationFulfillmentReport {
+    pub fn packages(&self) -> &[PackageFulfillmentReport] {
+        &self.packages
+    }
+    pub fn fonts(&self) -> &[FontFulfillmentReport] {
+        &self.fonts
+    }
+}
+
+/// The immutable account of an accepted compilation through complete export.
+#[derive(Debug, Clone)]
+pub struct CompilationReport {
+    outcome: CompilationReportOutcome,
+    fulfillments: CompilationFulfillmentReport,
+}
+
+#[derive(Debug, Clone)]
+pub enum CompilationReportOutcome {
+    Result(Box<CompilationResult>),
+    Operation {
+        outcome: CompilationOperationOutcome,
+        request_inventory: Box<CompilationRequestInventory>,
+        compilation_identity: CompilationIdentity,
+    },
+}
+
+impl CompilationReport {
+    pub fn outcome(&self) -> &CompilationReportOutcome {
+        &self.outcome
+    }
+
+    pub fn result(&self) -> Option<&CompilationResult> {
+        match &self.outcome {
+            CompilationReportOutcome::Result(result) => Some(result.as_ref()),
+            CompilationReportOutcome::Operation { .. } => None,
+        }
+    }
+    pub fn fulfillments(&self) -> &CompilationFulfillmentReport {
+        &self.fulfillments
+    }
+    #[allow(clippy::result_large_err)]
+    fn into_result(self) -> Result<CompilationResult, PackCompileError> {
+        match self.outcome {
+            CompilationReportOutcome::Result(result) => Ok(*result),
+            CompilationReportOutcome::Operation {
+                outcome,
+                request_inventory,
+                compilation_identity,
+            } => Err(PackCompileError::Operation {
+                outcome,
+                request_inventory,
+                compilation_identity,
+                fulfillments: Box::new(self.fulfillments),
+            }),
+        }
+    }
+}
+
 /// The semantic result of an accepted Pack compilation request.
 #[derive(Debug, Clone)]
 pub struct CompilationResult {
@@ -1006,7 +1230,9 @@ pub struct CompilationResult {
     artifacts: Vec<CompilationArtifact>,
     diagnostics: Vec<CompilationDiagnostic>,
     pack_warnings: Vec<PackCompilationWarning>,
-    source_page_count: Option<usize>,
+    document: CompilationDocumentSummary,
+    access_trace: CompilationAccessTrace,
+    result_identity: CompilationResultIdentity,
     request_inventory: CompilationRequestInventory,
     compilation_identity: CompilationIdentity,
     engine_identity: EngineIdentity,
@@ -1032,7 +1258,19 @@ impl CompilationResult {
     }
 
     pub fn source_page_count(&self) -> Option<usize> {
-        self.source_page_count
+        self.document.source_page_count
+    }
+
+    pub fn document(&self) -> CompilationDocumentSummary {
+        self.document
+    }
+
+    pub fn access_trace(&self) -> &CompilationAccessTrace {
+        &self.access_trace
+    }
+
+    pub fn result_identity(&self) -> CompilationResultIdentity {
+        self.result_identity
     }
 
     /// The complete effective semantic request prepared before execution.
@@ -1055,7 +1293,7 @@ impl CompilationResult {
 }
 
 /// A Pack-owned semantic request warning.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct PackCompilationWarning {
     message: String,
     hints: Vec<String>,
@@ -1205,7 +1443,7 @@ impl CompilationRequestRejection {
 }
 
 /// A Pack-owned operational outcome before official compilation begins.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, thiserror::Error)]
 pub enum CompilationOperationOutcome {
     /// The request supplied no authority for declared external packages.
     #[error("external package fulfillment is unavailable for {packages:?}")]
@@ -1265,6 +1503,7 @@ pub enum PackCompileError {
         outcome: CompilationOperationOutcome,
         request_inventory: Box<CompilationRequestInventory>,
         compilation_identity: CompilationIdentity,
+        fulfillments: Box<CompilationFulfillmentReport>,
     },
 }
 
@@ -1310,9 +1549,39 @@ pub(crate) fn compile_world(
 pub fn compile(
     attempt: impl Into<CompilationAttempt>,
 ) -> Result<CompilationResult, PackCompileError> {
-    let prepared = prepare_pack_compilation(attempt.into())?;
+    compile_report(attempt)?.into_result()
+}
+
+/// Compiles a validated Pack and retains operational fulfillment evidence.
+#[allow(clippy::result_large_err)]
+pub fn compile_report(
+    attempt: impl Into<CompilationAttempt>,
+) -> Result<CompilationReport, PackCompileError> {
+    let prepared = match prepare_pack_compilation(attempt.into()) {
+        Ok(prepared) => prepared,
+        Err(PackCompileError::Operation {
+            outcome,
+            request_inventory,
+            compilation_identity,
+            fulfillments,
+        }) => {
+            return Ok(CompilationReport {
+                outcome: CompilationReportOutcome::Operation {
+                    outcome,
+                    request_inventory,
+                    compilation_identity,
+                },
+                fulfillments: *fulfillments,
+            });
+        }
+        Err(error) => return Err(error),
+    };
     let (world, kernel) = prepared.into_parts();
-    Ok(compile_pack_kernel(&world, kernel).result)
+    let execution = compile_pack_kernel(&world, kernel);
+    Ok(CompilationReport {
+        outcome: CompilationReportOutcome::Result(Box::new(execution.result)),
+        fulfillments: execution.fulfillments,
+    })
 }
 
 pub(crate) struct PreparedPackCompilation {
@@ -1333,11 +1602,13 @@ pub(crate) struct PreparedPackCompilationKernel {
     engine_identity: EngineIdentity,
     exporter_identity: ExporterIdentity,
     page_selection_implies_untagged_pdf: bool,
+    fulfillments: CompilationFulfillmentReport,
 }
 
 pub(crate) struct PackCompilationExecution {
     pub(crate) result: CompilationResult,
     pub(crate) presentation: PackCompilationPresentation,
+    pub(crate) fulfillments: CompilationFulfillmentReport,
 }
 
 pub(crate) enum PackCompilationPresentation {
@@ -1393,20 +1664,11 @@ pub(crate) fn prepare_pack_compilation(
         request_issues.push(CompilationRequestRejection::InvalidPpi);
     }
     if format == OutputFormat::Pdf {
-        if let Err(error) = validate_pdf_standards(&options_value.pdf_standards) {
-            request_issues.push(CompilationRequestRejection::InvalidPdfStandards(error));
-        }
-        let has_page_selection = !options_value.page_selection.ranges().is_empty();
-        let tagged = match options_value.pdf_tags {
-            Smart::Auto => PdfOptions::default().tagged && !has_page_selection,
-            Smart::Custom(tagged) => tagged,
-        };
-        if has_page_selection && matches!(options_value.pdf_tags, Smart::Custom(true)) {
-            request_issues.push(CompilationRequestRejection::PdfTagsWithPageSelection);
-        }
-        if !tagged && pdf_standard_requiring_tags(&options_value.pdf_standards).is_some() {
-            request_issues.push(CompilationRequestRejection::PdfStandardRequiresTags);
-        }
+        request_issues.extend(pdf_request_issues(
+            &options_value.page_selection,
+            &options_value.pdf_standards,
+            options_value.pdf_tags,
+        ));
     }
     let page_selection_implies_untagged_pdf = format == OutputFormat::Pdf
         && !options.value.page_selection.ranges().is_empty()
@@ -1524,6 +1786,35 @@ pub(crate) fn prepare_pack_compilation(
         engine_identity,
         exporter_identity,
     );
+    let fulfillments = CompilationFulfillmentReport {
+        packages: pack
+            .package_requirements()
+            .iter()
+            .map(|requirement| {
+                let supplied = package_fulfillments.get(&requirement.spec().to_string());
+                PackageFulfillmentReport {
+                    spec: requirement.spec().clone(),
+                    tree_identity: requirement.tree_identity(),
+                    embedded: requirement.is_embedded(),
+                    provenance: supplied.and_then(|value| value.provenance.clone()),
+                    cache_hit: supplied.is_some_and(|value| value.cache_hit),
+                }
+            })
+            .collect(),
+        fonts: pack
+            .font_requirements()
+            .iter()
+            .map(|requirement| {
+                let supplied = font_fulfillments.get(&requirement.container_identity());
+                FontFulfillmentReport {
+                    container_identity: requirement.container_identity(),
+                    embedded: requirement.is_embedded(),
+                    provenance: supplied.and_then(|value| value.provenance.clone()),
+                    licensing: supplied.and_then(|value| value.licensing.clone()),
+                }
+            })
+            .collect(),
+    };
     let package_files = package_fulfillments
         .into_iter()
         .map(|(spec, fulfillment)| (spec, fulfillment.files))
@@ -1534,6 +1825,7 @@ pub(crate) fn prepare_pack_compilation(
             outcome: package_tree_outcome(error),
             request_inventory: Box::new(request_inventory.clone()),
             compilation_identity,
+            fulfillments: Box::new(fulfillments.clone()),
         })?;
 
     let fulfillment_bytes = font_fulfillments
@@ -1566,6 +1858,7 @@ pub(crate) fn prepare_pack_compilation(
                 outcome,
                 request_inventory: Box::new(request_inventory.clone()),
                 compilation_identity,
+                fulfillments: Box::new(fulfillments.clone()),
             }
         })?;
 
@@ -1607,8 +1900,127 @@ pub(crate) fn prepare_pack_compilation(
             engine_identity,
             exporter_identity,
             page_selection_implies_untagged_pdf,
+            fulfillments,
         },
     })
+}
+
+struct TracingCompilationWorld<'a> {
+    world: &'a PackWorld,
+    observations: Mutex<BTreeSet<CompilationAccessObservation>>,
+}
+
+impl<'a> TracingCompilationWorld<'a> {
+    fn new(world: &'a PackWorld) -> Self {
+        Self {
+            world,
+            observations: Mutex::new(BTreeSet::new()),
+        }
+    }
+
+    fn record<T>(
+        &self,
+        id: FileId,
+        kind: CompilationAccessKind,
+        result: &FileResult<T>,
+        bytes: impl FnOnce(&T) -> &[u8],
+    ) {
+        let outcome = match result {
+            Ok(value) => {
+                let data = bytes(value);
+                CompilationAccessOutcome::Read {
+                    byte_length: data.len(),
+                    digest: typst::utils::hash128(&data).to_be_bytes(),
+                }
+            }
+            Err(FileError::NotFound(_)) => CompilationAccessOutcome::Missing,
+            Err(_) => CompilationAccessOutcome::Failed,
+        };
+        self.observations
+            .lock()
+            .expect("compilation trace lock poisoned")
+            .insert(CompilationAccessObservation {
+                kind,
+                logical_path: logical_path(id),
+                font_index: None,
+                outcome,
+            });
+    }
+
+    fn finish(&self) -> CompilationAccessTrace {
+        CompilationAccessTrace {
+            observations: self
+                .observations
+                .lock()
+                .expect("compilation trace lock poisoned")
+                .clone(),
+        }
+    }
+}
+
+impl World for TracingCompilationWorld<'_> {
+    fn library(&self) -> &LazyHash<Library> {
+        self.world.library()
+    }
+    fn book(&self) -> &LazyHash<FontBook> {
+        self.world.book()
+    }
+    fn main(&self) -> FileId {
+        self.world.main()
+    }
+
+    fn source(&self, id: FileId) -> FileResult<Source> {
+        let result = self.world.source(id);
+        self.record(id, CompilationAccessKind::Source, &result, |source| {
+            source.text().as_bytes()
+        });
+        result
+    }
+
+    fn file(&self, id: FileId) -> FileResult<Bytes> {
+        let result = self.world.file(id);
+        self.record(id, CompilationAccessKind::File, &result, Bytes::as_slice);
+        result
+    }
+
+    fn font(&self, index: usize) -> Option<Font> {
+        let font = self.world.font(index);
+        let (logical_path, outcome) = match &font {
+            Some(font) => (
+                format!(
+                    "font:{:032x}",
+                    u128::from_be_bytes(
+                        FontContainerIdentity::from_bytes(font.data().as_slice()).digest()
+                    )
+                ),
+                CompilationAccessOutcome::Read {
+                    byte_length: font.data().len(),
+                    digest: typst::utils::hash128(&font.data().as_slice()).to_be_bytes(),
+                },
+            ),
+            None => (
+                format!("font-index:{index}"),
+                CompilationAccessOutcome::Missing,
+            ),
+        };
+        self.observations
+            .lock()
+            .expect("compilation trace lock poisoned")
+            .insert(CompilationAccessObservation {
+                kind: CompilationAccessKind::Font,
+                logical_path,
+                font_index: font
+                    .as_ref()
+                    .map(|font| font.index() as usize)
+                    .or(Some(index)),
+                outcome,
+            });
+        font
+    }
+
+    fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
+        self.world.today(offset)
+    }
 }
 
 pub(crate) fn compile_pack_kernel(
@@ -1622,13 +2034,17 @@ pub(crate) fn compile_pack_kernel(
         engine_identity,
         exporter_identity,
         page_selection_implies_untagged_pdf,
+        fulfillments,
     } = kernel;
-    match compile_with_default_pdf_timestamp(
-        world,
+    let traced = TracingCompilationWorld::new(world);
+    let compiled = compile_with_default_pdf_timestamp(
+        &traced,
         format,
         request_inventory.options.value(),
         || None,
-    ) {
+    );
+    let access_trace = traced.finish();
+    match compiled {
         Ok(output) => {
             let warnings = output.warnings.clone();
             let mut presentation_pack_warnings = output.pack_warnings.clone();
@@ -1636,7 +2052,7 @@ pub(crate) fn compile_pack_kernel(
                 presentation_pack_warnings.push(page_selection_pdf_tags_warning());
             }
             let diagnostics = project_diagnostics(
-                world,
+                &traced,
                 output.warnings,
                 DiagnosticPhase::Compilation,
                 DiagnosticProducer::Engine(engine_identity),
@@ -1644,21 +2060,24 @@ pub(crate) fn compile_pack_kernel(
             let pack_warnings =
                 project_pack_warnings(output.pack_warnings, page_selection_implies_untagged_pdf);
             PackCompilationExecution {
-                result: CompilationResult {
+                result: finalize_result(CompilationResult {
                     status: CompilationStatus::Succeeded,
                     artifacts: output.artifacts,
                     diagnostics,
                     pack_warnings,
-                    source_page_count: output.source_page_count,
+                    document: document_summary(format, output.source_page_count),
+                    access_trace,
+                    result_identity: CompilationResultIdentity(0),
                     request_inventory: request_inventory.clone(),
                     compilation_identity,
                     engine_identity,
                     exporter_identity,
-                },
+                }),
                 presentation: PackCompilationPresentation::Succeeded {
                     warnings,
                     pack_warnings: presentation_pack_warnings,
                 },
+                fulfillments,
             }
         }
         Err(CompileError::Diagnostics {
@@ -1678,7 +2097,7 @@ pub(crate) fn compile_pack_kernel(
                 pack_warnings: presentation_pack_warnings,
             };
             let mut diagnostics = project_diagnostics(
-                world,
+                &traced,
                 warnings,
                 DiagnosticPhase::Compilation,
                 DiagnosticProducer::Engine(engine_identity),
@@ -1687,9 +2106,9 @@ pub(crate) fn compile_pack_kernel(
                 DiagnosticPhase::Compilation => DiagnosticProducer::Engine(engine_identity),
                 DiagnosticPhase::Export => DiagnosticProducer::Exporter(exporter_identity),
             };
-            diagnostics.extend(project_diagnostics(world, errors, phase, producer));
+            diagnostics.extend(project_diagnostics(&traced, errors, phase, producer));
             PackCompilationExecution {
-                result: CompilationResult {
+                result: finalize_result(CompilationResult {
                     status: CompilationStatus::Rejected,
                     artifacts: vec![],
                     diagnostics,
@@ -1697,13 +2116,16 @@ pub(crate) fn compile_pack_kernel(
                         pack_warnings,
                         page_selection_implies_untagged_pdf,
                     ),
-                    source_page_count,
+                    document: document_summary(format, source_page_count),
+                    access_trace,
+                    result_identity: CompilationResultIdentity(0),
                     request_inventory: request_inventory.clone(),
                     compilation_identity,
                     engine_identity,
                     exporter_identity,
-                },
+                }),
                 presentation,
+                fulfillments,
             }
         }
         Err(CompileError::PngExport {
@@ -1723,7 +2145,7 @@ pub(crate) fn compile_pack_kernel(
                 pack_warnings: presentation_pack_warnings,
             };
             let mut diagnostics = project_diagnostics(
-                world,
+                &traced,
                 warnings,
                 DiagnosticPhase::Compilation,
                 DiagnosticProducer::Engine(engine_identity),
@@ -1742,7 +2164,7 @@ pub(crate) fn compile_pack_kernel(
                 source_page_number: Some(source_page_number),
             });
             PackCompilationExecution {
-                result: CompilationResult {
+                result: finalize_result(CompilationResult {
                     status: CompilationStatus::Rejected,
                     artifacts: vec![],
                     diagnostics,
@@ -1750,19 +2172,62 @@ pub(crate) fn compile_pack_kernel(
                         pack_warnings,
                         page_selection_implies_untagged_pdf,
                     ),
-                    source_page_count: Some(source_page_count),
+                    document: document_summary(format, Some(source_page_count)),
+                    access_trace,
+                    result_identity: CompilationResultIdentity(0),
                     request_inventory: request_inventory.clone(),
                     compilation_identity,
                     engine_identity,
                     exporter_identity,
-                },
+                }),
                 presentation,
+                fulfillments,
             }
         }
         Err(CompileError::InvalidPdfStandards(error)) => {
             unreachable!("PDF standards are validated during request preparation: {error}");
         }
     }
+}
+
+fn document_summary(
+    format: OutputFormat,
+    source_page_count: Option<usize>,
+) -> CompilationDocumentSummary {
+    CompilationDocumentSummary {
+        target: if format == OutputFormat::Html {
+            CompilationTarget::Html
+        } else {
+            CompilationTarget::Paged
+        },
+        source_page_count,
+    }
+}
+
+fn finalize_result(mut result: CompilationResult) -> CompilationResult {
+    let artifacts = result
+        .artifacts
+        .iter()
+        .map(|artifact| {
+            (
+                artifact.format,
+                artifact.source_page_number,
+                artifact.bytes.len(),
+                typst::utils::hash128(&artifact.bytes),
+            )
+        })
+        .collect::<Vec<_>>();
+    result.result_identity = CompilationResultIdentity(typst::utils::hash128(&(
+        "typst-pack-compilation-result-v1",
+        result.compilation_identity,
+        result.status,
+        result.document,
+        &result.diagnostics,
+        &result.pack_warnings,
+        &result.access_trace,
+        artifacts,
+    )));
+    result
 }
 
 pub(crate) fn package_tree_outcome(error: PackageTreeError) -> CompilationOperationOutcome {
@@ -2092,6 +2557,29 @@ pub(crate) fn validate_pdf_standards(
     })
 }
 
+pub(crate) fn pdf_request_issues(
+    page_selection: &PageSelection,
+    standards: &[PdfStandard],
+    pdf_tags: Smart<bool>,
+) -> Vec<CompilationRequestRejection> {
+    let mut issues = Vec::new();
+    if let Err(error) = validate_pdf_standards(standards) {
+        issues.push(CompilationRequestRejection::InvalidPdfStandards(error));
+    }
+    let has_page_selection = !page_selection.ranges().is_empty();
+    let tagged = match pdf_tags {
+        Smart::Auto => PdfOptions::default().tagged && !has_page_selection,
+        Smart::Custom(tagged) => tagged,
+    };
+    if has_page_selection && matches!(pdf_tags, Smart::Custom(true)) {
+        issues.push(CompilationRequestRejection::PdfTagsWithPageSelection);
+    }
+    if !tagged && pdf_standard_requiring_tags(standards).is_some() {
+        issues.push(CompilationRequestRejection::PdfStandardRequiresTags);
+    }
+    issues
+}
+
 pub(crate) fn pdf_standard_requiring_tags(standards: &[PdfStandard]) -> Option<&'static str> {
     standards.iter().find_map(|standard| match standard {
         PdfStandard::A_1a => Some("PDF/A-1a"),
@@ -2207,5 +2695,64 @@ fn logical_path(id: FileId) -> String {
     match id.root() {
         VirtualRoot::Project => format!("project:{path}"),
         VirtualRoot::Package(spec) => format!("package:{spec}/{path}"),
+    }
+}
+
+#[cfg(test)]
+mod result_identity_tests {
+    use super::*;
+
+    #[test]
+    fn result_identity_binds_each_post_execution_projection() {
+        let pack = Pack::builder("main.typ")
+            .file(
+                "main.typ",
+                b"#set page(width: 20pt, height: 10pt, margin: 0pt)\n#rect(width: 1pt, height: 1pt)".to_vec(),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        let base = compile(PackCompilationRequest::new(pack, OutputFormat::Svg)).unwrap();
+        let identity = base.result_identity;
+
+        let mut status = base.clone();
+        status.status = CompilationStatus::Rejected;
+        assert_ne!(finalize_result(status).result_identity, identity);
+
+        let mut document = base.clone();
+        document.document.source_page_count = Some(2);
+        assert_ne!(finalize_result(document).result_identity, identity);
+
+        let mut diagnostics = base.clone();
+        diagnostics.diagnostics.push(CompilationDiagnostic {
+            severity: DiagnosticSeverity::Warning,
+            message: "identity warning".to_owned(),
+            span: LogicalSpan {
+                logical_path: None,
+                byte_range: None,
+            },
+            hints: vec![],
+            trace: vec![],
+            phase: DiagnosticPhase::Compilation,
+            producer: DiagnosticProducer::Engine(base.engine_identity),
+            source_page_number: None,
+        });
+        assert_ne!(finalize_result(diagnostics).result_identity, identity);
+
+        let mut access = base.clone();
+        access
+            .access_trace
+            .observations
+            .insert(CompilationAccessObservation {
+                kind: CompilationAccessKind::File,
+                logical_path: "project:missing.txt".to_owned(),
+                font_index: None,
+                outcome: CompilationAccessOutcome::Missing,
+            });
+        assert_ne!(finalize_result(access).result_identity, identity);
+
+        let mut artifact = base;
+        artifact.artifacts[0].bytes.push(0);
+        assert_ne!(finalize_result(artifact).result_identity, identity);
     }
 }

@@ -455,7 +455,7 @@ fn official_source_discovery_replay_and_pack_compilation_agree() {
     );
 
     let actual = compile(
-        PackCompilationRequest::new(outcome.pack, OutputFormat::Svg)
+        PackCompilationRequest::new(outcome.pack.clone(), OutputFormat::Svg)
             .inputs(inputs)
             .document_time(Datetime::from_ymd(2024, 2, 3).unwrap()),
     )
@@ -473,11 +473,123 @@ fn official_source_discovery_replay_and_pack_compilation_agree() {
             },
         },
     );
+    let discovered_dependencies = outcome.pack.discovery()[0]
+        .observations()
+        .iter()
+        .map(|observation| observation.logical_path().to_owned())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(discovered_dependencies, expected.dependencies);
     assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
+    assert_eq!(actual.status(), CompilationStatus::Succeeded);
+    assert_eq!(actual.source_page_count(), expected.source_page_count);
     assert_eq!(actual.artifacts().len(), expected.artifacts.len());
     for (actual, expected) in actual.artifacts().iter().zip(&expected.artifacts) {
+        let ArtifactRole::Svg { source_page_number } = expected.role else {
+            panic!("oracle produced a non-SVG artifact");
+        };
+        assert_eq!(actual.source_page_number(), Some(source_page_number));
         assert_eq!(actual.bytes(), expected.bytes);
     }
+
+    let pdf = compile(
+        PackCompilationRequest::new(outcome.pack.clone(), OutputFormat::Pdf)
+            .inputs(string_inputs([("width", "24")]))
+            .document_time(Datetime::from_ymd(2024, 2, 3).unwrap()),
+    )
+    .unwrap();
+    let expected_pdf = observe(
+        &fixture,
+        &ReferenceRequest {
+            inputs: string_inputs([("width", "24")]),
+            features: vec![],
+            document_time: Some(Datetime::from_ymd(2024, 2, 3).unwrap()),
+            output: OutputRequest::Pdf {
+                source_pages: vec![],
+                ident: Smart::Auto,
+                creator: Smart::Auto,
+                creation_time: None,
+                standards: vec![],
+                tagged: true,
+                pretty: false,
+            },
+        },
+    );
+    assert_diagnostics_match(pdf.diagnostics(), &expected_pdf.diagnostics);
+    assert_eq!(pdf.status(), CompilationStatus::Succeeded);
+    assert_eq!(pdf.source_page_count(), expected_pdf.source_page_count);
+    assert_eq!(expected_pdf.artifacts[0].role, ArtifactRole::Pdf);
+    assert_eq!(pdf.artifacts()[0].source_page_number(), None);
+    assert_eq!(pdf.artifacts()[0].bytes(), expected_pdf.artifacts[0].bytes);
+
+    let png = compile(
+        PackCompilationRequest::new(outcome.pack, OutputFormat::Png)
+            .inputs(string_inputs([("width", "24")]))
+            .document_time(Datetime::from_ymd(2024, 2, 3).unwrap()),
+    )
+    .unwrap();
+    let expected_png = observe(
+        &fixture,
+        &ReferenceRequest {
+            inputs: string_inputs([("width", "24")]),
+            features: vec![],
+            document_time: Some(Datetime::from_ymd(2024, 2, 3).unwrap()),
+            output: OutputRequest::Png {
+                source_pages: vec![],
+                pixels_per_inch: 144.0,
+                render_bleed: false,
+            },
+        },
+    );
+    assert_diagnostics_match(png.diagnostics(), &expected_png.diagnostics);
+    assert_eq!(png.status(), CompilationStatus::Succeeded);
+    assert_eq!(png.source_page_count(), expected_png.source_page_count);
+    assert_eq!(png.artifacts().len(), expected_png.artifacts.len());
+    for (actual, expected) in png.artifacts().iter().zip(&expected_png.artifacts) {
+        let ArtifactRole::Png { source_page_number } = expected.role else {
+            panic!("oracle produced a non-PNG artifact");
+        };
+        assert_eq!(actual.source_page_number(), Some(source_page_number));
+        assert_eq!(actual.bytes(), expected.bytes);
+    }
+
+    let html_fixture = Fixture::html_success();
+    let html_project = directory.path().join("html-project");
+    std::fs::create_dir_all(&html_project).unwrap();
+    for &(path, text) in html_fixture.project() {
+        let destination = html_project.join(path);
+        std::fs::create_dir_all(destination.parent().unwrap()).unwrap();
+        std::fs::write(destination, text).unwrap();
+    }
+    let html_pack = Packer::new(&html_project, html_fixture.entrypoint())
+        .system_fonts(false)
+        .typst_embedded_fonts(false)
+        .feature(typst::Feature::Html)
+        .target(DiscoveryTarget::Html)
+        .pack()
+        .unwrap();
+    let html = compile(PackCompilationRequest::new(
+        html_pack.pack,
+        OutputFormat::Html,
+    ))
+    .unwrap();
+    let expected_html = observe(
+        &html_fixture,
+        &ReferenceRequest {
+            inputs: Dict::new(),
+            features: vec![typst::Feature::Html],
+            document_time: None,
+            output: OutputRequest::Html { pretty: false },
+        },
+    );
+    assert_diagnostics_match(html.diagnostics(), &expected_html.diagnostics);
+    assert_eq!(html.status(), CompilationStatus::Succeeded);
+    assert_eq!(html.source_page_count(), expected_html.source_page_count);
+    assert_eq!(expected_html.artifacts[0].role, ArtifactRole::Html);
+    assert_eq!(html.artifacts()[0].source_page_number(), None);
+    assert_eq!(
+        html.artifacts()[0].bytes(),
+        expected_html.artifacts[0].bytes
+    );
 }
 
 #[test]

@@ -78,6 +78,17 @@ fn assert_success(output: &Output) {
     );
 }
 
+#[cfg(unix)]
+fn read_eventually(path: &Path) -> String {
+    for _ in 0..100 {
+        if let Ok(value) = std::fs::read_to_string(path) {
+            return value;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    std::fs::read_to_string(path).unwrap()
+}
+
 #[test]
 fn official_typst_compile_is_the_process_level_parity_baseline() {
     let Some(official) = OfficialTypstCli::from_environment() else {
@@ -218,6 +229,43 @@ fn official_typst_compile_gates_shared_environment_diagnostics_and_exit_behavior
     assert!(!official_output.exists());
     assert!(!pack_output.exists());
 
+    let official_color = official.run(
+        &project,
+        [
+            "--color",
+            "always",
+            "compile",
+            "main.typ",
+            official_output.to_str().unwrap(),
+            "--diagnostic-format",
+            "human",
+            "--ignore-system-fonts",
+        ],
+        &[],
+    );
+    let pack_color = pack_run(
+        directory.path(),
+        [
+            "--color",
+            "always",
+            "compile",
+            pack_path.to_str().unwrap(),
+            pack_output.to_str().unwrap(),
+            "--diagnostic-format",
+            "human",
+            "--ignore-system-fonts",
+        ],
+        &[],
+    );
+    assert_eq!(pack_color.status.code(), official_color.status.code());
+    assert_eq!(pack_color.stderr, official_color.stderr);
+    assert!(
+        official_color
+            .stderr
+            .windows(2)
+            .any(|bytes| bytes == b"\x1b[")
+    );
+
     let environment_source = "#set page(width: int(sys.inputs.width) * 1pt, height: datetime.today().day() * 1pt, margin: 0pt)";
     std::fs::write(project.join("main.typ"), environment_source).unwrap();
     let environment_pack = directory.path().join("environment.typk");
@@ -352,12 +400,20 @@ fn official_typst_compile_gates_package_font_and_offline_request_routing() {
     let directory = tempfile::tempdir().unwrap();
     let project = directory.path().join("dependencies");
     std::fs::create_dir(&project).unwrap();
+    let font = typst_kit::fonts::embedded().next().unwrap().0;
+    let font_directory = directory.path().join("fonts");
+    std::fs::create_dir(&font_directory).unwrap();
+    std::fs::write(font_directory.join("exact.ttf"), font.data()).unwrap();
+    let family = font.info().family.to_string();
     std::fs::write(
         project.join("main.typ"),
-        "#import \"@local/oracle:1.0.0\": oracle-box\n\
+        format!(
+            "#import \"@local/oracle:1.0.0\": oracle-box\n\
+         #set text(font: \"{family}\")\n\
          #set page(width: 40pt, height: 20pt, margin: 0pt)\n\
          #oracle-box(width: 8pt)\n\
-         #text(\"Parity\")",
+         #text(\"Parity\")"
+        ),
     )
     .unwrap();
     let packages =
@@ -372,6 +428,9 @@ fn official_typst_compile_gates_package_font_and_offline_request_routing() {
             "--package-path",
             packages.to_str().unwrap(),
             "--ignore-system-fonts",
+            "--ignore-embedded-fonts",
+            "--font-path",
+            font_directory.to_str().unwrap(),
         ],
         &[],
     );
@@ -379,9 +438,14 @@ fn official_typst_compile_gates_package_font_and_offline_request_routing() {
 
     let official_pdf = directory.path().join("dependencies-official.pdf");
     let pack_pdf = directory.path().join("dependencies-pack.pdf");
-    let official_result = official.compile(
+    let font_environment = [
+        ("TYPST_FONT_PATHS", font_directory.to_str().unwrap()),
+        ("TYPST_IGNORE_EMBEDDED_FONTS", "true"),
+    ];
+    let official_result = official.run(
         &project,
         [
+            "compile",
             "main.typ",
             official_pdf.to_str().unwrap(),
             "--package-path",
@@ -390,10 +454,12 @@ fn official_typst_compile_gates_package_font_and_offline_request_routing() {
             "--creation-timestamp",
             TIMESTAMP,
         ],
+        &font_environment,
     );
-    let pack_result = pack_command(
+    let pack_result = pack_run(
         directory.path(),
-        &[
+        [
+            "compile",
             pack_path.to_str().unwrap(),
             pack_pdf.to_str().unwrap(),
             "--offline",
@@ -401,6 +467,7 @@ fn official_typst_compile_gates_package_font_and_offline_request_routing() {
             "--creation-timestamp",
             TIMESTAMP,
         ],
+        &font_environment,
     );
     assert_success(&official_result);
     assert_success(&pack_result);
@@ -409,4 +476,154 @@ fn official_typst_compile_gates_package_font_and_offline_request_routing() {
         std::fs::read(official_pdf).unwrap(),
         "verified package and font fulfillment drifted from official Typst"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn official_typst_compile_gates_templates_automation_dependencies_and_viewing() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let Some(official) = OfficialTypstCli::from_environment() else {
+        eprintln!("skipping official CLI parity outside its pinned Dagger gate");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let source = "#set page(width: 20pt, height: 10pt, margin: 0pt)\n#rect(width: 2pt, height: 2pt)#pagebreak()#rect(width: 3pt, height: 3pt)";
+    let project = write_project(directory.path(), source);
+    let pack_path = directory.path().join("automation.typk");
+    write_pack(&pack_path, source);
+
+    let official_template = directory.path().join("official-{0p}.svg");
+    let pack_template = directory.path().join("pack-{0p}.svg");
+    let official_result = official.compile(
+        &project,
+        [
+            "main.typ",
+            official_template.to_str().unwrap(),
+            "-j",
+            "1",
+            "--ignore-system-fonts",
+        ],
+    );
+    let pack_result = pack_command(
+        directory.path(),
+        &[
+            pack_path.to_str().unwrap(),
+            pack_template.to_str().unwrap(),
+            "-j",
+            "1",
+            "--ignore-system-fonts",
+        ],
+    );
+    assert_success(&official_result);
+    assert_success(&pack_result);
+    for page in ["1", "2"] {
+        assert_eq!(
+            std::fs::read(directory.path().join(format!("pack-{page}.svg"))).unwrap(),
+            std::fs::read(directory.path().join(format!("official-{page}.svg"))).unwrap(),
+        );
+    }
+
+    let official_pdf = directory.path().join("automation-official.pdf");
+    let pack_pdf = directory.path().join("automation-pack.pdf");
+    let official_timings = directory.path().join("official-timings.json");
+    let pack_timings = directory.path().join("pack-timings.json");
+    let official_deps = directory.path().join("official-deps.json");
+    let pack_deps = directory.path().join("pack-deps.json");
+    let official_result = official.compile(
+        &project,
+        [
+            "main.typ",
+            official_pdf.to_str().unwrap(),
+            "--creation-timestamp",
+            TIMESTAMP,
+            "--timings",
+            official_timings.to_str().unwrap(),
+            "--deps",
+            official_deps.to_str().unwrap(),
+            "--deps-format",
+            "json",
+            "--ignore-system-fonts",
+        ],
+    );
+    let pack_result = pack_command(
+        directory.path(),
+        &[
+            pack_path.to_str().unwrap(),
+            pack_pdf.to_str().unwrap(),
+            "--creation-timestamp",
+            TIMESTAMP,
+            "--timings",
+            pack_timings.to_str().unwrap(),
+            "--deps",
+            pack_deps.to_str().unwrap(),
+            "--deps-format",
+            "json",
+            "--ignore-system-fonts",
+        ],
+    );
+    assert_success(&official_result);
+    assert_success(&pack_result);
+    assert_eq!(
+        std::fs::read(pack_pdf).unwrap(),
+        std::fs::read(official_pdf).unwrap()
+    );
+    for path in [&official_timings, &pack_timings, &official_deps, &pack_deps] {
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert!(
+            !value.as_array().is_some_and(Vec::is_empty),
+            "{} was empty",
+            path.display()
+        );
+    }
+    assert!(
+        String::from_utf8(std::fs::read(&official_deps).unwrap())
+            .unwrap()
+            .contains("main.typ")
+    );
+    assert!(
+        String::from_utf8(std::fs::read(&pack_deps).unwrap())
+            .unwrap()
+            .contains("automation.typk")
+    );
+
+    let viewer = directory.path().join("viewer.sh");
+    std::fs::write(&viewer, "#!/bin/sh\nprintf '%s' \"$1\" > \"$VIEWER_LOG\"\n").unwrap();
+    std::fs::set_permissions(&viewer, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let official_log = directory.path().join("official-viewer.log");
+    let pack_log = directory.path().join("pack-viewer.log");
+    let viewer_project = directory.path().join("viewer-project");
+    std::fs::create_dir(&viewer_project).unwrap();
+    std::fs::write(viewer_project.join("main.typ"), PAGED_SOURCE).unwrap();
+    let viewer_pack = directory.path().join("viewer.typk");
+    write_pack(&viewer_pack, PAGED_SOURCE);
+    let official_result = official.run(
+        &viewer_project,
+        [
+            "compile",
+            "main.typ",
+            "view-official.svg",
+            "--open",
+            viewer.to_str().unwrap(),
+            "--ignore-system-fonts",
+        ],
+        &[("VIEWER_LOG", official_log.to_str().unwrap())],
+    );
+    let pack_result = pack_run(
+        directory.path(),
+        [
+            "compile",
+            viewer_pack.to_str().unwrap(),
+            "view-pack.svg",
+            "--open",
+            viewer.to_str().unwrap(),
+            "--ignore-system-fonts",
+        ],
+        &[("VIEWER_LOG", pack_log.to_str().unwrap())],
+    );
+    assert_success(&official_result);
+    assert_success(&pack_result);
+    assert!(read_eventually(&official_log).ends_with("view-official.svg"));
+    assert!(read_eventually(&pack_log).ends_with("view-pack.svg"));
 }

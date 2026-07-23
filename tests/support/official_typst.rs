@@ -2,6 +2,7 @@ use std::collections::{BTreeSet, HashMap};
 use std::num::NonZeroUsize;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 use typst::diag::{
     FileError, FileResult, HintedString, Severity, SourceDiagnostic, Tracepoint, Warned,
@@ -277,6 +278,7 @@ pub struct Observation {
     pub diagnostics: Vec<DiagnosticObservation>,
     pub artifacts: Vec<ArtifactObservation>,
     pub font_catalog: Vec<(FontInfo, Vec<u8>, u32)>,
+    pub dependencies: BTreeSet<String>,
 }
 
 pub fn observe(fixture: &Fixture, request: &ReferenceRequest) -> Observation {
@@ -289,10 +291,12 @@ pub fn observe_with_project_overrides(
     overrides: &[(&str, &str)],
 ) -> Observation {
     let world = ReferenceWorld::new(fixture, request, overrides);
-    match &request.output {
+    let mut observation = match &request.output {
         OutputRequest::Html { pretty } => observe_html(&world, *pretty),
         output => observe_paged(&world, output),
-    }
+    };
+    observation.dependencies = world.dependencies();
+    observation
 }
 
 pub fn select_font(
@@ -323,6 +327,7 @@ fn observe_html(world: &ReferenceWorld, pretty: bool) -> Observation {
         diagnostics: project_diagnostics(world, warnings),
         artifacts: vec![],
         font_catalog: world.font_catalog(),
+        dependencies: BTreeSet::new(),
     };
     let document = match output {
         Ok(document) => document,
@@ -361,6 +366,7 @@ fn observe_paged(world: &ReferenceWorld, output: &OutputRequest) -> Observation 
         diagnostics: project_diagnostics(world, warnings),
         artifacts: vec![],
         font_catalog: world.font_catalog(),
+        dependencies: BTreeSet::new(),
     };
     let document = match document {
         Ok(document) => document,
@@ -593,6 +599,7 @@ struct ReferenceWorld {
     files: HashMap<FileId, Bytes>,
     document_time: Option<Datetime>,
     fonts: Vec<Font>,
+    dependencies: Mutex<BTreeSet<String>>,
 }
 
 impl ReferenceWorld {
@@ -648,6 +655,7 @@ impl ReferenceWorld {
             files,
             document_time: request.document_time,
             fonts,
+            dependencies: Mutex::new(BTreeSet::new()),
         }
     }
 
@@ -656,6 +664,10 @@ impl ReferenceWorld {
             .iter()
             .map(|font| (font.info().clone(), font.data().to_vec(), font.index()))
             .collect()
+    }
+
+    fn dependencies(&self) -> BTreeSet<String> {
+        self.dependencies.lock().unwrap().clone()
     }
 }
 
@@ -689,6 +701,7 @@ impl World for ReferenceWorld {
     }
 
     fn source(&self, id: FileId) -> FileResult<Source> {
+        self.dependencies.lock().unwrap().insert(logical_path(id));
         self.sources
             .get(&id)
             .cloned()
@@ -696,6 +709,7 @@ impl World for ReferenceWorld {
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
+        self.dependencies.lock().unwrap().insert(logical_path(id));
         self.files
             .get(&id)
             .cloned()
@@ -703,7 +717,14 @@ impl World for ReferenceWorld {
     }
 
     fn font(&self, index: usize) -> Option<Font> {
-        self.fonts.get(index).cloned()
+        let font = self.fonts.get(index).cloned();
+        if let Some(font) = &font {
+            self.dependencies.lock().unwrap().insert(format!(
+                "font:{:032x}",
+                typst::utils::hash128(&font.data().as_slice())
+            ));
+        }
+        font
     }
 
     fn today(&self, _offset: Option<Duration>) -> Option<Datetime> {

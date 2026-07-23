@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 
 #[cfg(feature = "fs")]
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 #[cfg(feature = "fs")]
 use std::sync::Mutex;
 
@@ -20,11 +20,16 @@ struct ProviderChain(Vec<Provider>);
 
 impl ProviderChain {
     fn resolve(&self, id: FileId) -> FileResult<Bytes> {
-        for provider in &self.0 {
+        self.resolve_with_index(id).map(|(_, data)| data)
+    }
+
+    fn resolve_with_index(&self, id: FileId) -> FileResult<(usize, Bytes)> {
+        for (index, provider) in self.0.iter().enumerate() {
             let _timing = typst_timing::TimingScope::new("Resource Provider");
             match provider.load(id) {
                 Err(FileError::NotFound(_)) => {}
-                result => return result,
+                Ok(data) => return Ok((index, data)),
+                Err(error) => return Err(error),
             }
         }
         missing(id)
@@ -75,6 +80,7 @@ pub(crate) struct DiscoveryResources {
     explicit_slots: BTreeSet<String>,
     provenance: Mutex<BTreeSet<String>>,
     unavailable: Mutex<BTreeSet<String>>,
+    selected_providers: Mutex<BTreeMap<String, usize>>,
 }
 
 #[cfg(feature = "fs")]
@@ -85,6 +91,7 @@ impl DiscoveryResources {
             provenance: Mutex::new(explicit_slots.clone()),
             explicit_slots,
             unavailable: Mutex::new(BTreeSet::new()),
+            selected_providers: Mutex::new(BTreeMap::new()),
         }
     }
 
@@ -99,8 +106,12 @@ impl DiscoveryResources {
         }
         match result {
             Ok(data) => Ok(data),
-            Err(FileError::NotFound(_)) => match self.providers.resolve(id) {
-                Ok(data) => {
+            Err(FileError::NotFound(_)) => match self.providers.resolve_with_index(id) {
+                Ok((provider, data)) => {
+                    self.selected_providers
+                        .lock()
+                        .expect("Resource Provider selection lock poisoned")
+                        .insert(id.vpath().get_without_slash().to_owned(), provider);
                     self.provenance
                         .lock()
                         .expect("Resource Slot provenance lock poisoned")
@@ -153,6 +164,18 @@ impl DiscoveryResources {
             .iter()
             .cloned()
             .collect()
+    }
+
+    pub(crate) fn selected_provider(&self, path: &str) -> Option<usize> {
+        self.selected_providers
+            .lock()
+            .expect("Resource Provider selection lock poisoned")
+            .get(path)
+            .copied()
+    }
+
+    pub(crate) fn resolve_provider(&self, id: FileId) -> FileResult<(usize, Bytes)> {
+        self.providers.resolve_with_index(id)
     }
 
     fn record_unavailable_explicit(&self, id: FileId) {

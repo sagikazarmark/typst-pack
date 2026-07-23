@@ -210,6 +210,13 @@ assert_eq!(artifact.source_page_number(), None);
 let pdf = artifact.bytes();
 ```
 
+Use `compile_report` when operational dependency evidence is needed alongside
+the immutable semantic result. Its fulfillment report retains caller-supplied
+package and font provenance, cache disposition, and licensing metadata without
+including those operational values in Compilation Identity or Compilation
+Result Identity. Every result also exposes its document summary and canonical
+Compilation Access Trace.
+
 For PNG and SVG, `source_page_number()` identifies each artifact independently
 of its collection position. `bytes()` borrows the artifact bytes and
 `into_bytes()` extracts them without cloning.
@@ -226,6 +233,11 @@ let pack = Pack::builder("main.typ")
     .build()?;
 let bytes = pack.to_bytes()?;
 ```
+
+Packs issued by `Packer` additionally persist each successful Discovery
+Variant's safe request commitments and canonical Discovery Trace. This evidence
+survives archive round trips and contributes to Pack Identity. Manually assembled
+Packs carry no discovery claim.
 
 Resource Slots can also be declared and supplied in memory. A Resource Provider
 uses typst-kit's standard synchronous `FileLoader` interface, so callers can

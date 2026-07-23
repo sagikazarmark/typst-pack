@@ -25,11 +25,11 @@ use typst_pdf::{PdfStandard, Timestamp};
 
 use crate::compile::{
     CompilationArtifact, CompilationAttempt, CompilationExecutionControls,
-    CompilationOperationOutcome, CompilationStatus, CompileOptions, CreationTimestamp,
-    FontContainerFulfillment, OutputFormat, PackCompilationPresentation, PackCompilationRequest,
-    PackOverrideSet, PackageTreeFulfillment, PageRange, PageSelection, compile_pack_kernel,
-    parse_page_selection, pdf_standard_requiring_tags, prepare_pack_compilation,
-    validate_pdf_standards,
+    CompilationOperationOutcome, CompilationRequestRejection, CompilationStatus, CompileOptions,
+    CreationTimestamp, FontContainerFulfillment, OutputFormat, PackCompilationPresentation,
+    PackCompilationRequest, PackOverrideSet, PackageTreeFulfillment, PageRange, PageSelection,
+    compile_pack_kernel, parse_page_selection, pdf_request_issues, pdf_standard_requiring_tags,
+    prepare_pack_compilation,
 };
 use crate::extract::{ExtractOptions, extract};
 use crate::manifest::PackMetadata;
@@ -943,23 +943,36 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         .copied()
         .map(PdfStandard::from)
         .collect::<Vec<_>>();
-    if args.no_pdf_tags || !page_selection.ranges().is_empty() {
-        if let Some(name) = pdf_standard_requiring_tags(&standards) {
-            let message = format!("cannot disable PDF tags when exporting a {name} document");
-            return if args.no_pdf_tags {
-                Err(message.into())
-            } else {
-                Err(CliError::Hinted {
-                    message,
-                    hints: vec!["using --pages implies --no-pdf-tags".to_owned()],
-                })
-            };
-        }
+    let pdf_tags = if args.no_pdf_tags {
+        typst::foundations::Smart::Custom(false)
+    } else {
+        typst::foundations::Smart::Auto
+    };
+    if let Some(issue) = pdf_request_issues(&page_selection, &standards, pdf_tags)
+        .into_iter()
+        .next()
+    {
+        return Err(match issue {
+            CompilationRequestRejection::InvalidPdfStandards(error) => {
+                let (message, hints) = error.into_parts();
+                CliError::Hinted { message, hints }
+            }
+            CompilationRequestRejection::PdfStandardRequiresTags => {
+                let name = pdf_standard_requiring_tags(&standards)
+                    .expect("tag requirement was established by the shared validator");
+                let message = format!("cannot disable PDF tags when exporting a {name} document");
+                if args.no_pdf_tags {
+                    CliError::Message(message)
+                } else {
+                    CliError::Hinted {
+                        message,
+                        hints: vec!["using --pages implies --no-pdf-tags".to_owned()],
+                    }
+                }
+            }
+            other => CliError::Message(other.to_string()),
+        });
     }
-    validate_pdf_standards(&standards).map_err(|error| {
-        let (message, hints) = error.into_parts();
-        CliError::Hinted { message, hints }
-    })?;
 
     if args.output.as_deref() == Some(Path::new("-"))
         && args.deps.as_deref() == Some(Path::new("-"))
@@ -1072,11 +1085,7 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         pdf_standards: standards,
         pdf_identifier: typst::foundations::Smart::Auto,
         pdf_creator: typst::foundations::Smart::Auto,
-        pdf_tags: if args.no_pdf_tags {
-            typst::foundations::Smart::Custom(false)
-        } else {
-            typst::foundations::Smart::Auto
-        },
+        pdf_tags,
         creation_timestamp: match creation_timestamp {
             Some(timestamp) => convert_datetime(timestamp)
                 .map(Timestamp::new_utc)
@@ -1650,7 +1659,6 @@ fn emit_diagnostics_with<'a>(
     }
     let mut stream = StandardStream::stderr(color);
     let _ = typst_kit::diagnostics::emit(&mut stream, world, diagnostics, format);
-    let _ = stream.reset();
 }
 
 fn emit_owned_error(message: &str, color: ColorChoice) {

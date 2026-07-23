@@ -30,6 +30,9 @@ pub struct PackManifest {
     /// Fonts embedded in the pack.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     fonts: Vec<FontManifest>,
+    /// Canonical discovery coverage retained by filesystem-created Packs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    discovery: Vec<DiscoveryEvidence>,
     /// Optional descriptive metadata about the packed project.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     metadata: Option<PackMetadata>,
@@ -45,6 +48,8 @@ struct Version1Manifest {
     #[serde(default)]
     fonts: Vec<FontManifest>,
     #[serde(default)]
+    discovery: Vec<DiscoveryEvidence>,
+    #[serde(default)]
     metadata: Option<PackMetadata>,
 }
 
@@ -57,6 +62,7 @@ impl TryFrom<Version1Manifest> for PackManifest {
             project: manifest.project,
             packages: manifest.packages.try_into()?,
             fonts: manifest.fonts,
+            discovery: canonical_discovery(manifest.discovery)?,
             metadata: manifest.metadata,
         })
     }
@@ -169,6 +175,167 @@ pub struct FontManifest {
     /// The exact container byte length.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     container_length: Option<u64>,
+}
+
+/// Persisted request and trace evidence for one successful Discovery Variant.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct DiscoveryEvidence {
+    target: String,
+    inputs_commitment: String,
+    inputs_entry_count: u64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    overrides: Vec<DiscoveryOverrideEvidence>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    features: Vec<String>,
+    document_timestamp: i64,
+    observations: Vec<DiscoveryObservationEvidence>,
+}
+
+impl DiscoveryEvidence {
+    pub(crate) fn new(
+        target: String,
+        inputs_commitment: String,
+        inputs_entry_count: u64,
+        overrides: Vec<DiscoveryOverrideEvidence>,
+        features: Vec<String>,
+        document_timestamp: i64,
+        observations: Vec<DiscoveryObservationEvidence>,
+    ) -> Self {
+        Self {
+            target,
+            inputs_commitment,
+            inputs_entry_count,
+            overrides,
+            features,
+            document_timestamp,
+            observations,
+        }
+    }
+
+    pub fn target(&self) -> &str {
+        &self.target
+    }
+    pub fn inputs_commitment(&self) -> &str {
+        &self.inputs_commitment
+    }
+    pub fn inputs_entry_count(&self) -> u64 {
+        self.inputs_entry_count
+    }
+    pub fn overrides(&self) -> &[DiscoveryOverrideEvidence] {
+        &self.overrides
+    }
+    pub fn features(&self) -> &[String] {
+        &self.features
+    }
+    pub fn document_timestamp(&self) -> i64 {
+        self.document_timestamp
+    }
+    pub fn observations(&self) -> &[DiscoveryObservationEvidence] {
+        &self.observations
+    }
+}
+
+/// Safe evidence for one discovery-only project replacement.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct DiscoveryOverrideEvidence {
+    path: String,
+    byte_length: u64,
+    commitment: String,
+}
+
+impl DiscoveryOverrideEvidence {
+    pub(crate) fn new(path: String, byte_length: u64, commitment: String) -> Self {
+        Self {
+            path,
+            byte_length,
+            commitment,
+        }
+    }
+    pub fn path(&self) -> &str {
+        &self.path
+    }
+    pub fn byte_length(&self) -> u64 {
+        self.byte_length
+    }
+    pub fn commitment(&self) -> &str {
+        &self.commitment
+    }
+}
+
+/// One canonical dependency observation retained in a Pack.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct DiscoveryObservationEvidence {
+    kind: String,
+    logical_path: String,
+    authority: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project_provenance: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    font_index: Option<u64>,
+    outcome: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    byte_length: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    digest: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    commitment: Option<String>,
+}
+
+impl DiscoveryObservationEvidence {
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new(
+        kind: String,
+        logical_path: String,
+        authority: String,
+        project_provenance: Option<String>,
+        font_index: Option<u64>,
+        outcome: String,
+        byte_length: Option<u64>,
+        digest: Option<String>,
+        commitment: Option<String>,
+    ) -> Self {
+        Self {
+            kind,
+            logical_path,
+            authority,
+            project_provenance,
+            font_index,
+            outcome,
+            byte_length,
+            digest,
+            commitment,
+        }
+    }
+    pub fn kind(&self) -> &str {
+        &self.kind
+    }
+    pub fn logical_path(&self) -> &str {
+        &self.logical_path
+    }
+    pub fn authority(&self) -> &str {
+        &self.authority
+    }
+    pub fn project_provenance(&self) -> Option<&str> {
+        self.project_provenance.as_deref()
+    }
+    pub fn font_index(&self) -> Option<u64> {
+        self.font_index
+    }
+    pub fn outcome(&self) -> &str {
+        &self.outcome
+    }
+    pub fn byte_length(&self) -> Option<u64> {
+        self.byte_length
+    }
+    pub fn digest(&self) -> Option<&str> {
+        self.digest.as_deref()
+    }
+    pub fn commitment(&self) -> Option<&str> {
+        self.commitment.as_deref()
+    }
 }
 
 fn is_zero(index: &u32) -> bool {
@@ -390,6 +557,8 @@ pub enum PackManifestError {
     InvalidPackageSpec { spec: String, message: String },
     #[error("package requirement `{spec}` is declared more than once with conflicting values")]
     ConflictingPackageRequirements { spec: String },
+    #[error("invalid discovery evidence: {0}")]
+    InvalidDiscoveryEvidence(String),
 }
 
 impl PackManifest {
@@ -399,6 +568,7 @@ impl PackManifest {
         vendored_packages: Vec<PackageManifest>,
         unvendored_packages: Vec<PackageManifest>,
         fonts: Vec<FontManifest>,
+        discovery: Vec<DiscoveryEvidence>,
         metadata: Option<PackMetadata>,
     ) -> Self {
         Self {
@@ -412,6 +582,7 @@ impl PackManifest {
                 unvendored: unvendored_packages,
             },
             fonts,
+            discovery,
             metadata,
         }
     }
@@ -434,6 +605,16 @@ impl PackManifest {
     /// The embedded font declarations.
     pub fn fonts(&self) -> &[FontManifest] {
         &self.fonts
+    }
+
+    /// Persisted canonical discovery coverage, empty for manually assembled Packs.
+    pub fn discovery(&self) -> &[DiscoveryEvidence] {
+        &self.discovery
+    }
+
+    pub(crate) fn set_discovery(&mut self, discovery: Vec<DiscoveryEvidence>) {
+        self.discovery = canonical_discovery(discovery)
+            .expect("internally generated discovery evidence is canonical");
     }
 
     /// Optional descriptive Pack metadata.
@@ -502,4 +683,107 @@ fn canonical_packages(
         }
     }
     Ok(canonical.into_values().collect())
+}
+
+fn canonical_discovery(
+    mut discovery: Vec<DiscoveryEvidence>,
+) -> Result<Vec<DiscoveryEvidence>, PackManifestError> {
+    fn digest(value: &str) -> bool {
+        value.len() == 32
+            && value
+                .bytes()
+                .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    }
+
+    for variant in &mut discovery {
+        if !matches!(variant.target.as_str(), "paged" | "html") {
+            return Err(PackManifestError::InvalidDiscoveryEvidence(
+                "unknown discovery target".to_owned(),
+            ));
+        }
+        if !digest(&variant.inputs_commitment) {
+            return Err(PackManifestError::InvalidDiscoveryEvidence(
+                "invalid inputs commitment".to_owned(),
+            ));
+        }
+        variant.overrides.sort();
+        for replacements in variant.overrides.windows(2) {
+            if replacements[0].path == replacements[1].path && replacements[0] != replacements[1] {
+                return Err(PackManifestError::InvalidDiscoveryEvidence(
+                    "conflicting override evidence".to_owned(),
+                ));
+            }
+        }
+        variant.overrides.dedup();
+        variant.features.sort();
+        variant.features.dedup();
+        variant.observations.sort();
+        variant.observations.dedup();
+        for replacement in &variant.overrides {
+            if !digest(&replacement.commitment) {
+                return Err(PackManifestError::InvalidDiscoveryEvidence(
+                    "invalid override commitment".to_owned(),
+                ));
+            }
+        }
+        for observation in &variant.observations {
+            if !matches!(observation.kind.as_str(), "source" | "file" | "font")
+                || !matches!(observation.outcome.as_str(), "read" | "missing" | "failed")
+                || !matches!(
+                    observation.authority.as_str(),
+                    "project" | "package" | "resource-provider" | "font-catalog"
+                )
+                || observation.logical_path.is_empty()
+            {
+                return Err(PackManifestError::InvalidDiscoveryEvidence(
+                    "unknown or incomplete observation".to_owned(),
+                ));
+            }
+            let read = observation.outcome == "read";
+            let has_digest = observation.digest.as_deref().is_some_and(digest);
+            let has_commitment = observation.commitment.as_deref().is_some_and(digest);
+            let provenance_valid = match observation.authority.as_str() {
+                "project" => matches!(
+                    observation.project_provenance.as_deref(),
+                    Some("baseline") | Some("override")
+                ),
+                "resource-provider" => {
+                    observation.project_provenance.as_deref() == Some("resource-slot")
+                }
+                "package" | "font-catalog" => observation.project_provenance.is_none(),
+                _ => false,
+            };
+            let override_valid = if observation.project_provenance.as_deref() == Some("override") {
+                observation
+                    .logical_path
+                    .strip_prefix("project:")
+                    .and_then(|path| {
+                        variant.overrides.iter().find(|replacement| {
+                            replacement.path == path
+                                && Some(replacement.byte_length) == observation.byte_length
+                                && Some(replacement.commitment.as_str())
+                                    == observation.commitment.as_deref()
+                        })
+                    })
+                    .is_some()
+            } else {
+                true
+            };
+            if read != (observation.byte_length.is_some() && (has_digest ^ has_commitment))
+                || (!read && (observation.byte_length.is_some() || observation.digest.is_some()))
+                || (!read && observation.commitment.is_some())
+                || !provenance_valid
+                || (observation.project_provenance.as_deref() == Some("override")
+                    && !has_commitment)
+                || !override_valid
+            {
+                return Err(PackManifestError::InvalidDiscoveryEvidence(
+                    "observation outcome fields disagree".to_owned(),
+                ));
+            }
+        }
+    }
+    discovery.sort();
+    discovery.dedup();
+    Ok(discovery)
 }
