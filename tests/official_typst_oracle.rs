@@ -10,10 +10,11 @@ use support::official_typst::{
 use typst::World;
 use typst::foundations::{Bytes, Datetime, Dict, Smart, Value};
 use typst_pack::{
-    CompilationDiagnostic, CompilationStatus, CompileOptions, CreationTimestamp, DiagnosticPhase,
-    DiagnosticProducer, DiagnosticSeverity as PackDiagnosticSeverity, OutputFormat, Pack,
-    PackCompilationRequest, PackOverrideSet, PackageTreeFulfillment, RequestValueOrigin,
-    TracepointKind, compile_pack, parse_page_selection,
+    CompilationDiagnostic, CompilationRequestRejection, CompilationStatus, CompileOptions,
+    CreationTimestamp, DiagnosticPhase, DiagnosticProducer,
+    DiagnosticSeverity as PackDiagnosticSeverity, OutputFormat, Pack, PackCompilationRequest,
+    PackCompileError, PackOverrideSet, PackageTreeFulfillment, RequestValueOrigin, TracepointKind,
+    compile_pack, parse_page_selection,
 };
 use typst_pdf::PdfStandard;
 
@@ -539,6 +540,24 @@ fn effective_defaults_and_required_features_keep_their_origins() {
         explicit.request_inventory().features()[0].origin(),
         RequestValueOrigin::CoreDerived
     );
+
+    let rejected = compile_pack(
+        PackCompilationRequest::new(stabilized_pack(&fixture), OutputFormat::Html)
+            .feature(typst::Feature::Bundle),
+    );
+    let Err(PackCompileError::RequestRejected {
+        rejection,
+        request_inventory,
+    }) = rejected
+    else {
+        panic!("the unsupported Bundle feature must be rejected by Pack preparation");
+    };
+    assert_eq!(*request_inventory.format().value(), OutputFormat::Html);
+    assert_eq!(rejection.issues().len(), 1);
+    assert!(matches!(
+        rejection.issues()[0],
+        CompilationRequestRejection::UnsupportedBundleFeature
+    ));
 }
 
 #[test]
@@ -797,6 +816,196 @@ fn stabilized_pack_matches_official_pdf_exporter_defaults() {
     assert_eq!(actual.artifacts().len(), 1);
     assert_eq!(actual.artifacts()[0].source_page_number(), None);
     assert_eq!(actual.artifacts()[0].bytes(), expected.artifacts[0].bytes);
+}
+
+#[test]
+fn stabilized_pack_matches_official_html_artifacts_and_pretty_control() {
+    let fixture = Fixture::html_success();
+    assert_eq!(
+        CompileOptions::default().pretty,
+        typst_html::HtmlOptions::default().pretty
+    );
+    let compact = compile_pack(PackCompilationRequest::new(
+        stabilized_pack(&fixture),
+        OutputFormat::Html,
+    ))
+    .unwrap();
+    let pretty_result = compile_pack(
+        PackCompilationRequest::new(stabilized_pack(&fixture), OutputFormat::Html).options(
+            CompileOptions {
+                pretty: true,
+                ..CompileOptions::default()
+            },
+        ),
+    )
+    .unwrap();
+    let expected_compact = observe(
+        &fixture,
+        &ReferenceRequest {
+            inputs: Dict::new(),
+            features: vec![typst::Feature::Html],
+            document_time: None,
+            output: OutputRequest::Html { pretty: false },
+        },
+    );
+    let expected_pretty = observe(
+        &fixture,
+        &ReferenceRequest {
+            inputs: Dict::new(),
+            features: vec![typst::Feature::Html],
+            document_time: None,
+            output: OutputRequest::Html { pretty: true },
+        },
+    );
+
+    for (actual, expected, pretty_enabled) in [
+        (&compact, &expected_compact, false),
+        (&pretty_result, &expected_pretty, true),
+    ] {
+        assert_eq!(expected.status, ObservationStatus::Accepted);
+        assert_eq!(expected.target, Target::Html);
+        assert_eq!(actual.status(), CompilationStatus::Succeeded);
+        assert_eq!(actual.source_page_count(), None);
+        assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
+        assert_eq!(actual.artifacts().len(), 1);
+        assert_eq!(expected.artifacts.len(), 1);
+        assert_eq!(expected.artifacts[0].role, ArtifactRole::Html);
+        assert_eq!(actual.artifacts()[0].format(), OutputFormat::Html);
+        assert_eq!(actual.artifacts()[0].source_page_number(), None);
+        assert_eq!(actual.artifacts()[0].bytes(), expected.artifacts[0].bytes);
+        assert_eq!(
+            actual.request_inventory().options().value().pretty,
+            pretty_enabled
+        );
+        assert_eq!(actual.request_inventory().features().len(), 1);
+        assert_eq!(
+            actual.request_inventory().features()[0].value(),
+            typst::Feature::Html
+        );
+        assert_eq!(
+            actual.request_inventory().features()[0].origin(),
+            RequestValueOrigin::CoreDerived
+        );
+        assert!(actual.request_inventory().selected_features().is_empty());
+        assert!(actual.diagnostics().iter().all(|diagnostic| {
+            diagnostic.phase() == DiagnosticPhase::Compilation
+                && diagnostic.producer() == DiagnosticProducer::Engine(actual.engine_identity())
+        }));
+        assert_eq!(actual.exporter_identity().implementation(), "typst-html");
+        assert_eq!(actual.exporter_identity().version(), "0.15.0");
+    }
+    assert_ne!(
+        compact.artifacts()[0].bytes(),
+        pretty_result.artifacts()[0].bytes()
+    );
+    assert_ne!(
+        compact.compilation_identity(),
+        pretty_result.compilation_identity()
+    );
+}
+
+#[test]
+fn official_html_target_rejects_a_missing_required_feature() {
+    let fixture = Fixture::html_success();
+    let observation = observe(
+        &fixture,
+        &ReferenceRequest {
+            inputs: Dict::new(),
+            features: vec![],
+            document_time: None,
+            output: OutputRequest::Html { pretty: false },
+        },
+    );
+
+    assert_eq!(observation.status, ObservationStatus::Rejected);
+    assert_eq!(observation.target, Target::Html);
+    assert_eq!(observation.source_page_count, None);
+    assert!(observation.artifacts.is_empty());
+    let (error, warnings) = observation.diagnostics.split_last().unwrap();
+    assert!(
+        warnings
+            .iter()
+            .all(|diagnostic| diagnostic.severity == DiagnosticSeverity::Warning)
+    );
+    assert_eq!(error.severity, DiagnosticSeverity::Error);
+}
+
+#[test]
+fn html_compiler_rejection_matches_official_diagnostics_and_order() {
+    let fixture = Fixture::html_compiler_rejection();
+    let actual = compile_pack(PackCompilationRequest::new(
+        stabilized_pack(&fixture),
+        OutputFormat::Html,
+    ))
+    .unwrap();
+    let expected = observe(
+        &fixture,
+        &ReferenceRequest {
+            inputs: Dict::new(),
+            features: vec![typst::Feature::Html],
+            document_time: None,
+            output: OutputRequest::Html { pretty: false },
+        },
+    );
+
+    assert_eq!(expected.status, ObservationStatus::Rejected);
+    assert_eq!(expected.target, Target::Html);
+    assert_eq!(actual.status(), CompilationStatus::Rejected);
+    assert_eq!(actual.source_page_count(), None);
+    assert!(actual.artifacts().is_empty());
+    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
+    let (error, warnings) = actual.diagnostics().split_last().unwrap();
+    assert!(!warnings.is_empty());
+    assert!(
+        warnings
+            .iter()
+            .all(|diagnostic| diagnostic.severity() == PackDiagnosticSeverity::Warning)
+    );
+    assert_eq!(error.severity(), PackDiagnosticSeverity::Error);
+    assert!(actual.diagnostics().iter().all(|diagnostic| {
+        diagnostic.phase() == DiagnosticPhase::Compilation
+            && diagnostic.producer() == DiagnosticProducer::Engine(actual.engine_identity())
+    }));
+}
+
+#[test]
+fn html_exporter_rejection_matches_official_diagnostics_and_order() {
+    let fixture = Fixture::html_exporter_rejection();
+    let actual = compile_pack(PackCompilationRequest::new(
+        stabilized_pack(&fixture),
+        OutputFormat::Html,
+    ))
+    .unwrap();
+    let expected = observe(
+        &fixture,
+        &ReferenceRequest {
+            inputs: Dict::new(),
+            features: vec![typst::Feature::Html],
+            document_time: None,
+            output: OutputRequest::Html { pretty: false },
+        },
+    );
+
+    assert_eq!(expected.status, ObservationStatus::Rejected);
+    assert_eq!(expected.target, Target::Html);
+    assert_eq!(actual.status(), CompilationStatus::Rejected);
+    assert_eq!(actual.source_page_count(), None);
+    assert!(actual.artifacts().is_empty());
+    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
+    let (error, warnings) = actual.diagnostics().split_last().unwrap();
+    assert!(!warnings.is_empty());
+    assert!(warnings.iter().all(|warning| {
+        warning.severity() == PackDiagnosticSeverity::Warning
+            && warning.phase() == DiagnosticPhase::Compilation
+            && warning.producer() == DiagnosticProducer::Engine(actual.engine_identity())
+    }));
+    assert_eq!(error.severity(), PackDiagnosticSeverity::Error);
+    assert_eq!(error.phase(), DiagnosticPhase::Export);
+    assert_eq!(
+        error.producer(),
+        DiagnosticProducer::Exporter(actual.exporter_identity())
+    );
+    assert_eq!(error.hints().len(), 1);
 }
 
 #[test]

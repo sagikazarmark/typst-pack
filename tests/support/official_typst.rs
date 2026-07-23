@@ -20,6 +20,9 @@ const MAIN: &str = include_str!("../fixtures/official-oracle/main.typ");
 const CHAPTER: &str = include_str!("../fixtures/official-oracle/chapter.typ");
 const EXPORT_REJECTION: &str = "#pdf.attach(\"duplicate.txt\", bytes(\"first\"))\n\
                                 #pdf.attach(\"duplicate.txt\", bytes(\"second\"))";
+const HTML_SUCCESS: &str = "#let _ = decimal(1.1)\n#html.div[HTML artifact]";
+const HTML_COMPILER_REJECTION: &str = "#let _ = decimal(1.1)\n#datetime.today()";
+const HTML_EXPORTER_REJECTION: &str = "#let _ = decimal(1.1)\n#html.script(\"</script>\")";
 const SEMANTIC_REQUEST: &str = "#let width = int(sys.inputs.width)\n\
                                 #set page(width: (width + datetime.today().day()) * 1pt, height: 10pt, margin: 0pt)\n\
                                 #pdf.table-summary(table(columns: 1, [feature enabled]))";
@@ -61,6 +64,33 @@ impl Fixture {
         Self {
             entrypoint: "main.typ",
             project: &[("main.typ", EXPORT_REJECTION)],
+            packages: &[],
+            fonts: vec![],
+        }
+    }
+
+    pub fn html_success() -> Self {
+        Self {
+            entrypoint: "main.typ",
+            project: &[("main.typ", HTML_SUCCESS)],
+            packages: &[],
+            fonts: vec![],
+        }
+    }
+
+    pub fn html_compiler_rejection() -> Self {
+        Self {
+            entrypoint: "main.typ",
+            project: &[("main.typ", HTML_COMPILER_REJECTION)],
+            packages: &[],
+            fonts: vec![],
+        }
+    }
+
+    pub fn html_exporter_rejection() -> Self {
+        Self {
+            entrypoint: "main.typ",
+            project: &[("main.typ", HTML_EXPORTER_REJECTION)],
             packages: &[],
             fonts: vec![],
         }
