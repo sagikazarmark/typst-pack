@@ -77,8 +77,12 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
 hayro-syntax = "0.7"
+sha2 = "0.10"
 tempfile = "3"
 tiny-skia = "0.12"
+
+[build-dependencies]
+toml = "1.1"
 
 # The profile that 'dist' will build with
 [profile.dist]

@@ -130,10 +130,14 @@ type TypstPack {
     Dagger
       .rust(
         version: self.rustVersion,
-        container: self.rustContainer.withFile("/usr/local/bin/typst", self.officialTypst),
+        container: self
+          .rustContainer
+          .withFile("/usr/local/bin/typst", self.officialTypst)
+          .withFile("/usr/local/bin/typst-pack", self.build),
       )
       .withEnvVariable("TYPST_PACK_OFFICIAL_TYPST", "/usr/local/bin/typst")
       .withEnvVariable("TYPST_PACK_REQUIRE_OFFICIAL_TYPST", "1")
+      .withEnvVariable("TYPST_PACK_TEST_BINARY", "/usr/local/bin/typst-pack")
       .withEnvVariable("CARGO_TARGET_DIR", "/target/cli-parity")
       .test(allFeatures: true, test: ["official_typst_cli"])
   }

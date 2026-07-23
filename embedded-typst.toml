@@ -1,0 +1,302 @@
+[baseline]
+version = 1
+engine = "0.15.0"
+
+[official-cli]
+version = "0.15.0"
+platform = "x86_64-unknown-linux-musl"
+url = "https://github.com/typst/typst/releases/download/v0.15.0/typst-x86_64-unknown-linux-musl.tar.xz"
+sha256 = "59b207df01be2dab9f13e80f73d04d7ff8273ffd46b3dd1b9eef5c60f3eeabea"
+
+[[crate]]
+name = "typst"
+version = "0.15.0"
+checksum = "3c8bf2a5a9d58cc542764a88dd43c8a679b683db4ae23e36267219339ab36b01"
+direct = true
+identity = "engine"
+
+[[crate]]
+name = "typst-assets"
+version = "0.15.0"
+checksum = "da9b236d339dce0ec443dc44afe4ba4c6d76b8917bd4b1ae80158d2111f6637b"
+direct = false
+
+[[crate]]
+name = "typst-eval"
+version = "0.15.0"
+checksum = "4d064876305073ab75d5af039ae5e8dcb32c4cac4aa9f43d0f5aae347baef7c3"
+direct = false
+
+[[crate]]
+name = "typst-html"
+version = "0.15.0"
+checksum = "d442f92bae44087735efc8b83508b259c573bbccf027e098ac68c8f4ca879f76"
+direct = true
+identity = "html"
+
+[[crate]]
+name = "typst-kit"
+version = "0.15.0"
+checksum = "55a24650fc436d32deb55b49fd63f7bcad3a864c96f52587b9934c85e0092d6f"
+direct = true
+
+[[crate]]
+name = "typst-layout"
+version = "0.15.0"
+checksum = "ae5af3949efc6d02e3d55e79430c9096415fcf68166414c3a0e5fed1c3325d5f"
+direct = true
+
+[[crate]]
+name = "typst-library"
+version = "0.15.0"
+checksum = "9550a33d0f4e1965fd7d69abcf10135e965a4ad3a3aee24573b52dda9234e491"
+direct = false
+
+[[crate]]
+name = "typst-macros"
+version = "0.15.0"
+checksum = "500e2873a544ca161f98183eea7ddb00030d16f4585b5ffa9e9c8e24f53148e1"
+direct = false
+
+[[crate]]
+name = "typst-pdf"
+version = "0.15.0"
+checksum = "cd7b33bcabc3357480768f6c78dda99a838d621c71b4738b25e09ac30ac063c9"
+direct = true
+identity = "pdf"
+
+[[crate]]
+name = "typst-realize"
+version = "0.15.0"
+checksum = "917e09614771258b13409b9a8d4f3915b2a2f7f28ca987701695f82fc6a7c0b9"
+direct = false
+
+[[crate]]
+name = "typst-render"
+version = "0.15.0"
+checksum = "040ab6e56e91099963ef69dd9f0d284adda66c066b742f1866a20b8295ebb2e3"
+direct = true
+identity = "png"
+
+[[crate]]
+name = "typst-svg"
+version = "0.15.0"
+checksum = "878b6e1293c2bea77a8be50670d1cbca4e676af96480313a105cba539da51d1c"
+direct = true
+identity = "svg"
+
+[[crate]]
+name = "typst-syntax"
+version = "0.15.0"
+checksum = "22bf7f87450e5841debd4986b0f912b0f7a2251e600c08aca406305ff52c67b4"
+direct = false
+
+[[crate]]
+name = "typst-timing"
+version = "0.15.1"
+checksum = "ab6ee5110f671a23164c61caa85dbc476043d503103dedd36f16d93f970f3f59"
+direct = true
+
+[[crate]]
+name = "typst-utils"
+version = "0.15.0"
+checksum = "40215eb2541102ecfb4cf3bef29da53033a82e22dbc2308c43bdb855701bf8d2"
+direct = false
+
+[[matrix]]
+category = "pdf"
+classification = "upstream-behavior"
+coverage = ["stabilized_pack_matches_official_pdf_export_with_explicit_controls", "stabilized_pack_matches_official_pdf_exporter_defaults"]
+
+[[matrix]]
+category = "png"
+classification = "upstream-behavior"
+coverage = ["pack_png_defaults_match_the_pinned_official_exporter", "stabilized_pack_matches_complete_official_png_page_artifacts"]
+
+[[matrix]]
+category = "svg"
+classification = "upstream-behavior"
+coverage = ["stabilized_project_round_trips_and_matches_pack_svg_compilation"]
+
+[[matrix]]
+category = "html"
+classification = "upstream-behavior"
+coverage = ["stabilized_pack_matches_official_html_artifacts_and_pretty_control", "html_exporter_rejection_matches_official_diagnostics_and_order"]
+
+[[matrix]]
+category = "diagnostics"
+classification = "upstream-behavior"
+coverage = ["pack_rejection_matches_official_diagnostics_and_remains_a_result", "official_typst_compile_gates_shared_environment_diagnostics_and_exit_behavior"]
+
+[[matrix]]
+category = "shared-requests"
+classification = "upstream-behavior"
+coverage = ["shared_semantic_values_drive_the_same_official_source_behavior", "official_typst_compile_gates_shared_environment_diagnostics_and_exit_behavior"]
+
+[[matrix]]
+category = "packages"
+classification = "pack-invariant"
+coverage = ["embedded_and_external_complete_package_trees_match_the_independent_oracle", "official_typst_compile_gates_package_font_and_offline_request_routing"]
+
+[[matrix]]
+category = "fonts"
+classification = "pack-invariant"
+coverage = ["exact_pack_font_catalog_matches_the_independent_oracle_and_external_fulfillment", "official_typst_compile_gates_package_font_and_offline_request_routing"]
+
+[[matrix]]
+category = "pack-overrides"
+classification = "intentional-pack-difference"
+coverage = ["pack_source_and_non_source_overrides_match_the_independent_oracle"]
+
+[[matrix]]
+category = "discovery"
+classification = "pack-invariant"
+coverage = ["official_source_discovery_replay_and_pack_compilation_agree"]
+
+[[matrix]]
+category = "replay"
+classification = "pack-invariant"
+coverage = ["official_source_discovery_replay_and_pack_compilation_agree"]
+
+[[semantic]]
+name = "pack-backed-world"
+classification = "pack-invariant"
+coverage = ["tests/official_typst_oracle.rs", "tests/compilation.rs"]
+
+[[semantic]]
+name = "pack-overrides"
+classification = "intentional-pack-difference"
+coverage = ["tests/official_typst_oracle.rs", "tests/compilation.rs"]
+
+[[semantic]]
+name = "output-request-defaults"
+classification = "upstream-behavior"
+coverage = ["tests/official_typst_oracle.rs"]
+
+[[semantic]]
+name = "cli-parsing-and-environment"
+classification = "unavoidable-mirror"
+coverage = ["tests/official_typst_cli.rs", "tests/cli.rs"]
+
+[[semantic]]
+name = "artifact-publication"
+classification = "adapter-concern"
+coverage = ["tests/cli.rs", ".dagger/modules/tests/main.dang"]
+
+[[semantic]]
+name = "dagger-argument-translation"
+classification = "adapter-concern"
+coverage = [".dagger/modules/tests/main.dang"]
+
+# These are the complete implementation and expectation surfaces where Pack
+# customizes or mirrors embedded Typst behavior. Any change requires updating
+# the adjacent classification and digest as part of the upgrade review.
+[[surface]]
+path = "src/compile.rs"
+classification = "pack-invariant"
+sha256 = "e036b07505b3bc12470dd9d8a98e4f65b65ccc6d5e23cbd252f6d5f0a66a11b4"
+
+[[surface]]
+path = "src/embedded.rs"
+classification = "upstream-behavior"
+sha256 = "7c23c4a6f4e39cba18c6be325e77af113aa500287cf86903942ca6ba8c446ce1"
+
+[[surface]]
+path = "src/extract.rs"
+classification = "pack-invariant"
+sha256 = "a57b8b90aee4fa3805e726ed5ea1cef42166fe9654c4148521eb0bdef397c5a1"
+
+[[surface]]
+path = "src/lib.rs"
+classification = "pack-invariant"
+sha256 = "5e93cabe8ee5d2340da708d7b956182d2ceae0ef711fce8783f45e6c05cf360a"
+
+[[surface]]
+path = "src/main.rs"
+classification = "adapter-concern"
+sha256 = "adce8be17cae31d2753b2ecd1636a466e0e02dded3780951e0bd3fe172a2d098"
+
+[[surface]]
+path = "src/manifest.rs"
+classification = "pack-invariant"
+sha256 = "8e31aa5afbca537ef8291cd981c7c37fe19bb7b8aeebef37c1f3e2539d3c3315"
+
+[[surface]]
+path = "src/pack.rs"
+classification = "pack-invariant"
+sha256 = "8986e537c05428dd7300486ffbb1d2472c269ae79bb343bbc79df6bae8b17306"
+
+[[surface]]
+path = "src/packer.rs"
+classification = "pack-invariant"
+sha256 = "550f1db0e5882cd893b87146e8485716649403b09fbb1d4bdc907930484c9297"
+
+[[surface]]
+path = "src/resource.rs"
+classification = "pack-invariant"
+sha256 = "5efaae4cdba4da676f2c92783dead1e04eb9017caf45107e7d7332f9d8a6adb7"
+
+[[surface]]
+path = "src/tests.rs"
+classification = "pack-invariant"
+sha256 = "672e05c343146618b3c3a49c6020779c346f0fbf330b4a9470e96e6fa870b3f8"
+
+[[surface]]
+path = "src/world.rs"
+classification = "pack-invariant"
+sha256 = "b50c84c2d3000d5d63ff02accd5252d9cb6cbd63967ca3837b320b38a420ed9f"
+
+[[surface]]
+path = "src/cli.rs"
+classification = "unavoidable-mirror"
+sha256 = "9ed0229c8dfd93f38ae1507ae8434f82dfceeeb3e95c4d8a79b9401ad7210a89"
+
+[[surface]]
+path = "dagger.dang"
+classification = "adapter-concern"
+sha256 = "7988c41b0bb71ce6b6431db08e961910260ef4506fb591494696788ac14ee5b5"
+
+[[surface]]
+path = ".dagger/modules/tests"
+classification = "adapter-concern"
+sha256 = "e223dac81f095a82fd98eff1055a8ba13dec654033fb72607cbe5b412473707c"
+
+[[surface]]
+path = "tests/cli.rs"
+classification = "unavoidable-mirror"
+sha256 = "bcd51566ba5ebea2596eebf44e4508878e1d1be8f66a10e8f32eeb01e21981aa"
+
+[[surface]]
+path = "tests/compilation.rs"
+classification = "pack-invariant"
+sha256 = "d97474ddc88bc93579cf52d9220015ec8521baa1782936e464d9dc96b9c75021"
+
+[[surface]]
+path = "tests/official_typst_oracle.rs"
+classification = "upstream-behavior"
+sha256 = "7a689c6c04a46d42ae8aff2a4da949eb0198a6e7a085f4fb912d23558955430a"
+
+[[surface]]
+path = "tests/official_typst_cli.rs"
+classification = "unavoidable-mirror"
+sha256 = "c0b52a6e51b22bd450d410e0599ae9d744405a1c4208fca27a4b0989834a2d21"
+
+[[surface]]
+path = "tests/support/mod.rs"
+classification = "upstream-behavior"
+sha256 = "2d0bd52dd4f556dc7503ed7c8f520cc1322c9bb950e2cce3a8015a118938c3f9"
+
+[[surface]]
+path = "tests/support/official_typst.rs"
+classification = "upstream-behavior"
+sha256 = "d261fae14713c229e4abdb4df5a73aa3c9564d7cde8f37097f3e787ba2246852"
+
+[[surface]]
+path = "tests/support/official_typst_cli.rs"
+classification = "unavoidable-mirror"
+sha256 = "b0c5b1e387750c78896c73cd280d7d0379d266f092c533b466b919e2cda723d7"
+
+[[surface]]
+path = "tests/fixtures/official-oracle"
+classification = "upstream-behavior"
+sha256 = "9fdb0af890f4eec4bbcae274699d05f1af09b418ed820bc6ddc061d3d0cb29a1"

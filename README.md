@@ -172,6 +172,11 @@ such as `page-2.png`, derived from Source Page Numbers. Its typed mapping,
 staging, failure boundary, and intentional transport omissions are documented
 in the [Dagger adapter contract](docs/dagger-adapter.md).
 
+Maintainers changing the embedded compiler must follow the
+[embedded Typst upgrade procedure](docs/embedded-typst-upgrade.md). CI enforces
+the approved crate graph, classified differential matrix, official CLI oracle,
+and the packaged release binary.
+
 ## Library
 
 Add the crate with filesystem-backed packing support and Typst's embedded

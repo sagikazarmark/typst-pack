@@ -63,7 +63,12 @@ type CliResult = Result<(), CliError>;
 #[derive(Debug, Parser)]
 #[command(
     name = "typst-pack",
-    version = concat!(env!("CARGO_PKG_VERSION"), " (Typst 0.15.0)"),
+    version = concat!(
+        env!("CARGO_PKG_VERSION"),
+        " (Typst ",
+        env!("TYPST_PACK_ENGINE_VERSION"),
+        ")"
+    ),
     about
 )]
 pub struct Cli {

@@ -45,7 +45,7 @@ impl ImplementationIdentity {
             source_checksum,
             target: env!("TYPST_PACK_TARGET"),
             target_features: env!("TYPST_PACK_CARGO_CFG_TARGET_FEATURE"),
-            feature_set: "cargo-default-features",
+            feature_set: env!("TYPST_PACK_FEATURE_SET"),
             debug_assertions: cfg!(debug_assertions),
         }
     }

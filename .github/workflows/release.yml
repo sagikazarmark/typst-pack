@@ -211,14 +211,63 @@ jobs:
           path: |
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
+
+  verify-embedded-typst:
+    name: Verify packaged embedded Typst parity
+    needs:
+      - plan
+      - build-local-artifacts
+    if: ${{ fromJson(needs.plan.outputs.val).ci.github.artifacts_matrix.include != null && (needs.plan.outputs.publishing == 'true' || fromJson(needs.plan.outputs.val).ci.github.pr_run_mode == 'upload') }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.92.0
+      - name: Fetch packaged first-party artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: artifacts-build-local-*
+          path: target/distrib/
+          merge-multiple: true
+      - name: Extract Linux release binary
+        shell: bash
+        run: |
+          archive="$(find target/distrib -type f -name '*x86_64-unknown-linux-gnu.tar.xz' -print -quit)"
+          test -n "$archive"
+          mkdir -p "$RUNNER_TEMP/typst-pack-release"
+          tar -xJf "$archive" -C "$RUNNER_TEMP/typst-pack-release"
+          binary="$(find "$RUNNER_TEMP/typst-pack-release" -type f -name typst-pack -print -quit)"
+          test -n "$binary"
+          chmod +x "$binary"
+          echo "TYPST_PACK_TEST_BINARY=$binary" >> "$GITHUB_ENV"
+      - name: Fetch exact official Typst oracle
+        shell: bash
+        run: |
+          curl --proto '=https' --tlsv1.2 -LsSf \
+            https://github.com/typst/typst/releases/download/v0.15.0/typst-x86_64-unknown-linux-musl.tar.xz \
+            -o "$RUNNER_TEMP/typst.tar.xz"
+          printf '%s  %s\n' \
+            '59b207df01be2dab9f13e80f73d04d7ff8273ffd46b3dd1b9eef5c60f3eeabea' \
+            "$RUNNER_TEMP/typst.tar.xz" | sha256sum --check
+          mkdir -p "$RUNNER_TEMP/official-typst"
+          tar -xJf "$RUNNER_TEMP/typst.tar.xz" -C "$RUNNER_TEMP/official-typst" --strip-components=1
+          echo "TYPST_PACK_OFFICIAL_TYPST=$RUNNER_TEMP/official-typst/typst" >> "$GITHUB_ENV"
+      - name: Gate packaged binary against official Typst
+        env:
+          TYPST_PACK_REQUIRE_OFFICIAL_TYPST: "1"
+        run: cargo test --locked --all-features
+
   # Determines if we should publish/announce
   host:
     needs:
       - plan
       - build-local-artifacts
       - build-global-artifacts
+      - verify-embedded-typst
     # Only run if we're "publishing", and only if plan, local and global didn't fail (skipped is fine)
-    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
+    if: ${{ always() && needs.plan.result == 'success' && needs.plan.outputs.publishing == 'true' && needs.verify-embedded-typst.result == 'success' && (needs.build-global-artifacts.result == 'skipped' || needs.build-global-artifacts.result == 'success') && (needs.build-local-artifacts.result == 'skipped' || needs.build-local-artifacts.result == 'success') }}
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
     runs-on: "ubuntu-22.04"

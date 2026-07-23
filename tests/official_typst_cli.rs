@@ -13,6 +13,7 @@ const PAGED_SOURCE: &str =
     "#set page(width: 20pt, height: 10pt, margin: 0pt)\n#rect(width: 4pt, height: 4pt)";
 const HTML_SOURCE: &str = "#html.div[CLI parity]";
 const TIMESTAMP: &str = "946684800";
+const TEST_BINARY_ENV: &str = "TYPST_PACK_TEST_BINARY";
 
 fn write_project(root: &Path, source: &str) -> PathBuf {
     let project = root.join("project");
@@ -44,7 +45,9 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    let mut command = Command::new(env!("CARGO_BIN_EXE_typst-pack"));
+    let executable = std::env::var_os(TEST_BINARY_ENV)
+        .unwrap_or_else(|| env!("CARGO_BIN_EXE_typst-pack").into());
+    let mut command = Command::new(executable);
     for variable in [
         "SOURCE_DATE_EPOCH",
         "TYPST_CERT",
@@ -89,6 +92,15 @@ fn official_typst_compile_is_the_process_level_parity_baseline() {
     let public_result = compile(PackCompilationRequest::new(pack.clone(), OutputFormat::Svg))
         .expect("public Pack compilation must establish the embedded Engine baseline");
     official.require_version(public_result.engine_identity().version());
+    let pack_version = pack_run(directory.path(), ["--version"], &[]);
+    assert_success(&pack_version);
+    assert!(
+        String::from_utf8_lossy(&pack_version.stdout).contains(&format!(
+            "(Typst {})",
+            public_result.engine_identity().version()
+        )),
+        "{TEST_BINARY_ENV} must report the exact embedded Engine baseline"
+    );
 
     for extension in ["pdf", "png", "svg"] {
         let official_output = directory.path().join(format!("official.{extension}"));

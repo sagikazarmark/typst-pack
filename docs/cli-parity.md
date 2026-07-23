@@ -2,7 +2,9 @@
 
 This inventory is tied to Typst 0.15.0. It supplements
 [ADR-0005](adr/0005-align-cli-with-embedded-typst.md) and must be reviewed before
-the embedded Typst release changes.
+the embedded Typst release changes. Follow the complete
+[embedded Typst upgrade procedure](embedded-typst-upgrade.md); the approved
+crate set and classified differential matrix live in `embedded-typst.toml`.
 
 The process differential gate is `tests/official_typst_cli.rs`. Dagger downloads
 the official Typst 0.15.0 release artifact, verifies its published SHA-256
