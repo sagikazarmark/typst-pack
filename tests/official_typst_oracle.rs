@@ -12,8 +12,8 @@ use typst::foundations::{Bytes, Datetime, Dict, Smart, Value};
 use typst_pack::{
     CompilationDiagnostic, CompilationStatus, CompileOptions, CreationTimestamp, DiagnosticPhase,
     DiagnosticProducer, DiagnosticSeverity as PackDiagnosticSeverity, OutputFormat, Pack,
-    PackCompilationRequest, PackOverrideSet, RequestValueOrigin, TracepointKind, compile_pack,
-    parse_page_selection,
+    PackCompilationRequest, PackOverrideSet, PackageTreeFulfillment, RequestValueOrigin,
+    TracepointKind, compile_pack, parse_page_selection,
 };
 use typst_pdf::PdfStandard;
 
@@ -31,6 +31,68 @@ fn stabilized_pack(fixture: &Fixture) -> Pack {
         builder = builder.font(data.clone(), *index).unwrap();
     }
     Pack::from_bytes(builder.build().unwrap().to_bytes().unwrap()).unwrap()
+}
+
+#[test]
+fn embedded_and_external_complete_package_trees_match_the_independent_oracle() {
+    let fixture = Fixture::official_oracle();
+    let reference_request = ReferenceRequest {
+        inputs: string_inputs([("width", "24")]),
+        features: vec![],
+        document_time: Some(Datetime::from_ymd(2024, 2, 3).unwrap()),
+        output: OutputRequest::Svg {
+            source_pages: vec![],
+            render_bleed: false,
+            pretty: false,
+        },
+    };
+    let expected = observe(&fixture, &reference_request);
+    let embedded = compile_pack(
+        PackCompilationRequest::new(stabilized_pack(&fixture), OutputFormat::Svg)
+            .inputs(string_inputs([("width", "24")]))
+            .document_time(Datetime::from_ymd(2024, 2, 3).unwrap()),
+    )
+    .unwrap();
+
+    let mut builder = Pack::builder(fixture.entrypoint());
+    for &(path, text) in fixture.project() {
+        builder = builder.file(path, text.as_bytes().to_vec()).unwrap();
+    }
+    let spec: typst::syntax::package::PackageSpec = fixture.packages()[0].0.parse().unwrap();
+    for &(_, path, text) in fixture.packages() {
+        builder = builder
+            .external_package_file(spec.clone(), path, text.as_bytes().to_vec())
+            .unwrap();
+    }
+    let external_pack = builder.build().unwrap();
+    let external = compile_pack(
+        PackCompilationRequest::new(external_pack, OutputFormat::Svg)
+            .inputs(string_inputs([("width", "24")]))
+            .document_time(Datetime::from_ymd(2024, 2, 3).unwrap())
+            .package_fulfillment(
+                spec,
+                PackageTreeFulfillment::new(
+                    fixture
+                        .packages()
+                        .iter()
+                        .map(|&(_, path, text)| (path, text.as_bytes().to_vec())),
+                ),
+            ),
+    )
+    .unwrap();
+
+    assert_eq!(embedded.status(), CompilationStatus::Succeeded);
+    assert_eq!(external.status(), embedded.status());
+    assert_diagnostics_match(embedded.diagnostics(), &expected.diagnostics);
+    assert_eq!(external.diagnostics(), embedded.diagnostics());
+    assert_eq!(external.artifacts().len(), expected.artifacts.len());
+    assert!(
+        external
+            .artifacts()
+            .iter()
+            .zip(embedded.artifacts())
+            .all(|(external, embedded)| external.bytes() == embedded.bytes())
+    );
 }
 
 #[cfg(feature = "embedded-fonts")]

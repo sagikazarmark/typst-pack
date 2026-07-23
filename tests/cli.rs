@@ -2027,14 +2027,26 @@ fn typst_font_and_package_environment_variables_are_honored() {
         "#let mark = rect(width: 1pt, height: 1pt)",
     )
     .unwrap();
-    let spec = "@local/shapes:0.1.0".parse().unwrap();
+    let spec: typst::syntax::package::PackageSpec = "@local/shapes:0.1.0".parse().unwrap();
     let package_pack = Pack::builder("main.typ")
         .file(
             "main.typ",
             b"#import \"@local/shapes:0.1.0\": mark\n#mark".to_vec(),
         )
         .unwrap()
-        .unvendored_package(spec)
+        .external_package_file(
+            spec.clone(),
+            "typst.toml",
+            b"[package]\nname = \"shapes\"\nversion = \"0.1.0\"\nentrypoint = \"lib.typ\"\n"
+                .to_vec(),
+        )
+        .unwrap()
+        .external_package_file(
+            spec,
+            "lib.typ",
+            b"#let mark = rect(width: 1pt, height: 1pt)".to_vec(),
+        )
+        .unwrap()
         .build()
         .unwrap();
     let package_pack_path = directory.path().join("package.typk");
@@ -2120,14 +2132,26 @@ fn typst_package_cache_path_resolves_unvendored_packages_during_compile() {
     write_cached_package(&cache, "compile-cache");
     let empty_packages = directory.path().join("empty-packages");
     std::fs::create_dir(&empty_packages).unwrap();
-    let spec = "@preview/compile-cache:0.1.0".parse().unwrap();
+    let spec: typst::syntax::package::PackageSpec = "@preview/compile-cache:0.1.0".parse().unwrap();
     let pack = Pack::builder("main.typ")
         .file(
             "main.typ",
             b"#import \"@preview/compile-cache:0.1.0\": mark\n#mark".to_vec(),
         )
         .unwrap()
-        .unvendored_package(spec)
+        .external_package_file(
+            spec.clone(),
+            "typst.toml",
+            b"[package]\nname = \"compile-cache\"\nversion = \"0.1.0\"\nentrypoint = \"lib.typ\"\n"
+                .to_vec(),
+        )
+        .unwrap()
+        .external_package_file(
+            spec,
+            "lib.typ",
+            b"#let mark = rect(width: 1pt, height: 1pt)".to_vec(),
+        )
+        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("package.typk");
@@ -2242,7 +2266,10 @@ fn no_vendor_packages_records_dependency_and_compiles_with_package_path() {
     let pack = Pack::from_bytes(std::fs::read(&pack_path).unwrap()).unwrap();
     let spec = "@preview/unvendored:0.1.0".parse().unwrap();
     assert!(!pack.has_package(&spec));
-    assert_eq!(pack.manifest().packages().unvendored(), [spec]);
+    assert_eq!(
+        pack.manifest().packages().unvendored()[0].spec().unwrap(),
+        spec
+    );
 
     let output = directory.path().join("project.svg");
     let compiled = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
@@ -3007,7 +3034,8 @@ fn compile_forwards_argument_and_environment_certificates_to_package_downloader(
             b"#import \"@preview/certificate-probe:0.1.0\": value\n#value".to_vec(),
         )
         .unwrap()
-        .unvendored_package(spec)
+        .external_package_file(spec, "lib.typ", b"#let value = 42".to_vec())
+        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
@@ -3108,7 +3136,8 @@ fn compile_offline_missing_package_does_not_activate_download_probe() {
             b"#import \"@preview/offline-probe:0.1.0\": value\n#value".to_vec(),
         )
         .unwrap()
-        .unvendored_package(spec)
+        .external_package_file(spec, "lib.typ", b"#let value = 42".to_vec())
+        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");

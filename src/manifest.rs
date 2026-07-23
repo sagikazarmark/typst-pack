@@ -3,8 +3,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
-use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde::{Deserialize, Deserializer, Serialize};
 use typst::syntax::package::PackageSpec;
+
+use crate::pack::{
+    PACKAGE_TREE_IDENTITY_ALGORITHM, PACKAGE_TREE_IDENTITY_KIND, PACKAGE_TREE_IDENTITY_SCHEMA,
+};
 
 /// The archive entry name of the manifest.
 pub const MANIFEST_PATH: &str = "typst-pack.toml";
@@ -83,31 +87,21 @@ pub struct ProjectManifest {
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub struct PackagesManifest {
-    /// Exact specs of packages whose files are stored inside the pack.
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        serialize_with = "serialize_package_specs"
-    )]
-    vendored: Vec<PackageSpec>,
-    /// Exact specs of observed dependencies that are *not* stored inside the
-    /// pack and must be resolved from a package directory, cache, or registry
-    /// when compiling.
-    #[serde(
-        default,
-        skip_serializing_if = "Vec::is_empty",
-        serialize_with = "serialize_package_specs"
-    )]
-    unvendored: Vec<PackageSpec>,
+    /// Exact package trees whose files are stored inside the Pack.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    vendored: Vec<PackageManifest>,
+    /// Exact package trees that must be externally fulfilled.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    unvendored: Vec<PackageManifest>,
 }
 
 #[derive(Default, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 struct Version1PackagesManifest {
     #[serde(default)]
-    vendored: Vec<String>,
+    vendored: Vec<PackageManifest>,
     #[serde(default)]
-    unvendored: Vec<String>,
+    unvendored: Vec<PackageManifest>,
 }
 
 impl TryFrom<Version1PackagesManifest> for PackagesManifest {
@@ -115,8 +109,8 @@ impl TryFrom<Version1PackagesManifest> for PackagesManifest {
 
     fn try_from(packages: Version1PackagesManifest) -> Result<Self, Self::Error> {
         Ok(Self {
-            vendored: parse_specs(packages.vendored)?,
-            unvendored: parse_specs(packages.unvendored)?,
+            vendored: canonical_packages(packages.vendored)?,
+            unvendored: canonical_packages(packages.unvendored)?,
         })
     }
 }
@@ -132,11 +126,17 @@ impl<'de> Deserialize<'de> for PackagesManifest {
     }
 }
 
-fn serialize_package_specs<S>(specs: &[PackageSpec], serializer: S) -> Result<S::Ok, S::Error>
-where
-    S: Serializer,
-{
-    serializer.collect_seq(specs.iter().map(ToString::to_string))
+/// One exact Complete Package Tree declaration.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", deny_unknown_fields)]
+pub struct PackageManifest {
+    spec: String,
+    tree_digest: String,
+    tree_identity_kind: String,
+    tree_identity_schema: String,
+    tree_identity_algorithm: String,
+    file_count: u64,
+    byte_length: u64,
 }
 
 /// One `[[fonts]]` entry.
@@ -208,18 +208,69 @@ impl ProjectManifest {
 }
 
 impl PackagesManifest {
-    /// Exact specifications of packages stored inside the Pack.
-    pub fn vendored(&self) -> &[PackageSpec] {
+    /// Exact package trees stored inside the Pack.
+    pub fn vendored(&self) -> &[PackageManifest] {
         &self.vendored
     }
 
-    /// Exact specifications of packages resolved outside the Pack.
-    pub fn unvendored(&self) -> &[PackageSpec] {
+    /// Exact package trees fulfilled outside the Pack.
+    pub fn unvendored(&self) -> &[PackageManifest] {
         &self.unvendored
     }
 
     fn is_empty(&self) -> bool {
         self.vendored.is_empty() && self.unvendored.is_empty()
+    }
+}
+
+impl PackageManifest {
+    pub(crate) fn new(
+        spec: PackageSpec,
+        tree_digest: String,
+        file_count: u64,
+        byte_length: u64,
+    ) -> Self {
+        Self {
+            spec: spec.to_string(),
+            tree_digest,
+            tree_identity_kind: PACKAGE_TREE_IDENTITY_KIND.to_owned(),
+            tree_identity_schema: PACKAGE_TREE_IDENTITY_SCHEMA.to_owned(),
+            tree_identity_algorithm: PACKAGE_TREE_IDENTITY_ALGORITHM.to_owned(),
+            file_count,
+            byte_length,
+        }
+    }
+
+    pub fn spec(&self) -> Result<PackageSpec, PackManifestError> {
+        PackageSpec::from_str(&self.spec).map_err(|error| PackManifestError::InvalidPackageSpec {
+            spec: self.spec.clone(),
+            message: error.to_string(),
+        })
+    }
+
+    pub fn tree_digest(&self) -> &str {
+        &self.tree_digest
+    }
+    pub fn tree_identity_kind(&self) -> &str {
+        &self.tree_identity_kind
+    }
+    pub fn tree_identity_schema(&self) -> &str {
+        &self.tree_identity_schema
+    }
+    pub fn tree_identity_algorithm(&self) -> &str {
+        &self.tree_identity_algorithm
+    }
+    pub fn file_count(&self) -> u64 {
+        self.file_count
+    }
+    pub fn byte_length(&self) -> u64 {
+        self.byte_length
+    }
+}
+
+impl std::fmt::Display for PackageManifest {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.spec)
     }
 }
 
@@ -337,14 +388,16 @@ pub enum PackManifestError {
     UnsupportedVersion(u32),
     #[error("invalid package spec `{spec}`: {message}")]
     InvalidPackageSpec { spec: String, message: String },
+    #[error("package requirement `{spec}` is declared more than once with conflicting values")]
+    ConflictingPackageRequirements { spec: String },
 }
 
 impl PackManifest {
     pub(crate) fn new(
         entrypoint: String,
         resource_slots: BTreeSet<String>,
-        vendored_packages: Vec<PackageSpec>,
-        unvendored_packages: Vec<PackageSpec>,
+        vendored_packages: Vec<PackageManifest>,
+        unvendored_packages: Vec<PackageManifest>,
         fonts: Vec<FontManifest>,
         metadata: Option<PackMetadata>,
     ) -> Self {
@@ -355,8 +408,8 @@ impl PackManifest {
                 resource_slots,
             },
             packages: PackagesManifest {
-                vendored: canonical_specs(vendored_packages),
-                unvendored: canonical_specs(unvendored_packages),
+                vendored: vendored_packages,
+                unvendored: unvendored_packages,
             },
             fonts,
             metadata,
@@ -410,13 +463,13 @@ impl PackManifest {
         Ok(())
     }
 
-    /// The vendored package specs.
-    pub fn vendored_packages(&self) -> &[PackageSpec] {
+    /// The vendored package requirements.
+    pub fn vendored_packages(&self) -> &[PackageManifest] {
         &self.packages.vendored
     }
 
-    /// The unvendored package specs.
-    pub fn unvendored_packages(&self) -> &[PackageSpec] {
+    /// The externally fulfilled package requirements.
+    pub fn unvendored_packages(&self) -> &[PackageManifest] {
         &self.packages.unvendored
     }
 }
@@ -436,24 +489,17 @@ fn parse_manifest_value(value: toml::Value) -> Result<PackManifest, PackManifest
     Ok(manifest)
 }
 
-fn parse_specs(specs: Vec<String>) -> Result<Vec<PackageSpec>, PackManifestError> {
-    specs
-        .into_iter()
-        .map(|spec| {
-            PackageSpec::from_str(&spec).map_err(|err| PackManifestError::InvalidPackageSpec {
-                spec,
-                message: err.to_string(),
-            })
-        })
-        .collect::<Result<Vec<_>, _>>()
-        .map(canonical_specs)
-}
-
-fn canonical_specs(specs: Vec<PackageSpec>) -> Vec<PackageSpec> {
-    specs
-        .into_iter()
-        .map(|spec| (spec.to_string(), spec))
-        .collect::<BTreeMap<_, _>>()
-        .into_values()
-        .collect()
+fn canonical_packages(
+    packages: Vec<PackageManifest>,
+) -> Result<Vec<PackageManifest>, PackManifestError> {
+    let mut canonical = BTreeMap::new();
+    for package in packages {
+        let spec = package.spec()?.to_string();
+        if let Some(existing) = canonical.insert(spec.clone(), package.clone())
+            && existing != package
+        {
+            return Err(PackManifestError::ConflictingPackageRequirements { spec });
+        }
+    }
+    Ok(canonical.into_values().collect())
 }

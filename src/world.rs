@@ -18,7 +18,7 @@ use typst::{Feature, Library, LibraryExt, World};
 use typst_kit::files::{FileLoader, FileStore};
 use typst_kit::fonts::{FontSource, FontStore};
 
-use crate::pack::{FontCatalogError, FontContainerIdentity, Pack};
+use crate::pack::{FontCatalogError, FontContainerIdentity, Pack, PackageFiles};
 use crate::resource::{CompilationResources, Provider};
 
 #[cfg(feature = "fs")]
@@ -162,11 +162,38 @@ fn system_packages_with_online(
     SystemPackages::from_parts(data, cache, universe)
 }
 
+#[cfg(feature = "fs")]
+pub(crate) fn read_complete_package_tree(
+    root: &std::path::Path,
+) -> Result<Vec<(String, Bytes)>, String> {
+    let mut files = Vec::new();
+    for entry in walkdir::WalkDir::new(root).sort_by_file_name() {
+        let entry = entry.map_err(|error| error.to_string())?;
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        let path = typst::syntax::VirtualPath::virtualize(root, entry.path()).map_err(|_| {
+            format!(
+                "package file `{}` is outside its root",
+                entry.path().display()
+            )
+        })?;
+        let data = std::fs::read(entry.path()).map_err(|error| {
+            format!(
+                "failed to read package file `{}`: {error}",
+                entry.path().display()
+            )
+        })?;
+        files.push((path.get_without_slash().to_owned(), Bytes::new(data)));
+    }
+    Ok(files)
+}
+
 /// A complete Typst [`World`] backed by a [`Pack`].
 ///
-/// Project files and vendored package files come from the pack. Fonts come
-/// from the pack, plus any fonts configured on the builder. Files of packages
-/// that are not vendored are only available if a package loader is configured.
+/// Project files and embedded package files come from the Pack. Externally
+/// fulfilled package files are available only through a crate-verified exact
+/// dependency snapshot. Fonts come from the Pack plus any configured fonts.
 /// Declared Resource Slots may come from Resource Providers; providers cannot
 /// replace packed files or supply Typst source or package files.
 pub struct PackWorld {
@@ -184,7 +211,7 @@ impl PackWorld {
     }
 
     /// Creates a world with default configuration.
-    pub fn new(pack: Pack) -> Result<Self, FontCatalogError> {
+    pub fn new(pack: Pack) -> Result<Self, PackWorldBuildError> {
         Self::builder(pack).build()
     }
 
@@ -236,6 +263,13 @@ impl World for PackWorld {
     }
 }
 
+impl PackWorld {
+    pub(crate) fn file_dependencies(&mut self) -> Vec<FileId> {
+        let (_, dependencies) = self.store.dependencies();
+        dependencies.collect()
+    }
+}
+
 /// Where the world takes the current date from.
 enum Clock {
     /// `datetime.today()` errors in document code.
@@ -250,13 +284,12 @@ enum Clock {
     System(typst_kit::datetime::Time),
 }
 
-/// Serves file requests from a pack, with an optional fallback for packages
-/// that are not vendored.
+/// Serves file requests only from a Pack and verified dependency snapshots.
 struct PackLoader {
     pack: Arc<Pack>,
     project_overrides: BTreeMap<String, Bytes>,
     resources: CompilationResources,
-    package_loader: Option<Box<dyn FileLoader + Send + Sync>>,
+    exact_packages: BTreeMap<String, PackageFiles>,
 }
 
 impl FileLoader for PackLoader {
@@ -280,15 +313,14 @@ impl FileLoader for PackLoader {
                         .package_file(spec, path)
                         .cloned()
                         .ok_or_else(|| FileError::NotFound(PathBuf::from(path)))
-                } else if let Some(loader) = &self.package_loader {
-                    loader.load(id)
+                } else if let Some(package) = self.exact_packages.get(&spec.to_string()) {
+                    package
+                        .file(path)
+                        .cloned()
+                        .ok_or_else(|| FileError::NotFound(PathBuf::from(path)))
                 } else {
                     Err(FileError::Other(Some(
-                        format!(
-                            "package {spec} is not vendored in the pack \
-                             and no package loader is configured"
-                        )
-                        .into(),
+                        format!("package {spec} has no verified Complete Package Tree").into(),
                     )))
                 }
             }
@@ -306,9 +338,20 @@ pub struct PackWorldBuilder {
     embedded_fonts: bool,
     extra_fonts: Vec<(BoxedFontSource, FontInfo)>,
     catalog_fonts: Option<Vec<Font>>,
+    exact_packages: Option<BTreeMap<String, PackageFiles>>,
     resource_providers: Vec<Provider>,
-    package_loader: Option<Box<dyn FileLoader + Send + Sync>>,
     project_overrides: BTreeMap<String, Bytes>,
+}
+
+/// A Pack cannot be exposed to Typst without exact dependency snapshots.
+#[derive(Debug, thiserror::Error)]
+pub enum PackWorldBuildError {
+    #[error("external package fulfillment is unavailable for {packages:?}")]
+    MissingExternalPackages {
+        packages: Vec<typst::syntax::package::PackageSpec>,
+    },
+    #[error(transparent)]
+    FontCatalog(#[from] FontCatalogError),
 }
 
 /// Adapter that lets heterogeneous font sources live in one list.
@@ -330,8 +373,8 @@ impl PackWorldBuilder {
             embedded_fonts: false,
             extra_fonts: Vec::new(),
             catalog_fonts: None,
+            exact_packages: None,
             resource_providers: Vec::new(),
-            package_loader: None,
             project_overrides: BTreeMap::new(),
         }
     }
@@ -413,10 +456,8 @@ impl PackWorldBuilder {
         self
     }
 
-    /// Serves files of packages that are not vendored in the pack, e.g. from
-    /// a package cache or the network.
-    pub fn package_loader(mut self, loader: impl FileLoader + Send + Sync + 'static) -> Self {
-        self.package_loader = Some(Box::new(loader));
+    pub(crate) fn exact_packages(mut self, packages: BTreeMap<String, PackageFiles>) -> Self {
+        self.exact_packages = Some(packages);
         self
     }
 
@@ -453,7 +494,19 @@ impl PackWorldBuilder {
     }
 
     /// Builds the world.
-    pub fn build(self) -> Result<PackWorld, FontCatalogError> {
+    pub fn build(self) -> Result<PackWorld, PackWorldBuildError> {
+        let missing_packages = self
+            .pack
+            .package_requirements()
+            .iter()
+            .filter(|requirement| !requirement.is_embedded())
+            .map(|requirement| requirement.spec().clone())
+            .collect::<Vec<_>>();
+        if self.exact_packages.is_none() && !missing_packages.is_empty() {
+            return Err(PackWorldBuildError::MissingExternalPackages {
+                packages: missing_packages,
+            });
+        }
         let entrypoint = typst::syntax::VirtualPath::new(self.pack.entrypoint())
             .expect("Pack entrypoint invariant violated");
         let main = RootedPath::new(VirtualRoot::Project, entrypoint).intern();
@@ -497,33 +550,11 @@ impl PackWorldBuilder {
                 pack: Arc::new(self.pack),
                 project_overrides: self.project_overrides,
                 resources: CompilationResources::new(self.resource_providers),
-                package_loader: self.package_loader,
+                exact_packages: self.exact_packages.unwrap_or_default(),
             }),
             fonts,
             clock: self.clock,
         })
-    }
-}
-
-/// A [`FileLoader`] that resolves package files from standard system
-/// locations (and Typst Universe), for compiling packs whose dependencies are
-/// not vendored. Project file requests always fail: those must come from the
-/// pack.
-#[cfg(feature = "fs")]
-pub struct SystemPackageLoader(pub typst_kit::packages::SystemPackages);
-
-#[cfg(feature = "fs")]
-impl SystemPackageLoader {
-    /// Creates a loader using the standard package directories and the
-    /// official Typst Universe registry.
-    pub fn system() -> Self {
-        Self(system_packages(None, None, false, None))
-    }
-
-    /// Creates a loader that only uses the standard local package
-    /// directories and never accesses the network.
-    pub fn offline() -> Self {
-        Self(system_packages(None, None, true, None))
     }
 }
 
@@ -581,18 +612,6 @@ impl typst_kit::downloader::Downloader for OfflineDownloader {
             std::io::ErrorKind::NotFound,
             "network access is disabled (offline mode)",
         ))
-    }
-}
-
-#[cfg(feature = "fs")]
-impl FileLoader for SystemPackageLoader {
-    fn load(&self, id: FileId) -> FileResult<Bytes> {
-        match id.root() {
-            VirtualRoot::Project => Err(FileError::NotFound(PathBuf::from(
-                id.vpath().get_without_slash(),
-            ))),
-            VirtualRoot::Package(spec) => Ok(self.0.obtain(spec)?.load(id.vpath())?),
-        }
     }
 }
 

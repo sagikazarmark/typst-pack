@@ -2,7 +2,8 @@ use typst_pack::{
     CompilationOperationOutcome, CompilationRequestRejection, CompilationStatus, CompileOptions,
     CreationTimestamp, DiagnosticPhase, DiagnosticProducer, FontContainerFulfillment, OutputFormat,
     Pack, PackCompilationRequest, PackCompileError, PackMetadata, PackOverrideSet,
-    PackOverrideSetError, PackWorld, RequestValueOrigin, compile, compile_pack,
+    PackOverrideSetError, PackWorld, PackageTreeFulfillment, RequestValueOrigin, compile,
+    compile_pack,
 };
 
 fn five_page_world() -> PackWorld {
@@ -379,7 +380,8 @@ fn pack_bound_compilation_does_not_use_package_caches_or_network() {
             b"#import \"@preview/example:1.0.0\": *".to_vec(),
         )
         .unwrap()
-        .unvendored_package(package)
+        .external_package_file(package, "lib.typ", b"#let value = 1".to_vec())
+        .unwrap()
         .build()
         .unwrap();
 
@@ -392,6 +394,88 @@ fn pack_bound_compilation_does_not_use_package_caches_or_network() {
             ..
         }) if packages.len() == 1
     ));
+}
+
+#[test]
+fn external_package_fulfillment_is_verified_before_official_compilation() {
+    let package: typst::syntax::package::PackageSpec = "@local/example:1.0.0".parse().unwrap();
+    let source = b"#let value = 42".to_vec();
+    let manifest =
+        b"[package]\nname = \"example\"\nversion = \"1.0.0\"\nentrypoint = \"lib.typ\"".to_vec();
+    let pack = Pack::builder("main.typ")
+        .file(
+            "main.typ",
+            b"#import \"@local/example:1.0.0\": value\n#value".to_vec(),
+        )
+        .unwrap()
+        .external_package_file(package.clone(), "lib.typ", source.clone())
+        .unwrap()
+        .external_package_file(package.clone(), "typst.toml", manifest.clone())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let malformed = compile_pack(
+        PackCompilationRequest::new(pack.clone(), OutputFormat::Svg).package_fulfillment(
+            package.clone(),
+            PackageTreeFulfillment::new([("../lib.typ", source.clone())]),
+        ),
+    );
+    assert!(matches!(
+        malformed,
+        Err(PackCompileError::Operation {
+            outcome: CompilationOperationOutcome::MalformedExternalPackageTree { spec, .. },
+            ..
+        }) if spec == package
+    ));
+
+    let mismatched = compile_pack(
+        PackCompilationRequest::new(pack.clone(), OutputFormat::Svg).package_fulfillment(
+            package.clone(),
+            PackageTreeFulfillment::new([
+                ("lib.typ", b"#let value = 7".to_vec()),
+                ("typst.toml", manifest.clone()),
+            ]),
+        ),
+    );
+    assert!(matches!(
+        mismatched,
+        Err(PackCompileError::Operation {
+            outcome: CompilationOperationOutcome::MismatchedExternalPackageTree { spec, .. },
+            ..
+        }) if spec == package
+    ));
+
+    let baseline = compile_pack(
+        PackCompilationRequest::new(pack.clone(), OutputFormat::Svg).package_fulfillment(
+            package.clone(),
+            PackageTreeFulfillment::new([
+                ("lib.typ", source.clone()),
+                ("typst.toml", manifest.clone()),
+            ]),
+        ),
+    )
+    .unwrap();
+    let with_telemetry = compile_pack(
+        PackCompilationRequest::new(pack, OutputFormat::Svg).package_fulfillment(
+            package,
+            PackageTreeFulfillment::new([("lib.typ", source), ("typst.toml", manifest)])
+                .provenance("memory:test")
+                .cache_hit(true),
+        ),
+    )
+    .unwrap();
+
+    assert_eq!(baseline.status(), CompilationStatus::Succeeded);
+    assert_eq!(
+        baseline.compilation_identity(),
+        with_telemetry.compilation_identity()
+    );
+    assert_eq!(
+        baseline.artifacts()[0].bytes(),
+        with_telemetry.artifacts()[0].bytes()
+    );
+    assert_eq!(baseline.diagnostics(), with_telemetry.diagnostics());
 }
 
 #[cfg(feature = "embedded-fonts")]

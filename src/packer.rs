@@ -562,35 +562,31 @@ impl Packer {
 
         // Packages.
         for (spec, id) in package_files.values() {
-            if self.vendor_packages {
-                let package_root =
-                    world
-                        .files
-                        .loader()
-                        .root(*id)
-                        .map_err(|err| PackerError::Package {
-                            spec: spec.clone(),
-                            message: err.to_string(),
-                        })?;
-                for entry in walkdir::WalkDir::new(package_root.path()).sort_by_file_name() {
-                    let entry = entry.map_err(|err| PackerError::Walk(err.to_string()))?;
-                    if !entry.file_type().is_file() {
-                        continue;
-                    }
-                    let vpath = VirtualPath::virtualize(package_root.path(), entry.path())
-                        .map_err(|_| PackerError::OutsideRoot(entry.path().to_owned()))?;
-                    let data = std::fs::read(entry.path()).map_err(|err| {
-                        PackerError::io(
-                            &format!("failed to read `{}`", entry.path().display()),
-                            err,
-                        )
+            let package_root =
+                world
+                    .files
+                    .loader()
+                    .root(*id)
+                    .map_err(|err| PackerError::Package {
+                        spec: spec.clone(),
+                        message: err.to_string(),
                     })?;
-                    builder =
-                        builder.package_file(spec.clone(), vpath.get_without_slash(), data)?;
-                }
+            let tree = crate::world::read_complete_package_tree(package_root.path()).map_err(
+                |message| PackerError::Package {
+                    spec: spec.clone(),
+                    message,
+                },
+            )?;
+            for (path, data) in tree {
+                builder = if self.vendor_packages {
+                    builder.package_file(spec.clone(), path, data.to_vec())?
+                } else {
+                    builder.external_package_file(spec.clone(), path, data.to_vec())?
+                };
+            }
+            if self.vendor_packages {
                 report.packages_vendored.push(spec.clone());
             } else {
-                builder = builder.unvendored_package(spec.clone());
                 report.packages_unvendored.push(spec.clone());
             }
         }

@@ -20,27 +20,28 @@ pub use compile::{
     EffectiveEngineFeature, EffectiveRequestValue, EngineIdentity, ExporterIdentity,
     FontContainerFulfillment, LogicalSpan, OutputFormat, PackCompilationRequest,
     PackCompilationWarning, PackCompileError, PackOverrideInventoryEntry, PackOverrideSet,
-    PackOverrideSetError, PackOverridesInventory, PageRange, PageSelection,
+    PackOverrideSetError, PackOverridesInventory, PackageTreeFulfillment, PageRange, PageSelection,
     PdfStandardsValidationError, RequestValueOrigin, TracepointKind, TypstInputsInventory, compile,
     compile_pack, parse_page_selection,
 };
 pub use manifest::{
     FORMAT_VERSION, FontManifest, MANIFEST_PATH, PackManifest, PackManifestError, PackMetadata,
-    PackagesManifest, ProjectManifest,
+    PackageManifest, PackagesManifest, ProjectManifest,
 };
 pub use pack::{
     FILE_EXTENSION, FontCatalogError, FontContainerIdentity, FontFaceIdentity, FontRequirement,
     Pack, PackBuildError, PackBuilder, PackFont, PackFontCatalogFace, PackIdentity,
-    PackInvariantError, PackPathRole, PackReadError, PackWriteError,
+    PackInvariantError, PackPathRole, PackReadError, PackWriteError, PackageRequirement,
+    PackageTreeError, PackageTreeIdentity,
 };
-pub use world::{PackWorld, PackWorldBuilder};
+pub use world::{PackWorld, PackWorldBuildError, PackWorldBuilder};
 
 #[cfg(feature = "fs")]
 pub use extract::{ExtractError, ExtractOptions, ExtractReport, extract};
 #[cfg(feature = "fs")]
 pub use packer::{DiscoveryTarget, DiscoveryWorld, PackOutcome, PackReport, Packer, PackerError};
 #[cfg(feature = "fs")]
-pub use world::{OfflineDownloader, SystemPackageLoader};
+pub use world::OfflineDownloader;
 
 #[cfg(test)]
 mod tests;

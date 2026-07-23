@@ -2,7 +2,6 @@
 
 use crate::*;
 
-#[cfg(feature = "fs")]
 use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -17,6 +16,35 @@ use typst_kit::files::FileLoader;
 
 fn tiny_png() -> Vec<u8> {
     tiny_skia::Pixmap::new(4, 4).unwrap().encode_png().unwrap()
+}
+
+fn test_package_declaration(files: &[(&str, &[u8])]) -> PackageManifest {
+    let spec: typst::syntax::package::PackageSpec = "@local/example:1.0.0".parse().unwrap();
+    let mut builder = Pack::builder("main.typ")
+        .file("main.typ", b"Hello".to_vec())
+        .unwrap();
+    for (path, data) in files {
+        builder = builder
+            .package_file(spec.clone(), path, data.to_vec())
+            .unwrap();
+    }
+    builder.build().unwrap().manifest().packages().vendored()[0].clone()
+}
+
+fn test_package_manifest(
+    vendored: Vec<PackageManifest>,
+    unvendored: Vec<PackageManifest>,
+) -> Vec<u8> {
+    PackManifest::new(
+        "main.typ".to_owned(),
+        BTreeSet::new(),
+        vendored,
+        unvendored,
+        vec![],
+        None,
+    )
+    .to_toml()
+    .into_bytes()
 }
 
 #[test]
@@ -311,8 +339,8 @@ fn manifest_roundtrip() {
         resource-slots = ["logo.png"]
 
         [packages]
-        vendored = ["@preview/cetz:0.3.4"]
-        unvendored = ["@preview/tablex:0.0.9"]
+        vendored = [{ spec = "@preview/cetz:0.3.4", tree-digest = "00000000000000000000000000000001", tree-identity-kind = "complete-package-tree", tree-identity-schema = "typst-pack-complete-package-tree-v1", tree-identity-algorithm = "typst-hash128-0.15", file-count = 1, byte-length = 1 }]
+        unvendored = [{ spec = "@preview/tablex:0.0.9", tree-digest = "00000000000000000000000000000002", tree-identity-kind = "complete-package-tree", tree-identity-schema = "typst-pack-complete-package-tree-v1", tree-identity-algorithm = "typst-hash128-0.15", file-count = 1, byte-length = 1 }]
 
         [[fonts]]
         path = "fonts/test.ttf"
@@ -329,9 +357,29 @@ fn manifest_roundtrip() {
 
     let serialized = manifest.to_toml();
     assert!(serialized.contains("resource-slots ="));
-    assert!(serialized.contains("unvendored ="));
+    assert!(serialized.contains("tree-digest ="));
     let reparsed = PackManifest::from_toml(&serialized).unwrap();
     assert_eq!(manifest, reparsed);
+}
+
+#[test]
+fn manifest_rejects_conflicting_package_requirements_for_one_spec() {
+    let manifest = r#"
+        format-version = 1
+        [project]
+        entrypoint = "main.typ"
+        [packages]
+        unvendored = [
+          { spec = "@local/example:1.0.0", tree-digest = "00000000000000000000000000000001", tree-identity-kind = "complete-package-tree", tree-identity-schema = "typst-pack-complete-package-tree-v1", tree-identity-algorithm = "typst-hash128-0.15", file-count = 1, byte-length = 1 },
+          { spec = "@local/example:1.0.0", tree-digest = "00000000000000000000000000000002", tree-identity-kind = "complete-package-tree", tree-identity-schema = "typst-pack-complete-package-tree-v1", tree-identity-algorithm = "typst-hash128-0.15", file-count = 1, byte-length = 1 },
+        ]
+    "#;
+
+    assert!(matches!(
+        PackManifest::from_toml(manifest),
+        Err(PackManifestError::ConflictingPackageRequirements { ref spec })
+            if spec == "@local/example:1.0.0"
+    ));
 }
 
 #[test]
@@ -358,8 +406,8 @@ fn manifest_declarations_are_exposed_read_only_through_accessors() {
         resource-slots = ["logo.png"]
 
         [packages]
-        vendored = ["@preview/cetz:0.3.4"]
-        unvendored = ["@preview/tablex:0.0.9"]
+        vendored = [{ spec = "@preview/cetz:0.3.4", tree-digest = "00000000000000000000000000000001", tree-identity-kind = "complete-package-tree", tree-identity-schema = "typst-pack-complete-package-tree-v1", tree-identity-algorithm = "typst-hash128-0.15", file-count = 1, byte-length = 1 }]
+        unvendored = [{ spec = "@preview/tablex:0.0.9", tree-digest = "00000000000000000000000000000002", tree-identity-kind = "complete-package-tree", tree-identity-schema = "typst-pack-complete-package-tree-v1", tree-identity-algorithm = "typst-hash128-0.15", file-count = 1, byte-length = 1 }]
 
         [[fonts]]
         path = "fonts/test.ttf"
@@ -385,8 +433,11 @@ fn manifest_declarations_are_exposed_read_only_through_accessors() {
     let unvendored = "@preview/tablex:0.0.9"
         .parse::<typst::syntax::package::PackageSpec>()
         .unwrap();
-    assert_eq!(manifest.packages().vendored(), &[vendored]);
-    assert_eq!(manifest.packages().unvendored(), &[unvendored]);
+    assert_eq!(manifest.packages().vendored()[0].spec().unwrap(), vendored);
+    assert_eq!(
+        manifest.packages().unvendored()[0].spec().unwrap(),
+        unvendored
+    );
     assert_eq!(manifest.fonts()[0].path(), "fonts/test.ttf");
     assert_eq!(manifest.fonts()[0].index(), 2);
     assert_eq!(manifest.fonts()[0].families(), ["Test"]);
@@ -630,7 +681,8 @@ fn pack_construction_rejects_conflicting_package_roles() {
         .unwrap()
         .package_file(spec.clone(), "lib.typ", b"Hello".to_vec())
         .unwrap()
-        .unvendored_package(spec)
+        .external_package_file(spec, "lib.typ", b"Hello".to_vec())
+        .unwrap()
         .build();
     assert!(matches!(
         built,
@@ -639,9 +691,10 @@ fn pack_construction_rejects_conflicting_package_roles() {
         )) if spec == "@local/example:1.0.0"
     ));
 
-    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[packages]\nvendored = [\"@local/example:1.0.0\"]\nunvendored = [\"@local/example:1.0.0\"]\n";
+    let declaration = test_package_declaration(&[("lib.typ", b"Hello")]);
+    let manifest = test_package_manifest(vec![declaration.clone()], vec![declaration]);
     let bytes = raw_stored_zip(&[
-        (MANIFEST_PATH, manifest),
+        (MANIFEST_PATH, &manifest),
         ("project/main.typ", b"Hello"),
         ("packages/local/example/1.0.0/lib.typ", b"Hello"),
     ]);
@@ -655,9 +708,12 @@ fn pack_construction_rejects_conflicting_package_roles() {
 
 #[test]
 fn pack_construction_rejects_package_declaration_data_disagreement() {
-    let missing_manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[packages]\nvendored = [\"@local/example:1.0.0\"]\n";
+    let missing_manifest = test_package_manifest(
+        vec![test_package_declaration(&[("lib.typ", b"Hello")])],
+        vec![],
+    );
     let missing = raw_stored_zip(&[
-        (MANIFEST_PATH, missing_manifest),
+        (MANIFEST_PATH, &missing_manifest),
         ("project/main.typ", b"Hello"),
     ]);
     assert!(matches!(
@@ -682,6 +738,38 @@ fn pack_construction_rejects_package_declaration_data_disagreement() {
 }
 
 #[test]
+fn complete_package_tree_identity_binds_paths_bytes_and_fulfillment_role() {
+    let spec: typst::syntax::package::PackageSpec = "@local/example:1.0.0".parse().unwrap();
+    let external = |path: &str, data: &[u8]| {
+        Pack::builder("main.typ")
+            .file("main.typ", b"Hello".to_vec())
+            .unwrap()
+            .external_package_file(spec.clone(), path, data.to_vec())
+            .unwrap()
+            .build()
+            .unwrap()
+    };
+    let first = external("lib.typ", b"first");
+    let changed_bytes = external("lib.typ", b"second");
+    let changed_path = external("other.typ", b"first");
+    let embedded = Pack::builder("main.typ")
+        .file("main.typ", b"Hello".to_vec())
+        .unwrap()
+        .package_file(spec, "lib.typ", b"first".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    assert_ne!(first.identity(), changed_bytes.identity());
+    assert_ne!(first.identity(), changed_path.identity());
+    assert_ne!(first.identity(), embedded.identity());
+    assert_eq!(first.package_requirements()[0].file_count(), 1);
+    assert_eq!(first.package_requirements()[0].byte_length(), 5);
+    assert!(!first.package_requirements()[0].is_embedded());
+    assert!(embedded.package_requirements()[0].is_embedded());
+}
+
+#[test]
 fn pack_construction_rejects_package_specs_that_do_not_roundtrip() {
     let mut invalid = "@local/example:1.0.0"
         .parse::<typst::syntax::package::PackageSpec>()
@@ -697,7 +785,8 @@ fn pack_construction_rejects_package_specs_that_do_not_roundtrip() {
     let unvendored = Pack::builder("main.typ")
         .file("main.typ", b"Hello".to_vec())
         .unwrap()
-        .unvendored_package(invalid)
+        .external_package_file(invalid, "lib.typ", b"Hello".to_vec())
+        .unwrap()
         .build();
 
     assert!(matches!(
@@ -771,7 +860,8 @@ fn archive_path_failures_precede_package_role_failures() {
         .unwrap()
         .package_file(spec.clone(), "lib.typ", b"Package".to_vec())
         .unwrap()
-        .unvendored_package(spec)
+        .external_package_file(spec, "lib.typ", b"Package".to_vec())
+        .unwrap()
         .build();
 
     assert!(matches!(
@@ -787,9 +877,10 @@ fn archive_path_failures_precede_package_role_failures() {
 
 #[test]
 fn pack_construction_rejects_conflicting_package_file_tree_paths() {
-    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[packages]\nvendored = [\"@local/example:1.0.0\"]\n";
+    let manifest =
+        test_package_manifest(vec![test_package_declaration(&[("lib", b"file")])], vec![]);
     let bytes = raw_stored_zip(&[
-        (MANIFEST_PATH, manifest),
+        (MANIFEST_PATH, &manifest),
         ("project/main.typ", b"Hello"),
         ("packages/local/example/1.0.0/lib", b"file"),
         ("packages/local/example/1.0.0/lib/child.typ", b"child"),
@@ -1198,7 +1289,8 @@ fn full_unicode_pack_roundtrip_is_equivalent_and_idempotent() {
         .unwrap()
         .package_file(vendored, "章节.typ", b"Package".to_vec())
         .unwrap()
-        .unvendored_package(unvendored)
+        .external_package_file(unvendored, "lib.typ", b"Remote".to_vec())
+        .unwrap()
         .font(embedded_font_data(), 0)
         .unwrap()
         .metadata(PackMetadata::new().with_name("完整 Pack"))
@@ -1541,9 +1633,12 @@ fn read_rejects_distinct_archive_entries_with_one_canonical_identity() {
 
 #[test]
 fn read_rejects_canonical_collisions_for_package_and_font_entries() {
-    let package_manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[packages]\nvendored = [\"@local/example:1.0.0\"]\n";
+    let package_manifest = test_package_manifest(
+        vec![test_package_declaration(&[("lib.typ", b"first")])],
+        vec![],
+    );
     let package = raw_stored_zip(&[
-        (MANIFEST_PATH, package_manifest),
+        (MANIFEST_PATH, &package_manifest),
         ("project/main.typ", b"Hello"),
         ("packages/local/example/1.0.0/lib.typ", b"first"),
         ("packages/local/example/1.0.0/./lib.typ", b"second"),
@@ -1674,9 +1769,12 @@ fn read_accepts_safe_aliases_at_archive_role_boundaries() {
     .unwrap();
     assert_eq!(project.file("main.typ").unwrap().as_slice(), b"Hello");
 
-    let package_manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[packages]\nvendored = [\"@local/example:1.0.0\"]\n";
+    let package_manifest = test_package_manifest(
+        vec![test_package_declaration(&[("lib.typ", b"Package")])],
+        vec![],
+    );
     let package = Pack::from_bytes(raw_stored_zip(&[
-        (MANIFEST_PATH, package_manifest),
+        (MANIFEST_PATH, &package_manifest),
         ("project/main.typ", b"Hello"),
         ("packages/local/example/1.0.0//lib.typ", b"Package"),
     ]))
@@ -2180,24 +2278,25 @@ fn package_requests_do_not_consult_resource_providers() {
 }
 
 #[test]
-fn project_requests_do_not_consult_package_loader() {
+fn undeclared_package_requests_have_no_ambient_fallback() {
     let pack = Pack::builder("main.typ")
-        .file("main.typ", b"#read(\"missing.txt\")".to_vec())
+        .file("main.typ", Vec::new())
         .unwrap()
         .build()
         .unwrap();
-    let (loader, calls) = MemoryProjectFile::tracked("missing.txt", b"host file".to_vec());
-    let world = PackWorld::builder(pack)
-        .package_loader(loader)
-        .build()
-        .unwrap();
+    let world = PackWorld::builder(pack).build().unwrap();
+    let spec = "@local/undeclared:1.0.0".parse().unwrap();
+    let id = RootedPath::new(
+        VirtualRoot::Package(spec),
+        VirtualPath::new("lib.typ").unwrap(),
+    )
+    .intern();
 
-    assert!(compile(&world, OutputFormat::Svg, &CompileOptions::default()).is_err());
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
+    assert!(world.file(id).is_err());
 }
 
 #[test]
-fn vendored_package_compiles_without_consulting_package_loader() {
+fn vendored_package_compiles_from_the_pack() {
     use std::str::FromStr as _;
 
     let spec = typst::syntax::package::PackageSpec::from_str("@local/inside:1.0.0").unwrap();
@@ -2222,18 +2321,13 @@ fn vendored_package_compiles_without_consulting_package_loader() {
         .unwrap()
         .build()
         .unwrap();
-    let (loader, calls) = MemoryProjectFile::tracked("unused", Vec::new());
-    let world = PackWorld::builder(pack)
-        .package_loader(loader)
-        .build()
-        .unwrap();
+    let world = PackWorld::builder(pack).build().unwrap();
 
     assert!(compile(&world, OutputFormat::Svg, &CompileOptions::default()).is_ok());
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
 
 #[test]
-fn missing_vendored_package_file_does_not_fall_through_to_package_loader() {
+fn missing_vendored_package_file_has_no_ambient_fallback() {
     use std::str::FromStr as _;
 
     let spec = typst::syntax::package::PackageSpec::from_str("@local/inside:1.0.0").unwrap();
@@ -2252,17 +2346,9 @@ fn missing_vendored_package_file_does_not_fall_through_to_package_loader() {
         .unwrap()
         .build()
         .unwrap();
-    let (loader, calls) = MemoryProjectFile::tracked(
-        "missing.typ",
-        b"#let mark = rect(width: 1pt, height: 1pt)".to_vec(),
-    );
-    let world = PackWorld::builder(pack)
-        .package_loader(loader)
-        .build()
-        .unwrap();
+    let world = PackWorld::builder(pack).build().unwrap();
 
     assert!(compile(&world, OutputFormat::Svg, &CompileOptions::default()).is_err());
-    assert_eq!(calls.load(Ordering::Relaxed), 0);
 }
 
 #[cfg(feature = "fs")]
@@ -2270,24 +2356,6 @@ mod fs {
     use super::*;
     use std::fs;
     use std::path::Path;
-
-    #[test]
-    fn system_package_loader_rejects_project_requests() {
-        use typst_kit::packages::{FsPackages, SystemPackages, UniversePackages};
-
-        let dir = tempfile::tempdir().unwrap();
-        let packages = SystemPackages::from_parts(
-            Some(FsPackages::new(dir.path().join("packages"))),
-            None,
-            UniversePackages::new(OfflineDownloader),
-        );
-        let loader = SystemPackageLoader(packages);
-
-        assert_eq!(
-            loader.load(project_file_id("project.typ")),
-            Err(FileError::NotFound(PathBuf::from("project.typ")))
-        );
-    }
 
     /// Creates a project directory with an image, a data file, an included
     /// chapter, and an import from a local package, plus the package itself
@@ -3180,57 +3248,6 @@ Rows: #csv("data.csv").len()
         // Round-trip through bytes: nothing may depend on the file system.
         let pack = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
         let world = PackWorld::builder(pack)
-            .embedded_fonts(true)
-            .build()
-            .unwrap();
-        let output = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap();
-        assert!(output.artifacts[0].bytes().starts_with(b"%PDF"));
-    }
-
-    #[cfg(feature = "embedded-fonts")]
-    #[test]
-    fn unvendored_packages_resolve_through_package_loader() {
-        let dir = tempfile::tempdir().unwrap();
-        let (project, packages) = fixture(dir.path());
-        let outcome = Packer::new(&project, "main.typ")
-            .package_path(&packages)
-            .system_fonts(false)
-            .vendor_packages(false)
-            .pack()
-            .unwrap();
-        assert!(outcome.report.packages_vendored.is_empty());
-        assert_eq!(outcome.report.packages_unvendored.len(), 1);
-
-        let pack = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
-
-        // Without a loader, compilation must fail...
-        let world = PackWorld::builder(pack.clone())
-            .embedded_fonts(true)
-            .build()
-            .unwrap();
-        let error = compile(&world, OutputFormat::Pdf, &CompileOptions::default()).unwrap_err();
-        let CompileError::Diagnostics { errors, .. } = error else {
-            panic!("unvendored package did not produce a compilation diagnostic");
-        };
-        let messages = errors
-            .iter()
-            .map(|diagnostic| diagnostic.message.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            messages.contains("no package loader is configured"),
-            "{messages}"
-        );
-
-        // ...with a loader pointed at the package path, it succeeds.
-        use typst_kit::packages::{FsPackages, SystemPackages, UniversePackages};
-        let loader = SystemPackageLoader(SystemPackages::from_parts(
-            Some(FsPackages::new(&packages)),
-            None,
-            UniversePackages::new(OfflineDownloader),
-        ));
-        let world = PackWorld::builder(pack)
-            .package_loader(loader)
             .embedded_fonts(true)
             .build()
             .unwrap();

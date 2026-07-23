@@ -130,9 +130,11 @@ empty files for them.
 ### Packages
 
 All observed package dependencies are vendored into the pack by default.
-With `--no-vendor-packages`, they are instead recorded as *unvendored* dependencies in
-the Pack Manifest; compiling such a pack resolves them from the local package
-directories or downloads them from Typst Universe, like the Typst CLI would.
+With `--no-vendor-packages`, each dependency is instead recorded as an exact
+package specification and Complete Package Tree identity. Compilation acquires
+the whole tree from the configured package directory, cache, or Typst Universe,
+verifies it before invoking Typst, and exposes only the verified paths and bytes.
+Undeclared package locations and ambient caches cannot satisfy imports.
 
 `--offline` (on both `create` and `compile`) disables the download step
 entirely: dependencies must come from the pack or the local package

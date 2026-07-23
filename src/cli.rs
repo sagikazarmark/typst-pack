@@ -23,9 +23,9 @@ use typst_kit::fonts::FontSource;
 use typst_pdf::{PdfStandard, Timestamp};
 
 use crate::compile::{
-    CompilationArtifact, CompileError, CompileOptions, CreationTimestamp, OutputFormat, PageRange,
-    PageSelection, compile_with_default_pdf_timestamp, parse_page_selection,
-    pdf_standard_requiring_tags, validate_pdf_standards,
+    CompilationArtifact, CompilationOperationOutcome, CompileError, CompileOptions,
+    CreationTimestamp, OutputFormat, PageRange, PageSelection, compile_with_default_pdf_timestamp,
+    parse_page_selection, pdf_standard_requiring_tags, validate_pdf_standards,
 };
 use crate::extract::{ExtractOptions, extract};
 use crate::manifest::PackMetadata;
@@ -994,20 +994,45 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         .materialize_font_catalog(&supplied_fonts)
         .map_err(|error| CliError::Message(error.to_string()))?;
 
+    let packages = crate::world::system_packages(
+        args.packages.package_path.as_deref(),
+        args.packages.package_cache_path.as_deref(),
+        args.packages.offline,
+        cert,
+    );
+    let mut package_roots = BTreeMap::new();
+    let mut package_fulfillments = BTreeMap::new();
+    for requirement in pack
+        .package_requirements()
+        .iter()
+        .filter(|requirement| !requirement.is_embedded())
+    {
+        let root = packages.obtain(requirement.spec()).map_err(|error| {
+            CliError::Message(
+                CompilationOperationOutcome::UnavailableExternalPackageFulfillment {
+                    spec: requirement.spec().clone(),
+                    message: error.to_string(),
+                }
+                .to_string(),
+            )
+        })?;
+        let files =
+            crate::world::read_complete_package_tree(root.path()).map_err(CliError::Message)?;
+        package_roots.insert(requirement.spec().to_string(), root.path().to_owned());
+        package_fulfillments.insert(requirement.spec().to_string(), files);
+    }
+    let exact_packages = pack
+        .materialize_package_trees(package_fulfillments)
+        .map_err(|error| {
+            CliError::Message(crate::compile::package_tree_outcome(error).to_string())
+        })?;
+
     let host_dependencies = Arc::new(Mutex::new(BTreeSet::new()));
     let mut builder = PackWorld::builder(pack)
         .embedded_fonts(false)
         .exact_font_catalog(exact_font_catalog)
-        .inputs(parse_inputs(&args.compilation.inputs))
-        .package_loader(FilesystemPackageLoader {
-            packages: crate::world::system_packages(
-                args.packages.package_path.as_deref(),
-                args.packages.package_cache_path.as_deref(),
-                args.packages.offline,
-                cert,
-            ),
-            dependencies: Arc::clone(&host_dependencies),
-        });
+        .exact_packages(exact_packages)
+        .inputs(parse_inputs(&args.compilation.inputs));
     for feature in &args.compilation.features {
         builder = builder.feature((*feature).into());
     }
@@ -1065,12 +1090,19 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     let mut command_result = None;
     let timings = timer.record(&mut world, |world| {
         command_result = Some((|| -> CliResult {
-            let output = match compile_with_default_pdf_timestamp(
-                world,
-                format,
-                &options,
-                local_timestamp,
-            ) {
+            let compiled =
+                compile_with_default_pdf_timestamp(world, format, &options, local_timestamp);
+            for id in world.file_dependencies() {
+                if let VirtualRoot::Package(spec) = id.root()
+                    && let Some(root) = package_roots.get(&spec.to_string())
+                {
+                    host_dependencies
+                        .lock()
+                        .expect("host dependency lock poisoned")
+                        .insert(root.join(id.vpath().get_without_slash()));
+                }
+            }
+            let output = match compiled {
                 Ok(output) => output,
                 Err(CompileError::Diagnostics {
                     errors,
@@ -1391,32 +1423,6 @@ impl FileLoader for FilesystemResourceProvider {
             VirtualRoot::Package(_) => Err(FileError::NotFound(PathBuf::from(
                 id.vpath().get_without_slash(),
             ))),
-        }
-    }
-}
-
-struct FilesystemPackageLoader {
-    packages: typst_kit::packages::SystemPackages,
-    dependencies: Arc<Mutex<BTreeSet<PathBuf>>>,
-}
-
-impl FileLoader for FilesystemPackageLoader {
-    fn load(&self, id: FileId) -> FileResult<Bytes> {
-        match id.root() {
-            VirtualRoot::Project => Err(FileError::NotFound(PathBuf::from(
-                id.vpath().get_without_slash(),
-            ))),
-            VirtualRoot::Package(spec) => {
-                let root = self.packages.obtain(spec)?;
-                let result = root.load(id.vpath());
-                if result.is_ok() {
-                    self.dependencies
-                        .lock()
-                        .expect("host dependency lock poisoned")
-                        .insert(root.path().join(id.vpath().get_without_slash()));
-                }
-                result
-            }
         }
     }
 }

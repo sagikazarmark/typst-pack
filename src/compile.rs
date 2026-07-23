@@ -16,8 +16,8 @@ use typst_layout::PagedDocument;
 use typst_pdf::{PdfOptions, PdfStandard, PdfStandards, Timestamp};
 
 use crate::embedded::EmbeddedTypst;
-use crate::pack::FontCatalogError;
-use crate::{FontContainerIdentity, Pack, PackWorld};
+use crate::pack::{FontCatalogError, PackageTreeError};
+use crate::{FontContainerIdentity, Pack, PackWorld, PackageTreeIdentity};
 
 /// The exact embedded Typst compiler implementation that produced a result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -521,7 +521,44 @@ pub struct PackCompilationRequest {
     overrides: EffectiveRequestValue<PackOverrideSet>,
     features: Vec<EffectiveEngineFeature>,
     document_time: EffectiveRequestValue<Option<Datetime>>,
+    package_fulfillments: BTreeMap<String, PackageTreeFulfillment>,
     font_fulfillments: BTreeMap<FontContainerIdentity, FontContainerFulfillment>,
+}
+
+/// One externally acquired Complete Package Tree and operational metadata.
+#[derive(Debug, Clone)]
+pub struct PackageTreeFulfillment {
+    files: Vec<(String, Bytes)>,
+    provenance: Option<String>,
+    cache_hit: bool,
+}
+
+impl PackageTreeFulfillment {
+    pub fn new<I, P, D>(files: I) -> Self
+    where
+        I: IntoIterator<Item = (P, D)>,
+        P: Into<String>,
+        D: Into<Vec<u8>>,
+    {
+        Self {
+            files: files
+                .into_iter()
+                .map(|(path, data)| (path.into(), Bytes::new(data.into())))
+                .collect(),
+            provenance: None,
+            cache_hit: false,
+        }
+    }
+
+    pub fn provenance(mut self, provenance: impl Into<String>) -> Self {
+        self.provenance = Some(provenance.into());
+        self
+    }
+
+    pub fn cache_hit(mut self, cache_hit: bool) -> Self {
+        self.cache_hit = cache_hit;
+        self
+    }
 }
 
 /// Exact externally supplied Font Container bytes and non-semantic metadata.
@@ -567,6 +604,7 @@ impl PackCompilationRequest {
             overrides: EffectiveRequestValue::new(overrides, RequestValueOrigin::CoreDefaulted),
             features: Vec::new(),
             document_time: EffectiveRequestValue::new(None, RequestValueOrigin::CoreDefaulted),
+            package_fulfillments: BTreeMap::new(),
             font_fulfillments: BTreeMap::new(),
         }
     }
@@ -634,6 +672,17 @@ impl PackCompilationRequest {
         fulfillment: FontContainerFulfillment,
     ) -> Self {
         self.font_fulfillments.insert(expected, fulfillment);
+        self
+    }
+
+    /// Supplies one Complete Package Tree under its exact Typst package specification.
+    pub fn package_fulfillment(
+        mut self,
+        spec: PackageSpec,
+        fulfillment: PackageTreeFulfillment,
+    ) -> Self {
+        self.package_fulfillments
+            .insert(spec.to_string(), fulfillment);
         self
     }
 }
@@ -1117,6 +1166,27 @@ pub enum CompilationOperationOutcome {
     /// The request supplied no authority for declared external packages.
     #[error("external package fulfillment is unavailable for {packages:?}")]
     MissingExternalPackageFulfillment { packages: Vec<PackageSpec> },
+    /// An explicit Package Authority could not acquire one declared requirement.
+    #[error("external package fulfillment for {spec} is unavailable: {message}")]
+    UnavailableExternalPackageFulfillment { spec: PackageSpec, message: String },
+    /// Supplied files do not match the exact required Complete Package Tree.
+    #[error("external package fulfillment for {spec} supplied {actual:?}, expected {expected:?}")]
+    MismatchedExternalPackageTree {
+        spec: PackageSpec,
+        expected: PackageTreeIdentity,
+        actual: PackageTreeIdentity,
+        expected_file_count: u64,
+        actual_file_count: u64,
+        expected_byte_length: u64,
+        actual_byte_length: u64,
+    },
+    /// Supplied package files do not form a valid Complete Package Tree.
+    #[error("external package fulfillment for {spec} is malformed at `{path}`: {message}")]
+    MalformedExternalPackageTree {
+        spec: PackageSpec,
+        path: String,
+        message: String,
+    },
     /// No fulfillment was supplied for declared external Font Containers.
     #[error("external font fulfillment is unavailable for {containers:?}")]
     MissingExternalFontFulfillment {
@@ -1205,6 +1275,7 @@ pub fn compile_pack(
         overrides,
         features,
         document_time,
+        package_fulfillments,
         font_fulfillments,
     } = request;
     let options_value = options.value();
@@ -1356,16 +1427,17 @@ pub fn compile_pack(
         engine_identity,
         exporter_identity,
     );
-    let external_packages = pack.manifest().packages().unvendored().to_vec();
-    if !external_packages.is_empty() {
-        return Err(PackCompileError::Operation {
-            outcome: CompilationOperationOutcome::MissingExternalPackageFulfillment {
-                packages: external_packages,
-            },
-            request_inventory: Box::new(request_inventory),
+    let package_files = package_fulfillments
+        .into_iter()
+        .map(|(spec, fulfillment)| (spec, fulfillment.files))
+        .collect();
+    let exact_packages = pack
+        .materialize_package_trees(package_files)
+        .map_err(|error| PackCompileError::Operation {
+            outcome: package_tree_outcome(error),
+            request_inventory: Box::new(request_inventory.clone()),
             compilation_identity,
-        });
-    }
+        })?;
 
     let fulfillment_bytes = font_fulfillments
         .into_iter()
@@ -1403,6 +1475,7 @@ pub fn compile_pack(
     let mut world = PackWorld::builder(pack)
         .inputs(raw_inputs)
         .exact_project_overrides(overrides.value.replacements)
+        .exact_packages(exact_packages)
         .exact_font_catalog(catalog_fonts);
     #[cfg(feature = "embedded-fonts")]
     {
@@ -1416,7 +1489,7 @@ pub fn compile_pack(
     }
     let world = world
         .build()
-        .expect("verified Pack Font Catalog must build a World");
+        .expect("verified Pack dependency snapshots must build a World");
 
     let result = match compile_with_default_pdf_timestamp(
         &world,
@@ -1527,6 +1600,40 @@ pub fn compile_pack(
         }
     };
     Ok(result)
+}
+
+pub(crate) fn package_tree_outcome(error: PackageTreeError) -> CompilationOperationOutcome {
+    match error {
+        PackageTreeError::Missing { packages } => {
+            CompilationOperationOutcome::MissingExternalPackageFulfillment { packages }
+        }
+        PackageTreeError::Mismatched {
+            spec,
+            expected,
+            actual,
+            expected_file_count,
+            actual_file_count,
+            expected_byte_length,
+            actual_byte_length,
+        } => CompilationOperationOutcome::MismatchedExternalPackageTree {
+            spec,
+            expected,
+            actual,
+            expected_file_count,
+            actual_file_count,
+            expected_byte_length,
+            actual_byte_length,
+        },
+        PackageTreeError::Malformed {
+            spec,
+            path,
+            message,
+        } => CompilationOperationOutcome::MalformedExternalPackageTree {
+            spec,
+            path,
+            message,
+        },
+    }
 }
 
 fn compilation_identity(

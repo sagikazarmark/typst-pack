@@ -12,7 +12,9 @@ use typst::text::{Font, FontInfo};
 use zip::write::SimpleFileOptions;
 use zip::{ZipArchive, ZipWriter};
 
-use crate::manifest::{FontManifest, MANIFEST_PATH, PackManifest, PackManifestError, PackMetadata};
+use crate::manifest::{
+    FontManifest, MANIFEST_PATH, PackManifest, PackManifestError, PackMetadata, PackageManifest,
+};
 
 /// The conventional file extension for packs.
 pub const FILE_EXTENSION: &str = "typk";
@@ -20,6 +22,9 @@ pub const FILE_EXTENSION: &str = "typk";
 const PROJECT_PREFIX: &str = "project/";
 const PACKAGES_PREFIX: &str = "packages/";
 const MAX_ZIP_ENTRY_NAME_LEN: usize = u16::MAX as usize;
+pub(crate) const PACKAGE_TREE_IDENTITY_KIND: &str = "complete-package-tree";
+pub(crate) const PACKAGE_TREE_IDENTITY_SCHEMA: &str = "typst-pack-complete-package-tree-v1";
+pub(crate) const PACKAGE_TREE_IDENTITY_ALGORITHM: &str = "typst-hash128-0.15";
 
 /// A portable pack of a Typst project.
 ///
@@ -33,6 +38,7 @@ pub struct Pack {
     files: BTreeMap<CanonicalPath, Bytes>,
     /// Vendored packages, keyed by spec string for deterministic order.
     packages: BTreeMap<String, PackageFiles>,
+    package_requirements: Vec<PackageRequirement>,
     fonts: Vec<PackFont>,
     font_catalog: Vec<PackFontCatalogFace>,
     font_requirements: Vec<FontRequirement>,
@@ -61,9 +67,70 @@ impl PackIdentity {
 }
 
 #[derive(Debug, Clone)]
-struct PackageFiles {
-    spec: PackageSpec,
+pub(crate) struct PackageFiles {
+    pub(crate) spec: PackageSpec,
     files: BTreeMap<CanonicalPath, Bytes>,
+}
+
+impl PackageFiles {
+    pub(crate) fn file(&self, path: &str) -> Option<&Bytes> {
+        self.files.get(path)
+    }
+}
+
+/// The canonical content identity of one Complete Package Tree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct PackageTreeIdentity(u128);
+
+impl PackageTreeIdentity {
+    pub fn digest(self) -> [u8; 16] {
+        self.0.to_be_bytes()
+    }
+    pub fn kind(self) -> &'static str {
+        PACKAGE_TREE_IDENTITY_KIND
+    }
+    pub fn schema(self) -> &'static str {
+        PACKAGE_TREE_IDENTITY_SCHEMA
+    }
+    pub fn algorithm(self) -> &'static str {
+        PACKAGE_TREE_IDENTITY_ALGORITHM
+    }
+    fn encode(self) -> String {
+        format!("{:032x}", self.0)
+    }
+    fn decode(value: &str) -> Option<Self> {
+        (value.len() == 32)
+            .then(|| u128::from_str_radix(value, 16).ok().map(Self))
+            .flatten()
+    }
+}
+
+/// One exact package specification and Complete Package Tree identity.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PackageRequirement {
+    spec: PackageSpec,
+    tree: PackageTreeIdentity,
+    file_count: u64,
+    byte_length: u64,
+    embedded: bool,
+}
+
+impl PackageRequirement {
+    pub fn spec(&self) -> &PackageSpec {
+        &self.spec
+    }
+    pub fn tree_identity(&self) -> PackageTreeIdentity {
+        self.tree
+    }
+    pub fn file_count(&self) -> u64 {
+        self.file_count
+    }
+    pub fn byte_length(&self) -> u64 {
+        self.byte_length
+    }
+    pub fn is_embedded(&self) -> bool {
+        self.embedded
+    }
 }
 
 #[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -266,15 +333,13 @@ impl Pack {
         let vendored_packages = manifest
             .vendored_packages()
             .iter()
-            .cloned()
-            .map(|spec| (spec.to_string(), spec))
-            .collect::<BTreeMap<_, _>>();
+            .map(|entry| package_manifest_requirement(entry, true))
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
         let unvendored_packages = manifest
             .unvendored_packages()
             .iter()
-            .cloned()
-            .map(|spec| (spec.to_string(), spec))
-            .collect::<BTreeMap<_, _>>();
+            .map(|entry| package_manifest_requirement(entry, false))
+            .collect::<Result<BTreeMap<_, _>, _>>()?;
         for path in canonical_files.keys() {
             validate_archive_entry_name(
                 PackPathRole::ProjectFile,
@@ -360,22 +425,38 @@ impl Pack {
             ));
         }
 
-        for spec in manifest
-            .vendored_packages()
-            .iter()
-            .chain(manifest.unvendored_packages())
-            .chain(packages.values().map(|package| &package.spec))
+        for requirement in vendored_packages
+            .values()
+            .chain(unvendored_packages.values())
         {
-            validate_package_spec(spec)?;
+            validate_package_spec(&requirement.spec)?;
+        }
+        for package in packages.values() {
+            validate_package_spec(&package.spec)?;
         }
 
         let mut canonical_packages = BTreeMap::new();
+        let mut package_requirements = Vec::new();
         for (_, package) in packages {
             let key = package.spec.to_string();
-            if !vendored_packages.contains_key(&key) {
+            let Some(declared) = vendored_packages.get(&key) else {
                 return Err(PackInvariantError::UndeclaredPackageData(key));
-            }
+            };
             let package_files = package.files;
+            let (tree, file_count, byte_length) = package_tree_identity(&package_files);
+            if declared.tree != tree
+                || declared.file_count != file_count
+                || declared.byte_length != byte_length
+            {
+                return Err(PackInvariantError::MismatchedEmbeddedPackageIdentity(key));
+            }
+            package_requirements.push(PackageRequirement {
+                spec: package.spec.clone(),
+                tree,
+                file_count,
+                byte_length,
+                embedded: true,
+            });
             canonical_packages.insert(
                 key,
                 PackageFiles {
@@ -390,6 +471,8 @@ impl Pack {
         {
             return Err(PackInvariantError::MissingVendoredPackageData(spec.clone()));
         }
+        package_requirements.extend(unvendored_packages.values().cloned());
+        package_requirements.sort_by_key(|requirement| requirement.spec.to_string());
 
         let mut canonical_fonts = Vec::new();
         let mut canonical_font_entries = Vec::new();
@@ -515,8 +598,16 @@ impl Pack {
                 .into_iter()
                 .map(CanonicalPath::into_string)
                 .collect(),
-            vendored_packages.into_values().collect(),
-            unvendored_packages.into_values().collect(),
+            package_requirements
+                .iter()
+                .filter(|requirement| requirement.embedded)
+                .map(package_requirement_manifest)
+                .collect(),
+            package_requirements
+                .iter()
+                .filter(|requirement| !requirement.embedded)
+                .map(package_requirement_manifest)
+                .collect(),
             canonical_font_entries,
             manifest.metadata().cloned(),
         );
@@ -525,6 +616,7 @@ impl Pack {
             manifest,
             files: canonical_files,
             packages: canonical_packages,
+            package_requirements,
             fonts: canonical_fonts,
             font_catalog,
             font_requirements,
@@ -544,22 +636,17 @@ impl Pack {
             .collect::<Vec<_>>();
         let resource_slots = self.resource_slots().collect::<Vec<_>>();
         let packages = self
-            .packages()
-            .map(|(spec, files)| {
+            .package_requirements()
+            .iter()
+            .map(|requirement| {
                 (
-                    spec.to_string(),
-                    files
-                        .map(|(path, data)| (path, typst::utils::hash128(data)))
-                        .collect::<Vec<_>>(),
+                    requirement.spec.to_string(),
+                    requirement.tree.0,
+                    requirement.file_count,
+                    requirement.byte_length,
+                    requirement.embedded,
                 )
             })
-            .collect::<Vec<_>>();
-        let unvendored_packages = self
-            .manifest()
-            .packages()
-            .unvendored()
-            .iter()
-            .map(ToString::to_string)
             .collect::<Vec<_>>();
         let fonts = self
             .font_catalog()
@@ -578,7 +665,6 @@ impl Pack {
             project_files,
             resource_slots,
             packages,
-            unvendored_packages,
             fonts,
         )))
     }
@@ -636,6 +722,89 @@ impl Pack {
     /// Whether the pack vendors the given package.
     pub fn has_package(&self, spec: &PackageSpec) -> bool {
         self.packages.contains_key(&spec.to_string())
+    }
+
+    /// The Pack's exact Package Requirements in canonical specification order.
+    pub fn package_requirements(&self) -> &[PackageRequirement] {
+        &self.package_requirements
+    }
+
+    pub(crate) fn materialize_package_trees(
+        &self,
+        fulfillments: BTreeMap<String, Vec<(String, Bytes)>>,
+    ) -> Result<BTreeMap<String, PackageFiles>, PackageTreeError> {
+        let missing = self
+            .package_requirements
+            .iter()
+            .filter(|requirement| !requirement.embedded)
+            .filter(|requirement| !fulfillments.contains_key(&requirement.spec.to_string()))
+            .map(|requirement| requirement.spec.clone())
+            .collect::<Vec<_>>();
+        if !missing.is_empty() {
+            return Err(PackageTreeError::Missing { packages: missing });
+        }
+
+        let mut materialized = self.packages.clone();
+        for requirement in self
+            .package_requirements
+            .iter()
+            .filter(|requirement| !requirement.embedded)
+        {
+            let key = requirement.spec.to_string();
+            let mut files = BTreeMap::new();
+            for (path, data) in &fulfillments[&key] {
+                let canonical =
+                    canonical_path(PackPathRole::PackageFile, path).map_err(|error| {
+                        PackageTreeError::Malformed {
+                            spec: requirement.spec.clone(),
+                            path: path.clone(),
+                            message: error.to_string(),
+                        }
+                    })?;
+                if files.insert(canonical, data.clone()).is_some() {
+                    return Err(PackageTreeError::Malformed {
+                        spec: requirement.spec.clone(),
+                        path: path.clone(),
+                        message: "duplicate package file path".to_owned(),
+                    });
+                }
+            }
+            let paths = files
+                .keys()
+                .cloned()
+                .map(|path| (path, PackPathRole::PackageFile))
+                .collect();
+            if let Some(conflict) = find_path_tree_conflict(paths) {
+                return Err(PackageTreeError::Malformed {
+                    spec: requirement.spec.clone(),
+                    path: conflict.descendant.to_string(),
+                    message: format!("file path has file ancestor `{}`", conflict.ancestor),
+                });
+            }
+            let (actual, actual_file_count, actual_byte_length) = package_tree_identity(&files);
+            if actual != requirement.tree
+                || actual_file_count != requirement.file_count
+                || actual_byte_length != requirement.byte_length
+            {
+                return Err(PackageTreeError::Mismatched {
+                    spec: requirement.spec.clone(),
+                    expected: requirement.tree,
+                    actual,
+                    expected_file_count: requirement.file_count,
+                    actual_file_count,
+                    expected_byte_length: requirement.byte_length,
+                    actual_byte_length,
+                });
+            }
+            materialized.insert(
+                key,
+                PackageFiles {
+                    spec: requirement.spec.clone(),
+                    files,
+                },
+            );
+        }
+        Ok(materialized)
     }
 
     /// The fonts embedded in the pack.
@@ -982,6 +1151,104 @@ pub enum FontCatalogError {
     },
 }
 
+/// A Pack-owned failure to materialize exact Complete Package Trees.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum PackageTreeError {
+    #[error("exact package trees {packages:?} are unavailable")]
+    Missing { packages: Vec<PackageSpec> },
+    #[error("package fulfillment for {spec} does not match its Complete Package Tree identity")]
+    Mismatched {
+        spec: PackageSpec,
+        expected: PackageTreeIdentity,
+        actual: PackageTreeIdentity,
+        expected_file_count: u64,
+        actual_file_count: u64,
+        expected_byte_length: u64,
+        actual_byte_length: u64,
+    },
+    #[error("package fulfillment for {spec} has malformed path `{path}`: {message}")]
+    Malformed {
+        spec: PackageSpec,
+        path: String,
+        message: String,
+    },
+}
+
+fn package_tree_identity(
+    files: &BTreeMap<CanonicalPath, Bytes>,
+) -> (PackageTreeIdentity, u64, u64) {
+    let file_count = files.len() as u64;
+    let byte_length = files.values().map(|data| data.len() as u64).sum();
+    let projection = files
+        .iter()
+        .map(|(path, data)| {
+            (
+                path.as_str(),
+                data.len() as u64,
+                typst::utils::hash128(data),
+            )
+        })
+        .collect::<Vec<_>>();
+    (
+        PackageTreeIdentity(typst::utils::hash128(&(
+            PACKAGE_TREE_IDENTITY_SCHEMA,
+            file_count,
+            byte_length,
+            projection,
+        ))),
+        file_count,
+        byte_length,
+    )
+}
+
+fn package_manifest_requirement(
+    manifest: &PackageManifest,
+    embedded: bool,
+) -> Result<(String, PackageRequirement), PackInvariantError> {
+    let spec = manifest.spec().map_err(|error| match error {
+        PackManifestError::InvalidPackageSpec { spec, message } => {
+            PackInvariantError::InvalidPackageSpec { spec, message }
+        }
+        error => PackInvariantError::InvalidPackageRequirement {
+            spec: error.to_string(),
+        },
+    })?;
+    if manifest.tree_identity_kind() != PACKAGE_TREE_IDENTITY_KIND
+        || manifest.tree_identity_schema() != PACKAGE_TREE_IDENTITY_SCHEMA
+        || manifest.tree_identity_algorithm() != PACKAGE_TREE_IDENTITY_ALGORITHM
+        || manifest.file_count() == 0
+    {
+        return Err(PackInvariantError::InvalidPackageRequirement {
+            spec: spec.to_string(),
+        });
+    }
+    let tree = PackageTreeIdentity::decode(manifest.tree_digest()).ok_or_else(|| {
+        PackInvariantError::InvalidPackageRequirement {
+            spec: spec.to_string(),
+        }
+    })?;
+    let key = spec.to_string();
+    Ok((
+        key,
+        PackageRequirement {
+            spec,
+            tree,
+            file_count: manifest.file_count(),
+            byte_length: manifest.byte_length(),
+            embedded,
+        },
+    ))
+}
+
+fn package_requirement_manifest(requirement: &PackageRequirement) -> PackageManifest {
+    PackageManifest::new(
+        requirement.spec.clone(),
+        requirement.tree.encode(),
+        requirement.file_count,
+        requirement.byte_length,
+    )
+}
+
 fn zip_file_options(size: usize) -> SimpleFileOptions {
     // Deflate may expand incompressible input. Nine bits per input byte plus
     // framing is a conservative bound for the configured encoder.
@@ -1101,7 +1368,7 @@ pub struct PackBuilder {
     files: BTreeMap<CanonicalPath, Bytes>,
     resource_slots: BTreeSet<CanonicalPath>,
     packages: BTreeMap<String, PackageFiles>,
-    unvendored_packages: Vec<PackageSpec>,
+    external_packages: BTreeMap<String, PackageFiles>,
     fonts: Vec<PackFontInput>,
     metadata: Option<PackMetadata>,
 }
@@ -1114,7 +1381,7 @@ impl PackBuilder {
             files: BTreeMap::new(),
             resource_slots: BTreeSet::new(),
             packages: BTreeMap::new(),
-            unvendored_packages: Vec::new(),
+            external_packages: BTreeMap::new(),
             fonts: Vec::new(),
             metadata: None,
         }
@@ -1178,12 +1445,23 @@ impl PackBuilder {
         Ok(self)
     }
 
-    /// Records a package dependency that is intentionally not vendored.
-    pub fn unvendored_package(mut self, spec: PackageSpec) -> Self {
-        if !self.unvendored_packages.contains(&spec) {
-            self.unvendored_packages.push(spec);
-        }
-        self
+    /// Adds a file to an exact Complete Package Tree fulfilled outside the Pack.
+    pub fn external_package_file(
+        mut self,
+        spec: PackageSpec,
+        path: impl AsRef<str>,
+        data: impl Into<Vec<u8>>,
+    ) -> Result<Self, PackBuildError> {
+        let path = canonical_path(PackPathRole::PackageFile, path.as_ref())?;
+        self.external_packages
+            .entry(spec.to_string())
+            .or_insert_with(|| PackageFiles {
+                spec,
+                files: BTreeMap::new(),
+            })
+            .files
+            .insert(path, Bytes::new(data.into()));
+        Ok(self)
     }
 
     /// Embeds a font file.
@@ -1255,17 +1533,40 @@ impl PackBuilder {
                 ))
             })
             .collect::<Result<BTreeMap<_, _>, PackInvariantError>>()?;
+        let vendored_requirements = self
+            .packages
+            .values()
+            .map(|package| {
+                let (identity, file_count, byte_length) = package_tree_identity(&package.files);
+                PackageManifest::new(
+                    package.spec.clone(),
+                    identity.encode(),
+                    file_count,
+                    byte_length,
+                )
+            })
+            .collect();
+        let external_requirements = self
+            .external_packages
+            .values()
+            .map(|package| {
+                let (identity, file_count, byte_length) = package_tree_identity(&package.files);
+                PackageManifest::new(
+                    package.spec.clone(),
+                    identity.encode(),
+                    file_count,
+                    byte_length,
+                )
+            })
+            .collect();
         let manifest = PackManifest::new(
             entrypoint.into_string(),
             self.resource_slots
                 .into_iter()
                 .map(CanonicalPath::into_string)
                 .collect(),
-            self.packages
-                .values()
-                .map(|package| package.spec.clone())
-                .collect(),
-            self.unvendored_packages.clone(),
+            vendored_requirements,
+            external_requirements,
             self.fonts.iter().map(|font| font.entry.clone()).collect(),
             self.metadata,
         );
@@ -1537,6 +1838,12 @@ pub enum PackInvariantError {
     /// A package value cannot be represented as a canonical package specification.
     #[error("invalid package spec `{spec}`: {message}")]
     InvalidPackageSpec { spec: String, message: String },
+    /// A Package Requirement has a malformed or unsupported tree identity.
+    #[error("package requirement `{spec}` has an invalid Complete Package Tree identity")]
+    InvalidPackageRequirement { spec: String },
+    /// Embedded package bytes disagree with their declared tree identity.
+    #[error("embedded package `{0}` does not match its declared Complete Package Tree identity")]
+    MismatchedEmbeddedPackageIdentity(String),
     /// A contained path cannot fit in ZIP's filename field after adding its role prefix.
     #[error("the {role} path `{path}` exceeds ZIP's filename length limit")]
     ArchiveEntryNameTooLong { role: PackPathRole, path: String },
