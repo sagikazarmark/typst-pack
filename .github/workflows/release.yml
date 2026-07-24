@@ -245,14 +245,9 @@ jobs:
       - name: Fetch exact official Typst oracle
         shell: bash
         run: |
-          curl --proto '=https' --tlsv1.2 -LsSf \
-            https://github.com/typst/typst/releases/download/v0.15.0/typst-x86_64-unknown-linux-musl.tar.xz \
-            -o "$RUNNER_TEMP/typst.tar.xz"
-          printf '%s  %s\n' \
-            '59b207df01be2dab9f13e80f73d04d7ff8273ffd46b3dd1b9eef5c60f3eeabea' \
-            "$RUNNER_TEMP/typst.tar.xz" | sha256sum --check
-          mkdir -p "$RUNNER_TEMP/official-typst"
-          tar -xJf "$RUNNER_TEMP/typst.tar.xz" -C "$RUNNER_TEMP/official-typst" --strip-components=1
+          scripts/install-official-typst.sh \
+            embedded-typst.toml \
+            "$RUNNER_TEMP/official-typst"
           echo "TYPST_PACK_OFFICIAL_TYPST=$RUNNER_TEMP/official-typst/typst" >> "$GITHUB_ENV"
       - name: Gate packaged binary against official Typst
         env:

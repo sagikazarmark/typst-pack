@@ -66,16 +66,33 @@ fn approved_baseline_covers_the_complete_differential_matrix() {
 }
 
 #[test]
-fn pinned_official_cli_artifact_agrees_with_the_dagger_gate() {
-    let baseline = baseline();
+fn official_cli_consumers_use_the_canonical_pin() {
     let dagger = include_str!("../dagger.dang");
     let release = include_str!("../.github/workflows/release.yml");
+    let installer = include_str!("../scripts/install-official-typst.sh");
+
+    for consumer in [dagger, release] {
+        assert!(consumer.contains("embedded-typst.toml"));
+        assert!(consumer.contains("install-official-typst.sh"));
+    }
+
+    let baseline = baseline();
     for key in ["version", "url", "sha256"] {
         let value = baseline["official-cli"][key].as_str().unwrap();
-        assert!(dagger.contains(value), "Dagger official CLI {key} drifted");
         assert!(
-            release.contains(value),
-            "release official CLI {key} drifted"
+            !dagger.contains(value),
+            "Dagger must not copy the official CLI {key}"
+        );
+        assert!(
+            !release.contains(value),
+            "release verification must not copy the official CLI {key}"
+        );
+    }
+
+    for key in ["version", "url", "sha256"] {
+        assert!(
+            installer.contains(&format!("read_pin {key}")),
+            "the installer must consume the canonical `{key}`"
         );
     }
 }

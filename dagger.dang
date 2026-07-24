@@ -29,17 +29,20 @@ type TypstPack {
     self.rustContainer = container
     self.packageCache = packageCache
     self.officialTypst = container
-      .withExec(["mkdir", "-p", "/opt/typst"])
+      .withMountedFile(
+        "/tmp/embedded-typst.toml",
+        Dagger.currentModule.source.file("embedded-typst.toml"),
+      )
+      .withMountedFile(
+        "/tmp/install-official-typst.sh",
+        Dagger.currentModule.source.file("scripts/install-official-typst.sh"),
+      )
       .withExec([
-        "curl", "--proto", "=https", "--tlsv1.2", "-LsSf",
-        "https://github.com/typst/typst/releases/download/v0.15.0/typst-x86_64-unknown-linux-musl.tar.xz",
-        "-o", "/tmp/typst.tar.xz",
+        "bash",
+        "/tmp/install-official-typst.sh",
+        "/tmp/embedded-typst.toml",
+        "/opt/typst",
       ])
-      .withExec([
-        "bash", "-c",
-        "printf '%s  %s\\n' '59b207df01be2dab9f13e80f73d04d7ff8273ffd46b3dd1b9eef5c60f3eeabea' '/tmp/typst.tar.xz' | sha256sum --check",
-      ])
-      .withExec(["tar", "-xJf", "/tmp/typst.tar.xz", "-C", "/opt/typst", "--strip-components=1"])
       .file("/opt/typst/typst")
 
     self

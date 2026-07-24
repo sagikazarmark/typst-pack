@@ -23,8 +23,8 @@ issue:
 - official CLI commands, flags, aliases, parsers, environment variables, help,
   defaults, conflicts, output planning, dependencies, timings, and viewing;
 - every intentional Pack difference in ADR-0005 and `docs/cli-parity.md`;
-- the official release artifact URL, platform, published SHA-256 digest, and
-  the cargo-dist artifact used by release verification.
+- the official release artifact platform and the cargo-dist artifact used by
+  release verification.
 
 ## Required changes
 
@@ -35,8 +35,11 @@ issue:
    crates, checksums, the Engine baseline, and all Exporter Identity sources.
    Do not add an exception implicitly; explain intentional patch-version splits
    such as `typst-timing` in the upgrade change.
-3. Update `[official-cli]` from the matching official Typst release. Verify the
-   published digest independently before changing Dagger's pinned download.
+3. Update `[official-cli]` in `embedded-typst.toml`, the one authoritative
+   declaration of the official binary version, URL, and SHA-256 digest. Verify
+   the published digest independently before changing this pin. Dagger and the
+   release workflow both consume it through `scripts/install-official-typst.sh`;
+   do not update either consumer separately.
 4. Review every `[[matrix]]` and `[[semantic]]` entry. New custom behavior must
    be added with coverage and exactly one classification:
    `upstream-behavior`, `pack-invariant`, `adapter-concern`,
@@ -74,10 +77,13 @@ TYPST_PACK_TEST_BINARY=/path/to/packaged/typst-pack \
 cargo test --locked --all-features --test official_typst_cli
 ```
 
-Finish with `dagger check`. Dagger verifies representative adapter delegation
-and deliberately leaves native semantic coverage to the Rust differential
-matrix. The release workflow extracts the cargo-dist Linux archive and reruns
-the same mandatory process gate against that exact binary before `host` can
-publish any artifact. A missing reference binary, version mismatch, artifact
-difference, diagnostic difference, unclassified semantic, or incomplete matrix
-fails the release.
+Finish with `dagger check`. The embedded gate verifies that Dagger and release
+verification consume the canonical pin without copied literals. Dagger's typed
+tests exercise the download, digest, extraction, and version checks while
+verifying representative adapter delegation, and deliberately leave native
+semantic coverage to the Rust differential matrix. The release workflow
+extracts the cargo-dist Linux archive and reruns the same mandatory process gate
+against that exact binary before `host` can publish any artifact. A missing or
+replaced reference binary, digest or version mismatch, artifact difference,
+diagnostic difference, unclassified semantic, or incomplete matrix fails the
+release.
