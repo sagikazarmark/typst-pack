@@ -194,7 +194,7 @@ coverage = [".dagger/modules/tests/main.dang"]
 [[surface]]
 path = "src/compile.rs"
 classification = "pack-invariant"
-sha256 = "64aafb297cc512916b83d796aba5155e385abb997b6671b506a9e74aff09d8cd"
+sha256 = "afa701a9968458946682976191c30726ca062a4d4dcdeae0ac4efef992ad1424"
 
 [[surface]]
 path = "src/embedded.rs"
@@ -254,7 +254,7 @@ sha256 = "fdeeb29d49b63878e238407fafe500d67d778805b3127d2943810bd8415266cd"
 [[surface]]
 path = "src/cli.rs"
 classification = "unavoidable-mirror"
-sha256 = "878f8c4a19b302003f2b3cd52e59104f7464da22ea1337a2ff10e27a020409bb"
+sha256 = "d0658d8f564710fcb63e69b35f4383aaa4020b24b49213e6a269128ac3453657"
 
 [[surface]]
 path = "dagger.dang"

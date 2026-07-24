@@ -1585,7 +1585,7 @@ pub fn compile(
 pub fn compile_report(
     attempt: impl Into<CompilationAttempt>,
 ) -> Result<CompilationReport, PackCompileError> {
-    let prepared = match prepare_pack_compilation(attempt.into()) {
+    let (world, kernel) = match prepare_pack_compilation(attempt.into()) {
         Ok(prepared) => prepared,
         Err(PackCompileError::Operation {
             outcome,
@@ -1604,23 +1604,11 @@ pub fn compile_report(
         }
         Err(error) => return Err(error),
     };
-    let (world, kernel) = prepared.into_parts();
     let execution = compile_pack_kernel(&world, kernel);
     Ok(CompilationReport {
         outcome: CompilationReportOutcome::Result(Box::new(execution.result)),
         fulfillments: execution.fulfillments,
     })
-}
-
-pub(crate) struct PreparedPackCompilation {
-    world: PackWorld,
-    kernel: PreparedPackCompilationKernel,
-}
-
-impl PreparedPackCompilation {
-    pub(crate) fn into_parts(self) -> (PackWorld, PreparedPackCompilationKernel) {
-        (self.world, self.kernel)
-    }
 }
 
 pub(crate) struct PreparedPackCompilationKernel {
@@ -1658,7 +1646,7 @@ pub(crate) enum PackCompilationPresentation {
 #[allow(clippy::result_large_err)]
 pub(crate) fn prepare_pack_compilation(
     attempt: CompilationAttempt,
-) -> Result<PreparedPackCompilation, PackCompileError> {
+) -> Result<(PackWorld, PreparedPackCompilationKernel), PackCompileError> {
     let CompilationAttempt { request, controls } = attempt;
     let PackCompilationRequest {
         pack,
@@ -1889,9 +1877,9 @@ pub(crate) fn prepare_pack_compilation(
     let _ = controls;
     let world = world.build();
 
-    Ok(PreparedPackCompilation {
+    Ok((
         world,
-        kernel: PreparedPackCompilationKernel {
+        PreparedPackCompilationKernel {
             request_inventory,
             compilation_identity,
             engine_identity,
@@ -1899,7 +1887,7 @@ pub(crate) fn prepare_pack_compilation(
             page_selection_implies_untagged_pdf,
             fulfillments,
         },
-    })
+    ))
 }
 
 pub(crate) fn compile_pack_kernel(

@@ -1068,9 +1068,8 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
             ),
         );
     }
-    let prepared = prepare_pack_compilation(CompilationAttempt::new(request, controls))
+    let (mut world, kernel) = prepare_pack_compilation(CompilationAttempt::new(request, controls))
         .map_err(|error| CliError::Message(error.to_string()))?;
-    let (mut world, kernel) = prepared.into_parts();
 
     let diagnostic_format = args.automation.diagnostic_format.into();
     let write_requested_dependencies = |outputs: Option<&[PathBuf]>| {
