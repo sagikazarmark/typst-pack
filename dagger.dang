@@ -129,6 +129,29 @@ type TypstPack {
   }
 
   """
+  Run the featureless core suite, including identity compatibility checks.
+  """
+  testCore: String! @check {
+    self.rust.test(noDefaultFeatures: true)
+  }
+
+  """
+  Keep the featureless core and fixed Document Time available to wasm consumers.
+  """
+  buildWasm: Directory! @check {
+    Dagger
+      .rust(
+        version: self.rustVersion,
+        container: self.rustContainer,
+        targets: ["wasm32-unknown-unknown"],
+      )
+      .build(
+        noDefaultFeatures: true,
+        target: ["wasm32-unknown-unknown"],
+      )
+  }
+
+  """
   Run the ordinary CLI test suite without internal test-only features.
   """
   testCli: String! @check {
@@ -204,7 +227,7 @@ type TypstPack {
     """
     Target for the representative creation compilation.
     """
-    target: CreationTarget,
+    target: TypstTarget,
     """
     Experimental Typst features to enable during creation.
     """
@@ -262,7 +285,7 @@ type TypstPack {
     if (embedFonts) { args += ["--embed-fonts"] }
     if (includeTypstEmbeddedFonts) { args += ["--include-typst-embedded-fonts"] }
     sysInputs.each { input => args += ["--input", input] }
-    if (target != null) { args += ["--target", creationTargetName(target)] }
+    if (target != null) { args += ["--target", typstTargetName(target)] }
     features.each { feature => args += ["--features", featureName(feature)] }
     if (creationTimestamp != null) {
       args += ["--creation-timestamp", toString(creationTimestamp)]
@@ -507,7 +530,7 @@ enum OutputFormat {
   HTML
 }
 
-enum CreationTarget {
+enum TypstTarget {
   PAGED
   HTML
 }
@@ -541,7 +564,7 @@ let outputFormatName(format: OutputFormat!): String! {
   toString(format).toLower
 }
 
-let creationTargetName(target: CreationTarget!): String! {
+let typstTargetName(target: TypstTarget!): String! {
   toString(target).toLower
 }
 

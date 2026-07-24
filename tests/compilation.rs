@@ -1,11 +1,22 @@
 use typst_pack::{
     CompilationOperationOutcome, CompilationOutputOrigins, CompilationOutputSpecification,
-    CompilationReportOutcome, CompilationRequestRejection, CompilationStatus, CreationTimestamp,
-    DiagnosticPhase, DiagnosticProducer, FontContainerFulfillment, HtmlOutputSpecification,
-    OutputFormat, Pack, PackCompilationRequest, PackCompileError, PackMetadata, PackOverrideSet,
-    PackOverrideSetError, PackageTreeFulfillment, PdfOutputSpecification, PngOutputSpecification,
-    RequestValueOrigin, SvgOutputSpecification, compile, compile_report,
+    CompilationReportOutcome, CompilationRequestIssue, CompilationRequestRejection,
+    CompilationResult, CompilationStatus, CreationTimestamp, DiagnosticPhase, DiagnosticProducer,
+    DocumentTime, FontContainerFulfillment, HtmlOutputSpecification, OutputFormat, Pack,
+    PackCompilationRequest, PackMetadata, PackOverrideSet, PackOverrideSetError,
+    PackageTreeFulfillment, PdfOutputSpecification, PngOutputSpecification, RequestValueOrigin,
+    SvgOutputSpecification, compile as compile_to_report,
 };
+
+fn compile(
+    request: PackCompilationRequest,
+) -> Result<CompilationResult, CompilationRequestRejection> {
+    let report = compile_to_report(request)?;
+    Ok(report
+        .result()
+        .expect("expected a semantic Compilation Result")
+        .clone())
+}
 
 fn output(format: OutputFormat) -> CompilationOutputSpecification {
     match format {
@@ -227,15 +238,16 @@ fn pack_override_set_cannot_be_applied_to_a_different_pack() {
         PackCompilationRequest::new(second, output(OutputFormat::Svg)).overrides(overrides),
     );
 
-    let Err(PackCompileError::RequestRejected {
-        rejection: CompilationRequestRejection::OverrideSetPackMismatch,
-        request_inventory,
-    }) = result
-    else {
+    let Err(rejection) = result else {
         panic!("expected a Pack Override Set binding rejection");
     };
+    assert!(matches!(
+        rejection.issues(),
+        [CompilationRequestIssue::OverrideSetPackMismatch]
+    ));
     assert_eq!(
-        request_inventory
+        rejection
+            .request_inventory()
             .overrides()
             .value()
             .iter()
@@ -440,7 +452,7 @@ fn adapter_resolved_shared_values_remain_distinguishable() {
         PackCompilationRequest::new(pack, output(OutputFormat::Svg))
             .adapter_resolved_inputs(inputs)
             .adapter_resolved_feature(typst::Feature::A11yExtras)
-            .adapter_resolved_document_time(Some(
+            .adapter_resolved_document_time(DocumentTime::Fixed(
                 typst::foundations::Datetime::from_ymd(2024, 2, 3).unwrap(),
             )),
     )
@@ -461,7 +473,6 @@ fn adapter_resolved_shared_values_remain_distinguishable() {
     );
 }
 
-#[cfg(feature = "cli")]
 #[test]
 fn offset_aware_document_timestamps_on_the_same_utc_date_have_distinct_identities() {
     let pack = Pack::builder("main.typ")
@@ -486,27 +497,76 @@ fn offset_aware_document_timestamps_on_the_same_utc_date_have_distinct_identitie
 
     let first = compile(
         PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg))
-            .adapter_resolved_document_timestamp(early)
-            .unwrap(),
+            .adapter_resolved_document_time(DocumentTime::UnixTimestamp(early)),
     )
     .unwrap();
     let second = compile(
         PackCompilationRequest::new(pack, output(OutputFormat::Svg))
-            .adapter_resolved_document_timestamp(late)
-            .unwrap(),
+            .adapter_resolved_document_time(DocumentTime::UnixTimestamp(late)),
     )
     .unwrap();
 
     assert_eq!(
-        first.request_inventory().document_timestamp().value(),
-        &Some(early)
+        first.request_inventory().document_time().value(),
+        &DocumentTime::UnixTimestamp(early)
     );
     assert_eq!(
-        first.request_inventory().document_timestamp().origin(),
+        first.request_inventory().document_time().origin(),
         RequestValueOrigin::AdapterResolved
     );
     assert_ne!(first.compilation_identity(), second.compilation_identity());
     assert_ne!(first.artifacts()[0].bytes(), second.artifacts()[0].bytes());
+}
+
+#[test]
+fn invalid_document_timestamp_is_rejected_with_its_inventory() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"invalid time".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let request = PackCompilationRequest::new(pack, output(OutputFormat::Svg))
+        .document_time(DocumentTime::UnixTimestamp(i64::MAX));
+
+    let rejection = compile(request).unwrap_err();
+
+    assert!(matches!(
+        rejection.issues(),
+        [CompilationRequestIssue::InvalidDocumentTimestamp]
+    ));
+    assert_eq!(
+        rejection.request_inventory().document_time().value(),
+        &DocumentTime::UnixTimestamp(i64::MAX)
+    );
+    assert_eq!(
+        rejection.request_inventory().document_time().origin(),
+        RequestValueOrigin::CallerSupplied
+    );
+}
+
+#[cfg(not(any(
+    feature = "_test-package-download-probe",
+    feature = "cli",
+    feature = "default",
+    feature = "embedded-fonts",
+    feature = "fs"
+)))]
+#[test]
+fn document_time_refactor_preserves_the_existing_compilation_identity() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"identity baseline".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let result = compile(PackCompilationRequest::new(pack, output(OutputFormat::Svg))).unwrap();
+
+    assert_eq!(
+        result.compilation_identity().digest(),
+        [
+            0x44, 0x74, 0x9f, 0x09, 0x75, 0x8f, 0xbc, 0x64, 0xe2, 0x55, 0x7d, 0xf9, 0xde, 0xb0,
+            0x7c, 0x1d,
+        ]
+    );
 }
 
 #[test]
@@ -523,20 +583,21 @@ fn pack_bound_compilation_does_not_use_package_caches_or_network() {
         .build()
         .unwrap();
 
-    let result = compile(PackCompilationRequest::new(
+    let report = compile_to_report(PackCompilationRequest::new(
         pack.clone(),
         output(OutputFormat::Svg),
-    ));
+    ))
+    .unwrap();
 
     assert!(matches!(
-        result,
-        Err(PackCompileError::Operation {
+        report.outcome(),
+        CompilationReportOutcome::Operation {
             outcome: CompilationOperationOutcome::MissingExternalPackageFulfillment { packages },
             ..
-        }) if packages.len() == 1
+        } if packages.len() == 1
     ));
     let report =
-        compile_report(PackCompilationRequest::new(pack, output(OutputFormat::Svg))).unwrap();
+        compile_to_report(PackCompilationRequest::new(pack, output(OutputFormat::Svg))).unwrap();
     assert!(matches!(
         report.outcome(),
         CompilationReportOutcome::Operation {
@@ -567,21 +628,21 @@ fn external_package_fulfillment_is_verified_before_official_compilation() {
         .build()
         .unwrap();
 
-    let malformed = compile(
+    let malformed = compile_to_report(
         PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)).package_fulfillment(
             package.clone(),
             PackageTreeFulfillment::new([("../lib.typ", source.clone())]),
         ),
     );
     assert!(matches!(
-        malformed,
-        Err(PackCompileError::Operation {
+        malformed.unwrap().outcome(),
+        CompilationReportOutcome::Operation {
             outcome: CompilationOperationOutcome::MalformedExternalPackageTree { spec, .. },
             ..
-        }) if spec == package
+        } if spec == &package
     ));
 
-    let mismatched = compile(
+    let mismatched = compile_to_report(
         PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)).package_fulfillment(
             package.clone(),
             PackageTreeFulfillment::new([
@@ -591,11 +652,11 @@ fn external_package_fulfillment_is_verified_before_official_compilation() {
         ),
     );
     assert!(matches!(
-        mismatched,
-        Err(PackCompileError::Operation {
+        mismatched.unwrap().outcome(),
+        CompilationReportOutcome::Operation {
             outcome: CompilationOperationOutcome::MismatchedExternalPackageTree { spec, .. },
             ..
-        }) if spec == package
+        } if spec == &package
     ));
 
     let baseline = compile(
@@ -608,7 +669,7 @@ fn external_package_fulfillment_is_verified_before_official_compilation() {
         ),
     )
     .unwrap();
-    let with_telemetry = compile_report(
+    let with_telemetry = compile_to_report(
         PackCompilationRequest::new(pack, output(OutputFormat::Svg)).package_fulfillment(
             package,
             PackageTreeFulfillment::new([("lib.typ", source), ("typst.toml", manifest)])
@@ -662,32 +723,33 @@ fn external_font_fulfillment_is_verified_before_official_compilation() {
         .unwrap();
     let requirement = pack.font_requirements()[0].clone();
 
-    let missing = compile(PackCompilationRequest::new(
+    let missing = compile_to_report(PackCompilationRequest::new(
         pack.clone(),
         output(OutputFormat::Svg),
-    ));
+    ))
+    .unwrap();
     assert!(matches!(
-        missing,
-        Err(PackCompileError::Operation {
+        missing.outcome(),
+        CompilationReportOutcome::Operation {
             outcome: CompilationOperationOutcome::MissingExternalFontFulfillment { containers },
             ..
-        }) if containers == vec![requirement.container_identity()]
+        } if containers == &vec![requirement.container_identity()]
     ));
 
     let mut wrong = data.clone();
     wrong.push(0);
-    let mismatched = compile(
+    let mismatched = compile_to_report(
         PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)).font_fulfillment(
             requirement.container_identity(),
             FontContainerFulfillment::new(wrong),
         ),
     );
     assert!(matches!(
-        mismatched,
-        Err(PackCompileError::Operation {
+        mismatched.unwrap().outcome(),
+        CompilationReportOutcome::Operation {
             outcome: CompilationOperationOutcome::MismatchedExternalFontContainer { expected, .. },
             ..
-        }) if expected == requirement.container_identity()
+        } if *expected == requirement.container_identity()
     ));
 
     let baseline = compile(
@@ -697,7 +759,7 @@ fn external_font_fulfillment_is_verified_before_official_compilation() {
         ),
     )
     .unwrap();
-    let with_metadata = compile_report(
+    let with_metadata = compile_to_report(
         PackCompilationRequest::new(pack, output(OutputFormat::Svg)).font_fulfillment(
             requirement.container_identity(),
             FontContainerFulfillment::new(data)
@@ -739,12 +801,10 @@ fn pack_bound_compilation_rejects_the_bundle_feature() {
     let request = PackCompilationRequest::new(pack, output(OutputFormat::Svg))
         .feature(typst::Feature::Bundle);
 
+    let rejection = compile(request).unwrap_err();
     assert!(matches!(
-        compile(request),
-        Err(PackCompileError::RequestRejected {
-            rejection: CompilationRequestRejection::UnsupportedBundleFeature,
-            ..
-        })
+        rejection.issues(),
+        [CompilationRequestIssue::UnsupportedBundleFeature]
     ));
 }
 
@@ -761,12 +821,11 @@ fn pack_bound_compilation_rejects_invalid_png_resolution() {
             pixels_per_inch: Some(ppi),
             ..PngOutputSpecification::default()
         });
+        let rejection =
+            compile(PackCompilationRequest::new(pack.clone(), specification)).unwrap_err();
         assert!(matches!(
-            compile(PackCompilationRequest::new(pack.clone(), specification)),
-            Err(PackCompileError::RequestRejected {
-                rejection: CompilationRequestRejection::InvalidPpi,
-                ..
-            })
+            rejection.issues(),
+            [CompilationRequestIssue::InvalidPpi]
         ));
     }
 }
@@ -1159,18 +1218,18 @@ fn pack_request_rejection_collects_independent_pdf_issues_in_stable_order() {
         PackCompilationRequest::new(pack, CompilationOutputSpecification::Pdf(specification))
             .feature(typst::Feature::Bundle);
 
-    let Err(PackCompileError::RequestRejected { rejection, .. }) = compile(request) else {
+    let Err(rejection) = compile(request) else {
         panic!("expected a Pack request rejection");
     };
 
     assert_eq!(rejection.issues().len(), 2);
     assert!(matches!(
         rejection.issues()[0],
-        CompilationRequestRejection::UnsupportedBundleFeature
+        CompilationRequestIssue::UnsupportedBundleFeature
     ));
     assert!(matches!(
         rejection.issues()[1],
-        CompilationRequestRejection::InvalidPdfStandards(_)
+        CompilationRequestIssue::InvalidPdfStandards(_)
     ));
 }
 

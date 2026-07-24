@@ -343,12 +343,14 @@ impl Pack {
             .collect::<Result<Vec<_>, PackInvariantError>>()?;
 
         let vendored_packages = manifest
-            .vendored_packages()
+            .packages()
+            .vendored()
             .iter()
             .map(|entry| package_manifest_requirement(entry, true))
             .collect::<Result<BTreeMap<_, _>, _>>()?;
         let unvendored_packages = manifest
-            .unvendored_packages()
+            .packages()
+            .unvendored()
             .iter()
             .map(|entry| package_manifest_requirement(entry, false))
             .collect::<Result<BTreeMap<_, _>, _>>()?;
@@ -1825,13 +1827,6 @@ pub enum PackInvariantError {
         canonical: String,
         first_entry: String,
         second_entry: String,
-    },
-    /// One canonical path was assigned two incompatible roles.
-    #[error("path `{path}` cannot be both {first} and {second}")]
-    PathRoleConflict {
-        path: String,
-        first: PackPathRole,
-        second: PackPathRole,
     },
     /// One file path is an ancestor of another file path in the same tree.
     #[error(

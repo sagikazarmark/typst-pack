@@ -8,8 +8,19 @@ use std::process::{Command, Output};
 
 use official_typst_cli::OfficialTypstCli;
 use typst_pack::{
-    CompilationOutputSpecification, Pack, PackCompilationRequest, SvgOutputSpecification, compile,
+    CompilationOutputSpecification, CompilationRequestRejection, CompilationResult, Pack,
+    PackCompilationRequest, SvgOutputSpecification, compile as compile_to_report,
 };
+
+fn compile(
+    request: PackCompilationRequest,
+) -> Result<CompilationResult, CompilationRequestRejection> {
+    let report = compile_to_report(request)?;
+    Ok(report
+        .result()
+        .expect("expected a semantic Compilation Result")
+        .clone())
+}
 
 const PAGED_SOURCE: &str =
     "#set page(width: 20pt, height: 10pt, margin: 0pt)\n#rect(width: 4pt, height: 4pt)";

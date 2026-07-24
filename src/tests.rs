@@ -2,7 +2,7 @@
 
 use crate::compile::{CompileError, compile as compile_request, compile_world as compile};
 use crate::pack::CompilationDependencySnapshotError;
-use crate::world::{PackWorld, PackWorldBuilder, PackWorldConstructionError};
+use crate::world::{PackWorld, PackWorldConstructionError};
 use crate::*;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -15,7 +15,7 @@ fn tiny_png() -> Vec<u8> {
     tiny_skia::Pixmap::new(4, 4).unwrap().encode_png().unwrap()
 }
 
-fn pack_world_builder(pack: Pack) -> PackWorldBuilder {
+fn pack_world_with_features(pack: Pack, features: Vec<typst::Feature>) -> PackWorld {
     #[cfg(feature = "embedded-fonts")]
     let font_fulfillments = typst_kit::fonts::embedded().fold(
         std::collections::BTreeMap::new(),
@@ -34,7 +34,19 @@ fn pack_world_builder(pack: Pack) -> PackWorldBuilder {
             &font_fulfillments,
         )
         .unwrap();
-    PackWorld::builder(pack, dependencies, std::collections::BTreeMap::new()).unwrap()
+    PackWorld::new(
+        pack,
+        dependencies,
+        std::collections::BTreeMap::new(),
+        typst::foundations::Dict::new(),
+        features,
+        DocumentTime::Absent,
+    )
+    .unwrap()
+}
+
+fn pack_world(pack: Pack) -> PackWorld {
+    pack_world_with_features(pack, vec![])
 }
 
 fn test_package_declaration(files: &[(&str, &[u8])]) -> PackageManifest {
@@ -245,8 +257,8 @@ fn manifest_roundtrip() {
     )
     .unwrap();
     assert_eq!(manifest.project().entrypoint(), "main.typ");
-    assert_eq!(manifest.vendored_packages().len(), 1);
-    assert_eq!(manifest.unvendored_packages().len(), 1);
+    assert_eq!(manifest.packages().vendored().len(), 1);
+    assert_eq!(manifest.packages().unvendored().len(), 1);
 
     let serialized = manifest.to_toml();
     assert!(!serialized.contains("resource-slots"));
@@ -887,14 +899,14 @@ fn malformed_external_font_is_a_pack_owned_pre_compilation_outcome() {
     );
 
     assert!(matches!(
-        result,
-        Err(PackCompileError::Operation {
+        result.unwrap().outcome(),
+        CompilationReportOutcome::Operation {
             outcome: CompilationOperationOutcome::MalformedExternalFontContainer {
                 container,
                 index: 0,
             },
             ..
-        }) if container == identity
+        } if *container == identity
     ));
 }
 
@@ -1036,7 +1048,7 @@ fn a_constructed_pack_builds_a_world_without_revalidation() {
         .build()
         .unwrap();
 
-    let _: PackWorld = pack_world_builder(pack).build();
+    let _: PackWorld = pack_world(pack);
 }
 
 #[test]
@@ -1074,7 +1086,14 @@ fn pack_world_construction_rejects_incomplete_dependencies_and_invalid_overrides
         Bytes::new(b"replacement".to_vec()),
     )]);
     assert!(matches!(
-        PackWorld::builder(pack, dependencies, overrides),
+        PackWorld::new(
+            pack,
+            dependencies,
+            overrides,
+            typst::foundations::Dict::new(),
+            vec![],
+            DocumentTime::Absent,
+        ),
         Err(PackWorldConstructionError::InvalidProjectOverride { path })
             if path == "missing.typ"
     ));
@@ -1648,7 +1667,7 @@ fn compile_in_memory_pack_to_pdf_and_svg() {
         .build()
         .unwrap();
 
-    let world = pack_world_builder(pack).build();
+    let world = pack_world(pack);
 
     let pdf = compile(
         &world,
@@ -1694,7 +1713,7 @@ fn pdf_default_timestamp_is_resolved_after_compilation() {
         .unwrap()
         .build()
         .unwrap();
-    let world = pack_world_builder(pack).build();
+    let world = pack_world(pack);
     let timestamp = typst_pdf::Timestamp::new_utc(
         typst::foundations::Datetime::from_ymd_hms(2000, 1, 2, 3, 4, 5).unwrap(),
     );
@@ -1734,7 +1753,7 @@ fn undeclared_package_requests_have_no_ambient_fallback() {
         .unwrap()
         .build()
         .unwrap();
-    let world = pack_world_builder(pack).build();
+    let world = pack_world(pack);
     let spec = "@local/undeclared:1.0.0".parse().unwrap();
     let id = RootedPath::new(
         VirtualRoot::Package(spec),
@@ -1771,7 +1790,7 @@ fn vendored_package_compiles_from_the_pack() {
         .unwrap()
         .build()
         .unwrap();
-    let world = pack_world_builder(pack).build();
+    let world = pack_world(pack);
 
     assert!(
         compile(
@@ -1802,7 +1821,7 @@ fn missing_vendored_package_file_has_no_ambient_fallback() {
         .unwrap()
         .build()
         .unwrap();
-    let world = pack_world_builder(pack).build();
+    let world = pack_world(pack);
 
     assert!(
         compile(
@@ -2037,7 +2056,7 @@ Rows: #csv("data.csv").len()
         let outcome = Packer::new(&project, "main.typ")
             .system_fonts(false)
             .feature(typst::Feature::Html)
-            .target(CreationTarget::Html)
+            .target(TypstTarget::Html)
             .pack()
             .unwrap();
 
@@ -2268,7 +2287,7 @@ Rows: #csv("data.csv").len()
 
         // Round-trip through bytes: nothing may depend on the file system.
         let pack = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
-        let world = pack_world_builder(pack).build();
+        let world = pack_world(pack);
         let output = compile(
             &world,
             &CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
@@ -2304,7 +2323,7 @@ Rows: #csv("data.csv").len()
         assert!(!full.pack.fonts().is_empty());
         // The embedded fonts must load again from the pack.
         let pack = Pack::from_bytes(full.pack.to_bytes().unwrap()).unwrap();
-        pack_world_builder(pack).build();
+        pack_world(pack);
     }
 
     #[cfg(feature = "embedded-fonts")]
@@ -2316,7 +2335,7 @@ Rows: #csv("data.csv").len()
         fs::write(project.join("main.typ"), "#html.frame[Hello]").unwrap();
 
         let outcome = Packer::new(&project, "main.typ")
-            .target(CreationTarget::Html)
+            .target(TypstTarget::Html)
             .feature(typst::Feature::Html)
             .system_fonts(false)
             .embed_fonts(true)
@@ -2550,7 +2569,7 @@ Rows: #csv("data.csv").len()
             .pack()
             .unwrap();
 
-        assert!(!outcome.report.compile_warnings.is_empty());
+        assert!(!outcome.warnings.is_empty());
     }
 }
 
@@ -2564,7 +2583,7 @@ fn html_output_is_gated_by_the_html_feature() {
         .unwrap();
 
     // Without the feature, Typst itself rejects HTML export.
-    let world = pack_world_builder(pack.clone()).build();
+    let world = pack_world(pack.clone());
     assert!(
         compile(
             &world,
@@ -2574,9 +2593,7 @@ fn html_output_is_gated_by_the_html_feature() {
     );
 
     // With the feature, it produces a document plus an "experimental" warning.
-    let world = pack_world_builder(pack)
-        .feature(typst::Feature::Html)
-        .build();
+    let world = pack_world_with_features(pack, vec![typst::Feature::Html]);
     let output = compile(
         &world,
         &CompilationOutputSpecification::Html(HtmlOutputSpecification::default()),
@@ -2615,9 +2632,15 @@ fn exact_font_catalog_is_authoritative() {
             &font_fulfillments,
         )
         .unwrap();
-    let world = PackWorld::builder(pack, dependencies, std::collections::BTreeMap::new())
-        .unwrap()
-        .build();
+    let world = PackWorld::new(
+        pack,
+        dependencies,
+        std::collections::BTreeMap::new(),
+        typst::foundations::Dict::new(),
+        vec![],
+        DocumentTime::Absent,
+    )
+    .unwrap();
     let selected = world.book().select(&family, variant).unwrap();
     let selected = world.font(selected).unwrap();
 

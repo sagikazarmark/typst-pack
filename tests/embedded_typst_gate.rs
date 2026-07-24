@@ -139,7 +139,10 @@ fn public_compilation_attests_the_approved_engine_and_exporters() {
                 typst_pack::HtmlOutputSpecification::default(),
             ),
         };
-        let result = compile(PackCompilationRequest::new(pack, specification)).unwrap();
+        let report = compile(PackCompilationRequest::new(pack, specification)).unwrap();
+        let result = report
+            .result()
+            .expect("differential fixture must produce a result");
         let (engine_version, engine_checksum) = expected("typst");
         let (exporter_version, exporter_checksum) = expected(exporter);
 
@@ -161,7 +164,12 @@ fn public_compilation_attests_the_approved_engine_and_exporters() {
                 features.push(name);
             }
         }
-        assert_eq!(result.engine_identity().feature_set(), features.join(","));
+        let expected_features = if features.is_empty() {
+            "none".to_owned()
+        } else {
+            features.join(",")
+        };
+        assert_eq!(result.engine_identity().feature_set(), expected_features);
         assert_eq!(result.exporter_identity().implementation(), exporter);
         assert_eq!(result.exporter_identity().version(), exporter_version);
         assert_eq!(

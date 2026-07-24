@@ -17,6 +17,7 @@ use typst::{Feature, Library, LibraryExt, World};
 use typst_kit::files::{FileLoader, FileStore};
 use typst_kit::fonts::FontStore;
 
+use crate::compile::DocumentTime;
 use crate::pack::{CompilationDependencySnapshot, Pack, PackageFiles};
 
 #[cfg(feature = "fs")]
@@ -202,12 +203,15 @@ pub(crate) struct PackWorld {
 }
 
 impl PackWorld {
-    /// Starts configuring a world from a complete verified dependency snapshot.
-    pub(crate) fn builder(
+    /// Constructs a world from one complete Pack-bound input set.
+    pub(crate) fn new(
         pack: Pack,
         dependencies: CompilationDependencySnapshot,
         project_overrides: BTreeMap<String, Bytes>,
-    ) -> Result<PackWorldBuilder, PackWorldConstructionError> {
+        inputs: Dict,
+        features: Vec<Feature>,
+        document_time: DocumentTime,
+    ) -> Result<Self, PackWorldConstructionError> {
         if dependencies.pack_identity() != pack.identity() {
             return Err(PackWorldConstructionError::DependencySnapshotPackMismatch);
         }
@@ -217,7 +221,42 @@ impl PackWorld {
         {
             return Err(PackWorldConstructionError::InvalidProjectOverride { path: path.clone() });
         }
-        Ok(PackWorldBuilder::new(pack, dependencies, project_overrides))
+
+        let clock = match document_time {
+            DocumentTime::Absent => Clock::None,
+            DocumentTime::Fixed(datetime) => Clock::FixedDate(datetime),
+            DocumentTime::UnixTimestamp(timestamp) => Clock::FixedTimestamp(
+                typst_kit::datetime::Time::fixed_timestamp(timestamp)
+                    .map_err(|_| PackWorldConstructionError::InvalidDocumentTimestamp)?,
+            ),
+        };
+        let (exact_packages, font_catalog) = dependencies.into_parts();
+        let entrypoint = typst::syntax::VirtualPath::new(pack.entrypoint())
+            .expect("Pack entrypoint invariant violated");
+        let main = RootedPath::new(VirtualRoot::Project, entrypoint).intern();
+
+        let mut fonts = FontStore::new();
+        for font in font_catalog {
+            let info = font.info().clone();
+            fonts.push((font, info));
+        }
+
+        let library = Library::builder()
+            .with_inputs(inputs)
+            .with_features(features.into_iter().collect())
+            .build();
+
+        Ok(Self {
+            library: LazyHash::new(library),
+            main,
+            store: FileStore::new(PackLoader {
+                pack: Arc::new(pack),
+                project_overrides,
+                exact_packages,
+            }),
+            fonts,
+            clock,
+        })
     }
 }
 
@@ -252,7 +291,6 @@ impl World for PackWorld {
             // A fixed date is used as-is; the offset only matters relative to
             // an instant, which a plain date does not carry.
             Clock::FixedDate(datetime) => Some(*datetime),
-            #[cfg(feature = "fs")]
             Clock::FixedTimestamp(time) => time.today(offset),
         }
     }
@@ -272,7 +310,6 @@ enum Clock {
     /// A fixed date, for reproducible output.
     FixedDate(Datetime),
     /// A fixed timestamp whose date respects requested timezone offsets.
-    #[cfg(feature = "fs")]
     FixedTimestamp(typst_kit::datetime::Time),
 }
 
@@ -290,6 +327,8 @@ pub(crate) enum PackWorldConstructionError {
     DependencySnapshotPackMismatch,
     #[error("Pack Override path `{path}` is not a contained project file")]
     InvalidProjectOverride { path: String },
+    #[error("the document-time UNIX timestamp is out of range")]
+    InvalidDocumentTimestamp,
 }
 
 impl FileLoader for PackLoader {
@@ -320,92 +359,6 @@ impl FileLoader for PackLoader {
                     )))
                 }
             }
-        }
-    }
-}
-
-/// Configures a [`PackWorld`].
-pub(crate) struct PackWorldBuilder {
-    pack: Pack,
-    dependencies: CompilationDependencySnapshot,
-    project_overrides: BTreeMap<String, Bytes>,
-    inputs: Dict,
-    features: Vec<Feature>,
-    clock: Clock,
-}
-
-impl PackWorldBuilder {
-    fn new(
-        pack: Pack,
-        dependencies: CompilationDependencySnapshot,
-        project_overrides: BTreeMap<String, Bytes>,
-    ) -> Self {
-        Self {
-            pack,
-            dependencies,
-            project_overrides,
-            inputs: Dict::new(),
-            features: Vec::new(),
-            clock: Clock::None,
-        }
-    }
-
-    /// Values made available to document code as `sys.inputs`.
-    pub(crate) fn inputs(mut self, inputs: Dict) -> Self {
-        self.inputs = inputs;
-        self
-    }
-
-    /// Enables an experimental Typst language feature.
-    ///
-    /// [`Feature::Html`](typst::Feature::Html) is required for compiling to
-    /// [`OutputFormat::Html`](crate::OutputFormat::Html).
-    pub(crate) fn feature(mut self, feature: Feature) -> Self {
-        self.features.push(feature);
-        self
-    }
-
-    /// Uses a fixed date for `datetime.today()`, for reproducible output.
-    pub(crate) fn fixed_date(mut self, datetime: Datetime) -> Self {
-        self.clock = Clock::FixedDate(datetime);
-        self
-    }
-
-    /// Uses a fixed UNIX timestamp for `datetime.today()`, for reproducible output.
-    #[cfg(feature = "fs")]
-    pub(crate) fn fixed_timestamp(mut self, timestamp: i64) -> typst::diag::StrResult<Self> {
-        self.clock = Clock::FixedTimestamp(typst_kit::datetime::Time::fixed_timestamp(timestamp)?);
-        Ok(self)
-    }
-
-    /// Builds the world.
-    pub(crate) fn build(self) -> PackWorld {
-        let (exact_packages, font_catalog) = self.dependencies.into_parts();
-        let entrypoint = typst::syntax::VirtualPath::new(self.pack.entrypoint())
-            .expect("Pack entrypoint invariant violated");
-        let main = RootedPath::new(VirtualRoot::Project, entrypoint).intern();
-
-        let mut fonts = FontStore::new();
-        for font in font_catalog {
-            let info = font.info().clone();
-            fonts.push((font, info));
-        }
-
-        let library = Library::builder()
-            .with_inputs(self.inputs)
-            .with_features(self.features.into_iter().collect())
-            .build();
-
-        PackWorld {
-            library: LazyHash::new(library),
-            main,
-            store: FileStore::new(PackLoader {
-                pack: Arc::new(self.pack),
-                project_overrides: self.project_overrides,
-                exact_packages,
-            }),
-            fonts,
-            clock: self.clock,
         }
     }
 }

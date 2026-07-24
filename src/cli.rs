@@ -23,18 +23,17 @@ use typst_kit::fonts::FontSource;
 use typst_pdf::{PdfStandard, Timestamp};
 
 use crate::compile::{
-    CompilationArtifact, CompilationAttempt, CompilationExecutionControls,
-    CompilationOperationOutcome, CompilationOutputSpecification, CompilationStatus,
-    CreationTimestamp, FontContainerFulfillment, HtmlOutputSpecification, OutputFormat,
+    CompilationArtifact, CompilationOutputSpecification, CompilationStatus, CreationTimestamp,
+    DocumentTime, FontContainerFulfillment, HtmlOutputSpecification, OutputFormat,
     PackCompilationPresentation, PackCompilationRequest, PackOverrideSet, PackageTreeFulfillment,
     PageRange, PageSelection, PdfOutputSpecification, PngOutputSpecification,
-    SvgOutputSpecification, compile_pack_kernel, parse_page_selection, pdf_standard_requiring_tags,
-    prepare_pack_compilation, validate_pdf_standards,
+    SvgOutputSpecification, TypstTarget, compile_pack_kernel, parse_page_selection,
+    pdf_standard_requiring_tags, prepare_pack_compilation, validate_pdf_standards,
 };
 use crate::extract::{ExtractOptions, extract};
 use crate::manifest::PackMetadata;
 use crate::pack::{FILE_EXTENSION, FontContainerIdentity, Pack};
-use crate::packer::{CreationTarget, CreationWorld, Packer, PackerError};
+use crate::packer::{CreationWorld, Packer, PackerError};
 use crate::world::PackWorld;
 
 const ENV_PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
@@ -202,7 +201,7 @@ struct CreateArgs {
 
     /// Target for the representative creation compilation [default: paged].
     #[arg(long = "target", value_name = "TARGET", help_heading = "Creation")]
-    target: Option<CreationTargetArg>,
+    target: Option<TypstTargetArg>,
 
     #[command(flatten, next_help_heading = "Creation")]
     compilation: SharedCompilationArgs,
@@ -429,16 +428,16 @@ impl From<FeatureArg> for typst::Feature {
 }
 
 #[derive(Debug, Clone, Copy, ValueEnum)]
-enum CreationTargetArg {
+enum TypstTargetArg {
     Paged,
     Html,
 }
 
-impl From<CreationTargetArg> for CreationTarget {
-    fn from(value: CreationTargetArg) -> Self {
+impl From<TypstTargetArg> for TypstTarget {
+    fn from(value: TypstTargetArg) -> Self {
         match value {
-            CreationTargetArg::Paged => Self::Paged,
-            CreationTargetArg::Html => Self::Html,
+            TypstTargetArg::Paged => Self::Paged,
+            TypstTargetArg::Html => Self::Html,
         }
     }
 }
@@ -698,7 +697,7 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
 
     emit_diagnostics_with(
         &outcome.world,
-        outcome.report.compile_warnings.iter(),
+        outcome.warnings.iter(),
         diagnostic_format,
         color,
     );
@@ -990,13 +989,10 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         .filter(|requirement| !requirement.is_embedded())
     {
         let root = packages.obtain(requirement.spec()).map_err(|error| {
-            CliError::Message(
-                CompilationOperationOutcome::UnavailableExternalPackageFulfillment {
-                    spec: requirement.spec().clone(),
-                    message: error.to_string(),
-                }
-                .to_string(),
-            )
+            CliError::Message(format!(
+                "external package fulfillment for {} is unavailable: {error}",
+                requirement.spec()
+            ))
         })?;
         let files =
             crate::world::read_complete_package_tree(root.path()).map_err(CliError::Message)?;
@@ -1048,9 +1044,7 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     let mut request = PackCompilationRequest::new(pack, output_specification)
         .adapter_resolved_output()
         .adapter_resolved_inputs(parse_inputs(&args.compilation.inputs))
-        .adapter_resolved_document_timestamp(document_timestamp)
-        .map_err(|_| "creation timestamp is out of range")?;
-    let controls = CompilationExecutionControls;
+        .adapter_resolved_document_time(DocumentTime::UnixTimestamp(document_timestamp));
     if !args.overrides.is_empty() {
         request = request.overrides(overrides);
     }
@@ -1068,8 +1062,8 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
             ),
         );
     }
-    let (mut world, kernel) = prepare_pack_compilation(CompilationAttempt::new(request, controls))
-        .map_err(|error| CliError::Message(error.to_string()))?;
+    let (mut world, kernel) =
+        prepare_pack_compilation(request).map_err(|error| CliError::Message(error.to_string()))?;
 
     let diagnostic_format = args.automation.diagnostic_format.into();
     let write_requested_dependencies = |outputs: Option<&[PathBuf]>| {

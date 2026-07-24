@@ -184,7 +184,8 @@ let request = PackCompilationRequest::new(
     pack,
     CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
 );
-let output = compile(request)?;
+let report = compile(request)?;
+let output = report.result().expect("semantic compilation result");
 assert_eq!(output.engine_identity().implementation(), "typst");
 assert_eq!(output.exporter_identity().implementation(), "typst-pdf");
 let artifact = output.artifacts().first().expect("PDF artifact");
@@ -193,18 +194,19 @@ assert_eq!(artifact.source_page_number(), None);
 let pdf = artifact.bytes();
 ```
 
-`PackOutcome::report` is the transient Creation Report. On success it retains
-warnings from the representative creation compile. Inspect `PackOutcome::pack`
-for authoritative project files, package requirements and their embedding
-disposition, and the Pack Font Catalog; that static inventory is not duplicated
-in the report.
+`PackOutcome::warnings` retains warnings from the representative creation
+compile. Inspect `PackOutcome::pack` for authoritative project files, package
+requirements and their embedding disposition, and the Pack Font Catalog; that
+static inventory is not duplicated in the creation outcome.
 
-Use `compile_report` when operational dependency evidence is needed alongside
-the immutable semantic result. Its fulfillment report retains caller-supplied
-package and font provenance, cache disposition, and licensing metadata without
-including those operational values in Compilation Identity or Compilation
-Result Identity. Every result also exposes its document summary and canonical
-Compilation Access Trace.
+`compile` always returns a `CompilationReport` after accepting the semantic
+request. Its outcome contains either the immutable semantic result or an
+operational dependency failure, and its fulfillment report retains
+caller-supplied package and font provenance, cache disposition, and licensing
+metadata without including those operational values in Compilation Identity or
+Compilation Result Identity. Request rejection is the outer error and retains
+the complete request inventory. Every semantic result also exposes its document
+summary and canonical Compilation Access Trace.
 
 For PNG and SVG, `source_page_number()` identifies each artifact independently
 of its collection position. `bytes()` borrows the artifact bytes and
@@ -236,7 +238,8 @@ let request = PackCompilationRequest::new(
     pack,
     CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
 ).overrides(overrides);
-let output = compile(request)?;
+let report = compile(request)?;
+let output = report.result().expect("semantic compilation result");
 ```
 
 ### Compilation authority
@@ -284,17 +287,26 @@ compatibility aliases:
   placeholders and replace contained files with Pack Overrides.
 - Rename Dagger arguments: `source` -> `project`, `entrypoint` -> `input`,
   `inputs` -> `sysInputs`, `noPackages` -> `noVendorPackages`,
-  and `sourceDateEpoch` -> `creationTimestamp`. Removed resource and inclusion
-  arguments have no replacements.
+  `sourceDateEpoch` -> `creationTimestamp`, and `CreationTarget` ->
+  `TypstTarget`. Removed resource and inclusion arguments have no replacements.
 - Change creation from a directory plus `--entrypoint`/`--output` to
   `create <INPUT> [OUTPUT]`.
 - Replace `compile_pack(request)` with `compile(request)`. The provisional
   arbitrary-`World` `compile` overload and public `PackWorld` builder are
-  removed; configure semantic values on `PackCompilationRequest` and operational
-  values on `CompilationExecutionControls`.
+  removed; configure semantic values on `PackCompilationRequest`.
+- `compile` returns `CompilationReport`; inspect `report.outcome()` or
+  `report.result()`. `compile_report`, `PackCompileError`, `CompilationAttempt`,
+  and the empty `CompilationExecutionControls` are removed. Request rejection
+  now owns its inventory and ordered `CompilationRequestIssue` values.
+- Replace `CreationTarget` and `CompilationTarget` with `TypstTarget`.
+- Configure document time with one `DocumentTime` value. `Absent`, `Fixed`, and
+  `UnixTimestamp` replace the former date/timestamp fields and setters.
+- Read representative-compile warnings from `PackOutcome::warnings`; the
+  one-field `PackReport` is removed.
 - Pack Manifest fields and `PackFont` fields are read-only. Use accessors such
   as `manifest.project()`, `project.entrypoint()`, `font.manifest()`, and
-  `font.data()`.
+  `font.data()`. Package declarations are reached only through
+  `manifest.packages().vendored()` and `.unvendored()`.
 - Shared Pack consistency failures are available as `PackInvariantError`,
   wrapped by `PackBuildError::Invariant` or `PackReadError::Invariant`.
 - Replace `OutputFormat` plus `CompileOptions` request construction with the
@@ -317,7 +329,8 @@ fields are removed in place. Old fields and aliases are not accepted.
 - `embedded-fonts`: make Typst's bundled fonts available as intentional
   creation and external-fulfillment sources.
 
-All crate features are opt-in.
+All crate features are opt-in. Fixed timestamp conversion for `DocumentTime`
+is part of the featureless core and remains available on wasm targets.
 
 ## Pack format
 

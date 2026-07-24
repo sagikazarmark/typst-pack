@@ -19,6 +19,7 @@ use typst_kit::datetime::Time;
 use typst_kit::files::{FileLoader, FileStore, FsRoot, SystemFiles};
 use typst_kit::fonts::FontStore;
 
+use crate::compile::TypstTarget;
 use crate::embedded::EmbeddedTypst;
 use crate::manifest::PackMetadata;
 use crate::pack::{Pack, PackBuildError};
@@ -43,7 +44,7 @@ pub struct Packer {
     system_fonts: bool,
     inputs: Dict,
     features: Vec<Feature>,
-    target: CreationTarget,
+    target: TypstTarget,
     package_path: Option<PathBuf>,
     package_cache_path: Option<PathBuf>,
     offline: bool,
@@ -70,7 +71,7 @@ impl Packer {
             system_fonts: true,
             inputs: Dict::new(),
             features: Vec::new(),
-            target: CreationTarget::Paged,
+            target: TypstTarget::Paged,
             package_path: None,
             package_cache_path: None,
             offline: false,
@@ -141,7 +142,7 @@ impl Packer {
     }
 
     /// Selects the target for the representative creation compilation.
-    pub fn target(mut self, target: CreationTarget) -> Self {
+    pub fn target(mut self, target: TypstTarget) -> Self {
         self.target = target;
         self
     }
@@ -232,7 +233,7 @@ impl Packer {
             .map_err(|err| PackerError::io("failed to resolve entrypoint", err))?;
         let entrypoint = VirtualPath::virtualize(&root, &entrypoint_abs)
             .map_err(|_| PackerError::OutsideRoot(entrypoint_abs.clone()))?;
-        let snapshot = ProjectSnapshot::acquire(&root)?;
+        let snapshot = Arc::new(ProjectSnapshot::acquire(&root)?);
         if snapshot.file(entrypoint.get_without_slash()).is_none() {
             return Err(PackerError::IgnoredEntrypoint(
                 entrypoint.get_without_slash().to_owned(),
@@ -255,10 +256,7 @@ impl Packer {
 
         let primary = Arc::new(PrimaryLoader {
             system: SystemFiles::new(FsRoot::new(root.clone()), packages),
-            project: snapshot
-                .files()
-                .map(|(path, data)| (path.to_owned(), data.clone()))
-                .collect(),
+            project: Arc::clone(&snapshot),
             cache: Mutex::new(HashMap::new()),
         });
         let creation_timestamp = self.creation_timestamp.unwrap_or_else(|| {
@@ -310,10 +308,6 @@ impl Packer {
         if let Some(hook) = &self.after_creation_hook {
             hook();
         }
-
-        let report = PackReport {
-            compile_warnings: warnings,
-        };
 
         let mut package_evidence = Vec::new();
         let font_evidence = FontEvidence {
@@ -387,7 +381,7 @@ impl Packer {
 
         Ok(PackOutcome {
             pack,
-            report,
+            warnings,
             world,
         })
     }
@@ -405,21 +399,12 @@ fn creation_compile_error(
     })
 }
 
-/// The target used by the representative creation compilation.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Ord, PartialOrd)]
-pub enum CreationTarget {
-    /// PDF and image formats.
-    Paged,
-    /// HTML.
-    Html,
-}
-
 /// The result of a successful [`Packer::pack`] run.
 pub struct PackOutcome {
     /// The assembled pack.
     pub pack: Pack,
-    /// Transient diagnostics from the creation attempt.
-    pub report: PackReport,
+    /// Warnings emitted by the representative creation compile.
+    pub warnings: EcoVec<SourceDiagnostic>,
     pub(crate) world: CreationWorld,
 }
 
@@ -435,15 +420,6 @@ impl CreationDiagnosticContext {
     pub(crate) fn world(&self) -> &CreationWorld {
         &self.world
     }
-}
-
-/// Transient diagnostics from a successful [`Packer`] creation attempt.
-///
-/// Inspect the issued [`Pack`] for its project, package, and font inventory.
-#[derive(Debug, Clone)]
-pub struct PackReport {
-    /// Warnings emitted by the representative creation compile.
-    pub compile_warnings: EcoVec<SourceDiagnostic>,
 }
 
 /// A failure while packing a project directory.
@@ -589,7 +565,7 @@ impl World for CreationWorld {
 
 struct PrimaryLoader {
     system: SystemFiles,
-    project: BTreeMap<String, Bytes>,
+    project: Arc<ProjectSnapshot>,
     cache: Mutex<HashMap<FileId, Arc<OnceLock<FileResult<Bytes>>>>>,
 }
 
@@ -605,7 +581,7 @@ impl FileLoader for PrimaryLoader {
             let path = id.vpath().get_without_slash();
             return self
                 .project
-                .get(path)
+                .file(path)
                 .cloned()
                 .ok_or_else(|| FileError::NotFound(PathBuf::from(path)));
         }
@@ -633,17 +609,17 @@ fn is_typst_embedded_font(font: &Font) -> bool {
 
 fn compile_creation_target(
     world: &dyn World,
-    target: CreationTarget,
+    target: TypstTarget,
 ) -> Warned<Result<(), EcoVec<SourceDiagnostic>>> {
     match target {
-        CreationTarget::Paged => {
+        TypstTarget::Paged => {
             let Warned { output, warnings } = EmbeddedTypst::compile_paged(world);
             Warned {
                 output: output.map(|_| ()),
                 warnings,
             }
         }
-        CreationTarget::Html => {
+        TypstTarget::Html => {
             let Warned { output, warnings } = EmbeddedTypst::compile_html(world);
             Warned {
                 output: output.map(|_| ()),

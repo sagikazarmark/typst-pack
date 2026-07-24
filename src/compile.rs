@@ -168,6 +168,15 @@ pub enum OutputFormat {
     Html,
 }
 
+/// The Typst document model selected for creation or compilation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum TypstTarget {
+    /// A paged document used by PDF and image formats.
+    Paged,
+    /// An HTML document.
+    Html,
+}
+
 impl OutputFormat {
     /// The conventional file extension for this format.
     pub fn extension(self) -> &'static str {
@@ -266,10 +275,10 @@ impl CompilationOutputSpecification {
         }
     }
 
-    fn target(&self) -> CompilationTarget {
+    fn target(&self) -> TypstTarget {
         match self {
-            Self::Html(_) => CompilationTarget::Html,
-            Self::Pdf(_) | Self::Png(_) | Self::Svg(_) => CompilationTarget::Paged,
+            Self::Html(_) => TypstTarget::Html,
+            Self::Pdf(_) | Self::Png(_) | Self::Svg(_) => TypstTarget::Paged,
         }
     }
 }
@@ -285,6 +294,27 @@ pub enum RequestValueOrigin {
     CoreDerived,
     /// An adapter resolved an ambient or adapter-level default before execution.
     AdapterResolved,
+}
+
+/// The exact or explicitly absent time used by Typst document-time requests.
+#[derive(Debug, Clone, Copy, PartialEq, Hash)]
+pub enum DocumentTime {
+    /// Document-time requests have no value.
+    Absent,
+    /// Return one fixed Typst date or datetime.
+    Fixed(Datetime),
+    /// Resolve one fixed UTC instant under each requested timezone offset.
+    UnixTimestamp(i64),
+}
+
+impl DocumentTime {
+    fn identity_projection(self) -> (Option<Datetime>, Option<i64>) {
+        match self {
+            Self::Absent => (None, None),
+            Self::Fixed(datetime) => (Some(datetime), None),
+            Self::UnixTimestamp(timestamp) => (None, Some(timestamp)),
+        }
+    }
 }
 
 /// One effective request value together with its provenance.
@@ -338,8 +368,7 @@ pub struct CompilationRequestInventory {
     overrides: EffectiveRequestValue<PackOverridesInventory>,
     selected_features: Vec<EffectiveEngineFeature>,
     features: Vec<EffectiveEngineFeature>,
-    document_time: EffectiveRequestValue<Option<Datetime>>,
-    document_timestamp: EffectiveRequestValue<Option<i64>>,
+    document_time: EffectiveRequestValue<DocumentTime>,
 }
 
 impl CompilationRequestInventory {
@@ -374,15 +403,8 @@ impl CompilationRequestInventory {
     }
 
     /// The exact Compilation Document Time, including explicit absence.
-    pub fn document_time(&self) -> &EffectiveRequestValue<Option<Datetime>> {
+    pub fn document_time(&self) -> &EffectiveRequestValue<DocumentTime> {
         &self.document_time
-    }
-
-    /// The exact effective Unix timestamp used for offset-aware document-time requests.
-    ///
-    /// This is `None` when document time is absent or represented by [`Self::document_time`].
-    pub fn document_timestamp(&self) -> &EffectiveRequestValue<Option<i64>> {
-        &self.document_timestamp
     }
 }
 
@@ -573,32 +595,9 @@ pub struct PackCompilationRequest {
     inputs: EffectiveRequestValue<Dict>,
     overrides: EffectiveRequestValue<PackOverrideSet>,
     features: Vec<EffectiveEngineFeature>,
-    document_time: EffectiveRequestValue<Option<Datetime>>,
-    document_timestamp: EffectiveRequestValue<Option<i64>>,
+    document_time: EffectiveRequestValue<DocumentTime>,
     package_fulfillments: BTreeMap<String, PackageTreeFulfillment>,
     font_fulfillments: BTreeMap<FontContainerIdentity, FontContainerFulfillment>,
-}
-
-/// Operational controls for one Pack compilation attempt.
-#[derive(Default)]
-pub struct CompilationExecutionControls;
-
-/// A validated Pack-bound request paired with independent operational controls.
-pub struct CompilationAttempt {
-    request: PackCompilationRequest,
-    controls: CompilationExecutionControls,
-}
-
-impl CompilationAttempt {
-    pub fn new(request: PackCompilationRequest, controls: CompilationExecutionControls) -> Self {
-        Self { request, controls }
-    }
-}
-
-impl From<PackCompilationRequest> for CompilationAttempt {
-    fn from(request: PackCompilationRequest) -> Self {
-        Self::new(request, CompilationExecutionControls)
-    }
 }
 
 /// One externally acquired Complete Package Tree and operational metadata.
@@ -678,8 +677,10 @@ impl PackCompilationRequest {
             inputs: EffectiveRequestValue::new(Dict::new(), RequestValueOrigin::CoreDefaulted),
             overrides: EffectiveRequestValue::new(overrides, RequestValueOrigin::CoreDefaulted),
             features: Vec::new(),
-            document_time: EffectiveRequestValue::new(None, RequestValueOrigin::CoreDefaulted),
-            document_timestamp: EffectiveRequestValue::new(None, RequestValueOrigin::CoreDefaulted),
+            document_time: EffectiveRequestValue::new(
+                DocumentTime::Absent,
+                RequestValueOrigin::CoreDefaulted,
+            ),
             package_fulfillments: BTreeMap::new(),
             font_fulfillments: BTreeMap::new(),
         }
@@ -726,35 +727,18 @@ impl PackCompilationRequest {
         self
     }
 
-    /// Sets the exact date returned by document-time requests.
-    pub fn document_time(mut self, document_time: Datetime) -> Self {
+    /// Sets the exact value returned by document-time requests.
+    pub fn document_time(mut self, document_time: DocumentTime) -> Self {
         self.document_time =
-            EffectiveRequestValue::new(Some(document_time), RequestValueOrigin::CallerSupplied);
-        self.document_timestamp =
-            EffectiveRequestValue::new(None, RequestValueOrigin::CoreDefaulted);
+            EffectiveRequestValue::new(document_time, RequestValueOrigin::CallerSupplied);
         self
     }
 
     /// Sets the exact document time resolved by an adapter.
-    pub fn adapter_resolved_document_time(mut self, document_time: Option<Datetime>) -> Self {
+    pub fn adapter_resolved_document_time(mut self, document_time: DocumentTime) -> Self {
         self.document_time =
             EffectiveRequestValue::new(document_time, RequestValueOrigin::AdapterResolved);
-        self.document_timestamp =
-            EffectiveRequestValue::new(None, RequestValueOrigin::CoreDefaulted);
         self
-    }
-
-    /// Sets the exact Unix timestamp resolved by an adapter for document-time requests.
-    #[cfg(feature = "cli")]
-    pub fn adapter_resolved_document_timestamp(
-        mut self,
-        timestamp: i64,
-    ) -> typst::diag::StrResult<Self> {
-        typst_kit::datetime::Time::fixed_timestamp(timestamp)?;
-        self.document_time = EffectiveRequestValue::new(None, RequestValueOrigin::CoreDefaulted);
-        self.document_timestamp =
-            EffectiveRequestValue::new(Some(timestamp), RequestValueOrigin::AdapterResolved);
-        Ok(self)
     }
 
     /// Supplies bytes for one exact external Font Container requirement.
@@ -1021,22 +1005,15 @@ impl CompilationDiagnostic {
     }
 }
 
-/// The Typst document shape reached by semantic compilation.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum CompilationTarget {
-    Paged,
-    Html,
-}
-
 /// The stable document facts reached before complete export.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct CompilationDocumentSummary {
-    target: CompilationTarget,
+    target: TypstTarget,
     source_page_count: Option<usize>,
 }
 
 impl CompilationDocumentSummary {
-    pub fn target(self) -> CompilationTarget {
+    pub fn target(self) -> TypstTarget {
         self.target
     }
 
@@ -1242,22 +1219,6 @@ impl CompilationReport {
     pub fn fulfillments(&self) -> &CompilationFulfillmentReport {
         &self.fulfillments
     }
-    #[allow(clippy::result_large_err)]
-    fn into_result(self) -> Result<CompilationResult, PackCompileError> {
-        match self.outcome {
-            CompilationReportOutcome::Result(result) => Ok(*result),
-            CompilationReportOutcome::Operation {
-                outcome,
-                request_inventory,
-                compilation_identity,
-            } => Err(PackCompileError::Operation {
-                outcome,
-                request_inventory,
-                compilation_identity,
-                fulfillments: Box::new(self.fulfillments),
-            }),
-        }
-    }
 }
 
 /// The semantic result of an accepted Pack compilation request.
@@ -1435,9 +1396,9 @@ impl PdfStandardsValidationError {
     }
 }
 
-/// A Pack-owned semantic request rejection.
+/// One independently detectable issue in a rejected semantic request.
 #[derive(Debug, thiserror::Error)]
-pub enum CompilationRequestRejection {
+pub enum CompilationRequestIssue {
     /// The Pack compilation contract intentionally excludes Typst Bundle.
     #[error("the Typst Bundle feature is not supported for Pack compilation")]
     UnsupportedBundleFeature,
@@ -1450,28 +1411,52 @@ pub enum CompilationRequestRejection {
     /// The Pack Override Set was preflighted against a different Pack.
     #[error("the Pack Override Set is bound to a different Pack")]
     OverrideSetPackMismatch,
-    /// Multiple independently detectable request issues in stable order.
-    #[error("the compilation request contains multiple invalid values")]
-    Multiple { issues: Vec<Self> },
+    /// The document-time Unix timestamp cannot be represented.
+    #[error("the document-time UNIX timestamp is out of range")]
+    InvalidDocumentTimestamp,
+}
+
+/// A rejected semantic request and its complete effective inventory.
+#[derive(Debug)]
+pub struct CompilationRequestRejection {
+    issues: Vec<CompilationRequestIssue>,
+    request_inventory: Box<CompilationRequestInventory>,
 }
 
 impl CompilationRequestRejection {
     /// The independently detectable request issues in stable order.
-    pub fn issues(&self) -> &[Self] {
-        match self {
-            Self::Multiple { issues } => issues,
-            issue => std::slice::from_ref(issue),
-        }
+    pub fn issues(&self) -> &[CompilationRequestIssue] {
+        &self.issues
     }
 
-    fn from_issues(mut issues: Vec<Self>) -> Option<Self> {
-        match issues.len() {
-            0 => None,
-            1 => issues.pop(),
-            _ => Some(Self::Multiple { issues }),
+    /// Every effective semantic request value retained before rejection.
+    pub fn request_inventory(&self) -> &CompilationRequestInventory {
+        &self.request_inventory
+    }
+
+    fn new(
+        issues: Vec<CompilationRequestIssue>,
+        request_inventory: CompilationRequestInventory,
+    ) -> Self {
+        debug_assert!(!issues.is_empty());
+        Self {
+            issues,
+            request_inventory: Box::new(request_inventory),
         }
     }
 }
+
+impl std::fmt::Display for CompilationRequestRejection {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let [issue] = self.issues.as_slice() {
+            issue.fmt(formatter)
+        } else {
+            formatter.write_str("the compilation request contains multiple invalid values")
+        }
+    }
+}
+
+impl std::error::Error for CompilationRequestRejection {}
 
 /// A Pack-owned operational outcome before official compilation begins.
 #[derive(Debug, Clone, thiserror::Error)]
@@ -1479,9 +1464,6 @@ pub enum CompilationOperationOutcome {
     /// The request supplied no authority for declared external packages.
     #[error("external package fulfillment is unavailable for {packages:?}")]
     MissingExternalPackageFulfillment { packages: Vec<PackageSpec> },
-    /// An explicit Package Authority could not acquire one declared requirement.
-    #[error("external package fulfillment for {spec} is unavailable: {message}")]
-    UnavailableExternalPackageFulfillment { spec: PackageSpec, message: String },
     /// Supplied files do not match the exact required Complete Package Tree.
     #[error("external package fulfillment for {spec} supplied {actual:?}, expected {expected:?}")]
     MismatchedExternalPackageTree {
@@ -1521,14 +1503,10 @@ pub enum CompilationOperationOutcome {
     },
 }
 
-/// A failed Pack-bound request or operation, never an official rejection.
 #[derive(Debug, thiserror::Error)]
-pub enum PackCompileError {
-    #[error("{rejection}")]
-    RequestRejected {
-        rejection: CompilationRequestRejection,
-        request_inventory: Box<CompilationRequestInventory>,
-    },
+pub(crate) enum PackCompilationPreparationError {
+    #[error("{0}")]
+    RequestRejected(CompilationRequestRejection),
     #[error("{outcome}")]
     Operation {
         outcome: CompilationOperationOutcome,
@@ -1536,31 +1514,6 @@ pub enum PackCompileError {
         compilation_identity: CompilationIdentity,
         fulfillments: Box<CompilationFulfillmentReport>,
     },
-}
-
-impl PackCompileError {
-    /// The request inventory retained by either terminal branch.
-    pub fn request_inventory(&self) -> &CompilationRequestInventory {
-        match self {
-            Self::RequestRejected {
-                request_inventory, ..
-            }
-            | Self::Operation {
-                request_inventory, ..
-            } => request_inventory.as_ref(),
-        }
-    }
-
-    /// The identity prepared before an operational outcome, if one exists.
-    pub fn compilation_identity(&self) -> Option<CompilationIdentity> {
-        match self {
-            Self::RequestRejected { .. } => None,
-            Self::Operation {
-                compilation_identity,
-                ..
-            } => Some(*compilation_identity),
-        }
-    }
 }
 
 /// Compiles one private adapter world through the embedded Typst implementation.
@@ -1572,22 +1525,14 @@ pub(crate) fn compile_world(
     compile_with_default_pdf_timestamp(world, output, || world.today(None).map(Timestamp::new_utc))
 }
 
-/// Compiles a validated Pack through the private Pack Compilation Kernel.
-#[allow(clippy::result_large_err)]
-pub fn compile(
-    attempt: impl Into<CompilationAttempt>,
-) -> Result<CompilationResult, PackCompileError> {
-    compile_report(attempt)?.into_result()
-}
-
 /// Compiles a validated Pack and retains operational fulfillment evidence.
 #[allow(clippy::result_large_err)]
-pub fn compile_report(
-    attempt: impl Into<CompilationAttempt>,
-) -> Result<CompilationReport, PackCompileError> {
-    let (world, kernel) = match prepare_pack_compilation(attempt.into()) {
+pub fn compile(
+    request: PackCompilationRequest,
+) -> Result<CompilationReport, CompilationRequestRejection> {
+    let (world, kernel) = match prepare_pack_compilation(request) {
         Ok(prepared) => prepared,
-        Err(PackCompileError::Operation {
+        Err(PackCompilationPreparationError::Operation {
             outcome,
             request_inventory,
             compilation_identity,
@@ -1602,7 +1547,9 @@ pub fn compile_report(
                 fulfillments: *fulfillments,
             });
         }
-        Err(error) => return Err(error),
+        Err(PackCompilationPreparationError::RequestRejected(rejection)) => {
+            return Err(rejection);
+        }
     };
     let execution = compile_pack_kernel(&world, kernel);
     Ok(CompilationReport {
@@ -1645,9 +1592,8 @@ pub(crate) enum PackCompilationPresentation {
 
 #[allow(clippy::result_large_err)]
 pub(crate) fn prepare_pack_compilation(
-    attempt: CompilationAttempt,
-) -> Result<(PackWorld, PreparedPackCompilationKernel), PackCompileError> {
-    let CompilationAttempt { request, controls } = attempt;
+    request: PackCompilationRequest,
+) -> Result<(PackWorld, PreparedPackCompilationKernel), PackCompilationPreparationError> {
     let PackCompilationRequest {
         pack,
         output_specification: mut output,
@@ -1655,19 +1601,23 @@ pub(crate) fn prepare_pack_compilation(
         overrides,
         features,
         document_time,
-        document_timestamp,
         package_fulfillments,
         font_fulfillments,
     } = request;
     let mut request_issues = vec![];
     if overrides.value.pack_identity != pack.identity() {
-        request_issues.push(CompilationRequestRejection::OverrideSetPackMismatch);
+        request_issues.push(CompilationRequestIssue::OverrideSetPackMismatch);
     }
     if features
         .iter()
         .any(|feature| feature.value == Feature::Bundle)
     {
-        request_issues.push(CompilationRequestRejection::UnsupportedBundleFeature);
+        request_issues.push(CompilationRequestIssue::UnsupportedBundleFeature);
+    }
+    if let DocumentTime::UnixTimestamp(timestamp) = document_time.value
+        && typst_kit::datetime::Time::fixed_timestamp(timestamp).is_err()
+    {
+        request_issues.push(CompilationRequestIssue::InvalidDocumentTimestamp);
     }
     let page_selection_implies_untagged_pdf;
     let output_origins = match &mut output.value {
@@ -1677,7 +1627,7 @@ pub(crate) fn prepare_pack_compilation(
                 .pixels_per_inch
                 .is_some_and(|ppi| !ppi.is_finite() || ppi <= 0.0)
             {
-                request_issues.push(CompilationRequestRejection::InvalidPpi);
+                request_issues.push(CompilationRequestIssue::InvalidPpi);
             }
             if specification.pixels_per_inch.is_none() {
                 specification.pixels_per_inch = Some(default_png_ppi());
@@ -1690,7 +1640,7 @@ pub(crate) fn prepare_pack_compilation(
             let mut tags = output.origin;
             let mut creation_time = output.origin;
             if let Err(error) = validate_pdf_standards(&specification.standards) {
-                request_issues.push(CompilationRequestRejection::InvalidPdfStandards(error));
+                request_issues.push(CompilationRequestIssue::InvalidPdfStandards(error));
             }
             page_selection_implies_untagged_pdf = !specification.page_selection.ranges().is_empty()
                 && specification.tags.is_auto()
@@ -1790,13 +1740,11 @@ pub(crate) fn prepare_pack_compilation(
         selected_features,
         features: effective_features,
         document_time,
-        document_timestamp,
     };
-    if let Some(rejection) = CompilationRequestRejection::from_issues(request_issues) {
-        return Err(PackCompileError::RequestRejected {
-            rejection,
-            request_inventory: Box::new(request_inventory),
-        });
+    if !request_issues.is_empty() {
+        return Err(PackCompilationPreparationError::RequestRejected(
+            CompilationRequestRejection::new(request_issues, request_inventory),
+        ));
     }
     let compilation_identity = compilation_identity(
         &pack,
@@ -1848,7 +1796,7 @@ pub(crate) fn prepare_pack_compilation(
                 CompilationDependencySnapshotError::Package(error) => package_tree_outcome(*error),
                 CompilationDependencySnapshotError::Font(error) => font_catalog_outcome(error),
             };
-            PackCompileError::Operation {
+            PackCompilationPreparationError::Operation {
                 outcome,
                 request_inventory: Box::new(request_inventory.clone()),
                 compilation_identity,
@@ -1856,26 +1804,19 @@ pub(crate) fn prepare_pack_compilation(
             }
         })?;
 
-    let mut world = PackWorld::builder(pack, dependencies, overrides.value.replacements)
-        .expect("preflighted Pack World inputs must remain valid")
-        .inputs(raw_inputs);
-    for feature in &request_inventory.features {
-        world = world.feature(feature.value);
-    }
-    #[cfg(feature = "fs")]
-    if let Some(timestamp) = request_inventory.document_timestamp.value {
-        world = world
-            .fixed_timestamp(timestamp)
-            .expect("validated adapter-resolved timestamp must remain valid");
-    } else if let Some(document_time) = request_inventory.document_time.value {
-        world = world.fixed_date(document_time);
-    }
-    #[cfg(not(feature = "fs"))]
-    if let Some(document_time) = request_inventory.document_time.value {
-        world = world.fixed_date(document_time);
-    }
-    let _ = controls;
-    let world = world.build();
+    let world = PackWorld::new(
+        pack,
+        dependencies,
+        overrides.value.replacements,
+        raw_inputs,
+        request_inventory
+            .features
+            .iter()
+            .map(|feature| feature.value)
+            .collect(),
+        request_inventory.document_time.value,
+    )
+    .expect("preflighted Pack World inputs must remain valid");
 
     Ok((
         world,
@@ -2209,6 +2150,7 @@ fn compilation_identity(
         .iter()
         .map(|feature| feature.value)
         .collect::<Vec<_>>();
+    let (document_time, document_timestamp) = inventory.document_time.value.identity_projection();
     CompilationIdentity(typst::utils::hash128(&(
         "typst-pack-compilation-v1",
         pack.identity(),
@@ -2222,8 +2164,8 @@ fn compilation_identity(
             .map(|entry| (&entry.path, entry.byte_len, entry.commitment))
             .collect::<Vec<_>>(),
         feature_values,
-        inventory.document_time.value,
-        inventory.document_timestamp.value,
+        document_time,
+        document_timestamp,
         engine_identity,
         exporter_identity,
     )))
@@ -2601,11 +2543,12 @@ mod result_identity_tests {
             .unwrap()
             .build()
             .unwrap();
-        let base = compile(PackCompilationRequest::new(
+        let report = compile(PackCompilationRequest::new(
             pack,
             CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
         ))
         .unwrap();
+        let base = report.result().unwrap().clone();
         let identity = base.result_identity;
 
         let mut status = base.clone();

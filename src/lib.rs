@@ -16,21 +16,20 @@ pub mod cli;
 
 pub use compile::{
     CompilationAccessKind, CompilationAccessObservation, CompilationAccessOutcome,
-    CompilationAccessTrace, CompilationArtifact, CompilationAttempt, CompilationDiagnostic,
-    CompilationDocumentSummary, CompilationExecutionControls, CompilationFulfillmentReport,
-    CompilationIdentity, CompilationOperationOutcome, CompilationOutputOrigins,
-    CompilationOutputSpecification, CompilationReport, CompilationReportOutcome,
-    CompilationRequestInventory, CompilationRequestRejection, CompilationResult,
-    CompilationResultIdentity, CompilationStatus, CompilationTarget, CreationTimestamp,
-    DiagnosticHint, DiagnosticPhase, DiagnosticProducer, DiagnosticSeverity, DiagnosticTracepoint,
-    EffectiveEngineFeature, EffectiveRequestValue, EngineIdentity, ExporterIdentity,
-    FontContainerFulfillment, FontFulfillmentReport, HtmlOutputSpecification, LogicalSpan,
-    OutputFormat, PackCompilationRequest, PackCompilationWarning, PackCompileError,
-    PackOverrideInventoryEntry, PackOverrideSet, PackOverrideSetError, PackOverridesInventory,
-    PackageFulfillmentReport, PackageTreeFulfillment, PageRange, PageSelection,
-    PdfOutputSpecification, PdfStandardsValidationError, PngOutputSpecification,
-    RequestValueOrigin, SvgOutputSpecification, TracepointKind, TypstInputsInventory, compile,
-    compile_report, parse_page_selection,
+    CompilationAccessTrace, CompilationArtifact, CompilationDiagnostic, CompilationDocumentSummary,
+    CompilationFulfillmentReport, CompilationIdentity, CompilationOperationOutcome,
+    CompilationOutputOrigins, CompilationOutputSpecification, CompilationReport,
+    CompilationReportOutcome, CompilationRequestInventory, CompilationRequestIssue,
+    CompilationRequestRejection, CompilationResult, CompilationResultIdentity, CompilationStatus,
+    CreationTimestamp, DiagnosticHint, DiagnosticPhase, DiagnosticProducer, DiagnosticSeverity,
+    DiagnosticTracepoint, DocumentTime, EffectiveEngineFeature, EffectiveRequestValue,
+    EngineIdentity, ExporterIdentity, FontContainerFulfillment, FontFulfillmentReport,
+    HtmlOutputSpecification, LogicalSpan, OutputFormat, PackCompilationRequest,
+    PackCompilationWarning, PackOverrideInventoryEntry, PackOverrideSet, PackOverrideSetError,
+    PackOverridesInventory, PackageFulfillmentReport, PackageTreeFulfillment, PageRange,
+    PageSelection, PdfOutputSpecification, PdfStandardsValidationError, PngOutputSpecification,
+    RequestValueOrigin, SvgOutputSpecification, TracepointKind, TypstInputsInventory, TypstTarget,
+    compile, parse_page_selection,
 };
 #[cfg(feature = "fs")]
 pub use extract::{ExtractError, ExtractOptions, ExtractReport, extract};
@@ -45,9 +44,7 @@ pub use pack::{
     PackageTreeError, PackageTreeIdentity,
 };
 #[cfg(feature = "fs")]
-pub use packer::{
-    CreationDiagnosticContext, CreationTarget, PackOutcome, PackReport, Packer, PackerError,
-};
+pub use packer::{CreationDiagnosticContext, PackOutcome, Packer, PackerError};
 #[cfg(feature = "fs")]
 pub use world::OfflineDownloader;
 

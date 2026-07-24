@@ -159,9 +159,15 @@ mod tests {
                 &std::collections::BTreeMap::new(),
             )
             .unwrap();
-        let world = PackWorld::builder(pack, dependencies, std::collections::BTreeMap::new())
-            .unwrap()
-            .build();
+        let world = PackWorld::new(
+            pack,
+            dependencies,
+            std::collections::BTreeMap::new(),
+            typst::foundations::Dict::new(),
+            vec![],
+            crate::DocumentTime::Absent,
+        )
+        .unwrap();
         let trace = WorldTrace::new(&world);
         let bad =
             RootedPath::new(VirtualRoot::Project, VirtualPath::new("bad.typ").unwrap()).intern();

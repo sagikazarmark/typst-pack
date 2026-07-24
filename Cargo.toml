@@ -43,7 +43,6 @@ fs = [
     "dep:ureq",
     "dep:walkdir",
     "dep:webpki-roots",
-    "typst-kit/datetime",
     "typst-kit/scan-fonts",
     "typst-kit/system-files",
     "typst-kit/timer",
@@ -66,7 +65,7 @@ rustls-pemfile = { version = "2", optional = true }
 # Typst crates share internal types and must resolve to the same exact release.
 typst = "=0.15.0"
 typst-html = "=0.15.0"
-typst-kit = { version = "=0.15.0", default-features = false }
+typst-kit = { version = "=0.15.0", default-features = false, features = ["datetime"] }
 typst-layout = "=0.15.0"
 typst-pdf = "=0.15.0"
 typst-render = "=0.15.0"

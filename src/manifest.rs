@@ -446,16 +446,6 @@ impl PackManifest {
         }
         Ok(())
     }
-
-    /// The vendored package requirements.
-    pub fn vendored_packages(&self) -> &[PackageManifest] {
-        &self.packages.vendored
-    }
-
-    /// The externally fulfilled package requirements.
-    pub fn unvendored_packages(&self) -> &[PackageManifest] {
-        &self.packages.unvendored
-    }
 }
 
 fn parse_manifest_value(value: toml::Value) -> Result<PackManifest, PackManifestError> {

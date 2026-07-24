@@ -294,7 +294,7 @@ type Tests {
     let pack = Dagger.typstPack.create(
       project: source,
       input: "main.typ",
-      target: TypstPackCreationTarget.HTML,
+      target: TypstPackTypstTarget.HTML,
       features: [TypstPackFeature.HTML],
     )
     let output = Dagger.typstPack.inspect(pack)

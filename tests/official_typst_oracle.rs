@@ -9,14 +9,25 @@ use support::official_typst::{
 };
 use typst::foundations::{Bytes, Datetime, Dict, Smart, Value};
 use typst_pack::{
-    CompilationDiagnostic, CompilationOutputSpecification, CompilationRequestRejection,
-    CompilationStatus, CreationTimestamp, DiagnosticPhase, DiagnosticProducer,
-    DiagnosticSeverity as PackDiagnosticSeverity, HtmlOutputSpecification, OutputFormat, Pack,
-    PackCompilationRequest, PackCompileError, PackOverrideSet, PackageTreeFulfillment,
-    PdfOutputSpecification, PngOutputSpecification, RequestValueOrigin, SvgOutputSpecification,
-    TracepointKind, compile, parse_page_selection,
+    CompilationDiagnostic, CompilationOutputSpecification, CompilationRequestIssue,
+    CompilationRequestRejection, CompilationResult, CompilationStatus, CreationTimestamp,
+    DiagnosticPhase, DiagnosticProducer, DiagnosticSeverity as PackDiagnosticSeverity,
+    DocumentTime, HtmlOutputSpecification, OutputFormat, Pack, PackCompilationRequest,
+    PackOverrideSet, PackageTreeFulfillment, PdfOutputSpecification, PngOutputSpecification,
+    RequestValueOrigin, SvgOutputSpecification, TracepointKind, compile as compile_to_report,
+    parse_page_selection,
 };
 use typst_pdf::PdfStandard;
+
+fn compile(
+    request: PackCompilationRequest,
+) -> Result<CompilationResult, CompilationRequestRejection> {
+    let report = compile_to_report(request)?;
+    Ok(report
+        .result()
+        .expect("expected a semantic Compilation Result")
+        .clone())
+}
 
 fn output(format: OutputFormat) -> CompilationOutputSpecification {
     match format {
@@ -62,7 +73,7 @@ fn embedded_and_external_complete_package_trees_match_the_independent_oracle() {
     let embedded = compile(
         PackCompilationRequest::new(stabilized_pack(&fixture), output(OutputFormat::Svg))
             .inputs(string_inputs([("width", "24")]))
-            .document_time(Datetime::from_ymd(2024, 2, 3).unwrap()),
+            .document_time(DocumentTime::Fixed(Datetime::from_ymd(2024, 2, 3).unwrap())),
     )
     .unwrap();
 
@@ -80,7 +91,7 @@ fn embedded_and_external_complete_package_trees_match_the_independent_oracle() {
     let external = compile(
         PackCompilationRequest::new(external_pack, output(OutputFormat::Svg))
             .inputs(string_inputs([("width", "24")]))
-            .document_time(Datetime::from_ymd(2024, 2, 3).unwrap())
+            .document_time(DocumentTime::Fixed(Datetime::from_ymd(2024, 2, 3).unwrap()))
             .package_fulfillment(
                 spec,
                 PackageTreeFulfillment::new(
@@ -373,7 +384,7 @@ fn stabilized_project_round_trips_and_matches_pack_svg_compilation() {
     });
     let request = PackCompilationRequest::new(pack, output_specification)
         .inputs(inputs)
-        .document_time(Datetime::from_ymd(2024, 2, 3).unwrap());
+        .document_time(DocumentTime::Fixed(Datetime::from_ymd(2024, 2, 3).unwrap()));
 
     let actual = compile(request).unwrap();
     let expected = observe(
@@ -485,7 +496,7 @@ fn shared_semantic_values_drive_the_same_official_source_behavior() {
         PackCompilationRequest::new(pack, output(OutputFormat::Svg))
             .inputs(inputs.clone())
             .feature(typst::Feature::A11yExtras)
-            .document_time(document_time),
+            .document_time(DocumentTime::Fixed(document_time)),
     )
     .unwrap();
     let expected = observe(
@@ -517,7 +528,10 @@ fn shared_semantic_values_drive_the_same_official_source_behavior() {
         inventory.document_time().origin(),
         RequestValueOrigin::CallerSupplied
     );
-    assert_eq!(inventory.document_time().value(), &Some(document_time));
+    assert_eq!(
+        inventory.document_time().value(),
+        &DocumentTime::Fixed(document_time)
+    );
     assert_eq!(inventory.features().len(), 1);
     assert_eq!(inventory.features()[0].value(), typst::Feature::A11yExtras);
     assert_eq!(
@@ -546,7 +560,7 @@ fn effective_defaults_and_required_features_keep_their_origins() {
         inventory.document_time().origin(),
         RequestValueOrigin::CoreDefaulted
     );
-    assert_eq!(inventory.document_time().value(), &None);
+    assert_eq!(inventory.document_time().value(), &DocumentTime::Absent);
     assert_eq!(inventory.features().len(), 1);
     assert_eq!(inventory.features()[0].value(), typst::Feature::Html);
     assert_eq!(
@@ -574,21 +588,21 @@ fn effective_defaults_and_required_features_keep_their_origins() {
         PackCompilationRequest::new(stabilized_pack(&fixture), output(OutputFormat::Html))
             .feature(typst::Feature::Bundle),
     );
-    let Err(PackCompileError::RequestRejected {
-        rejection,
-        request_inventory,
-    }) = rejected
-    else {
+    let Err(rejection) = rejected else {
         panic!("the unsupported Bundle feature must be rejected by Pack preparation");
     };
     assert_eq!(
-        request_inventory.output_specification().value().format(),
+        rejection
+            .request_inventory()
+            .output_specification()
+            .value()
+            .format(),
         OutputFormat::Html
     );
     assert_eq!(rejection.issues().len(), 1);
     assert!(matches!(
         rejection.issues()[0],
-        CompilationRequestRejection::UnsupportedBundleFeature
+        CompilationRequestIssue::UnsupportedBundleFeature
     ));
 }
 
@@ -619,7 +633,7 @@ fn unobserved_shared_values_still_change_compilation_identity() {
     .unwrap();
     let document_time = compile(
         PackCompilationRequest::new(time_pack, output(OutputFormat::Svg))
-            .document_time(Datetime::from_ymd(2024, 2, 3).unwrap()),
+            .document_time(DocumentTime::Fixed(Datetime::from_ymd(2024, 2, 3).unwrap())),
     )
     .unwrap();
 
@@ -814,7 +828,7 @@ fn stabilized_pack_matches_official_pdf_export_with_explicit_controls() {
     let actual = compile(
         PackCompilationRequest::new(pack, output_specification)
             .inputs(inputs)
-            .document_time(document_time),
+            .document_time(DocumentTime::Fixed(document_time)),
     )
     .unwrap();
     let expected = observe(
@@ -863,7 +877,7 @@ fn stabilized_pack_matches_official_pdf_exporter_defaults() {
     let actual = compile(
         PackCompilationRequest::new(pack, output(OutputFormat::Pdf))
             .inputs(inputs)
-            .document_time(document_time),
+            .document_time(DocumentTime::Fixed(document_time)),
     )
     .unwrap();
     let expected = observe(
@@ -1145,7 +1159,7 @@ fn stabilized_pack_matches_complete_official_png_page_artifacts() {
     let actual = compile(
         PackCompilationRequest::new(stabilized_pack(&fixture), output_specification)
             .inputs(inputs)
-            .document_time(document_time),
+            .document_time(DocumentTime::Fixed(document_time)),
     )
     .unwrap();
     let repeated = compile(
@@ -1158,7 +1172,7 @@ fn stabilized_pack_matches_complete_official_png_page_artifacts() {
             }),
         )
         .inputs(string_inputs([("width", "24")]))
-        .document_time(document_time),
+        .document_time(DocumentTime::Fixed(document_time)),
     )
     .unwrap();
     let expected = observe(
