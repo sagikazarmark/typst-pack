@@ -12,8 +12,10 @@ postprocessing.
 Compilation inputs map as follows:
 
 - `sysInputs`, `features`, `creationTimestamp`, page selection, PPI, PDF
-  controls, and format map to their typed CLI controls;
-- `packageDir`, `fontDir`, and their path controls fulfill exact Pack
+  controls, and format map to semantic typed CLI controls; selecting HTML
+  output derives the required HTML engine feature, so callers do not also
+  select it;
+- typed `packageDir` and mounted `fontDir` capabilities fulfill exact Pack
   dependencies through the CLI authorities;
 - `overrideDir` is an immutable project-shaped Dagger value, while
   `overridePaths` selects contained project paths whose same relative files are
@@ -30,11 +32,17 @@ result is raised with its diagnostics as a compilation error. Failures that
 occur while querying or exporting the returned `File` or `Directory` remain
 later Dagger delivery errors and cannot be reported as compilation failures.
 
-The adapter intentionally omits local output paths, stdout, terminal color,
-viewer launch, timing files, dependency files, arbitrary environment defaults,
-and Bundle output. It always stages Document Formats as `output.pdf` or
-`output.html`, and Page Formats as `page-{0p}.png` or `page-{0p}.svg`. These are
-transport differences after immutable Compilation Results. Native differential
-tests remain the authority for compiler, diagnostic, and artifact parity; the
-Dagger suite tests only typed mapping, artifact roles, immutability, and the
+The adapter intentionally omits diagnostic formatting, job counts, arbitrary
+font path strings, local output paths, stdout, terminal color, viewer launch,
+timing files, dependency files, arbitrary environment defaults, and Bundle
+output. Its container image installs no system-font source, so the interface
+also omits ineffective system-font controls. Callers can mount one typed font
+directory, and can still control whether Typst's deliberately installed
+embedded fonts participate.
+
+The adapter always stages Document Formats as `output.pdf` or `output.html`,
+and Page Formats as `page-{0p}.png` or `page-{0p}.svg`. These are transport
+differences after immutable Compilation Results. Native differential tests
+remain the authority for compiler, diagnostic, and artifact parity; the Dagger
+suite tests typed mapping, schema absence, artifact roles, immutability, and the
 adapter failure boundary.

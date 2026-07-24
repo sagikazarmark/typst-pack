@@ -264,7 +264,6 @@ type Tests {
         pack: self.pack,
         creationTimestamp: 1700000000,
         pdfStandards: [TypstPackPdfStandard.V2_0],
-        diagnosticFormat: TypstPackDiagnosticFormat.SHORT,
         certificate: self.project.file("notes.txt"),
       )
       .file("output.pdf")
@@ -297,8 +296,6 @@ type Tests {
       input: "main.typ",
       target: TypstPackCreationTarget.HTML,
       features: [TypstPackFeature.HTML],
-      diagnosticFormat: TypstPackDiagnosticFormat.SHORT,
-      ignoreSystemFonts: true,
     )
     let output = Dagger.typstPack.inspect(pack)
 
@@ -320,7 +317,6 @@ type Tests {
       project: source,
       input: "main.typ",
       sysInputs: ["phase=creation"],
-      ignoreSystemFonts: true,
       ignoreEmbeddedFonts: true,
     )
     let inspection = Dagger.typstPack.inspect(pack)
@@ -331,7 +327,6 @@ type Tests {
       pack: pack,
       format: TypstPackOutputFormat.SVG,
       sysInputs: ["phase=compilation"],
-      ignoreSystemFonts: true,
       ignoreEmbeddedFonts: true,
     )
 
@@ -350,7 +345,6 @@ type Tests {
       packageDir: self.packages,
       embedFonts: true,
       includeTypstEmbeddedFonts: true,
-      ignoreSystemFonts: true,
     )
     let output = Dagger.typstPack.inspect(pack)
 
@@ -432,7 +426,6 @@ type Tests {
       project: source,
       input: "main.typ",
       features: [TypstPackFeature.A11Y_EXTRAS],
-      ignoreSystemFonts: true,
       ignoreEmbeddedFonts: true,
     )
     let output = Dagger.typstPack.compile(
@@ -440,7 +433,6 @@ type Tests {
       format: TypstPackOutputFormat.PNG,
       pages: "5,2",
       ppi: "144.5",
-      ignoreSystemFonts: true,
       ignoreEmbeddedFonts: true,
     )
     let entries = output.entries
@@ -455,13 +447,12 @@ type Tests {
   }
 
   """
-  Compile a pack to HTML with Typst's experimental HTML feature enabled.
+  Compile a pack to HTML without redundantly selecting the derived HTML feature.
   """
   compileHtml: Void @check {
     let output = Dagger.typstPack.compile(
       pack: self.pack,
       format: TypstPackOutputFormat.HTML,
-      features: [TypstPackFeature.HTML],
     )
     let html = output.file("output.html")
 

@@ -62,10 +62,10 @@ type TypstPack {
   }
 
   """
-  Keep removed create and compile argument names out of the module schema.
+  Keep unsupported and CLI-shaped create and compile arguments out of the module schema.
   """
-  noLegacyCreateCompileArguments: Void @check {
-    let legacyArguments = [
+  noUnsupportedCreateCompileArguments: Void @check {
+    let unsupportedArguments = [
       "source",
       "entrypoint",
       "inputs",
@@ -78,7 +78,12 @@ type TypstPack {
       "resourceSlots",
       "targets",
       "sourceDateEpoch",
+      "jobs",
+      "diagnosticFormat",
+      "fontPaths",
+      "ignoreSystemFonts",
     ]
+    let unsupportedTypes = ["TypstPackDiagnosticFormat"]
     let checkedCreate = false
     let checkedCompile = false
 
@@ -93,14 +98,17 @@ type TypstPack {
       }}
     }}
       .each { typeDef =>
+        unsupportedTypes.each { unsupportedType =>
+          assert { typeDef.name != unsupportedType }
+        }
         if (typeDef.name == "TypstPack") {
           typeDef.asObject.functions.each { function =>
             if (function.name == "create" or function.name == "compile") {
               if (function.name == "create") { checkedCreate = true }
               if (function.name == "compile") { checkedCompile = true }
               function.args.each { argument =>
-                legacyArguments.each { legacyArgument =>
-                  assert { argument.name != legacyArgument }
+                unsupportedArguments.each { unsupportedArgument =>
+                  assert { argument.name != unsupportedArgument }
                 }
               }
             }
@@ -206,25 +214,9 @@ type TypstPack {
     """
     creationTimestamp: Int,
     """
-    Number of parallel jobs.
-    """
-    jobs: Int,
-    """
-    Diagnostic format.
-    """
-    diagnosticFormat: DiagnosticFormat! = DiagnosticFormat.HUMAN,
-    """
     Optional font directory mounted at /work/fonts and added to the font search path.
     """
     fontDir: Directory,
-    """
-    Additional font directories. Relative paths resolve from /work/project; absolute paths can reference other mounts.
-    """
-    fontPaths: [String!]! = [],
-    """
-    Do not use system fonts during creation.
-    """
-    ignoreSystemFonts: Boolean! = false,
     """
     Do not use fonts embedded into Typst during creation.
     """
@@ -261,7 +253,6 @@ type TypstPack {
     args += [
       "create", input, "/work/out/project.typk",
       "--root", ".",
-      "--diagnostic-format", diagnosticFormatName(diagnosticFormat),
     ]
 
     if (fontDir != null) {
@@ -276,9 +267,6 @@ type TypstPack {
     if (creationTimestamp != null) {
       args += ["--creation-timestamp", toString(creationTimestamp)]
     }
-    if (jobs != null) { args += ["--jobs", toString(jobs)] }
-    fontPaths.each { path => args += ["--font-path", path] }
-    if (ignoreSystemFonts) { args += ["--ignore-system-fonts"] }
     if (ignoreEmbeddedFonts) { args += ["--ignore-embedded-fonts"] }
     if (packageDir != null) {
       args += ["--package-path", "/work/packages"]
@@ -410,14 +398,6 @@ type TypstPack {
     """
     fontDir: Directory,
     """
-    Additional font directories. Relative paths resolve from /work/src; absolute paths can reference other mounts.
-    """
-    fontPaths: [String!]! = [],
-    """
-    Do not use system fonts.
-    """
-    ignoreSystemFonts: Boolean! = false,
-    """
     Do not use Typst's embedded fonts.
     """
     ignoreEmbeddedFonts: Boolean! = false,
@@ -438,10 +418,6 @@ type TypstPack {
     """
     creationTimestamp: Int,
     """
-    Number of parallel jobs.
-    """
-    jobs: Int,
-    """
     Optional Typst package directory mounted at /work/packages.
     """
     packageDir: Directory,
@@ -449,10 +425,6 @@ type TypstPack {
     Disallow network access while resolving packages.
     """
     offline: Boolean! = false,
-    """
-    Diagnostic format: human or short.
-    """
-    diagnosticFormat: DiagnosticFormat! = DiagnosticFormat.HUMAN,
     """
     Custom CA certificate used for package downloads.
     """
@@ -472,7 +444,6 @@ type TypstPack {
     args += [
       "compile", "project.typk", outputPath,
       "--format", outputFormatName(format),
-      "--diagnostic-format", diagnosticFormatName(diagnosticFormat),
     ]
 
     if (fontDir != null) {
@@ -489,8 +460,6 @@ type TypstPack {
         args += ["--override", path, "/work/overrides/" + path]
       }
     }
-    fontPaths.each { path => args += ["--font-path", path] }
-    if (ignoreSystemFonts) { args += ["--ignore-system-fonts"] }
     if (ignoreEmbeddedFonts) { args += ["--ignore-embedded-fonts"] }
     if (pretty) { args += ["--pretty"] }
     pdfStandards.each { standard => args += ["--pdf-standard", pdfStandardName(standard)] }
@@ -498,7 +467,6 @@ type TypstPack {
     if (creationTimestamp != null) {
       args += ["--creation-timestamp", toString(creationTimestamp)]
     }
-    if (jobs != null) { args += ["--jobs", toString(jobs)] }
     if (packageDir != null) {
       args += ["--package-path", "/work/packages"]
     }
@@ -539,11 +507,6 @@ enum OutputFormat {
   HTML
 }
 
-enum DiagnosticFormat {
-  HUMAN
-  SHORT
-}
-
 enum CreationTarget {
   PAGED
   HTML
@@ -575,10 +538,6 @@ enum PdfStandard {
 }
 
 let outputFormatName(format: OutputFormat!): String! {
-  toString(format).toLower
-}
-
-let diagnosticFormatName(format: DiagnosticFormat!): String! {
   toString(format).toLower
 }
 
