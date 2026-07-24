@@ -40,14 +40,17 @@ issue:
 4. Review every `[[matrix]]` and `[[semantic]]` entry. New custom behavior must
    be added with coverage and exactly one classification:
    `upstream-behavior`, `pack-invariant`, `adapter-concern`,
-   `intentional-pack-difference`, or `unavoidable-mirror`.
+   `intentional-pack-difference`, or `unavoidable-mirror`. Represent
+   differential matrix coverage with a typed entry in
+   `tests/support/differential.rs`; the embedded gate requires every classified
+   category to name at least one executable differential suite.
 5. Update frozen assertions or differential expectations only with a recorded
    classification. The change description must state whether each changed
    observation is upstream behavior, a Pack invariant, an adapter concern, an
    intentional Pack-specific difference, or an unavoidable mirror. An
-   unexplained expectation update is not an approved baseline change. Update
-   the corresponding `[[surface]]` digest only after completing that review;
-   stale source or expectation digests fail `embedded_typst_gate`.
+   unexplained expectation update is not an approved baseline change. Git
+   records source and test changes; the review gate intentionally does not
+   maintain duplicate whole-file or whole-tree content digests.
 6. Update `docs/cli-parity.md` and ADR-0005 when the shared behavior inventory
    or an intentional difference changes.
 

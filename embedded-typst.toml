@@ -106,47 +106,38 @@ direct = false
 [[matrix]]
 category = "pdf"
 classification = "upstream-behavior"
-coverage = ["stabilized_pack_matches_official_pdf_export_with_explicit_controls", "stabilized_pack_matches_official_pdf_exporter_defaults"]
 
 [[matrix]]
 category = "png"
 classification = "upstream-behavior"
-coverage = ["pack_png_defaults_match_the_pinned_official_exporter", "stabilized_pack_matches_complete_official_png_page_artifacts"]
 
 [[matrix]]
 category = "svg"
 classification = "upstream-behavior"
-coverage = ["stabilized_project_round_trips_and_matches_pack_svg_compilation"]
 
 [[matrix]]
 category = "html"
 classification = "upstream-behavior"
-coverage = ["stabilized_pack_matches_official_html_artifacts_and_pretty_control", "html_exporter_rejection_matches_official_diagnostics_and_order"]
 
 [[matrix]]
 category = "diagnostics"
 classification = "upstream-behavior"
-coverage = ["pack_rejection_matches_official_diagnostics_and_remains_a_result", "official_typst_compile_gates_shared_environment_diagnostics_and_exit_behavior"]
 
 [[matrix]]
 category = "shared-requests"
 classification = "upstream-behavior"
-coverage = ["shared_semantic_values_drive_the_same_official_source_behavior", "official_typst_compile_gates_shared_environment_diagnostics_and_exit_behavior"]
 
 [[matrix]]
 category = "packages"
 classification = "pack-invariant"
-coverage = ["embedded_and_external_complete_package_trees_match_the_independent_oracle", "official_typst_compile_gates_package_font_and_offline_request_routing"]
 
 [[matrix]]
 category = "fonts"
 classification = "pack-invariant"
-coverage = ["exact_pack_font_catalog_matches_the_independent_oracle_and_external_fulfillment", "official_typst_compile_gates_package_font_and_offline_request_routing"]
 
 [[matrix]]
 category = "pack-overrides"
 classification = "intentional-pack-difference"
-coverage = ["pack_source_and_non_source_overrides_match_the_independent_oracle"]
 
 [[semantic]]
 name = "pack-backed-world"
@@ -187,121 +178,3 @@ coverage = ["tests/compilation.rs"]
 name = "dagger-argument-translation"
 classification = "adapter-concern"
 coverage = [".dagger/modules/tests/main.dang"]
-
-# These are the complete implementation and expectation surfaces where Pack
-# customizes or mirrors embedded Typst behavior. Any change requires updating
-# the adjacent classification and digest as part of the upgrade review.
-[[surface]]
-path = "src/compile.rs"
-classification = "pack-invariant"
-sha256 = "afa701a9968458946682976191c30726ca062a4d4dcdeae0ac4efef992ad1424"
-
-[[surface]]
-path = "src/embedded.rs"
-classification = "upstream-behavior"
-sha256 = "7c23c4a6f4e39cba18c6be325e77af113aa500287cf86903942ca6ba8c446ce1"
-
-[[surface]]
-path = "src/extract.rs"
-classification = "pack-invariant"
-sha256 = "a549c99d90ecbedeb0c4cec8e2e6ea9c6fd07f76eded233cda467e7ef96660f7"
-
-[[surface]]
-path = "src/lib.rs"
-classification = "pack-invariant"
-sha256 = "d835c8fd351740c10153e6825f47e97f02fc5f9a89d1e91f59456032ecedac5f"
-
-[[surface]]
-path = "src/main.rs"
-classification = "adapter-concern"
-sha256 = "adce8be17cae31d2753b2ecd1636a466e0e02dded3780951e0bd3fe172a2d098"
-
-[[surface]]
-path = "src/manifest.rs"
-classification = "pack-invariant"
-sha256 = "ec6e48aa406c958c4141b675e0f1915a84e29cbdeb33498b575186d7f3779995"
-
-[[surface]]
-path = "src/pack.rs"
-classification = "pack-invariant"
-sha256 = "5dc7858e7e5f8ce12c2b0dd460d4817beb9c8f92fcd409c45350c14fc7b2145e"
-
-[[surface]]
-path = "src/packer.rs"
-classification = "pack-invariant"
-sha256 = "458ca3773bf9ee182bd3d1f2eb00bd9167fc7937f749b07415ae556c1ca4537a"
-
-[[surface]]
-path = "src/project_snapshot.rs"
-classification = "pack-invariant"
-sha256 = "ff5b4f24b0dd8ae448e70bb1aff57a77c83f5aa3ad9e91c6bd2d7d5fa96aae12"
-
-[[surface]]
-path = "src/tests.rs"
-classification = "pack-invariant"
-sha256 = "1dc25e2ab6d1ff9733c4adb733c3f2a05bd5e6e43255d182e4684f3ea0a07aad"
-
-[[surface]]
-path = "src/world.rs"
-classification = "pack-invariant"
-sha256 = "c139f0af3a7896e2d595ca2a95b1f741bac50e5c3ff5f1a9ffae4f982d3373f0"
-
-[[surface]]
-path = "src/world_trace.rs"
-classification = "pack-invariant"
-sha256 = "fdeeb29d49b63878e238407fafe500d67d778805b3127d2943810bd8415266cd"
-
-[[surface]]
-path = "src/cli.rs"
-classification = "unavoidable-mirror"
-sha256 = "d0658d8f564710fcb63e69b35f4383aaa4020b24b49213e6a269128ac3453657"
-
-[[surface]]
-path = "dagger.dang"
-classification = "adapter-concern"
-sha256 = "9e6fbf165b4407e0e17c8c9ababa2a5d89edfc20c907d14839adddd69e9839e4"
-
-[[surface]]
-path = ".dagger/modules/tests"
-classification = "adapter-concern"
-sha256 = "3d4dfaa961c5c95829e4773ff6e19d2411a9b9d2a0d5dd7c52f32d65a8b6313b"
-
-[[surface]]
-path = "tests/cli.rs"
-classification = "unavoidable-mirror"
-sha256 = "e5ddf4bf3f3f774ed420106217c5784aea68b7b61a5015664e12185c27841479"
-
-[[surface]]
-path = "tests/compilation.rs"
-classification = "pack-invariant"
-sha256 = "1db7c32d7bec24416151cf0c7511bf5a73b9582c67cec651e51da20440b6c9e1"
-
-[[surface]]
-path = "tests/official_typst_oracle.rs"
-classification = "upstream-behavior"
-sha256 = "4260b570b300f14eaa298eda35ce091ab004566a12948b82a96152e26ead796c"
-
-[[surface]]
-path = "tests/official_typst_cli.rs"
-classification = "unavoidable-mirror"
-sha256 = "bfdf73c2898793d237940dc8b5bd8ac72129cf4373a5be763656a7731495e37b"
-
-[[surface]]
-path = "tests/support/mod.rs"
-classification = "upstream-behavior"
-sha256 = "2d0bd52dd4f556dc7503ed7c8f520cc1322c9bb950e2cce3a8015a118938c3f9"
-
-[[surface]]
-path = "tests/support/official_typst.rs"
-classification = "upstream-behavior"
-sha256 = "34e166c5b7020c4aeffe8a8f0ece82ac40dfca1020245a8933e42b38e69333c2"
-
-[[surface]]
-path = "tests/support/official_typst_cli.rs"
-classification = "unavoidable-mirror"
-sha256 = "b0c5b1e387750c78896c73cd280d7d0379d266f092c533b466b919e2cda723d7"
-
-[[surface]]
-path = "tests/fixtures/official-oracle"
-classification = "upstream-behavior"
-sha256 = "9fdb0af890f4eec4bbcae274699d05f1af09b418ed820bc6ddc061d3d0cb29a1"

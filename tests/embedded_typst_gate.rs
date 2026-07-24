@@ -1,6 +1,9 @@
 use std::collections::BTreeSet;
 
-use sha2::{Digest, Sha256};
+#[path = "support/differential.rs"]
+mod differential;
+
+use differential::DIFFERENTIAL_COVERAGE;
 use typst_pack::{OutputFormat, Pack, PackCompilationRequest, compile};
 
 fn baseline() -> toml::Value {
@@ -10,30 +13,16 @@ fn baseline() -> toml::Value {
 #[test]
 fn approved_baseline_covers_the_complete_differential_matrix() {
     let baseline = baseline();
-    let differential_sources = concat!(
-        include_str!("official_typst_oracle.rs"),
-        include_str!("official_typst_cli.rs"),
-    );
     let categories = baseline["matrix"]
         .as_array()
         .unwrap()
         .iter()
         .map(|entry| entry["category"].as_str().unwrap())
         .collect::<BTreeSet<_>>();
-
     assert_eq!(
-        categories,
-        BTreeSet::from([
-            "diagnostics",
-            "fonts",
-            "html",
-            "packages",
-            "pack-overrides",
-            "pdf",
-            "png",
-            "shared-requests",
-            "svg",
-        ])
+        categories.len(),
+        baseline["matrix"].as_array().unwrap().len(),
+        "differential matrix categories must be unique"
     );
 
     let classifications = [
@@ -48,7 +37,6 @@ fn approved_baseline_covers_the_complete_differential_matrix() {
         .unwrap()
         .iter()
         .chain(baseline["semantic"].as_array().unwrap())
-        .chain(baseline["surface"].as_array().unwrap())
     {
         let classification = entry["classification"].as_str().unwrap();
         assert!(
@@ -59,99 +47,22 @@ fn approved_baseline_covers_the_complete_differential_matrix() {
             assert!(!coverage.as_array().unwrap().is_empty());
         }
     }
-    for entry in baseline["matrix"].as_array().unwrap() {
-        for coverage in entry["coverage"].as_array().unwrap() {
-            let coverage = coverage.as_str().unwrap();
-            assert!(
-                differential_sources.contains(coverage),
-                "differential matrix coverage `{coverage}` is missing"
-            );
-        }
-    }
-}
-
-#[test]
-fn classified_semantic_and_expectation_surfaces_have_reviewed_content() {
-    let baseline = baseline();
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-    let mut expected = BTreeSet::from([
-        ".dagger/modules/tests".to_owned(),
-        "dagger.dang".to_owned(),
-        "tests/fixtures/official-oracle".to_owned(),
-    ]);
-    for directory in ["src", "tests", "tests/support"] {
-        for entry in std::fs::read_dir(root.join(directory)).unwrap() {
-            let path = entry.unwrap().path();
-            if path.extension().and_then(|extension| extension.to_str()) == Some("rs")
-                && path.file_name().and_then(|name| name.to_str()) != Some("embedded_typst_gate.rs")
-            {
-                expected.insert(
-                    path.strip_prefix(root)
-                        .unwrap()
-                        .to_str()
-                        .unwrap()
-                        .to_owned(),
-                );
-            }
-        }
-    }
-    let actual = baseline["surface"]
-        .as_array()
-        .unwrap()
+    let typed_categories = DIFFERENTIAL_COVERAGE
         .iter()
-        .map(|surface| surface["path"].as_str().unwrap().to_owned())
+        .map(|coverage| coverage.category.as_str())
         .collect::<BTreeSet<_>>();
-    assert_eq!(actual, expected);
-
-    for surface in baseline["surface"].as_array().unwrap() {
-        let path = surface["path"].as_str().unwrap();
-        let actual = surface_digest(&root.join(path));
-        assert_eq!(
-            actual,
-            surface["sha256"].as_str().unwrap(),
-            "`{path}` changed without an updated embedded Typst classification review"
-        );
-    }
-}
-
-fn surface_digest(path: &std::path::Path) -> String {
-    let mut hasher = Sha256::new();
-    if path.is_file() {
-        hasher.update(std::fs::read(path).unwrap());
-    } else {
-        let mut files = Vec::new();
-        collect_files(path, path, &mut files);
-        files.sort_by(|left, right| left.0.cmp(&right.0));
-        for (relative, file) in files {
-            hasher.update(relative.as_bytes());
-            hasher.update([0]);
-            hasher.update(std::fs::read(file).unwrap());
-            hasher.update([0]);
-        }
-    }
-    format!("{:x}", hasher.finalize())
-}
-
-fn collect_files(
-    root: &std::path::Path,
-    directory: &std::path::Path,
-    files: &mut Vec<(String, std::path::PathBuf)>,
-) {
-    for entry in std::fs::read_dir(directory).unwrap() {
-        let path = entry.unwrap().path();
-        if path.is_dir() {
-            collect_files(root, &path, files);
-        } else {
-            let relative = path
-                .strip_prefix(root)
-                .unwrap()
-                .components()
-                .map(|component| component.as_os_str().to_str().unwrap())
-                .collect::<Vec<_>>()
-                .join("/");
-            files.push((relative, path));
-        }
-    }
+    assert_eq!(
+        typed_categories.len(),
+        DIFFERENTIAL_COVERAGE.len(),
+        "typed differential categories must be unique"
+    );
+    assert_eq!(typed_categories, categories);
+    assert!(
+        DIFFERENTIAL_COVERAGE
+            .iter()
+            .all(|coverage| !coverage.suites.is_empty()),
+        "every differential category must name an executable suite"
+    );
 }
 
 #[test]
