@@ -1,7 +1,8 @@
 //! Crate tests.
 
 use crate::compile::{CompileError, compile as compile_request, compile_world as compile};
-use crate::world::PackWorld;
+use crate::pack::CompilationDependencySnapshotError;
+use crate::world::{PackWorld, PackWorldBuilder, PackWorldConstructionError};
 use crate::*;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -12,6 +13,28 @@ use typst::syntax::{RootedPath, VirtualPath, VirtualRoot};
 
 fn tiny_png() -> Vec<u8> {
     tiny_skia::Pixmap::new(4, 4).unwrap().encode_png().unwrap()
+}
+
+fn pack_world_builder(pack: Pack) -> PackWorldBuilder {
+    #[cfg(feature = "embedded-fonts")]
+    let font_fulfillments = typst_kit::fonts::embedded().fold(
+        std::collections::BTreeMap::new(),
+        |mut fulfillments, (font, _)| {
+            fulfillments
+                .entry(FontContainerIdentity::from_bytes(font.data().as_slice()))
+                .or_insert_with(|| font.data().clone());
+            fulfillments
+        },
+    );
+    #[cfg(not(feature = "embedded-fonts"))]
+    let font_fulfillments = std::collections::BTreeMap::new();
+    let dependencies = pack
+        .materialize_compilation_dependency_snapshot(
+            std::collections::BTreeMap::new(),
+            &font_fulfillments,
+        )
+        .unwrap();
+    PackWorld::builder(pack, dependencies, std::collections::BTreeMap::new()).unwrap()
 }
 
 fn test_package_declaration(files: &[(&str, &[u8])]) -> PackageManifest {
@@ -1013,7 +1036,48 @@ fn a_constructed_pack_builds_a_world_without_revalidation() {
         .build()
         .unwrap();
 
-    let _: PackWorld = PackWorld::builder(pack).build().unwrap();
+    let _: PackWorld = pack_world_builder(pack).build();
+}
+
+#[test]
+fn pack_world_construction_rejects_incomplete_dependencies_and_invalid_overrides() {
+    let spec = "@local/example:1.0.0".parse().unwrap();
+    let dependent = Pack::builder("main.typ")
+        .file("main.typ", Vec::new())
+        .unwrap()
+        .external_package_file(spec, "lib.typ", b"package".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    assert!(matches!(
+        dependent.materialize_compilation_dependency_snapshot(
+            std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+        ),
+        Err(CompilationDependencySnapshotError::Package(error))
+            if matches!(*error, PackageTreeError::Missing { .. })
+    ));
+
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", Vec::new())
+        .unwrap()
+        .build()
+        .unwrap();
+    let dependencies = pack
+        .materialize_compilation_dependency_snapshot(
+            std::collections::BTreeMap::new(),
+            &std::collections::BTreeMap::new(),
+        )
+        .unwrap();
+    let overrides = std::collections::BTreeMap::from([(
+        "missing.typ".to_owned(),
+        Bytes::new(b"replacement".to_vec()),
+    )]);
+    assert!(matches!(
+        PackWorld::builder(pack, dependencies, overrides),
+        Err(PackWorldConstructionError::InvalidProjectOverride { path })
+            if path == "missing.typ"
+    ));
 }
 
 #[test]
@@ -1584,7 +1648,7 @@ fn compile_in_memory_pack_to_pdf_and_svg() {
         .build()
         .unwrap();
 
-    let world = PackWorld::builder(pack).build().unwrap();
+    let world = pack_world_builder(pack).build();
 
     let pdf = compile(
         &world,
@@ -1630,7 +1694,7 @@ fn pdf_default_timestamp_is_resolved_after_compilation() {
         .unwrap()
         .build()
         .unwrap();
-    let world = PackWorld::builder(pack).build().unwrap();
+    let world = pack_world_builder(pack).build();
     let timestamp = typst_pdf::Timestamp::new_utc(
         typst::foundations::Datetime::from_ymd_hms(2000, 1, 2, 3, 4, 5).unwrap(),
     );
@@ -1670,7 +1734,7 @@ fn undeclared_package_requests_have_no_ambient_fallback() {
         .unwrap()
         .build()
         .unwrap();
-    let world = PackWorld::builder(pack).build().unwrap();
+    let world = pack_world_builder(pack).build();
     let spec = "@local/undeclared:1.0.0".parse().unwrap();
     let id = RootedPath::new(
         VirtualRoot::Package(spec),
@@ -1707,7 +1771,7 @@ fn vendored_package_compiles_from_the_pack() {
         .unwrap()
         .build()
         .unwrap();
-    let world = PackWorld::builder(pack).build().unwrap();
+    let world = pack_world_builder(pack).build();
 
     assert!(
         compile(
@@ -1738,7 +1802,7 @@ fn missing_vendored_package_file_has_no_ambient_fallback() {
         .unwrap()
         .build()
         .unwrap();
-    let world = PackWorld::builder(pack).build().unwrap();
+    let world = pack_world_builder(pack).build();
 
     assert!(
         compile(
@@ -2204,10 +2268,7 @@ Rows: #csv("data.csv").len()
 
         // Round-trip through bytes: nothing may depend on the file system.
         let pack = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
-        let world = PackWorld::builder(pack)
-            .embedded_fonts(true)
-            .build()
-            .unwrap();
+        let world = pack_world_builder(pack).build();
         let output = compile(
             &world,
             &CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
@@ -2243,7 +2304,7 @@ Rows: #csv("data.csv").len()
         assert!(!full.pack.fonts().is_empty());
         // The embedded fonts must load again from the pack.
         let pack = Pack::from_bytes(full.pack.to_bytes().unwrap()).unwrap();
-        PackWorld::builder(pack).build().unwrap();
+        pack_world_builder(pack).build();
     }
 
     #[cfg(feature = "embedded-fonts")]
@@ -2503,7 +2564,7 @@ fn html_output_is_gated_by_the_html_feature() {
         .unwrap();
 
     // Without the feature, Typst itself rejects HTML export.
-    let world = PackWorld::builder(pack.clone()).build().unwrap();
+    let world = pack_world_builder(pack.clone()).build();
     assert!(
         compile(
             &world,
@@ -2513,10 +2574,9 @@ fn html_output_is_gated_by_the_html_feature() {
     );
 
     // With the feature, it produces a document plus an "experimental" warning.
-    let world = PackWorld::builder(pack)
+    let world = pack_world_builder(pack)
         .feature(typst::Feature::Html)
-        .build()
-        .unwrap();
+        .build();
     let output = compile(
         &world,
         &CompilationOutputSpecification::Html(HtmlOutputSpecification::default()),
@@ -2530,16 +2590,11 @@ fn html_output_is_gated_by_the_html_feature() {
 
 #[cfg(feature = "embedded-fonts")]
 #[test]
-fn pack_font_faces_remain_authoritative_over_host_and_typst_embedded_fonts() {
+fn exact_font_catalog_is_authoritative() {
     let embedded_data = embedded_font_data();
     let mut pack_data = embedded_data.clone();
     pack_data.push(0);
     let pack_font = typst::text::Font::new(Bytes::new(pack_data.clone()), 0).unwrap();
-    let mut host_data = embedded_data.clone();
-    host_data.push(1);
-    let host_font = typst::text::Font::new(Bytes::new(host_data.clone()), 0).unwrap();
-    assert_eq!(pack_font.info().family, host_font.info().family);
-    assert_eq!(pack_font.info().variant, host_font.info().variant);
     let family = pack_font.info().family.to_lowercase();
     let variant = pack_font.info().variant;
     let pack = Pack::builder("main.typ")
@@ -2550,16 +2605,23 @@ fn pack_font_faces_remain_authoritative_over_host_and_typst_embedded_fonts() {
         .build()
         .unwrap();
 
-    let world = PackWorld::builder(pack)
-        .embedded_fonts(true)
-        .extra_fonts([(host_font.clone(), host_font.info().clone())])
-        .build()
+    let font_fulfillments = std::collections::BTreeMap::from([(
+        FontContainerIdentity::from_bytes(pack_data.as_slice()),
+        Bytes::new(pack_data.clone()),
+    )]);
+    let dependencies = pack
+        .materialize_compilation_dependency_snapshot(
+            std::collections::BTreeMap::new(),
+            &font_fulfillments,
+        )
         .unwrap();
+    let world = PackWorld::builder(pack, dependencies, std::collections::BTreeMap::new())
+        .unwrap()
+        .build();
     let selected = world.book().select(&family, variant).unwrap();
     let selected = world.font(selected).unwrap();
 
     assert_ne!(pack_data, embedded_data);
-    assert_ne!(pack_data, host_data);
     assert_eq!(selected.data().as_slice(), pack_data);
 }
 

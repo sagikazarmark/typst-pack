@@ -194,7 +194,7 @@ coverage = [".dagger/modules/tests/main.dang"]
 [[surface]]
 path = "src/compile.rs"
 classification = "pack-invariant"
-sha256 = "3b283128a36746e4fd429fc0aad1b695b9b03dc5c5f3b351979c2f7da5383961"
+sha256 = "64aafb297cc512916b83d796aba5155e385abb997b6671b506a9e74aff09d8cd"
 
 [[surface]]
 path = "src/embedded.rs"
@@ -224,7 +224,7 @@ sha256 = "ec6e48aa406c958c4141b675e0f1915a84e29cbdeb33498b575186d7f3779995"
 [[surface]]
 path = "src/pack.rs"
 classification = "pack-invariant"
-sha256 = "1db6664bca1d5a1cf52ee65316165cf2d76372d40887dbcacf26e7d05996c356"
+sha256 = "5dc7858e7e5f8ce12c2b0dd460d4817beb9c8f92fcd409c45350c14fc7b2145e"
 
 [[surface]]
 path = "src/packer.rs"
@@ -239,17 +239,17 @@ sha256 = "ff5b4f24b0dd8ae448e70bb1aff57a77c83f5aa3ad9e91c6bd2d7d5fa96aae12"
 [[surface]]
 path = "src/tests.rs"
 classification = "pack-invariant"
-sha256 = "7920000f89991187564fd7a3029c51098594bda083cf45115641cb19a2565d3e"
+sha256 = "1dc25e2ab6d1ff9733c4adb733c3f2a05bd5e6e43255d182e4684f3ea0a07aad"
 
 [[surface]]
 path = "src/world.rs"
 classification = "pack-invariant"
-sha256 = "fb71ecc7669296916ed9d579d2f0016614ce74b987844899c3633995c6d02fdf"
+sha256 = "c139f0af3a7896e2d595ca2a95b1f741bac50e5c3ff5f1a9ffae4f982d3373f0"
 
 [[surface]]
 path = "src/world_trace.rs"
 classification = "pack-invariant"
-sha256 = "548e89c7d47d476c5eebe2b176bf2ae4c4950b8e4d7b8692d88ec6434b0f3a32"
+sha256 = "fdeeb29d49b63878e238407fafe500d67d778805b3127d2943810bd8415266cd"
 
 [[surface]]
 path = "src/cli.rs"

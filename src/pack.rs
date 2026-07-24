@@ -78,6 +78,23 @@ impl PackageFiles {
     }
 }
 
+/// Exact verified dependencies accepted by the synchronous Compilation Kernel.
+pub(crate) struct CompilationDependencySnapshot {
+    pack_identity: PackIdentity,
+    packages: BTreeMap<String, PackageFiles>,
+    font_catalog: Vec<Font>,
+}
+
+impl CompilationDependencySnapshot {
+    pub(crate) fn pack_identity(&self) -> PackIdentity {
+        self.pack_identity
+    }
+
+    pub(crate) fn into_parts(self) -> (BTreeMap<String, PackageFiles>, Vec<Font>) {
+        (self.packages, self.font_catalog)
+    }
+}
+
 /// The canonical content identity of one Complete Package Tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PackageTreeIdentity(u128);
@@ -856,6 +873,24 @@ impl Pack {
             .collect()
     }
 
+    pub(crate) fn materialize_compilation_dependency_snapshot(
+        &self,
+        package_fulfillments: BTreeMap<String, Vec<(String, Bytes)>>,
+        font_fulfillments: &BTreeMap<FontContainerIdentity, Bytes>,
+    ) -> Result<CompilationDependencySnapshot, CompilationDependencySnapshotError> {
+        let packages = self
+            .materialize_package_trees(package_fulfillments)
+            .map_err(|error| CompilationDependencySnapshotError::Package(Box::new(error)))?;
+        let font_catalog = self
+            .materialize_font_catalog(font_fulfillments)
+            .map_err(CompilationDependencySnapshotError::Font)?;
+        Ok(CompilationDependencySnapshot {
+            pack_identity: self.identity(),
+            packages,
+            font_catalog,
+        })
+    }
+
     /// Reads a pack from a seekable reader.
     pub fn read<R: Read + Seek>(reader: R) -> Result<Self, PackReadError> {
         let archive = ZipArchive::new(reader)?;
@@ -1148,6 +1183,15 @@ pub enum PackageTreeError {
         path: String,
         message: String,
     },
+}
+
+/// A Pack-owned failure to construct a complete Compilation Dependency Snapshot.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum CompilationDependencySnapshotError {
+    #[error(transparent)]
+    Package(Box<PackageTreeError>),
+    #[error(transparent)]
+    Font(FontCatalogError),
 }
 
 fn package_tree_identity(

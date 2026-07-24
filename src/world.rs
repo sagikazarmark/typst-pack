@@ -11,14 +11,13 @@ use std::sync::OnceLock;
 use typst::diag::{FileError, FileResult};
 use typst::foundations::{Bytes, Datetime, Dict, Duration};
 use typst::syntax::{FileId, RootedPath, Source, VirtualRoot};
-use typst::text::FontInfo;
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Feature, Library, LibraryExt, World};
 use typst_kit::files::{FileLoader, FileStore};
-use typst_kit::fonts::{FontSource, FontStore};
+use typst_kit::fonts::FontStore;
 
-use crate::pack::{FontCatalogError, FontContainerIdentity, Pack, PackageFiles};
+use crate::pack::{CompilationDependencySnapshot, Pack, PackageFiles};
 
 #[cfg(feature = "fs")]
 const USER_AGENT: &str = concat!("typst-pack/", env!("CARGO_PKG_VERSION"));
@@ -191,8 +190,9 @@ pub(crate) fn read_complete_package_tree(
 /// A complete Typst [`World`] backed by a [`Pack`].
 ///
 /// Project files and embedded package files come from the Pack. Externally
-/// fulfilled package files are available only through a crate-verified exact
-/// dependency snapshot. Fonts come from the Pack plus any configured fonts.
+/// fulfilled package files and exact fonts are available only through a
+/// crate-verified Compilation Dependency Snapshot. Pack Overrides remain
+/// separate exact request inputs.
 pub(crate) struct PackWorld {
     library: LazyHash<Library>,
     main: FileId,
@@ -202,9 +202,22 @@ pub(crate) struct PackWorld {
 }
 
 impl PackWorld {
-    /// Starts configuring a world for the given pack.
-    pub(crate) fn builder(pack: Pack) -> PackWorldBuilder {
-        PackWorldBuilder::new(pack)
+    /// Starts configuring a world from a complete verified dependency snapshot.
+    pub(crate) fn builder(
+        pack: Pack,
+        dependencies: CompilationDependencySnapshot,
+        project_overrides: BTreeMap<String, Bytes>,
+    ) -> Result<PackWorldBuilder, PackWorldConstructionError> {
+        if dependencies.pack_identity() != pack.identity() {
+            return Err(PackWorldConstructionError::DependencySnapshotPackMismatch);
+        }
+        if let Some(path) = project_overrides
+            .keys()
+            .find(|path| pack.file(path).is_none())
+        {
+            return Err(PackWorldConstructionError::InvalidProjectOverride { path: path.clone() });
+        }
+        Ok(PackWorldBuilder::new(pack, dependencies, project_overrides))
     }
 }
 
@@ -270,6 +283,15 @@ struct PackLoader {
     exact_packages: BTreeMap<String, PackageFiles>,
 }
 
+/// Pack World construction accepts only a complete Pack-bound input set.
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum PackWorldConstructionError {
+    #[error("the Compilation Dependency Snapshot is bound to a different Pack")]
+    DependencySnapshotPackMismatch,
+    #[error("Pack Override path `{path}` is not a contained project file")]
+    InvalidProjectOverride { path: String },
+}
+
 impl FileLoader for PackLoader {
     fn load(&self, id: FileId) -> FileResult<Bytes> {
         let _timing = typst_timing::TimingScope::new("Pack");
@@ -305,49 +327,26 @@ impl FileLoader for PackLoader {
 /// Configures a [`PackWorld`].
 pub(crate) struct PackWorldBuilder {
     pack: Pack,
+    dependencies: CompilationDependencySnapshot,
+    project_overrides: BTreeMap<String, Bytes>,
     inputs: Dict,
     features: Vec<Feature>,
     clock: Clock,
-    #[cfg_attr(not(feature = "embedded-fonts"), allow(dead_code))]
-    embedded_fonts: bool,
-    extra_fonts: Vec<(BoxedFontSource, FontInfo)>,
-    catalog_fonts: Option<Vec<Font>>,
-    exact_packages: Option<BTreeMap<String, PackageFiles>>,
-    project_overrides: BTreeMap<String, Bytes>,
-}
-
-/// A Pack cannot be exposed to Typst without exact dependency snapshots.
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum PackWorldBuildError {
-    #[error("external package fulfillment is unavailable for {packages:?}")]
-    MissingExternalPackages {
-        packages: Vec<typst::syntax::package::PackageSpec>,
-    },
-    #[error(transparent)]
-    FontCatalog(#[from] FontCatalogError),
-}
-
-/// Adapter that lets heterogeneous font sources live in one list.
-struct BoxedFontSource(Box<dyn FontSource>);
-
-impl FontSource for BoxedFontSource {
-    fn load(&self) -> Option<Font> {
-        self.0.load()
-    }
 }
 
 impl PackWorldBuilder {
-    fn new(pack: Pack) -> Self {
+    fn new(
+        pack: Pack,
+        dependencies: CompilationDependencySnapshot,
+        project_overrides: BTreeMap<String, Bytes>,
+    ) -> Self {
         Self {
             pack,
+            dependencies,
+            project_overrides,
             inputs: Dict::new(),
             features: Vec::new(),
             clock: Clock::None,
-            embedded_fonts: false,
-            extra_fonts: Vec::new(),
-            catalog_fonts: None,
-            exact_packages: None,
-            project_overrides: BTreeMap::new(),
         }
     }
 
@@ -379,89 +378,15 @@ impl PackWorldBuilder {
         Ok(self)
     }
 
-    /// Whether to include Typst's default embedded fonts. Defaults to `true`
-    /// when the `embedded-fonts` feature is enabled.
-    #[cfg(feature = "embedded-fonts")]
-    pub(crate) fn embedded_fonts(mut self, include: bool) -> Self {
-        self.embedded_fonts = include;
-        self
-    }
-
-    /// Adds fonts on top of the ones embedded in the pack.
-    ///
-    /// These rank behind pack fonts but before Typst's embedded fonts, so use
-    /// this for system fonts or other host-provided fonts. Accepts the same
-    /// `(source, info)` entries yielded by the `typst_kit::fonts` providers,
-    /// so fonts are only loaded into memory when actually used.
-    #[cfg(test)]
-    pub(crate) fn extra_fonts<T: FontSource>(
-        mut self,
-        fonts: impl IntoIterator<Item = (T, FontInfo)>,
-    ) -> Self {
-        self.extra_fonts.extend(
-            fonts
-                .into_iter()
-                .map(|(source, info)| (BoxedFontSource(Box::new(source)), info)),
-        );
-        self
-    }
-
-    pub(crate) fn exact_font_catalog(mut self, fonts: Vec<Font>) -> Self {
-        self.catalog_fonts = Some(fonts);
-        self
-    }
-
-    pub(crate) fn exact_project_overrides(mut self, overrides: BTreeMap<String, Bytes>) -> Self {
-        self.project_overrides = overrides;
-        self
-    }
-
-    pub(crate) fn exact_packages(mut self, packages: BTreeMap<String, PackageFiles>) -> Self {
-        self.exact_packages = Some(packages);
-        self
-    }
-
     /// Builds the world.
-    pub(crate) fn build(self) -> Result<PackWorld, PackWorldBuildError> {
-        let missing_packages = self
-            .pack
-            .package_requirements()
-            .iter()
-            .filter(|requirement| !requirement.is_embedded())
-            .map(|requirement| requirement.spec().clone())
-            .collect::<Vec<_>>();
-        if self.exact_packages.is_none() && !missing_packages.is_empty() {
-            return Err(PackWorldBuildError::MissingExternalPackages {
-                packages: missing_packages,
-            });
-        }
+    pub(crate) fn build(self) -> PackWorld {
+        let (exact_packages, font_catalog) = self.dependencies.into_parts();
         let entrypoint = typst::syntax::VirtualPath::new(self.pack.entrypoint())
             .expect("Pack entrypoint invariant violated");
         let main = RootedPath::new(VirtualRoot::Project, entrypoint).intern();
 
-        let catalog = if let Some(catalog) = self.catalog_fonts {
-            catalog
-        } else {
-            let mut fulfillments = std::collections::BTreeMap::new();
-            for (source, _) in self.extra_fonts {
-                if let Some(font) = source.load() {
-                    fulfillments
-                        .entry(FontContainerIdentity::from_bytes(font.data().as_slice()))
-                        .or_insert_with(|| font.data().clone());
-                }
-            }
-            #[cfg(feature = "embedded-fonts")]
-            if self.embedded_fonts {
-                for (font, _) in typst_kit::fonts::embedded() {
-                    fulfillments
-                        .entry(FontContainerIdentity::from_bytes(font.data().as_slice()))
-                        .or_insert_with(|| font.data().clone());
-                }
-            }
-            self.pack.materialize_font_catalog(&fulfillments)?
-        };
         let mut fonts = FontStore::new();
-        for font in catalog {
+        for font in font_catalog {
             let info = font.info().clone();
             fonts.push((font, info));
         }
@@ -471,17 +396,17 @@ impl PackWorldBuilder {
             .with_features(self.features.into_iter().collect())
             .build();
 
-        Ok(PackWorld {
+        PackWorld {
             library: LazyHash::new(library),
             main,
             store: FileStore::new(PackLoader {
                 pack: Arc::new(self.pack),
                 project_overrides: self.project_overrides,
-                exact_packages: self.exact_packages.unwrap_or_default(),
+                exact_packages,
             }),
             fonts,
             clock: self.clock,
-        })
+        }
     }
 }
 

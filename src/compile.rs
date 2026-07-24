@@ -16,7 +16,7 @@ use typst_layout::PagedDocument;
 use typst_pdf::{PdfOptions, PdfStandard, PdfStandards, Timestamp};
 
 use crate::embedded::EmbeddedTypst;
-use crate::pack::{FontCatalogError, PackageTreeError};
+use crate::pack::{CompilationDependencySnapshotError, FontCatalogError, PackageTreeError};
 use crate::world::PackWorld;
 use crate::world_trace::{WorldTrace, logical_path};
 use crate::{FontContainerIdentity, Pack, PackageTreeIdentity};
@@ -1849,40 +1849,16 @@ pub(crate) fn prepare_pack_compilation(
         .into_iter()
         .map(|(spec, fulfillment)| (spec, fulfillment.files))
         .collect();
-    let exact_packages = pack
-        .materialize_package_trees(package_files)
-        .map_err(|error| PackCompileError::Operation {
-            outcome: package_tree_outcome(error),
-            request_inventory: Box::new(request_inventory.clone()),
-            compilation_identity,
-            fulfillments: Box::new(fulfillments.clone()),
-        })?;
-
     let fulfillment_bytes = font_fulfillments
         .into_iter()
         .map(|(identity, fulfillment)| (identity, fulfillment.data))
         .collect();
-    let catalog_fonts = pack
-        .materialize_font_catalog(&fulfillment_bytes)
+    let dependencies = pack
+        .materialize_compilation_dependency_snapshot(package_files, &fulfillment_bytes)
         .map_err(|error| {
             let outcome = match error {
-                FontCatalogError::Missing { containers } => {
-                    CompilationOperationOutcome::MissingExternalFontFulfillment { containers }
-                }
-                FontCatalogError::Mismatched {
-                    expected,
-                    actual,
-                    expected_length,
-                    actual_length,
-                } => CompilationOperationOutcome::MismatchedExternalFontContainer {
-                    expected,
-                    actual,
-                    expected_length,
-                    actual_length,
-                },
-                FontCatalogError::Malformed { container, index } => {
-                    CompilationOperationOutcome::MalformedExternalFontContainer { container, index }
-                }
+                CompilationDependencySnapshotError::Package(error) => package_tree_outcome(*error),
+                CompilationDependencySnapshotError::Font(error) => font_catalog_outcome(error),
             };
             PackCompileError::Operation {
                 outcome,
@@ -1892,15 +1868,9 @@ pub(crate) fn prepare_pack_compilation(
             }
         })?;
 
-    let mut world = PackWorld::builder(pack)
-        .inputs(raw_inputs)
-        .exact_project_overrides(overrides.value.replacements)
-        .exact_packages(exact_packages)
-        .exact_font_catalog(catalog_fonts);
-    #[cfg(feature = "embedded-fonts")]
-    {
-        world = world.embedded_fonts(false);
-    }
+    let mut world = PackWorld::builder(pack, dependencies, overrides.value.replacements)
+        .expect("preflighted Pack World inputs must remain valid")
+        .inputs(raw_inputs);
     for feature in &request_inventory.features {
         world = world.feature(feature.value);
     }
@@ -1917,9 +1887,7 @@ pub(crate) fn prepare_pack_compilation(
         world = world.fixed_date(document_time);
     }
     let _ = controls;
-    let world = world
-        .build()
-        .expect("verified Pack dependency snapshots must build a World");
+    let world = world.build();
 
     Ok(PreparedPackCompilation {
         world,
@@ -2175,6 +2143,28 @@ pub(crate) fn package_tree_outcome(error: PackageTreeError) -> CompilationOperat
             path,
             message,
         },
+    }
+}
+
+fn font_catalog_outcome(error: FontCatalogError) -> CompilationOperationOutcome {
+    match error {
+        FontCatalogError::Missing { containers } => {
+            CompilationOperationOutcome::MissingExternalFontFulfillment { containers }
+        }
+        FontCatalogError::Mismatched {
+            expected,
+            actual,
+            expected_length,
+            actual_length,
+        } => CompilationOperationOutcome::MismatchedExternalFontContainer {
+            expected,
+            actual,
+            expected_length,
+            actual_length,
+        },
+        FontCatalogError::Malformed { container, index } => {
+            CompilationOperationOutcome::MalformedExternalFontContainer { container, index }
+        }
     }
 }
 
