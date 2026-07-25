@@ -6,7 +6,7 @@ the embedded Typst release changes. Follow the complete
 [embedded Typst upgrade procedure](embedded-typst-upgrade.md); the approved
 crate set and classified differential matrix live in `embedded-typst.toml`.
 
-The process differential gate is `tests/official_typst_cli.rs`. Dagger downloads
+The process differential gate is `cli/tests/official_typst_cli.rs`. Dagger downloads
 the official Typst 0.15.0 release artifact, verifies its published SHA-256
 digest, and exposes it through `TYPST_PACK_OFFICIAL_TYPST`. The test then checks
 the binary's version against the `EngineIdentity` produced by public Pack
@@ -18,13 +18,13 @@ missing, replaced, or version-mismatched oracle fails the gate.
 | Behavior | Upstream authority or unavoidable mirror | Differential or focused coverage |
 | --- | --- | --- |
 | PDF, PNG, SVG, and HTML compilation and artifact bytes | Public Typst compiler and exporter crates | `official_typst_compile_is_the_process_level_parity_baseline`; `tests/official_typst_oracle.rs` |
-| Typst inputs, features, document time, and PDF creation time | Public `Library`, `Features`, `World::today`, and exporter controls; CLI environment resolution is mirrored | `official_typst_compile_gates_shared_environment_diagnostics_and_exit_behavior`; `tests/official_typst_oracle.rs`; `tests/cli.rs` |
-| Complete packages, exact fonts, Pack Overrides, and offline dependency authority | Public Typst `World` requests wrapped by Pack verification; offline is Pack policy | `tests/official_typst_oracle.rs`; `tests/compilation.rs`; package, font, override, and offline cases in `tests/cli.rs` |
-| Diagnostic content, ordering, rendering, and process exit status | `SourceDiagnostic` and `typst-kit::diagnostics`; process exit policy is mirrored | `official_typst_compile_gates_shared_environment_diagnostics_and_exit_behavior`; diagnostic cases in `tests/official_typst_oracle.rs` and `tests/cli.rs` |
-| Option spelling, aliases, value parsing, defaults, conflicts, and help wording | Clap adapter mirrors Typst 0.15.0 because Typst exposes no stable reusable CLI parser | parsing, conflict, help, and environment cases in `tests/cli.rs` |
-| Output format inference and page-template expansion | Mirrors Typst 0.15.0 because no public CLI planning API exists | format, page-range, template, and collision cases in `tests/cli.rs` |
-| Dependency JSON, zero, and Make serialization | Mirrors Typst 0.15.0 with Pack-aware input provenance | dependency cases in `tests/cli.rs` |
-| Font, package, certificate, timestamp, jobs, timing, and viewer environment resolution | `typst-kit` where public; remaining process policy mirrors Typst 0.15.0 | corresponding environment and automation cases in `tests/cli.rs` |
+| Typst inputs, features, document time, and PDF creation time | Public `Library`, `Features`, `World::today`, and exporter controls; CLI environment resolution is mirrored | `official_typst_compile_gates_shared_environment_diagnostics_and_exit_behavior`; `tests/official_typst_oracle.rs`; `cli/tests/cli.rs` |
+| Complete packages, exact fonts, Pack Overrides, and offline dependency authority | Public Typst `World` requests wrapped by Pack verification; offline is Pack policy | `tests/official_typst_oracle.rs`; `tests/compilation.rs`; package, font, override, and offline cases in `cli/tests/cli.rs` |
+| Diagnostic content, ordering, rendering, and process exit status | `SourceDiagnostic` and `typst-kit::diagnostics`; process exit policy is mirrored | `official_typst_compile_gates_shared_environment_diagnostics_and_exit_behavior`; diagnostic cases in `tests/official_typst_oracle.rs` and `cli/tests/cli.rs` |
+| Option spelling, aliases, value parsing, defaults, conflicts, and help wording | Clap adapter mirrors Typst 0.15.0 because Typst exposes no stable reusable CLI parser | parsing, conflict, help, and environment cases in `cli/tests/cli.rs` |
+| Output format inference and page-template expansion | Mirrors Typst 0.15.0 because no public CLI planning API exists | format, page-range, template, and collision cases in `cli/tests/cli.rs` |
+| Dependency JSON, zero, and Make serialization | Mirrors Typst 0.15.0 with Pack-aware input provenance | dependency cases in `cli/tests/cli.rs` |
+| Font, package, certificate, timestamp, jobs, timing, and viewer environment resolution | `typst-kit` where public; remaining process policy mirrors Typst 0.15.0 | corresponding environment and automation cases in `cli/tests/cli.rs` |
 
 `World`, `Library`, the synchronous Typst compiler call, and all official
 exporter calls in this table are private mechanisms of the embedded adapter.
@@ -62,16 +62,16 @@ test in the same Typst upgrade.
 
 | Intentional difference | Pack contract reason | Positive and negative coverage |
 | --- | --- | --- |
-| Compile consumes a Pack and has no `--root` | The Pack owns its fixed virtual project tree | Pack file/stdin and help omission cases in `tests/cli.rs` |
-| Pack Overrides replace contained project files | Compilation cannot add paths or expand package/font authority | Override preflight, identity, immutability, and lifecycle cases in `tests/compilation.rs` and `tests/cli.rs` |
-| Pack Overrides use `--override PACK_PATH FILE` | A compilation may replace only contained project files without mutating the Pack | Pack Override cases in `tests/cli.rs`, `tests/compilation.rs`, and `tests/official_typst_oracle.rs` |
-| `--offline` is explicit | Exact Package Requirements must not fall through to an undeclared network source | offline package cases in `tests/cli.rs` and `tests/compilation.rs` |
-| Pack fonts and vendored packages precede host configuration | Contained exact dependencies remain authoritative | package and font authority cases in `tests/cli.rs`, `tests/compilation.rs`, and `tests/official_typst_oracle.rs` |
-| Bundle output and the Bundle feature are rejected | Bundle is outside the Pack output contract | feature acceptance/rejection and help omission cases in `tests/cli.rs` and `tests/compilation.rs` |
+| Compile consumes a Pack and has no `--root` | The Pack owns its fixed virtual project tree | Pack file/stdin and help omission cases in `cli/tests/cli.rs` |
+| Pack Overrides replace contained project files | Compilation cannot add paths or expand package/font authority | Override preflight, identity, immutability, and lifecycle cases in `tests/compilation.rs` and `cli/tests/cli.rs` |
+| Pack Overrides use `--override PACK_PATH FILE` | A compilation may replace only contained project files without mutating the Pack | Pack Override cases in `cli/tests/cli.rs`, `tests/compilation.rs`, and `tests/official_typst_oracle.rs` |
+| `--offline` is explicit | Exact Package Requirements must not fall through to an undeclared network source | offline package cases in `cli/tests/cli.rs` and `tests/compilation.rs` |
+| Pack fonts and vendored packages precede host configuration | Contained exact dependencies remain authoritative | package and font authority cases in `cli/tests/cli.rs`, `tests/compilation.rs`, and `tests/official_typst_oracle.rs` |
+| Bundle output and the Bundle feature are rejected | Bundle is outside the Pack output contract | feature acceptance/rejection and help omission cases in `cli/tests/cli.rs` and `tests/compilation.rs` |
 | Pack compilation derives the HTML feature from HTML output | The tagged output specification fully determines the official Typst target and its required feature | Pack derivation and direct-official rejection cases in `tests/official_typst_oracle.rs` |
-| Watch and deprecated `--make-deps` are absent | Watch needs Pack-aware provenance; deprecated compatibility is not adopted | command and help omission cases in `tests/cli.rs` |
-| Creation structurally packs the selected root and uses one optional representative target | Pack issuance needs a stable entrypoint, complete project snapshot, and selected dependency closure | create stdin, root, ignore-policy, target, and vendoring cases in `tests/cli.rs` |
-| Multi-output paths are collision-preflighted and stdout requires one artifact | Publication must not expose ambiguous or partial output | template collision, stdout, and empty/single/multiple artifact cases in `tests/cli.rs` |
+| Watch and deprecated `--make-deps` are absent | Watch needs Pack-aware provenance; deprecated compatibility is not adopted | command and help omission cases in `cli/tests/cli.rs` |
+| Creation structurally packs the selected root and uses one optional representative target | Pack issuance needs a stable entrypoint, complete project snapshot, and selected dependency closure | create stdin, root, ignore-policy, target, and vendoring cases in `cli/tests/cli.rs` |
+| Multi-output paths are collision-preflighted and stdout requires one artifact | Publication must not expose ambiguous or partial output | template collision, stdout, and empty/single/multiple artifact cases in `cli/tests/cli.rs` |
 
 ## Adapter boundary
 

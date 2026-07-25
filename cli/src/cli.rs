@@ -1,7 +1,5 @@
 //! The `typst-pack` command line interface.
 
-#![cfg(feature = "cli")]
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs::File;
@@ -12,29 +10,31 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{Datelike, Timelike};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use typst::diag::SourceDiagnostic;
 use typst::foundations::{Bytes, Datetime, Dict, IntoValue};
-use typst::syntax::{FileId, VirtualRoot};
+use typst::syntax::VirtualRoot;
+use typst_kit::diagnostics::DiagnosticFormat;
 use typst_kit::diagnostics::termcolor::{
     Color, ColorChoice, ColorSpec, StandardStream, WriteColor,
 };
-use typst_kit::diagnostics::{DiagnosticFormat, DiagnosticWorld};
 use typst_kit::fonts::FontSource;
 use typst_pdf::{PdfStandard, Timestamp};
 
-use crate::compile::{
+use typst_pack::cli_support::{
+    CliCompilationExecution, CliCompilationPresentation, compile_with_timing,
+    emit_creation_error_diagnostics, emit_creation_warnings, pdf_standard_requiring_tags,
+    read_complete_package_tree, system_packages, validate_pdf_standards,
+};
+use typst_pack::{
     CompilationArtifact, CompilationOutputSpecification, CompilationStatus, CreationTimestamp,
     DocumentTime, FontContainerFulfillment, HtmlOutputSpecification, OutputFormat,
-    PackCompilationPresentation, PackCompilationRequest, PackOverrideSet, PackageTreeFulfillment,
-    PageRange, PageSelection, PdfOutputSpecification, PngOutputSpecification,
-    SvgOutputSpecification, TypstTarget, compile_pack_kernel, parse_page_selection,
-    pdf_standard_requiring_tags, prepare_pack_compilation, validate_pdf_standards,
+    PackCompilationRequest, PackOverrideSet, PackageTreeFulfillment, PageRange, PageSelection,
+    PdfOutputSpecification, PngOutputSpecification, SvgOutputSpecification, TypstTarget,
+    parse_page_selection,
 };
-use crate::extract::{ExtractOptions, extract};
-use crate::manifest::PackMetadata;
-use crate::pack::{FILE_EXTENSION, FontContainerIdentity, Pack};
-use crate::packer::{CreationWorld, Packer, PackerError};
-use crate::world::PackWorld;
+use typst_pack::{
+    ExtractOptions, FILE_EXTENSION, FontContainerIdentity, Pack, PackMetadata, Packer, PackerError,
+    extract,
+};
 
 const ENV_PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
 
@@ -62,12 +62,7 @@ type CliResult = Result<(), CliError>;
 #[derive(Debug, Parser)]
 #[command(
     name = "typst-pack",
-    version = concat!(
-        env!("CARGO_PKG_VERSION"),
-        " (Typst ",
-        env!("TYPST_PACK_ENGINE_VERSION"),
-        ")"
-    ),
+    version = typst_pack::VERSION,
     about
 )]
 pub struct Cli {
@@ -675,11 +670,12 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
             errors,
             warnings,
         }) => {
-            emit_diagnostics_with(
-                world.world(),
+            let mut stream = StandardStream::stderr(color);
+            emit_creation_error_diagnostics(
+                &world,
                 errors.iter().chain(&warnings),
+                &mut stream,
                 diagnostic_format,
-                color,
             );
             if let Some(error) = timing_error {
                 return Err(error.into());
@@ -695,12 +691,8 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
         }
     };
 
-    emit_diagnostics_with(
-        &outcome.world,
-        outcome.warnings.iter(),
-        diagnostic_format,
-        color,
-    );
+    let mut stream = StandardStream::stderr(color);
+    emit_creation_warnings(&outcome, &mut stream, diagnostic_format);
     if let Some(error) = timing_error {
         return Err(error.into());
     }
@@ -975,7 +967,7 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
             }
         }
     }
-    let packages = crate::world::system_packages(
+    let packages = system_packages(
         args.packages.package_path.as_deref(),
         args.packages.package_cache_path.as_deref(),
         args.packages.offline,
@@ -994,8 +986,7 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
                 requirement.spec()
             ))
         })?;
-        let files =
-            crate::world::read_complete_package_tree(root.path()).map_err(CliError::Message)?;
+        let files = read_complete_package_tree(root.path()).map_err(CliError::Message)?;
         package_roots.insert(requirement.spec().to_string(), root.path().to_owned());
         package_fulfillments.push((requirement.spec().clone(), files));
     }
@@ -1062,8 +1053,9 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
             ),
         );
     }
-    let (mut world, kernel) =
-        prepare_pack_compilation(request).map_err(|error| CliError::Message(error.to_string()))?;
+    let timed = compile_with_timing(request, args.automation.timings.clone())
+        .map_err(|error| CliError::Message(error.to_string()))?;
+    let (execution, timing_error) = timed.into_parts();
 
     let diagnostic_format = args.automation.diagnostic_format.into();
     let write_requested_dependencies = |outputs: Option<&[PathBuf]>| {
@@ -1080,12 +1072,10 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         write_dependencies(destination, args.deps_format, &inputs, outputs)
     };
 
-    let mut timer = typst_kit::timer::Timer::new_or_placeholder(args.automation.timings.clone());
     let mut command_result = None;
-    let timings = timer.record(&mut world, |world| {
+    if let Some(execution) = execution {
         command_result = Some((|| -> CliResult {
-            let execution = compile_pack_kernel(world, kernel);
-            for id in world.file_dependencies() {
+            for id in execution.file_dependencies() {
                 if let VirtualRoot::Package(spec) = id.root()
                     && let Some(root) = package_roots.get(&spec.to_string())
                 {
@@ -1095,43 +1085,22 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
                         .insert(root.join(id.vpath().get_without_slash()));
                 }
             }
-            match &execution.presentation {
-                PackCompilationPresentation::Succeeded { .. } => {}
-                PackCompilationPresentation::Diagnostics {
-                    errors,
-                    warnings,
-                    pack_warnings,
-                } => {
-                    emit_diagnostics_with(
-                        world,
-                        warnings
-                            .iter()
-                            .chain(pack_warnings.iter())
-                            .chain(errors.iter()),
-                        diagnostic_format,
-                        color,
-                    );
+            match execution.presentation() {
+                CliCompilationPresentation::Succeeded => {}
+                CliCompilationPresentation::Diagnostics => {
+                    emit_compilation_diagnostics(&execution, diagnostic_format, color);
                     write_requested_dependencies(None)?;
                     return Err(CliError::Reported);
                 }
-                PackCompilationPresentation::PngExport {
-                    error,
-                    warnings,
-                    pack_warnings,
-                } => {
+                CliCompilationPresentation::PngExport { error } => {
                     emit_owned_error(error, color);
-                    emit_diagnostics_with(
-                        world,
-                        warnings.iter().chain(pack_warnings.iter()),
-                        diagnostic_format,
-                        color,
-                    );
+                    emit_compilation_diagnostics(&execution, diagnostic_format, color);
                     write_requested_dependencies(None)?;
                     return Err(CliError::Reported);
                 }
             }
-            debug_assert_eq!(execution.result.status(), CompilationStatus::Succeeded);
-            let output = &execution.result;
+            debug_assert_eq!(execution.result().status(), CompilationStatus::Succeeded);
+            let output = execution.result();
 
             let export_result = (|| {
                 let default_output = args.pack.with_extension(format.extension());
@@ -1192,34 +1161,22 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
                 Ok(exported) => exported,
                 Err(error) => {
                     emit_owned_error(&error, color);
-                    if let PackCompilationPresentation::Succeeded {
-                        warnings,
-                        pack_warnings,
-                    } = &execution.presentation
-                    {
-                        emit_diagnostics_with(
-                            world,
-                            warnings.iter().chain(pack_warnings),
-                            diagnostic_format,
-                            color,
-                        );
+                    if matches!(
+                        execution.presentation(),
+                        CliCompilationPresentation::Succeeded
+                    ) {
+                        emit_compilation_diagnostics(&execution, diagnostic_format, color);
                     }
                     write_requested_dependencies(None)?;
                     return Err(CliError::Reported);
                 }
             };
 
-            if let PackCompilationPresentation::Succeeded {
-                warnings,
-                pack_warnings,
-            } = &execution.presentation
-            {
-                emit_diagnostics_with(
-                    world,
-                    warnings.iter().chain(pack_warnings),
-                    diagnostic_format,
-                    color,
-                );
+            if matches!(
+                execution.presentation(),
+                CliCompilationPresentation::Succeeded
+            ) {
+                emit_compilation_diagnostics(&execution, diagnostic_format, color);
             }
 
             if !output_is_stdout
@@ -1240,14 +1197,12 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
 
             Ok(())
         })());
-    });
+    }
     let Some(command_result) = command_result else {
-        return Err(timings
-            .expect_err("timer did not execute compilation")
-            .to_string()
+        return Err(timing_error
+            .expect("timer did not execute compilation without reporting an error")
             .into());
     };
-    let timing_error = timings.err().map(|error| error.to_string());
     if let Some(error) = timing_error {
         emit_owned_error(&error, color);
         return Err(CliError::Reported);
@@ -1534,18 +1489,13 @@ fn local_timestamp(local: &chrono::DateTime<chrono::Local>) -> Option<Timestamp>
     Timestamp::new_local(datetime, local.offset().local_minus_utc() / 60)
 }
 
-fn emit_diagnostics_with<'a>(
-    world: &dyn DiagnosticWorld,
-    diagnostics: impl IntoIterator<Item = &'a SourceDiagnostic>,
+fn emit_compilation_diagnostics(
+    execution: &CliCompilationExecution,
     format: DiagnosticFormat,
     color: ColorChoice,
 ) {
-    let mut diagnostics = diagnostics.into_iter().peekable();
-    if diagnostics.peek().is_none() {
-        return;
-    }
     let mut stream = StandardStream::stderr(color);
-    let _ = typst_kit::diagnostics::emit(&mut stream, world, diagnostics, format);
+    execution.emit_diagnostics(&mut stream, format);
 }
 
 fn emit_owned_error(message: &str, color: ColorChoice) {
@@ -1568,74 +1518,6 @@ fn emit_owned_hint(message: &str, color: ColorChoice) {
     let _ = writeln!(stream, ": {message}");
 }
 
-/// Formats a file ID with its package prefix, if any.
-fn display_file_id(id: FileId) -> String {
-    match id.root() {
-        VirtualRoot::Project => id.vpath().get_without_slash().to_owned(),
-        VirtualRoot::Package(spec) => {
-            format!("{spec}{}", id.vpath().get_with_slash())
-        }
-    }
-}
-
-fn relative_path(path: &Path, base: &Path) -> Option<PathBuf> {
-    if path.is_absolute() != base.is_absolute() {
-        return path.is_absolute().then(|| path.to_path_buf());
-    }
-
-    let mut path_components = path.components();
-    let mut base_components = base.components();
-    let mut relative = Vec::new();
-    loop {
-        match (path_components.next(), base_components.next()) {
-            (None, None) => break,
-            (Some(component), None) => {
-                relative.push(component);
-                relative.extend(path_components.by_ref());
-                break;
-            }
-            (None, Some(_)) => relative.push(std::path::Component::ParentDir),
-            (Some(path), Some(base)) if relative.is_empty() && path == base => {}
-            (Some(path), Some(std::path::Component::CurDir)) => relative.push(path),
-            (Some(_), Some(std::path::Component::ParentDir)) => return None,
-            (Some(std::path::Component::Prefix(_) | std::path::Component::RootDir), Some(_))
-            | (Some(_), Some(std::path::Component::Prefix(_) | std::path::Component::RootDir)) => {
-                return path.is_absolute().then(|| path.to_path_buf());
-            }
-            (Some(path), Some(_)) => {
-                relative.push(std::path::Component::ParentDir);
-                relative.extend(base_components.map(|_| std::path::Component::ParentDir));
-                relative.push(path);
-                relative.extend(path_components.by_ref());
-                break;
-            }
-        }
-    }
-
-    Some(relative.iter().map(|part| part.as_os_str()).collect())
-}
-
-impl DiagnosticWorld for CreationWorld {
-    fn name(&self, id: FileId) -> String {
-        match id.root() {
-            VirtualRoot::Project => id
-                .vpath()
-                .realize(self.root())
-                .ok()
-                .and_then(|path| relative_path(&path, self.workdir()?))
-                .map(|path| path.to_string_lossy().into_owned())
-                .unwrap_or_else(|| display_file_id(id)),
-            VirtualRoot::Package(_) => display_file_id(id),
-        }
-    }
-}
-
-impl DiagnosticWorld for PackWorld {
-    fn name(&self, id: FileId) -> String {
-        display_file_id(id)
-    }
-}
-
 fn human_size(bytes: usize) -> String {
     const UNITS: [&str; 4] = ["B", "KiB", "MiB", "GiB"];
     let mut size = bytes as f64;
@@ -1648,6 +1530,37 @@ fn human_size(bytes: usize) -> String {
         format!("{bytes} {}", UNITS[0])
     } else {
         format!("{size:.1} {}", UNITS[unit])
+    }
+}
+
+#[cfg(test)]
+mod parser_tests {
+    use clap::Parser as _;
+
+    use super::Cli;
+
+    #[test]
+    fn uses_typst_embedded_font_terminology() {
+        assert!(
+            Cli::try_parse_from([
+                "typst-pack",
+                "create",
+                "project",
+                "--embed-fonts",
+                "--include-typst-embedded-fonts",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "typst-pack",
+                "create",
+                "project",
+                "--embed-fonts",
+                "--include-default-fonts",
+            ])
+            .is_err()
+        );
     }
 }
 

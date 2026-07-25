@@ -32,7 +32,8 @@ const USER_AGENT: &str = concat!("typst-pack/", env!("CARGO_PKG_VERSION"));
 const PACKAGE_DOWNLOAD_PROBE_ENV: &str = "TYPST_PACK_TEST_PACKAGE_DOWNLOAD_PROBE";
 
 #[cfg(feature = "fs")]
-pub(crate) fn system_packages(
+#[doc(hidden)]
+pub fn system_packages(
     package_path: Option<&std::path::Path>,
     package_cache_path: Option<&std::path::Path>,
     offline: bool,
@@ -162,9 +163,8 @@ fn system_packages_with_online(
 }
 
 #[cfg(feature = "fs")]
-pub(crate) fn read_complete_package_tree(
-    root: &std::path::Path,
-) -> Result<Vec<(String, Bytes)>, String> {
+#[doc(hidden)]
+pub fn read_complete_package_tree(root: &std::path::Path) -> Result<Vec<(String, Bytes)>, String> {
     let mut files = Vec::new();
     for entry in walkdir::WalkDir::new(root).sort_by_file_name() {
         let entry = entry.map_err(|error| error.to_string())?;
@@ -296,8 +296,18 @@ impl World for PackWorld {
     }
 }
 
+#[cfg(feature = "diagnostics")]
+impl typst_kit::diagnostics::DiagnosticWorld for PackWorld {
+    fn name(&self, id: FileId) -> String {
+        match id.root() {
+            VirtualRoot::Project => id.vpath().get_without_slash().to_owned(),
+            VirtualRoot::Package(spec) => format!("{spec}{}", id.vpath().get_with_slash()),
+        }
+    }
+}
+
 impl PackWorld {
-    #[cfg(feature = "cli")]
+    #[cfg(feature = "diagnostics")]
     pub(crate) fn file_dependencies(&mut self) -> Vec<FileId> {
         let (_, dependencies) = self.store.dependencies();
         dependencies.collect()

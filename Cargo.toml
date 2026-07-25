@@ -10,30 +10,21 @@ homepage = "https://github.com/sagikazarmark/typst-pack"
 keywords = ["typst", "documents", "packaging", "archive", "fonts"]
 categories = ["command-line-utilities", "text-processing", "filesystem"]
 
-[[bin]]
-name = "typst-pack"
-path = "src/main.rs"
-required-features = ["cli"]
+[workspace]
+members = ["cli"]
+resolver = "2"
 
 [features]
 default = []
 # Internal opt-in for controlled package downloader integration tests.
 _test-package-download-probe = []
-# The typst-pack command line tool.
-cli = [
-    "dep:chrono",
-    "dep:clap",
-    "dep:open",
-    "dep:rayon",
-    "dep:serde_json",
-    "dep:sigpipe",
-    "embedded-fonts",
-    "fs",
-    "typst-kit/emit-diagnostics",
-]
+# Retain the source context needed by diagnostic presentation adapters.
+diagnostics = ["typst-kit/emit-diagnostics"]
 # Ship Typst's embedded fonts (Libertinus Serif, New Computer Modern, ...) so
 # packs that only use them render without any font embedding.
 embedded-fonts = ["typst-kit/embedded-fonts"]
+# Export independent pages in parallel.
+parallel = ["dep:rayon"]
 # Filesystem-based packing: structural snapshot acquisition, package download and caching,
 # system font scanning. Not available on wasm targets.
 fs = [
@@ -49,16 +40,11 @@ fs = [
 ]
 
 [dependencies]
-chrono = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }
-clap = { version = "4", features = ["derive", "env"], optional = true }
 ecow = "0.2"
 env_proxy = { version = "0.4", optional = true }
 ignore = { version = "0.4", optional = true }
-open = { version = "5", optional = true }
 rayon = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"] }
-serde_json = { version = "1", optional = true }
-sigpipe = { version = "0.1", optional = true }
 thiserror = "2"
 toml = "1.1"
 rustls-pemfile = { version = "2", optional = true }
@@ -89,9 +75,10 @@ toml = "1.1"
 inherits = "release"
 lto = "thin"
 
-[package.metadata.release]
+[workspace.metadata.release]
 sign-commit = true
 sign-tag = true
 shared-version = true
+dependent-version = "upgrade"
 tag-message = "Release {{version}}"
 tag-name = "v{{version}}"

@@ -582,10 +582,11 @@ fn invalid_document_timestamp_is_rejected_with_its_inventory() {
 
 #[cfg(not(any(
     feature = "_test-package-download-probe",
-    feature = "cli",
     feature = "default",
+    feature = "diagnostics",
     feature = "embedded-fonts",
-    feature = "fs"
+    feature = "fs",
+    feature = "parallel"
 )))]
 #[test]
 fn document_time_refactor_preserves_the_existing_compilation_identity() {

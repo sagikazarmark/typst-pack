@@ -155,10 +155,11 @@ fn public_compilation_attests_the_approved_engine_and_exporters() {
                 cfg!(feature = "_test-package-download-probe"),
                 "_test-package-download-probe",
             ),
-            (cfg!(feature = "cli"), "cli"),
             (cfg!(feature = "default"), "default"),
+            (cfg!(feature = "diagnostics"), "diagnostics"),
             (cfg!(feature = "embedded-fonts"), "embedded-fonts"),
             (cfg!(feature = "fs"), "fs"),
+            (cfg!(feature = "parallel"), "parallel"),
         ] {
             if enabled {
                 features.push(name);

@@ -1626,33 +1626,6 @@ fn parse_page_selection_understands_ranges() {
     assert!(parse_page_selection("nope").is_err());
 }
 
-#[cfg(feature = "cli")]
-#[test]
-fn cli_uses_typst_embedded_font_terminology() {
-    use clap::Parser as _;
-
-    assert!(
-        crate::cli::Cli::try_parse_from([
-            "typst-pack",
-            "create",
-            "project",
-            "--embed-fonts",
-            "--include-typst-embedded-fonts",
-        ])
-        .is_ok()
-    );
-    assert!(
-        crate::cli::Cli::try_parse_from([
-            "typst-pack",
-            "create",
-            "project",
-            "--embed-fonts",
-            "--include-default-fonts",
-        ])
-        .is_err()
-    );
-}
-
 #[cfg(feature = "embedded-fonts")]
 #[test]
 fn compile_in_memory_pack_to_pdf_and_svg() {

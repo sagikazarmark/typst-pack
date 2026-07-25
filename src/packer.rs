@@ -4,7 +4,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
-#[cfg(feature = "cli")]
+#[cfg(feature = "diagnostics")]
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
@@ -209,9 +209,8 @@ impl Packer {
         timing_error.map_or(result, Err)
     }
 
-    pub(crate) fn pack_with_timing(
-        self,
-    ) -> (Result<PackOutcome, PackerError>, Option<PackerError>) {
+    #[doc(hidden)]
+    pub fn pack_with_timing(self) -> (Result<PackOutcome, PackerError>, Option<PackerError>) {
         let mut timing_error = None;
         let result = self.pack_inner(&mut timing_error);
         (result, timing_error)
@@ -270,7 +269,7 @@ impl Packer {
             .map_err(|error| PackerError::InvalidTimestamp(error.to_string()))?;
         let mut world = CreationWorld {
             root: root.clone(),
-            #[cfg(feature = "cli")]
+            #[cfg(feature = "diagnostics")]
             workdir: std::env::current_dir()
                 .ok()
                 .map(|path| path.canonicalize().unwrap_or(path)),
@@ -385,7 +384,7 @@ impl Packer {
         Ok(PackOutcome {
             pack,
             warnings,
-            #[cfg(feature = "cli")]
+            #[cfg(feature = "diagnostics")]
             world,
         })
     }
@@ -409,7 +408,7 @@ pub struct PackOutcome {
     pub pack: Pack,
     /// Warnings emitted by the representative creation compile.
     pub warnings: EcoVec<SourceDiagnostic>,
-    #[cfg(feature = "cli")]
+    #[cfg(feature = "diagnostics")]
     pub(crate) world: CreationWorld,
 }
 
@@ -418,15 +417,8 @@ pub struct PackOutcome {
 /// This value intentionally does not implement Typst's [`World`] interface.
 #[derive(Debug)]
 pub struct CreationDiagnosticContext {
-    #[cfg_attr(not(feature = "cli"), allow(dead_code))]
-    world: CreationWorld,
-}
-
-#[cfg(feature = "cli")]
-impl CreationDiagnosticContext {
-    pub(crate) fn world(&self) -> &CreationWorld {
-        &self.world
-    }
+    #[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
+    pub(crate) world: CreationWorld,
 }
 
 /// A failure while packing a project directory.
@@ -483,7 +475,7 @@ impl PackerError {
 /// The private snapshot-backed world used for creation compilation.
 pub(crate) struct CreationWorld {
     root: PathBuf,
-    #[cfg(feature = "cli")]
+    #[cfg(feature = "diagnostics")]
     workdir: Option<PathBuf>,
     library: LazyHash<Library>,
     main: FileId,
@@ -504,13 +496,13 @@ impl CreationWorld {
             .collect()
     }
     /// The canonicalized project root.
-    #[cfg(feature = "cli")]
-    pub fn root(&self) -> &Path {
+    #[cfg(feature = "diagnostics")]
+    fn root(&self) -> &Path {
         &self.root
     }
 
-    #[cfg(feature = "cli")]
-    pub(crate) fn workdir(&self) -> Option<&Path> {
+    #[cfg(feature = "diagnostics")]
+    fn workdir(&self) -> Option<&Path> {
         self.workdir.as_deref()
     }
 
@@ -571,6 +563,68 @@ impl World for CreationWorld {
     fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
         self.time.today(offset)
     }
+}
+
+#[cfg(feature = "diagnostics")]
+impl typst_kit::diagnostics::DiagnosticWorld for CreationWorld {
+    fn name(&self, id: FileId) -> String {
+        match id.root() {
+            VirtualRoot::Project => id
+                .vpath()
+                .realize(self.root())
+                .ok()
+                .and_then(|path| relative_path(&path, self.workdir()?))
+                .map(|path| path.to_string_lossy().into_owned())
+                .unwrap_or_else(|| display_file_id(id)),
+            VirtualRoot::Package(_) => display_file_id(id),
+        }
+    }
+}
+
+#[cfg(feature = "diagnostics")]
+fn display_file_id(id: FileId) -> String {
+    match id.root() {
+        VirtualRoot::Project => id.vpath().get_without_slash().to_owned(),
+        VirtualRoot::Package(spec) => format!("{spec}{}", id.vpath().get_with_slash()),
+    }
+}
+
+#[cfg(feature = "diagnostics")]
+fn relative_path(path: &Path, base: &Path) -> Option<PathBuf> {
+    if path.is_absolute() != base.is_absolute() {
+        return path.is_absolute().then(|| path.to_path_buf());
+    }
+
+    let mut path_components = path.components();
+    let mut base_components = base.components();
+    let mut relative = Vec::new();
+    loop {
+        match (path_components.next(), base_components.next()) {
+            (None, None) => break,
+            (Some(component), None) => {
+                relative.push(component);
+                relative.extend(path_components.by_ref());
+                break;
+            }
+            (None, Some(_)) => relative.push(std::path::Component::ParentDir),
+            (Some(path), Some(base)) if relative.is_empty() && path == base => {}
+            (Some(path), Some(std::path::Component::CurDir)) => relative.push(path),
+            (Some(_), Some(std::path::Component::ParentDir)) => return None,
+            (Some(std::path::Component::Prefix(_) | std::path::Component::RootDir), Some(_))
+            | (Some(_), Some(std::path::Component::Prefix(_) | std::path::Component::RootDir)) => {
+                return path.is_absolute().then(|| path.to_path_buf());
+            }
+            (Some(path), Some(_)) => {
+                relative.push(std::path::Component::ParentDir);
+                relative.extend(base_components.map(|_| std::path::Component::ParentDir));
+                relative.push(path);
+                relative.extend(path_components.by_ref());
+                break;
+            }
+        }
+    }
+
+    Some(relative.iter().map(|part| part.as_os_str()).collect())
 }
 
 struct PrimaryLoader {

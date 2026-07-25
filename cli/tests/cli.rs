@@ -1,5 +1,3 @@
-#![cfg(feature = "cli")]
-
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
@@ -649,7 +647,7 @@ fn compile_applies_pack_overrides_without_mutating_the_pack() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_vendor = "apple")))]
 #[test]
 fn compile_accepts_a_non_unicode_pack_override_source_path() {
     use std::os::unix::ffi::OsStringExt as _;

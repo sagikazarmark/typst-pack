@@ -1,5 +1,3 @@
-#![cfg(feature = "cli")]
-
 #[path = "support/official_typst_cli.rs"]
 mod official_typst_cli;
 

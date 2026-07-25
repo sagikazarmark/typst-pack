@@ -2936,18 +2936,13 @@ dependencies = [
 name = "typst-pack"
 version = "0.4.0"
 dependencies = [
- "chrono",
- "clap",
  "ecow",
  "env_proxy",
  "hayro-syntax",
  "ignore",
- "open",
  "rayon",
  "rustls-pemfile",
  "serde",
- "serde_json",
- "sigpipe",
  "tempfile",
  "thiserror",
  "tiny-skia",
@@ -2964,6 +2959,24 @@ dependencies = [
  "walkdir",
  "webpki-roots 1.0.9",
  "zip",
+]
+
+[[package]]
+name = "typst-pack-cli"
+version = "0.4.0"
+dependencies = [
+ "chrono",
+ "clap",
+ "hayro-syntax",
+ "open",
+ "rayon",
+ "serde_json",
+ "sigpipe",
+ "tempfile",
+ "typst",
+ "typst-kit",
+ "typst-pack",
+ "typst-pdf",
 ]
 
 [[package]]

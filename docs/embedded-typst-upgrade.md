@@ -62,9 +62,9 @@ issue:
 Run focused checks while upgrading:
 
 ```console
-cargo check --locked --all-features --all-targets
-cargo test --locked --all-features --test embedded_typst_gate
-cargo test --locked --all-features --test official_typst_oracle
+cargo check --locked --workspace --all-features --all-targets
+cargo test --locked -p typst-pack --all-features --test embedded_typst_gate
+cargo test --locked -p typst-pack --all-features --test official_typst_oracle
 ```
 
 Run the process gate with the exact official binary and the first-party binary
@@ -74,7 +74,7 @@ being released:
 TYPST_PACK_REQUIRE_OFFICIAL_TYPST=1 \
 TYPST_PACK_OFFICIAL_TYPST=/path/to/official/typst \
 TYPST_PACK_TEST_BINARY=/path/to/packaged/typst-pack \
-cargo test --locked --all-features --test official_typst_cli
+cargo test --locked -p typst-pack-cli --all-features --test official_typst_cli
 ```
 
 Finish with `dagger check`. The embedded gate verifies that Dagger and release

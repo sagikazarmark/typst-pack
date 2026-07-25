@@ -252,7 +252,7 @@ jobs:
       - name: Gate packaged binary against official Typst
         env:
           TYPST_PACK_REQUIRE_OFFICIAL_TYPST: "1"
-        run: cargo test --locked --all-features
+        run: cargo test --locked --workspace --all-features
 
   # Determines if we should publish/announce
   host:

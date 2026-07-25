@@ -95,7 +95,10 @@ fn verify_embedded_typst_baseline() {
     let resolved_typst = packages
         .iter()
         .filter_map(|package| package["name"].as_str())
-        .filter(|name| (*name == "typst" || name.starts_with("typst-")) && *name != "typst-pack")
+        .filter(|name| {
+            (*name == "typst" || name.starts_with("typst-"))
+                && !matches!(*name, "typst-pack" | "typst-pack-cli")
+        })
         .collect::<BTreeSet<_>>();
     assert_eq!(
         approved.keys().copied().collect::<BTreeSet<_>>(),

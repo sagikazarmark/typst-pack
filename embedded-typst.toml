@@ -162,12 +162,12 @@ coverage = ["tests/official_typst_oracle.rs"]
 [[semantic]]
 name = "cli-parsing-and-environment"
 classification = "unavoidable-mirror"
-coverage = ["tests/official_typst_cli.rs", "tests/cli.rs"]
+coverage = ["cli/tests/official_typst_cli.rs", "cli/tests/cli.rs"]
 
 [[semantic]]
 name = "artifact-publication"
 classification = "adapter-concern"
-coverage = ["tests/cli.rs", ".dagger/modules/tests/main.dang"]
+coverage = ["cli/tests/cli.rs", ".dagger/modules/tests/main.dang"]
 
 [[semantic]]
 name = "compilation-report-and-access-trace"
