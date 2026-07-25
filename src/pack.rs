@@ -29,7 +29,7 @@ pub(crate) const PACKAGE_TREE_IDENTITY_ALGORITHM: &str = "typst-hash128-0.15";
 /// A portable pack of a Typst project.
 ///
 /// A pack holds project files (sources, images, and data files), optionally
-/// package files and fonts. Every project path has contained baseline bytes.
+/// package files and fonts. Every project path has contained bytes.
 /// Its archive form is a Zip file with a `typst-pack.toml`
 /// manifest, conventionally named `*.typk`.
 #[derive(Debug, Clone)]

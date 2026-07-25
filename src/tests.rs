@@ -2245,6 +2245,7 @@ Rows: #csv("data.csv").len()
         }
     }
 
+    #[cfg(feature = "embedded-fonts")]
     #[test]
     fn changed_selected_font_evidence_prevents_pack_issuance() {
         let dir = tempfile::tempdir().unwrap();
@@ -2462,6 +2463,39 @@ Rows: #csv("data.csv").len()
         assert!(matches!(result, Err(ExtractError::DestinationConflict(_))));
         assert!(!blocked_target.join("main.typ").exists());
         assert_eq!(fs::read(blocked_target.join("tree")).unwrap(), b"external");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn extraction_rejects_symlinked_destination_components() {
+        use std::os::unix::fs::symlink;
+
+        let pack = Pack::builder("main.typ")
+            .file("main.typ", b"main".to_vec())
+            .unwrap()
+            .file("assets/logo.txt", b"packed".to_vec())
+            .unwrap()
+            .build()
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("extracted");
+        let outside = dir.path().join("outside");
+        fs::create_dir(&target).unwrap();
+        fs::create_dir(&outside).unwrap();
+        symlink(&outside, target.join("assets")).unwrap();
+
+        let result = extract(
+            &pack,
+            &target,
+            &ExtractOptions {
+                force: true,
+                ..ExtractOptions::default()
+            },
+        );
+
+        assert!(matches!(result, Err(ExtractError::DestinationConflict(_))));
+        assert!(!target.join("main.typ").exists());
+        assert!(!outside.join("logo.txt").exists());
     }
 
     #[cfg(feature = "embedded-fonts")]

@@ -2,12 +2,15 @@ mod support;
 
 use std::num::NonZeroUsize;
 
+#[cfg(feature = "embedded-fonts")]
+use support::official_typst::select_font;
 use support::official_typst::{
     ArtifactRole, DiagnosticObservation, DiagnosticSeverity, Fixture, ObservationStatus,
     OutputRequest, ReferenceRequest, Target, TraceKind, observe, observe_with_project_overrides,
-    select_font,
 };
-use typst::foundations::{Bytes, Datetime, Dict, Smart, Value};
+#[cfg(feature = "embedded-fonts")]
+use typst::foundations::Bytes;
+use typst::foundations::{Datetime, Dict, Smart, Value};
 use typst_pack::{
     CompilationDiagnostic, CompilationOutputSpecification, CompilationRequestIssue,
     CompilationRequestRejection, CompilationResult, CompilationStatus, CreationTimestamp,

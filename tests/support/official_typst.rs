@@ -31,6 +31,7 @@ const SEMANTIC_REQUEST: &str = "#let width = int(sys.inputs.width)\n\
                                 #pdf.table-summary(table(columns: 1, [feature enabled]))";
 const STATIC_SHAPE: &str =
     "#set page(width: 10pt, height: 10pt, margin: 0pt)\n#rect(width: 5pt, height: 5pt)";
+#[cfg(feature = "embedded-fonts")]
 const FONT_SELECTION: &str = "#set page(width: 100pt, height: 20pt, margin: 0pt)\n\
                               #set text(font: \"Libertinus Serif\", size: 12pt)\nExact font";
 const OVERRIDE_MAIN: &str = "#import \"chapter.typ\": source-width\n\
@@ -117,6 +118,7 @@ impl Fixture {
         }
     }
 
+    #[cfg(feature = "embedded-fonts")]
     pub fn font_selection() -> Self {
         Self {
             entrypoint: "main.typ",
@@ -152,6 +154,7 @@ impl Fixture {
         self.packages
     }
 
+    #[cfg(feature = "embedded-fonts")]
     pub fn font(mut self, data: Vec<u8>, index: u32) -> Self {
         self.fonts.push((data, index));
         self
@@ -301,6 +304,7 @@ pub fn observe_with_project_overrides(
     observation
 }
 
+#[cfg(feature = "embedded-fonts")]
 pub fn select_font(
     fixture: &Fixture,
     family: &str,

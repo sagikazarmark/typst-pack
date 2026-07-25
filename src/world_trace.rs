@@ -78,9 +78,22 @@ impl<W: World + ?Sized> World for WorldTrace<'_, W> {
 
     fn source(&self, id: FileId) -> FileResult<Source> {
         let result = self.world.source(id);
-        self.record_file(id, CompilationAccessKind::Source, &result, |source| {
-            source.text().as_bytes()
-        });
+        let outcome = match &result {
+            Ok(_) => self
+                .world
+                .file(id)
+                .map_or(CompilationAccessOutcome::Failed, |bytes| {
+                    read_outcome(bytes.as_slice())
+                }),
+            Err(FileError::NotFound(_)) => CompilationAccessOutcome::Missing,
+            Err(_) => CompilationAccessOutcome::Failed,
+        };
+        self.record(CompilationAccessObservation::new(
+            CompilationAccessKind::Source,
+            logical_path(id),
+            None,
+            outcome,
+        ));
         result
     }
 

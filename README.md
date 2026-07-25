@@ -99,7 +99,7 @@ defaults to `paged`; it does not restrict later output formats. This concrete
 evaluation is a temporary dependency-selection mechanism because Typst does not
 report every package or font a different request might reach.
 
-Every project path in a Pack has baseline bytes. For per-document variation,
+Every project path in a Pack has contained bytes. For per-document variation,
 pack a valid placeholder and use compile-time `--override PACK_PATH FILE`.
 Overrides may replace source, assets, data, or the entrypoint, but cannot add or
 delete paths or authorize undeclared packages and fonts.
@@ -225,7 +225,7 @@ let pack = Pack::builder("main.typ")
 let bytes = pack.to_bytes()?;
 ```
 
-Compilation-time Pack Overrides replace contained baseline bytes in memory:
+Compilation-time Pack Overrides replace contained project-file bytes in memory:
 
 ```rust,ignore
 let pack = Pack::builder("main.typ")
@@ -267,10 +267,10 @@ fn arbitrary_world(world: &dyn typst::World) {
 
 Typst 0.15.0 owns language evaluation, layout, official diagnostics, document
 structures, and PDF, PNG, SVG, and HTML export behavior. typst-pack owns Pack
-creation and validity, the fixed project namespace, exact package and font
-verification, Pack Overrides, request identities and reports,
-and later CLI or Dagger publication. Artifact bytes and official diagnostics
-are not reinterpreted by destination, transport, cache, or presentation code.
+creation and validity, the fixed set of contained project paths, exact package
+and font verification, Pack Overrides, request identities and reports, and later
+CLI or Dagger publication. Artifact bytes and official diagnostics are not
+reinterpreted by destination, transport, cache, or presentation code.
 
 Intentional differences from `typst compile` are Pack confinement, Pack input
 instead of a source root, a fixed contained project namespace, exact dependency
@@ -352,9 +352,23 @@ format-version = 1
 [project]
 entrypoint = "main.typ"
 
-[packages]
-vendored = ["@preview/cetz:0.3.4"]
-unvendored = ["@preview/tablex:0.0.9"]
+[[packages.vendored]]
+spec = "@preview/cetz:0.3.4"
+tree-digest = "0123456789abcdef0123456789abcdef"
+tree-identity-kind = "complete-package-tree"
+tree-identity-schema = "typst-pack-complete-package-tree-v1"
+tree-identity-algorithm = "typst-hash128-0.15"
+file-count = 12
+byte-length = 34567
+
+[[packages.unvendored]]
+spec = "@preview/tablex:0.0.9"
+tree-digest = "fedcba9876543210fedcba9876543210"
+tree-identity-kind = "complete-package-tree"
+tree-identity-schema = "typst-pack-complete-package-tree-v1"
+tree-identity-algorithm = "typst-hash128-0.15"
+file-count = 8
+byte-length = 23456
 
 [[fonts]]
 path = "fonts/ibm-plex-sans.ttf"
@@ -365,10 +379,10 @@ name = "Quarterly report"
 authors = ["Jane Doe"]
 ```
 
-Readers ignore unknown top-level archive entries and reject manifests with a
-`format-version` greater than they support. Paths inside the archive are
-validated, root-relative virtual paths, so a pack can never read or write
-outside its own tree.
+Readers ignore unknown top-level archive entries and reject manifests whose
+`format-version` is not the exact supported version. Paths inside the archive
+are validated, root-relative virtual paths. Extraction rejects existing
+symlinked entries within the selected destination before writing.
 
 The format version remains 1 and is explicitly unstable: readers reject old
 discovery, Resource Slot, `external-resources`, and `packages.external` fields

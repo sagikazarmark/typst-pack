@@ -196,22 +196,48 @@ fn preflight_destination(
         }
 
         let target = dir.join(relative);
-        if target.exists() {
-            if target.is_file() {
-                if !force {
-                    return Err(ExtractError::Exists(target));
+        match std::fs::symlink_metadata(&target) {
+            Ok(metadata) => {
+                if metadata.file_type().is_symlink() {
+                    return Err(ExtractError::DestinationConflict(target));
                 }
-            } else {
-                return Err(ExtractError::DestinationConflict(target));
+                if metadata.is_file() {
+                    if !force {
+                        return Err(ExtractError::Exists(target));
+                    }
+                } else {
+                    return Err(ExtractError::DestinationConflict(target));
+                }
+            }
+            Err(source)
+                if matches!(
+                    source.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) => {}
+            Err(source) => {
+                return Err(ExtractError::Io {
+                    path: target,
+                    source,
+                });
             }
         }
 
         let mut parent = target.parent();
-        while let Some(path) = parent {
-            if path.exists() {
-                if !path.is_dir() {
+        while let Some(path) = parent.filter(|path| path.starts_with(dir)) {
+            match std::fs::symlink_metadata(path) {
+                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
                     return Err(ExtractError::DestinationConflict(path.to_owned()));
                 }
+                Ok(_) => {}
+                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
+                Err(source) => {
+                    return Err(ExtractError::Io {
+                        path: path.to_owned(),
+                        source,
+                    });
+                }
+            }
+            if path == dir {
                 break;
             }
             parent = path.parent();

@@ -297,6 +297,7 @@ impl World for PackWorld {
 }
 
 impl PackWorld {
+    #[cfg(feature = "cli")]
     pub(crate) fn file_dependencies(&mut self) -> Vec<FileId> {
         let (_, dependencies) = self.store.dependencies();
         dependencies.collect()

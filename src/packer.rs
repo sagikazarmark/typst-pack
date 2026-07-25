@@ -4,7 +4,9 @@
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
-use std::path::{Path, PathBuf};
+#[cfg(feature = "cli")]
+use std::path::Path;
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use ecow::EcoVec;
@@ -268,6 +270,7 @@ impl Packer {
             .map_err(|error| PackerError::InvalidTimestamp(error.to_string()))?;
         let mut world = CreationWorld {
             root: root.clone(),
+            #[cfg(feature = "cli")]
             workdir: std::env::current_dir()
                 .ok()
                 .map(|path| path.canonicalize().unwrap_or(path)),
@@ -382,6 +385,7 @@ impl Packer {
         Ok(PackOutcome {
             pack,
             warnings,
+            #[cfg(feature = "cli")]
             world,
         })
     }
@@ -405,6 +409,7 @@ pub struct PackOutcome {
     pub pack: Pack,
     /// Warnings emitted by the representative creation compile.
     pub warnings: EcoVec<SourceDiagnostic>,
+    #[cfg(feature = "cli")]
     pub(crate) world: CreationWorld,
 }
 
@@ -413,9 +418,11 @@ pub struct PackOutcome {
 /// This value intentionally does not implement Typst's [`World`] interface.
 #[derive(Debug)]
 pub struct CreationDiagnosticContext {
+    #[cfg_attr(not(feature = "cli"), allow(dead_code))]
     world: CreationWorld,
 }
 
+#[cfg(feature = "cli")]
 impl CreationDiagnosticContext {
     pub(crate) fn world(&self) -> &CreationWorld {
         &self.world
@@ -476,6 +483,7 @@ impl PackerError {
 /// The private snapshot-backed world used for creation compilation.
 pub(crate) struct CreationWorld {
     root: PathBuf,
+    #[cfg(feature = "cli")]
     workdir: Option<PathBuf>,
     library: LazyHash<Library>,
     main: FileId,
@@ -496,10 +504,12 @@ impl CreationWorld {
             .collect()
     }
     /// The canonicalized project root.
+    #[cfg(feature = "cli")]
     pub fn root(&self) -> &Path {
         &self.root
     }
 
+    #[cfg(feature = "cli")]
     pub(crate) fn workdir(&self) -> Option<&Path> {
         self.workdir.as_deref()
     }

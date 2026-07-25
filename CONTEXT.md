@@ -8,12 +8,12 @@ belong in issues and ADRs until they become part of the implementation.
 
 **Pack**:
 A validated, portable Typst compilation closure with one fixed entrypoint and a
-fixed project namespace. Every contained project path has baseline bytes. A Pack
-identifies its exact package and font requirements and records whether each is
-embedded or must be fulfilled externally. A value exists as a Pack only after
-whole-Pack canonical and content-integrity validation. In-memory construction may
-choose project files directly; filesystem Pack Creation uses the complete
-structural project tree described below.
+fixed set of contained project paths and bytes. A Pack identifies its exact
+package and font requirements and records whether each is embedded or must be
+fulfilled externally. A value exists as a Pack only after whole-Pack canonical
+and content-integrity validation. In-memory construction may choose project files
+directly; filesystem Pack Creation uses the complete structural project tree
+described below.
 
 **Pack Creation**:
 The filesystem operation that stabilizes every eligible regular file beneath one
@@ -44,8 +44,8 @@ do not contribute.
 
 **Canonical Identity**:
 The shared convention used by concrete Pack, package-tree, font-container,
-compilation, result, and artifact identities. Equality includes the identity role,
-schema, algorithm, and digest; a bare digest is insufficient.
+compilation, and result identities. Equality includes the identity role, schema,
+algorithm, and digest; a bare digest is insufficient.
 _Avoid_: bare hash, checksum
 
 **Self-Contained Pack**:
@@ -58,19 +58,20 @@ fulfillment.
 The versioned declarative record stored in a Pack archive. It describes the
 entrypoint, package requirements, font catalog, and optional metadata. Pack
 validation derives identities and verifies agreement between these declarations
-and contained bytes rather than trusting the manifest alone. The current exact
-`format-version` determines the supported representation schema.
+and contained bytes rather than trusting the manifest alone. The current reader
+supports only its exact version-1 representation schema; version 1 remains
+unstable and does not identify schemas from earlier releases.
 
 **Pack Inspection**:
 The side-effect-free static inventory exposed by validated Pack accessors and the
 `inspect` command. It does not acquire dependencies, apply Pack Overrides, or
 compile the Pack.
 
-**Project Materialization**:
-Projection of contained project paths and baseline bytes into an editable project
-tree. Packages, fonts, Pack metadata, and Pack Overrides are separate extraction
-choices or excluded. Using the result for new Pack Creation does not preserve the
-original Pack Identity.
+**Pack Extraction**:
+Projection of contained project files into an editable project tree. Packages and
+fonts are separate extraction choices; Pack metadata and Pack Overrides are
+excluded. Using the result for new Pack Creation does not preserve the original
+Pack Identity.
 
 ## Packages
 
@@ -89,9 +90,9 @@ host filesystem metadata.
 **Package Authority**:
 The explicitly configured responsibility that resolves package specifications
 during filesystem creation or obtains exact trees for compilation. In the core,
-compilation receives already acquired Package Fulfillments rather than a public
-authority interface. Configured offline behavior disables package downloading;
-it may still use explicit or local package sources.
+compilation receives already acquired Package Tree Fulfillments rather than a
+public authority interface. Configured offline behavior disables package
+downloading; it may still use explicit or local package sources.
 
 **External Package Fulfillment**:
 Supplying one non-embedded Package Requirement as a Complete Package Tree. The
@@ -100,10 +101,10 @@ before Typst compilation. Optional provenance and cache-hit fields are
 caller-provided operational report metadata; they are not authenticated,
 identity-bearing, or semantic inputs.
 
-**Package Embedding Policy**:
-The global Pack Creation choice to embed every selected Complete Package Tree or
-record selected packages for external fulfillment. The choice affects Pack
-Identity and self-containment.
+**Package Embedding**:
+The Pack Creation choice to embed every selected Complete Package Tree or record
+selected packages for external fulfillment. The choice affects Pack Identity and
+self-containment.
 
 ## Fonts
 
@@ -125,8 +126,8 @@ or externally fulfilled.
 **Font Authority**:
 The explicitly configured responsibility that supplies the ordered candidate
 font catalog during filesystem creation or obtains exact Font Containers for
-compilation. In the core, compilation receives already acquired Font Fulfillments
-rather than a public authority interface.
+compilation. In the core, compilation receives already acquired Font Container
+Fulfillments rather than a public authority interface.
 
 **Pack Font Catalog**:
 The ordered projection of the creation font catalog containing exactly the Font
@@ -141,9 +142,9 @@ compilation. Optional provenance and licensing fields are caller-provided
 operational report metadata; they do not establish authenticity or legal
 permission and do not contribute to identities.
 
-**Font Embedding Policy**:
-The global Pack Creation choice to embed selected Font Containers or record them
-for external fulfillment. Typst-embedded-font handling is an explicit creation
+**Font Embedding**:
+The Pack Creation choice to embed selected Font Containers or record them for
+external fulfillment. Typst-embedded-font handling is an explicit creation
 option. The choice affects Pack Identity and self-containment; typst-pack does not
 derive a per-font legal policy from licensing metadata.
 
@@ -172,11 +173,6 @@ One exact owned byte value produced by compilation. Its role contains the output
 format and, for a Page Format, one Source Page Number. Filenames, destinations,
 and transport metadata are not part of the artifact.
 
-**Compilation Artifact Identity**:
-The artifact role within one Compilation Identity together with the content
-identity of its exact emitted bytes. It contributes to Compilation Result
-Identity; output destinations do not.
-
 **Document Time**:
 The exact value used to answer Typst document-time requests such as
 `datetime.today()`: explicitly absent, one fixed Typst date/datetime, or one Unix
@@ -184,7 +180,7 @@ timestamp interpreted under each requested timezone offset. The core default is
 absent. It contributes to Compilation Identity whether or not document code
 observes it.
 
-**PDF Creation Time**:
+**PDF Creation Timestamp**:
 The PDF-specific timestamp control offered to PDF metadata. It is explicitly
 omitted or fixed after defaults are resolved, is independent of Document Time,
 and contributes to Compilation Identity. An adapter may intentionally resolve one
@@ -252,6 +248,11 @@ One ordered compiler or exporter diagnostic containing severity, message, logica
 span, hints, tracepoints, phase, producer, and an optional Source Page Number.
 Messages and source-derived values remain untrusted presentation data.
 
+**Pack Compilation Warning**:
+One Pack-owned warning produced while preparing or exporting an accepted
+compilation. It is distinct from official compiler or exporter diagnostics and
+from representative-compile warnings returned by Pack Creation.
+
 **Compilation Access Trace**:
 The canonical set of project, package, and font requests observed by Typst. Each
 observation records request kind, logical path, optional font index, and a read,
@@ -265,16 +266,16 @@ total Source Page Number count reached before complete export.
 **Compilation Result**:
 The immutable semantic value produced after request acceptance and exact
 dependency verification. It records succeeded or rejected status, ordered
-artifacts, complete canonical diagnostics, Pack warnings, document summary,
-Compilation Access Trace, implementation identities, request inventory,
+artifacts, complete canonical diagnostics, Pack Compilation Warnings, document
+summary, Compilation Access Trace, implementation identities, request inventory,
 Compilation Identity, and Compilation Result Identity. Compiler or exporter
 rejection is a result with no artifacts, not an operational failure.
 
 **Compilation Result Identity**:
 The post-execution identity binding Compilation Identity to result status,
-document summary, diagnostics, Pack warnings, access trace, and every ordered
-artifact role, length, and content identity. Fulfillment provenance and cache
-metadata do not contribute.
+document summary, diagnostics, Pack Compilation Warnings, access trace, and every
+ordered artifact role, length, and content identity. Fulfillment provenance and
+cache metadata do not contribute.
 
 **Compilation Report**:
 The immutable terminal returned for every accepted compilation request. Its

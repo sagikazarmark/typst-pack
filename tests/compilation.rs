@@ -1,8 +1,10 @@
+#[cfg(feature = "embedded-fonts")]
+use typst_pack::FontContainerFulfillment;
 use typst_pack::{
-    CompilationOperationOutcome, CompilationOutputOrigins, CompilationOutputSpecification,
-    CompilationReportOutcome, CompilationRequestIssue, CompilationRequestRejection,
-    CompilationResult, CompilationStatus, CreationTimestamp, DiagnosticPhase, DiagnosticProducer,
-    DocumentTime, FontContainerFulfillment, HtmlOutputSpecification, OutputFormat, Pack,
+    CompilationAccessKind, CompilationOperationOutcome, CompilationOutputOrigins,
+    CompilationOutputSpecification, CompilationReportOutcome, CompilationRequestIssue,
+    CompilationRequestRejection, CompilationResult, CompilationStatus, CreationTimestamp,
+    DiagnosticPhase, DiagnosticProducer, DocumentTime, HtmlOutputSpecification, OutputFormat, Pack,
     PackCompilationRequest, PackMetadata, PackOverrideSet, PackOverrideSetError,
     PackageTreeFulfillment, PdfOutputSpecification, PngOutputSpecification, RequestValueOrigin,
     SvgOutputSpecification, compile as compile_to_report,
@@ -95,6 +97,40 @@ fn pack_bound_compilation_does_not_read_an_ambient_clock() {
     let result = compile(PackCompilationRequest::new(pack, output(OutputFormat::Svg)));
 
     assert_eq!(result.unwrap().status(), CompilationStatus::Rejected);
+}
+
+#[test]
+fn source_access_trace_retains_exact_bom_prefixed_pack_bytes() {
+    let pack = Pack::builder("main.typ")
+        .file(
+            "main.typ",
+            b"#include \"chapter.typ\"\n#read(\"chapter.typ\")".to_vec(),
+        )
+        .unwrap()
+        .file("chapter.typ", b"\xef\xbb\xbfChapter".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let result = compile(PackCompilationRequest::new(pack, output(OutputFormat::Svg))).unwrap();
+    let source = result
+        .access_trace()
+        .observations()
+        .find(|observation| {
+            observation.kind() == CompilationAccessKind::Source
+                && observation.logical_path() == "project:chapter.typ"
+        })
+        .expect("chapter source access");
+    let file = result
+        .access_trace()
+        .observations()
+        .find(|observation| {
+            observation.kind() == CompilationAccessKind::File
+                && observation.logical_path() == "project:chapter.typ"
+        })
+        .expect("chapter file access");
+
+    assert_eq!(source.outcome(), file.outcome());
 }
 
 #[test]
