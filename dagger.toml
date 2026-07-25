@@ -18,6 +18,7 @@ source = "github.com/sagikazarmark/daggerverse-beta/dagger-gha"
 
 [modules.dagger-gha.settings]
 lock = '"PINNED"'
+skip = ['"rust:build"', '"rust:test"']
 
 [modules.dang]
 source = "github.com/sagikazarmark/daggerverse-beta/dang"

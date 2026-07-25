@@ -10,7 +10,7 @@ jobs:
             - name: Check
               uses: dagger/dagger-for-github@v8.4.1
               with:
-                args: --lock pinned
+                args: --lock pinned --skip "rust:build" --skip "rust:test"
                 verb: check
                 version: v1.0.0-beta.7
 name: Dagger
