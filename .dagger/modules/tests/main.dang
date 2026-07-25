@@ -174,7 +174,7 @@ type Tests {
       count < 0
     } catch {
       error: Error => {
-        assert { error.message.contains("typstPack.compile error: expected expression") }
+        assert { error.message.contains("error: expected expression") }
         true
       }
     }

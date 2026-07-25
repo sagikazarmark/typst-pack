@@ -8,6 +8,7 @@
 
   packages = with pkgs; [
     lld
+
     cargo-audit
     cargo-deny
     cargo-dist
