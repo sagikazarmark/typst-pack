@@ -17,7 +17,7 @@ hayro-syntax = "0.7"
 rayon = "1"
 tempfile = "3"
 typst = "=0.15.0"
-typst-kit = { version = "=0.15.0", default-features = false, features = ["datetime"] }
+typst-kit = { version = "=0.15.1", default-features = false, features = ["datetime"] }
 typst-pdf = "=0.15.0"
 
 # The profile that 'dist' will build with
