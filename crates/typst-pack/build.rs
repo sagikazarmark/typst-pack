@@ -1,11 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 fn main() {
-    for path in ["Cargo.toml", "Cargo.lock", "embedded-typst.toml"] {
+    for path in ["Cargo.toml", "embedded-typst.toml"] {
         println!("cargo:rerun-if-changed={path}");
     }
 
     verify_embedded_typst_baseline();
+    stage_readme();
 
     for variable in ["TARGET", "CARGO_CFG_TARGET_FEATURE"] {
         println!(
@@ -23,6 +24,21 @@ fn main() {
             features.join(",")
         }
     );
+}
+
+fn stage_readme() {
+    let readme_path = if std::path::Path::new("README.md").is_file() {
+        "README.md"
+    } else {
+        "../../README.md"
+    };
+    println!("cargo:rerun-if-changed={readme_path}");
+    let output = std::path::PathBuf::from(
+        std::env::var_os("OUT_DIR").expect("Cargo must provide OUT_DIR to build scripts"),
+    )
+    .join("README.md");
+    std::fs::copy(readme_path, output)
+        .unwrap_or_else(|error| panic!("failed to stage {readme_path}: {error}"));
 }
 
 fn enabled_feature_set() -> Vec<String> {
@@ -51,7 +67,21 @@ fn enabled_feature_set() -> Vec<String> {
 
 fn verify_embedded_typst_baseline() {
     let manifest = parse("Cargo.toml", include_str!("Cargo.toml"));
-    let lockfile = parse("Cargo.lock", include_str!("Cargo.lock"));
+    let workspace_manifest = std::path::Path::new("../../Cargo.toml").is_file().then(|| {
+        println!("cargo:rerun-if-changed=../../Cargo.toml");
+        let source = std::fs::read_to_string("../../Cargo.toml")
+            .expect("failed to read workspace Cargo.toml");
+        parse("../../Cargo.toml", &source)
+    });
+    let lock_path = if std::path::Path::new("Cargo.lock").is_file() {
+        "Cargo.lock"
+    } else {
+        "../../Cargo.lock"
+    };
+    println!("cargo:rerun-if-changed={lock_path}");
+    let lock_source = std::fs::read_to_string(lock_path)
+        .unwrap_or_else(|error| panic!("failed to read {lock_path}: {error}"));
+    let lockfile = parse(lock_path, &lock_source);
     let baseline = parse("embedded-typst.toml", include_str!("embedded-typst.toml"));
     let declarations = baseline["crate"]
         .as_array()
@@ -136,7 +166,37 @@ fn verify_embedded_typst_baseline() {
         assert_eq!(declaration["direct"].as_bool(), Some(true));
         let requirement = specification
             .as_str()
-            .or_else(|| specification["version"].as_str())
+            .or_else(|| {
+                specification
+                    .get("version")
+                    .and_then(toml::Value::as_str)
+                    .or_else(|| {
+                        (specification
+                            .get("workspace")
+                            .and_then(toml::Value::as_bool)
+                            == Some(true))
+                        .then(|| {
+                            workspace_manifest
+                                .as_ref()
+                                .and_then(|manifest| {
+                                    manifest
+                                        .get("workspace")?
+                                        .get("dependencies")?
+                                        .get(name)
+                                        .and_then(|specification| {
+                                            specification.as_str().or_else(|| {
+                                                specification
+                                                    .get("version")
+                                                    .and_then(toml::Value::as_str)
+                                            })
+                                        })
+                                })
+                                .unwrap_or_else(|| {
+                                    panic!("workspace dependency `{name}` has no version")
+                                })
+                        })
+                    })
+            })
             .unwrap_or_else(|| panic!("direct Typst dependency `{name}` has no version"));
         assert_eq!(
             requirement,

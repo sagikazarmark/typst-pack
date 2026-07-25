@@ -18,10 +18,10 @@ or duplicate its compilation path.
 
 ## Decision
 
-The workspace publishes two crates:
+The workspace publishes two crates under `crates/`:
 
-- `typst-pack` provides the Pack library;
-- `typst-pack-cli` provides the `typst-pack` executable and depends on the exact
+- `crates/typst-pack` provides the Pack library;
+- `crates/typst-pack-cli` provides the `typst-pack` executable and depends on the exact
   matching `typst-pack` release.
 
 The library has no `cli` feature. The CLI enables capability-oriented library

@@ -31,7 +31,7 @@ type TypstPack {
     self.officialTypst = container
       .withMountedFile(
         "/tmp/embedded-typst.toml",
-        Dagger.currentModule.source.file("embedded-typst.toml"),
+        Dagger.currentModule.source.file("crates/typst-pack/embedded-typst.toml"),
       )
       .withMountedFile(
         "/tmp/install-official-typst.sh",

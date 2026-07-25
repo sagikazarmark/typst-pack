@@ -1,5 +1,5 @@
 [workspace]
-members = ["cargo:cli"]
+members = ["cargo:crates/typst-pack-cli"]
 
 # Config for 'dist'
 [dist]

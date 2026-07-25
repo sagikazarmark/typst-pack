@@ -141,4 +141,5 @@ their Pack-specific operational contracts are designed.
 - New Typst compile options are not adopted blindly: each engine upgrade checks
   whether the option applies to Pack compilation and records exclusions.
 - The machine-enforced baseline and maintainer checklist are defined by
-  `embedded-typst.toml` and `docs/embedded-typst-upgrade.md`.
+  `crates/typst-pack/embedded-typst.toml` and
+  `docs/embedded-typst-upgrade.md`.

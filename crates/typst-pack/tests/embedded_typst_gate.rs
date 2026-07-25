@@ -67,9 +67,9 @@ fn approved_baseline_covers_the_complete_differential_matrix() {
 
 #[test]
 fn official_cli_consumers_use_the_canonical_pin() {
-    let dagger = include_str!("../dagger.dang");
-    let release = include_str!("../.github/workflows/release.yml");
-    let installer = include_str!("../scripts/install-official-typst.sh");
+    let dagger = include_str!("../../../dagger.dang");
+    let release = include_str!("../../../.github/workflows/release.yml");
+    let installer = include_str!("../../../scripts/install-official-typst.sh");
 
     for consumer in [dagger, release] {
         assert!(consumer.contains("embedded-typst.toml"));

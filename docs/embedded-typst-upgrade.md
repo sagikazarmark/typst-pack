@@ -1,7 +1,7 @@
 # Embedded Typst upgrade procedure
 
 The embedded Typst release is an implementation authority, not a loose
-compatibility range. `embedded-typst.toml` is the machine-readable approved
+compatibility range. `crates/typst-pack/embedded-typst.toml` is the machine-readable approved
 release set and differential inventory. `build.rs` rejects an unapproved,
 duplicated, non-exact, or checksum-mismatched Typst crate before typst-pack can
 build.
@@ -28,15 +28,17 @@ issue:
 
 ## Required changes
 
-1. Update every direct Typst dependency in `Cargo.toml` to an exact `=VERSION`
-   pin. Run `cargo update` so `Cargo.lock` contains one compatible release of
-   every `typst` and `typst-*` crate.
-2. Update every `[[crate]]` entry in `embedded-typst.toml`, including transitive
-   crates, checksums, the Engine baseline, and all Exporter Identity sources.
+1. Update every direct Typst dependency in `crates/typst-pack/Cargo.toml` and
+   `crates/typst-pack-cli/Cargo.toml` to an exact `=VERSION` pin. Run
+   `cargo update` so `Cargo.lock` contains one compatible release of every
+   `typst` and `typst-*` crate.
+2. Update every `[[crate]]` entry in
+   `crates/typst-pack/embedded-typst.toml`, including transitive crates,
+   checksums, the Engine baseline, and all Exporter Identity sources.
    Do not add an exception implicitly; explain intentional patch-version splits
    such as `typst-timing` in the upgrade change.
-3. Update `[official-cli]` in `embedded-typst.toml`, the one authoritative
-   declaration of the official binary version, URL, and SHA-256 digest. Verify
+3. Update `[official-cli]` in `crates/typst-pack/embedded-typst.toml`, the one
+   authoritative declaration of the official binary version, URL, and SHA-256 digest. Verify
    the published digest independently before changing this pin. Dagger and the
    release workflow both consume it through `scripts/install-official-typst.sh`;
    do not update either consumer separately.
@@ -45,8 +47,8 @@ issue:
    `upstream-behavior`, `pack-invariant`, `adapter-concern`,
    `intentional-pack-difference`, or `unavoidable-mirror`. Represent
    differential matrix coverage with a typed entry in
-   `tests/support/differential.rs`; the embedded gate requires every classified
-   category to name at least one executable differential suite.
+   `crates/typst-pack/tests/support/differential.rs`; the embedded gate requires
+   every classified category to name at least one executable differential suite.
 5. Update frozen assertions or differential expectations only with a recorded
    classification. The change description must state whether each changed
    observation is upstream behavior, a Pack invariant, an adapter concern, an

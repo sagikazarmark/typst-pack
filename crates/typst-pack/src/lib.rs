@@ -1,4 +1,4 @@
-#![doc = include_str!("../README.md")]
+#![doc = include_str!(concat!(env!("OUT_DIR"), "/README.md"))]
 
 /// The typst-pack release and embedded Typst engine versions.
 pub const VERSION: &str = concat!(
