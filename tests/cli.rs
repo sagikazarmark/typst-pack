@@ -425,7 +425,7 @@ fn create_packs_the_structural_project_closure_with_root_ignore_policy() {
     std::fs::write(project.join("unused.txt"), "packed").unwrap();
     std::fs::write(
         project.join(".typkignore"),
-        "# Pack policy\nignored/**\n!ignored/reincluded/keep.txt\n*.secret\n",
+        "# Pack policy\nignored/**\n!ignored/reincluded/\n!ignored/reincluded/keep.txt\n*.secret\n",
     )
     .unwrap();
     std::fs::write(project.join("ignored/drop.txt"), "drop").unwrap();

@@ -1937,7 +1937,7 @@ Rows: #csv("data.csv").len()
         fs::write(project.join("unused.txt"), "packed").unwrap();
         fs::write(
             project.join(".typkignore"),
-            "ignored/**\n!ignored/reincluded/keep.txt\n*.secret\n",
+            "ignored/**\n!ignored/reincluded/\n!ignored/reincluded/keep.txt\n*.secret\n",
         )
         .unwrap();
         fs::write(project.join("ignored/drop.txt"), "drop").unwrap();
@@ -1965,6 +1965,85 @@ Rows: #csv("data.csv").len()
                 "nested/.typkignore",
                 "nested/ordinary.txt",
                 "unused.txt",
+            ]
+        );
+    }
+
+    #[test]
+    fn structural_creation_does_not_reinclude_files_beneath_ignored_parents() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(project.join("ignored")).unwrap();
+        fs::write(project.join("main.typ"), "Hello").unwrap();
+        fs::write(project.join(".typkignore"), "ignored/\n!ignored/keep.txt\n").unwrap();
+        fs::write(project.join("ignored/keep.txt"), "still ignored").unwrap();
+
+        let outcome = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .pack()
+            .unwrap();
+
+        assert_eq!(
+            outcome
+                .pack
+                .files()
+                .map(|(path, _)| path)
+                .collect::<Vec<_>>(),
+            [".typkignore", "main.typ"]
+        );
+    }
+
+    #[test]
+    fn structural_creation_supports_gitignore_pattern_syntax() {
+        let dir = tempfile::tempdir().unwrap();
+        let project = dir.path().join("project");
+        fs::create_dir_all(project.join("nested/cache")).unwrap();
+        fs::write(project.join("main.typ"), "Hello").unwrap();
+        fs::write(
+            project.join(".typkignore"),
+            concat!(
+                "# Project policy\n",
+                "/root-only.secret\n",
+                "\\!important.txt\n",
+                "\\#notes.txt\n",
+                "cache/\n",
+                "*.tmp\n",
+                "!keep.tmp\n",
+                " leading.txt\n",
+                "trailing.txt   \n",
+                "literal\\ \n",
+            ),
+        )
+        .unwrap();
+        fs::write(project.join("# Project policy"), "packed").unwrap();
+        fs::write(project.join("root-only.secret"), "ignored").unwrap();
+        fs::write(project.join("nested/root-only.secret"), "packed").unwrap();
+        fs::write(project.join("!important.txt"), "ignored").unwrap();
+        fs::write(project.join("#notes.txt"), "ignored").unwrap();
+        fs::write(project.join("nested/cache/data.txt"), "ignored").unwrap();
+        fs::write(project.join("drop.tmp"), "ignored").unwrap();
+        fs::write(project.join("nested/keep.tmp"), "packed").unwrap();
+        fs::write(project.join(" leading.txt"), "ignored").unwrap();
+        fs::write(project.join("trailing.txt"), "ignored").unwrap();
+        fs::write(project.join("literal "), "ignored").unwrap();
+
+        let outcome = Packer::new(&project, "main.typ")
+            .system_fonts(false)
+            .pack()
+            .unwrap();
+
+        assert_eq!(
+            outcome
+                .pack
+                .files()
+                .map(|(path, _)| path)
+                .collect::<Vec<_>>(),
+            [
+                "# Project policy",
+                ".typkignore",
+                "main.typ",
+                "nested/keep.tmp",
+                "nested/root-only.secret",
             ]
         );
     }
@@ -2014,10 +2093,11 @@ Rows: #csv("data.csv").len()
         )
         .unwrap();
 
+        let policy = project.canonicalize().unwrap().join(".typkignore");
+        let result = Packer::new(&project, "main.typ").system_fonts(false).pack();
         assert!(matches!(
-            Packer::new(&project, "main.typ").system_fonts(false).pack(),
-            Err(PackerError::UnsupportedProjectEntry { ref path })
-                if path == &project.join(".typkignore")
+            result,
+            Err(PackerError::UnsupportedProjectEntry { ref path }) if path == &policy
         ));
     }
 
@@ -2077,6 +2157,12 @@ Rows: #csv("data.csv").len()
         fs::create_dir_all(&project).unwrap();
         let main = project.join("main.typ");
         fs::write(&main, "original").unwrap();
+        let expected = project
+            .canonicalize()
+            .unwrap()
+            .join("main.typ")
+            .display()
+            .to_string();
 
         let result = Packer::new(&project, "main.typ")
             .system_fonts(false)
@@ -2088,7 +2174,7 @@ Rows: #csv("data.csv").len()
 
         assert!(matches!(
             result,
-            Err(PackerError::CreationEvidenceChanged { ref path }) if path == &main.display().to_string()
+            Err(PackerError::CreationEvidenceChanged { ref path }) if path == &expected
         ));
     }
 
@@ -2099,6 +2185,12 @@ Rows: #csv("data.csv").len()
         fs::create_dir_all(&project).unwrap();
         fs::write(project.join("main.typ"), "original").unwrap();
         let added = project.join("added.txt");
+        let expected = project
+            .canonicalize()
+            .unwrap()
+            .join("added.txt")
+            .display()
+            .to_string();
 
         let result = Packer::new(&project, "main.typ")
             .system_fonts(false)
@@ -2111,7 +2203,7 @@ Rows: #csv("data.csv").len()
         assert!(matches!(
             result,
             Err(PackerError::CreationEvidenceChanged { ref path })
-                if path == &added.display().to_string()
+                if path == &expected
         ));
     }
 

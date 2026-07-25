@@ -14,24 +14,6 @@ pub(crate) struct ProjectSnapshot {
     files: BTreeMap<String, Bytes>,
 }
 
-struct IgnorePolicy {
-    matcher: Gitignore,
-    exception_prefixes: Vec<Option<String>>,
-}
-
-impl IgnorePolicy {
-    fn may_reinclude_beneath(&self, directory: &str) -> bool {
-        self.exception_prefixes.iter().any(|prefix| match prefix {
-            None => true,
-            Some(prefix) => {
-                prefix == directory
-                    || prefix.starts_with(&format!("{directory}/"))
-                    || directory.starts_with(&format!("{prefix}/"))
-            }
-        })
-    }
-}
-
 impl ProjectSnapshot {
     pub(crate) fn acquire(root: &Path) -> Result<Self, PackerError> {
         let policy_path = root.join(IGNORE_FILE);
@@ -64,12 +46,11 @@ impl ProjectSnapshot {
             let ignored = !forced_policy
                 && (built_in_excluded
                     || policy
-                        .matcher
                         .matched_path_or_any_parents(relative, file_type.is_dir())
                         .is_ignore());
 
             if file_type.is_dir() {
-                if ignored && (built_in_excluded || !policy.may_reinclude_beneath(path)) {
+                if ignored {
                     walk.skip_current_dir();
                 }
                 continue;
@@ -131,9 +112,8 @@ impl ProjectSnapshot {
     }
 }
 
-fn build_policy(root: &Path, policy_path: &Path) -> Result<IgnorePolicy, PackerError> {
+fn build_policy(root: &Path, policy_path: &Path) -> Result<Gitignore, PackerError> {
     let mut builder = GitignoreBuilder::new(root);
-    let mut exception_prefixes = Vec::new();
     match std::fs::symlink_metadata(policy_path) {
         Ok(metadata) => {
             if !metadata.file_type().is_file() {
@@ -141,9 +121,8 @@ fn build_policy(root: &Path, policy_path: &Path) -> Result<IgnorePolicy, PackerE
                     path: policy_path.to_owned(),
                 });
             }
-            let text = std::fs::read_to_string(policy_path)
+            std::fs::read_to_string(policy_path)
                 .map_err(|error| PackerError::io("failed to read root `.typkignore`", error))?;
-            exception_prefixes = text.lines().filter_map(exception_prefix).collect();
             if let Some(error) = builder.add(policy_path) {
                 return Err(PackerError::InvalidIgnorePolicy(error.to_string()));
             }
@@ -156,32 +135,7 @@ fn build_policy(root: &Path, policy_path: &Path) -> Result<IgnorePolicy, PackerE
             ));
         }
     }
-    let matcher = builder
+    builder
         .build()
-        .map_err(|error| PackerError::InvalidIgnorePolicy(error.to_string()))?;
-    Ok(IgnorePolicy {
-        matcher,
-        exception_prefixes,
-    })
-}
-
-fn exception_prefix(line: &str) -> Option<Option<String>> {
-    let pattern = line.trim().strip_prefix('!')?;
-    if pattern.is_empty() {
-        return None;
-    }
-    let pattern = pattern.trim_start_matches('/').trim_end_matches('/');
-    if !pattern.contains('/') {
-        return Some(None);
-    }
-    let prefix = pattern
-        .split('/')
-        .take_while(|component| !component.contains(['*', '?', '[']))
-        .collect::<Vec<_>>()
-        .join("/");
-    if prefix.is_empty() {
-        Some(None)
-    } else {
-        Some(Some(prefix))
-    }
+        .map_err(|error| PackerError::InvalidIgnorePolicy(error.to_string()))
 }
