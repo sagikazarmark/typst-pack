@@ -68,13 +68,32 @@ fn approved_baseline_covers_the_complete_differential_matrix() {
 #[test]
 fn official_cli_consumers_use_the_canonical_pin() {
     let dagger = include_str!("../../../dagger.dang");
-    let release = include_str!("../../../.github/workflows/release.yml");
+    let release_verification = include_str!("../../../.github/workflows/verify-embedded-typst.yml");
+    let generated_release = include_str!("../../../.github/workflows/release.yml");
+    let dist = include_str!("../../../dist-workspace.toml");
     let installer = include_str!("../../../scripts/install-official-typst.sh");
 
-    for consumer in [dagger, release] {
-        assert!(consumer.contains("embedded-typst.toml"));
-        assert!(consumer.contains("install-official-typst.sh"));
+    for (name, consumer) in [
+        ("Dagger", dagger),
+        ("release verification workflow", release_verification),
+    ] {
+        assert!(
+            consumer.contains("embedded-typst.toml"),
+            "{name} must consume the canonical embedded Typst baseline"
+        );
+        assert!(
+            consumer.contains("install-official-typst.sh"),
+            "{name} must install the official Typst oracle through the canonical script"
+        );
     }
+    assert!(
+        dist.contains("host-jobs = [\"./verify-embedded-typst\"]"),
+        "cargo-dist must run embedded Typst verification before publishing"
+    );
+    assert!(
+        generated_release.contains("uses: ./.github/workflows/verify-embedded-typst.yml"),
+        "generated release workflow must call embedded Typst verification"
+    );
 
     let baseline = baseline();
     for key in ["version", "url", "sha256"] {
@@ -84,7 +103,7 @@ fn official_cli_consumers_use_the_canonical_pin() {
             "Dagger must not copy the official CLI {key}"
         );
         assert!(
-            !release.contains(value),
+            !release_verification.contains(value),
             "release verification must not copy the official CLI {key}"
         );
     }

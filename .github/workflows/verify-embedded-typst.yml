@@ -1,0 +1,46 @@
+name: Verify packaged embedded Typst parity
+
+on:
+  workflow_call:
+    inputs:
+      plan:
+        required: true
+        type: string
+
+jobs:
+  verify:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          submodules: recursive
+      - uses: dtolnay/rust-toolchain@1.92.0
+      - name: Fetch packaged first-party artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: artifacts-build-local-*
+          path: target/distrib/
+          merge-multiple: true
+      - name: Extract Linux release binary
+        shell: bash
+        run: |
+          archive="$(find target/distrib -type f -name '*x86_64-unknown-linux-gnu.tar.xz' -print -quit)"
+          test -n "$archive"
+          mkdir -p "$RUNNER_TEMP/typst-pack-release"
+          tar -xJf "$archive" -C "$RUNNER_TEMP/typst-pack-release"
+          binary="$(find "$RUNNER_TEMP/typst-pack-release" -type f -name typst-pack -print -quit)"
+          test -n "$binary"
+          chmod +x "$binary"
+          echo "TYPST_PACK_TEST_BINARY=$binary" >> "$GITHUB_ENV"
+      - name: Fetch exact official Typst oracle
+        shell: bash
+        run: |
+          scripts/install-official-typst.sh \
+            crates/typst-pack/embedded-typst.toml \
+            "$RUNNER_TEMP/official-typst"
+          echo "TYPST_PACK_OFFICIAL_TYPST=$RUNNER_TEMP/official-typst/typst" >> "$GITHUB_ENV"
+      - name: Gate packaged binary against official Typst
+        env:
+          TYPST_PACK_REQUIRE_OFFICIAL_TYPST: "1"
+        run: cargo test --locked --workspace --all-features
