@@ -6,16 +6,21 @@ updates:
     schedule:
       interval: daily
     groups:
-      cargo-dependencies:
+      typst:
+        patterns:
+          - "typst*"
+      all:
         patterns:
           - "*"
+        exclude-patterns:
+          - "typst*"
 
   - package-ecosystem: github-actions
     directory: /
     schedule:
       interval: daily
     groups:
-      github-actions:
+      all:
         patterns:
           - "*"
     exclude-paths:
