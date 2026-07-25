@@ -159,7 +159,6 @@ type TypstPack {
   testCli: String! @check {
     self
       .rust
-      .withEnvVariable("CARGO_TARGET_DIR", "/target/cli")
       .test(package: ["typst-pack-cli"], test: ["cli"])
   }
 
@@ -178,7 +177,6 @@ type TypstPack {
       .withEnvVariable("TYPST_PACK_OFFICIAL_TYPST", "/usr/local/bin/typst")
       .withEnvVariable("TYPST_PACK_REQUIRE_OFFICIAL_TYPST", "1")
       .withEnvVariable("TYPST_PACK_TEST_BINARY", "/usr/local/bin/typst-pack")
-      .withEnvVariable("CARGO_TARGET_DIR", "/target/cli-parity")
       .test(
         package: ["typst-pack-cli"],
         allFeatures: true,
