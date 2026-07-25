@@ -1,4 +1,12 @@
-#![doc = include_str!("../README.md")]
+#![doc = include_str!(concat!(env!("OUT_DIR"), "/README.md"))]
+
+/// The typst-pack release and embedded Typst engine versions.
+pub const VERSION: &str = concat!(
+    env!("CARGO_PKG_VERSION"),
+    " (Typst ",
+    env!("TYPST_PACK_ENGINE_VERSION"),
+    ")"
+);
 
 mod compile;
 mod embedded;
@@ -11,8 +19,9 @@ mod project_snapshot;
 mod world;
 mod world_trace;
 
-#[cfg(feature = "cli")]
-pub mod cli;
+#[cfg(all(feature = "diagnostics", feature = "fs"))]
+#[doc(hidden)]
+pub mod cli_support;
 
 pub use compile::{
     CompilationAccessKind, CompilationAccessObservation, CompilationAccessOutcome,

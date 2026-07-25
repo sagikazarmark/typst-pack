@@ -34,15 +34,15 @@ archive: a portable form of a project's sources and resources.
   with support for fixed timestamps and vendored packages.
 - **Pack Overrides**: replace any contained project file for one compilation
   without mutating the Pack.
-- **Library and CLI APIs**: create, inspect, compile, and extract packs in memory
-  or on the file system.
+- **Library and CLI interfaces**: create, inspect, compile, and extract packs in
+  memory or on the file system.
 
 ## CLI
 
-Install the command-line tool with its opt-in `cli` feature:
+Install the command-line tool:
 
 ```console
-cargo install typst-pack --features cli
+cargo install typst-pack-cli
 ```
 
 ```console
@@ -323,13 +323,15 @@ fields are removed in place. Old fields and aliases are not accepted.
 ### Feature flags
 
 - `fs`: `Packer`, `extract`, package download and caching,
-  system font scanning. Requires a file system, so disable this (and `cli`)
-  for wasm targets.
-- `cli`: the `typst-pack` binary.
+  system font scanning. Requires a file system, so disable this for wasm
+  targets.
 - `embedded-fonts`: make Typst's bundled fonts available as intentional
   creation and external-fulfillment sources.
+- `diagnostics`: retain source context for first-party diagnostic presentation
+  adapters.
+- `parallel`: export independent page artifacts in parallel.
 
-All crate features are opt-in. Fixed timestamp conversion for `DocumentTime`
+All library crate features are opt-in. Fixed timestamp conversion for `DocumentTime`
 is part of the featureless core and remains available on wasm targets.
 
 ## Pack format
@@ -393,8 +395,8 @@ rather than retaining aliases.
 Minimum verification:
 
 - `cargo fmt --all -- --check`
-- `cargo clippy --all-targets --all-features -- -D warnings`
-- `cargo test --all-features`
+- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
+- `cargo test --workspace --all-features`
 
 Run CI's containerized checks with [Dagger](https://dagger.io):
 

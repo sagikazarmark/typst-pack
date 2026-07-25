@@ -5,7 +5,7 @@ use std::num::NonZeroUsize;
 use std::ops::Range;
 
 use ecow::EcoVec;
-#[cfg(feature = "cli")]
+#[cfg(feature = "parallel")]
 use rayon::prelude::*;
 use typst::diag::{Severity, SourceDiagnostic, Tracepoint, Warned};
 use typst::foundations::{Bytes, Datetime, Dict, Repr, Smart};
@@ -686,8 +686,9 @@ impl PackCompilationRequest {
         }
     }
 
-    #[cfg(feature = "cli")]
-    pub(crate) fn adapter_resolved_output(mut self) -> Self {
+    #[cfg(feature = "diagnostics")]
+    #[doc(hidden)]
+    pub fn adapter_resolved_output(mut self) -> Self {
         self.output_specification.origin = RequestValueOrigin::AdapterResolved;
         self
     }
@@ -1570,12 +1571,12 @@ pub(crate) struct PreparedPackCompilationKernel {
 
 pub(crate) struct PackCompilationExecution {
     pub(crate) result: CompilationResult,
-    #[cfg(feature = "cli")]
+    #[cfg(feature = "diagnostics")]
     pub(crate) presentation: PackCompilationPresentation,
     pub(crate) fulfillments: CompilationFulfillmentReport,
 }
 
-#[cfg(feature = "cli")]
+#[cfg(feature = "diagnostics")]
 pub(crate) enum PackCompilationPresentation {
     Succeeded {
         warnings: EcoVec<SourceDiagnostic>,
@@ -1847,11 +1848,11 @@ pub(crate) fn compile_pack_kernel(
     let access_trace = traced.snapshot();
     match compiled {
         Ok(output) => {
-            #[cfg(feature = "cli")]
+            #[cfg(feature = "diagnostics")]
             let warnings = output.warnings.clone();
-            #[cfg(feature = "cli")]
+            #[cfg(feature = "diagnostics")]
             let mut presentation_pack_warnings = output.pack_warnings.clone();
-            #[cfg(feature = "cli")]
+            #[cfg(feature = "diagnostics")]
             if kernel.page_selection_implies_untagged_pdf {
                 presentation_pack_warnings.push(page_selection_pdf_tags_warning());
             }
@@ -1875,7 +1876,7 @@ pub(crate) fn compile_pack_kernel(
                     output.source_page_count,
                     access_trace,
                 ),
-                #[cfg(feature = "cli")]
+                #[cfg(feature = "diagnostics")]
                 presentation: PackCompilationPresentation::Succeeded {
                     warnings,
                     pack_warnings: presentation_pack_warnings,
@@ -1890,13 +1891,13 @@ pub(crate) fn compile_pack_kernel(
             phase,
             source_page_count,
         }) => {
-            #[cfg(feature = "cli")]
+            #[cfg(feature = "diagnostics")]
             let mut presentation_pack_warnings = pack_warnings.clone();
-            #[cfg(feature = "cli")]
+            #[cfg(feature = "diagnostics")]
             if kernel.page_selection_implies_untagged_pdf {
                 presentation_pack_warnings.push(page_selection_pdf_tags_warning());
             }
-            #[cfg(feature = "cli")]
+            #[cfg(feature = "diagnostics")]
             let presentation = PackCompilationPresentation::Diagnostics {
                 errors: errors.clone(),
                 warnings: warnings.clone(),
@@ -1926,7 +1927,7 @@ pub(crate) fn compile_pack_kernel(
                     source_page_count,
                     access_trace,
                 ),
-                #[cfg(feature = "cli")]
+                #[cfg(feature = "diagnostics")]
                 presentation,
                 fulfillments: kernel.fulfillments,
             }
@@ -1938,13 +1939,13 @@ pub(crate) fn compile_pack_kernel(
             source_page_count,
             source_page_number,
         }) => {
-            #[cfg(feature = "cli")]
+            #[cfg(feature = "diagnostics")]
             let mut presentation_pack_warnings = pack_warnings.clone();
-            #[cfg(feature = "cli")]
+            #[cfg(feature = "diagnostics")]
             if kernel.page_selection_implies_untagged_pdf {
                 presentation_pack_warnings.push(page_selection_pdf_tags_warning());
             }
-            #[cfg(feature = "cli")]
+            #[cfg(feature = "diagnostics")]
             let presentation = PackCompilationPresentation::PngExport {
                 error: format!("PNG export failed for source page {source_page_number}: {message}"),
                 warnings: warnings.clone(),
@@ -1982,7 +1983,7 @@ pub(crate) fn compile_pack_kernel(
                     Some(source_page_count),
                     access_trace,
                 ),
-                #[cfg(feature = "cli")]
+                #[cfg(feature = "diagnostics")]
                 presentation,
                 fulfillments: kernel.fulfillments,
             }
@@ -2365,12 +2366,12 @@ pub(crate) fn compile_with_default_pdf_timestamp(
                         source_page_number: Some(source_page_number),
                     })
                 };
-                #[cfg(feature = "cli")]
+                #[cfg(feature = "parallel")]
                 let artifacts = pages
                     .into_par_iter()
                     .map(export)
                     .collect::<Result<Vec<_>, _>>()?;
-                #[cfg(not(feature = "cli"))]
+                #[cfg(not(feature = "parallel"))]
                 let artifacts = pages
                     .into_iter()
                     .map(export)
@@ -2389,9 +2390,9 @@ pub(crate) fn compile_with_default_pdf_timestamp(
                     bytes: EmbeddedTypst::export_svg(page, &svg_options),
                     source_page_number: Some(source_page_number),
                 };
-                #[cfg(feature = "cli")]
+                #[cfg(feature = "parallel")]
                 let artifacts = pages.into_par_iter().map(export).collect();
-                #[cfg(not(feature = "cli"))]
+                #[cfg(not(feature = "parallel"))]
                 let artifacts = pages.into_iter().map(export).collect();
                 artifacts
             }
@@ -2415,7 +2416,7 @@ pub(crate) fn validate_pdf_standards(
     })
 }
 
-#[cfg(feature = "cli")]
+#[cfg(feature = "diagnostics")]
 pub(crate) fn pdf_standard_requiring_tags(standards: &[PdfStandard]) -> Option<&'static str> {
     standards.iter().find_map(|standard| match standard {
         PdfStandard::A_1a => Some("PDF/A-1a"),

@@ -1,5 +1,3 @@
-#![cfg(feature = "cli")]
-
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
@@ -425,7 +423,7 @@ fn create_packs_the_structural_project_closure_with_root_ignore_policy() {
     std::fs::write(project.join("unused.txt"), "packed").unwrap();
     std::fs::write(
         project.join(".typkignore"),
-        "# Pack policy\nignored/**\n!ignored/reincluded/keep.txt\n*.secret\n",
+        "# Pack policy\nignored/**\n!ignored/reincluded/\n!ignored/reincluded/keep.txt\n*.secret\n",
     )
     .unwrap();
     std::fs::write(project.join("ignored/drop.txt"), "drop").unwrap();
@@ -649,7 +647,7 @@ fn compile_applies_pack_overrides_without_mutating_the_pack() {
     );
 }
 
-#[cfg(unix)]
+#[cfg(all(unix, not(target_vendor = "apple")))]
 #[test]
 fn compile_accepts_a_non_unicode_pack_override_source_path() {
     use std::os::unix::ffi::OsStringExt as _;

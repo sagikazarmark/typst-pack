@@ -142,37 +142,37 @@ classification = "intentional-pack-difference"
 [[semantic]]
 name = "pack-backed-world"
 classification = "pack-invariant"
-coverage = ["tests/official_typst_oracle.rs", "tests/compilation.rs"]
+coverage = ["crates/typst-pack/tests/official_typst_oracle.rs", "crates/typst-pack/tests/compilation.rs"]
 
 [[semantic]]
 name = "pack-overrides"
 classification = "intentional-pack-difference"
-coverage = ["tests/official_typst_oracle.rs", "tests/compilation.rs"]
+coverage = ["crates/typst-pack/tests/official_typst_oracle.rs", "crates/typst-pack/tests/compilation.rs"]
 
 [[semantic]]
 name = "output-request-defaults"
 classification = "upstream-behavior"
-coverage = ["tests/official_typst_oracle.rs"]
+coverage = ["crates/typst-pack/tests/official_typst_oracle.rs"]
 
 [[semantic]]
 name = "required-output-feature-derivation"
 classification = "intentional-pack-difference"
-coverage = ["tests/official_typst_oracle.rs"]
+coverage = ["crates/typst-pack/tests/official_typst_oracle.rs"]
 
 [[semantic]]
 name = "cli-parsing-and-environment"
 classification = "unavoidable-mirror"
-coverage = ["tests/official_typst_cli.rs", "tests/cli.rs"]
+coverage = ["crates/typst-pack-cli/tests/official_typst_cli.rs", "crates/typst-pack-cli/tests/cli.rs"]
 
 [[semantic]]
 name = "artifact-publication"
 classification = "adapter-concern"
-coverage = ["tests/cli.rs", ".dagger/modules/tests/main.dang"]
+coverage = ["crates/typst-pack-cli/tests/cli.rs", ".dagger/modules/tests/main.dang"]
 
 [[semantic]]
 name = "compilation-report-and-access-trace"
 classification = "pack-invariant"
-coverage = ["tests/compilation.rs"]
+coverage = ["crates/typst-pack/tests/compilation.rs"]
 
 [[semantic]]
 name = "dagger-argument-translation"
