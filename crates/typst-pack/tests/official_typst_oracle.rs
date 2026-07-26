@@ -421,11 +421,11 @@ fn stabilized_project_round_trips_and_matches_pack_svg_compilation() {
         assert_eq!(actual.bytes(), expected.bytes);
     }
     assert_eq!(actual.engine_identity().implementation(), "typst");
-    assert_eq!(actual.engine_identity().version(), "0.15.0");
+    assert_eq!(actual.engine_identity().version(), "0.15.1");
     assert!(!actual.engine_identity().source_checksum().is_empty());
     assert!(!actual.engine_identity().target().is_empty());
     assert_eq!(actual.exporter_identity().implementation(), "typst-svg");
-    assert_eq!(actual.exporter_identity().version(), "0.15.0");
+    assert_eq!(actual.exporter_identity().version(), "0.15.1");
     assert!(!actual.exporter_identity().source_checksum().is_empty());
     assert!(!actual.exporter_identity().target().is_empty());
 }
@@ -866,7 +866,7 @@ fn stabilized_pack_matches_official_pdf_export_with_explicit_controls() {
     destination_bytes.clear();
     assert_eq!(actual.artifacts()[0].bytes(), expected.artifacts[0].bytes);
     assert_eq!(actual.exporter_identity().implementation(), "typst-pdf");
-    assert_eq!(actual.exporter_identity().version(), "0.15.0");
+    assert_eq!(actual.exporter_identity().version(), "0.15.1");
 }
 
 #[test]
@@ -981,7 +981,7 @@ fn stabilized_pack_matches_official_html_artifacts_and_pretty_control() {
                 && diagnostic.producer() == DiagnosticProducer::Engine(actual.engine_identity())
         }));
         assert_eq!(actual.exporter_identity().implementation(), "typst-html");
-        assert_eq!(actual.exporter_identity().version(), "0.15.0");
+        assert_eq!(actual.exporter_identity().version(), "0.15.1");
     }
     assert_ne!(
         compact.artifacts()[0].bytes(),
@@ -1144,7 +1144,7 @@ fn pack_png_defaults_match_the_pinned_official_exporter() {
     assert_eq!(output.pixels_per_inch, Some(144.0));
     assert!(!output.render_bleed);
     assert_eq!(actual.exporter_identity().implementation(), "typst-render");
-    assert_eq!(actual.exporter_identity().version(), "0.15.0");
+    assert_eq!(actual.exporter_identity().version(), "0.15.1");
 }
 
 #[test]
@@ -1222,7 +1222,7 @@ fn stabilized_pack_matches_complete_official_png_page_artifacts() {
     );
     assert!(actual.pack_warnings().is_empty());
     assert_eq!(actual.exporter_identity().implementation(), "typst-render");
-    assert_eq!(actual.exporter_identity().version(), "0.15.0");
+    assert_eq!(actual.exporter_identity().version(), "0.15.1");
     assert_eq!(actual.artifacts().len(), repeated.artifacts().len());
     assert!(
         actual

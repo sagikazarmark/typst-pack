@@ -2018,7 +2018,7 @@ fn compile_alias_and_version_report_typst_parity_baseline() {
     let stdout = String::from_utf8_lossy(&version.stdout);
     assert!(version.status.success());
     assert!(stdout.contains(env!("CARGO_PKG_VERSION")), "{stdout}");
-    assert!(stdout.contains("Typst 0.15.0"), "{stdout}");
+    assert!(stdout.contains("Typst 0.15.1"), "{stdout}");
 }
 
 #[test]
