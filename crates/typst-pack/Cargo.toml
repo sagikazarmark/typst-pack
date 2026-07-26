@@ -47,7 +47,7 @@ toml = "1.1"
 rustls-pemfile = { version = "2", optional = true }
 # Typst crates share internal types and must resolve to the same exact release.
 typst = { workspace = true }
-typst-html = "=0.15.0"
+typst-html = "=0.15.1"
 typst-kit = { workspace = true }
 typst-layout = "=0.15.1"
 typst-pdf = { workspace = true }
