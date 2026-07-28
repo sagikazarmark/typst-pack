@@ -23,9 +23,11 @@ use typst_kit::fonts::FontStore;
 
 use crate::compile::TypstTarget;
 use crate::embedded::EmbeddedTypst;
+use crate::fs_project;
+use crate::ignore_policy::ProjectIgnorePolicyError;
 use crate::manifest::PackMetadata;
 use crate::pack::{Pack, PackBuildError};
-use crate::project_snapshot::ProjectSnapshot;
+use crate::project_snapshot::{ProjectSnapshot, ProjectSnapshotError};
 use crate::world::system_packages;
 
 type PackageEvidence = (PackageSpec, PathBuf, Vec<(String, Bytes)>);
@@ -234,13 +236,11 @@ impl Packer {
             .map_err(|err| PackerError::io("failed to resolve entrypoint", err))?;
         let entrypoint = VirtualPath::virtualize(&root, &entrypoint_abs)
             .map_err(|_| PackerError::OutsideRoot(entrypoint_abs.clone()))?;
-        let snapshot = Arc::new(ProjectSnapshot::acquire(&root)?);
-        if snapshot.file(entrypoint.get_without_slash()).is_none() {
-            return Err(PackerError::IgnoredEntrypoint(
-                entrypoint.get_without_slash().to_owned(),
-            ));
-        }
-        let mut builder = Pack::builder(entrypoint.get_without_slash());
+        let snapshot = Arc::new(fs_project::acquire_snapshot(
+            &root,
+            entrypoint.get_without_slash(),
+        )?);
+        let mut builder = Pack::builder(snapshot.entrypoint());
 
         let packages = system_packages(
             self.package_path.as_deref(),
@@ -371,7 +371,7 @@ impl Packer {
             builder = builder.metadata(metadata);
         }
 
-        snapshot.revalidate(&root)?;
+        fs_project::revalidate(&snapshot, &root)?;
         revalidate_package_evidence(&package_evidence)?;
         revalidate_font_evidence(
             self.system_fonts,
@@ -447,12 +447,16 @@ pub enum PackerError {
     Package { spec: PackageSpec, message: String },
     #[error("failed to walk directory: {0}")]
     Walk(String),
-    #[error("invalid Project Ignore Policy: {0}")]
-    InvalidIgnorePolicy(String),
+    #[error(transparent)]
+    InvalidIgnorePolicy(#[from] ProjectIgnorePolicyError),
     #[error("project path `{path}` cannot be represented: {message}")]
     InvalidProjectPath { path: String, message: String },
     #[error("entrypoint `{0}` is excluded by the Project Ignore Policy")]
     IgnoredEntrypoint(String),
+    /// A Project Snapshot assembly failure with no filesystem vocabulary of
+    /// its own.
+    #[error(transparent)]
+    Snapshot(ProjectSnapshotError),
     #[error("project path `{}` is not valid UTF-8", path.display())]
     UnrepresentablePath { path: PathBuf },
     #[error("unsupported filesystem entry `{}` in the project", path.display())]
@@ -468,6 +472,25 @@ impl PackerError {
         Self::Io {
             message: message.to_owned(),
             source,
+        }
+    }
+}
+
+impl From<ProjectSnapshotError> for PackerError {
+    /// Reports snapshot assembly in the filesystem adapter's own vocabulary.
+    fn from(error: ProjectSnapshotError) -> Self {
+        match error {
+            ProjectSnapshotError::InvalidPath { path, message } => {
+                Self::InvalidProjectPath { path, message }
+            }
+            // A walked entrypoint that no longer survives assembly was either
+            // excluded by the policy or is not a regular file; the adapter has
+            // reported both as an excluded entrypoint since it walked trees.
+            ProjectSnapshotError::ExcludedEntrypoint(path)
+            | ProjectSnapshotError::MissingEntrypoint(path) => Self::IgnoredEntrypoint(path),
+            error @ (ProjectSnapshotError::DuplicatePath { .. }
+            | ProjectSnapshotError::FileCountExceeded { .. }
+            | ProjectSnapshotError::ByteSizeExceeded { .. }) => Self::Snapshot(error),
         }
     }
 }

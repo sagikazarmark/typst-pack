@@ -11,10 +11,12 @@ pub const VERSION: &str = concat!(
 mod compile;
 mod embedded;
 mod extract;
+#[cfg(feature = "fs")]
+mod fs_project;
+mod ignore_policy;
 mod manifest;
 mod pack;
 mod packer;
-#[cfg(feature = "fs")]
 mod project_snapshot;
 mod world;
 mod world_trace;
@@ -42,6 +44,7 @@ pub use compile::{
 };
 #[cfg(feature = "fs")]
 pub use extract::{ExtractError, ExtractOptions, ExtractReport, extract};
+pub use ignore_policy::{IGNORE_FILE, ProjectIgnorePolicy, ProjectIgnorePolicyError};
 pub use manifest::{
     FORMAT_VERSION, FontManifest, MANIFEST_PATH, PackManifest, PackManifestError, PackMetadata,
     PackageManifest, PackagesManifest, ProjectManifest,
@@ -54,6 +57,9 @@ pub use pack::{
 };
 #[cfg(feature = "fs")]
 pub use packer::{CreationDiagnosticContext, PackOutcome, Packer, PackerError};
+pub use project_snapshot::{
+    ProjectSnapshot, ProjectSnapshotAssembly, ProjectSnapshotBudget, ProjectSnapshotError,
+};
 #[cfg(feature = "fs")]
 pub use world::OfflineDownloader;
 

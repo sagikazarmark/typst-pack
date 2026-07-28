@@ -16,7 +16,7 @@ directly, subject to the built-in exclusion in the Project Ignore Policy; Pack
 Creation uses the complete structural project tree described below.
 
 **Pack Creation**:
-The adapter-neutral operation that takes one stabilized set of project files, an
+The adapter-neutral operation that takes one Project Snapshot, an
 ordered candidate font catalog, and the Complete Package Trees resolved for it,
 runs one representative Typst request to select package and font requirements,
 and returns one Pack plus representative-compile warnings. It acquires nothing
@@ -58,6 +58,16 @@ before reading content. The root policy file itself is included; nested
 `.typkignore` files are ordinary project files. Malformed rules prevent creation,
 as do the unsupported unignored entries, unreadable files, invalid paths, and
 traversal failures a Creation Adapter reports.
+
+**Project Snapshot**:
+One stabilized set of project files with one entrypoint among them, represented
+by canonical root-relative path and exact bytes. It is assembled from
+path-and-bytes entries under one Project Ignore Policy, which assembly
+re-applies so that membership does not depend on a Creation Adapter being
+well-behaved. Assembly rejects entries that cannot name a root-relative project
+file and fails when the entrypoint does not survive filtering. A caller may
+bound the result by file count and total byte size; exclusion is applied before
+those bounds are measured.
 
 **Pack Identity**:
 The content identity of a Pack's canonical logical compilation state: fixed
