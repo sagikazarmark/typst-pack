@@ -126,10 +126,23 @@ container identity. Fonts are *not* embedded by default: compilation must find
 the declared exact containers among the configured system, Typst-embedded, or
 `--font-path` sources. Other available fonts are not exposed to Typst.
 
-With `--embed-fonts`, selected containers are stored in the pack, except those
-identical to Typst's embedded fonts. Pass `--include-typst-embedded-fonts` to
-store those too. Mind font licenses when redistributing embedded containers;
-licensing and acquisition metadata do not change font selection.
+With `--embed-fonts`, selected containers are stored in the pack, except the
+ones Typst itself ships. Pass `--include-typst-embedded-fonts` to store those
+too. Embedding follows where a container came from, not what its bytes are: a
+`--font-path` directory holding a copy of one of Typst's containers is embedded
+like any other scanned container. Mind font licenses when redistributing
+embedded containers; licensing and acquisition metadata do not change font
+selection.
+
+The Candidate Font Catalog creation selects from is one explicit ordered
+sequence: `CandidateFontCatalog` holds `CandidateFontContainer`s, each carrying
+its own embedded-or-external `FontDisposition`, so one pack can embed a
+redistributable container and reference a restrictively licensed one. Faces are
+expanded in container-local index order, catalog order decides which container
+wins a family, and nothing joins a catalog implicitly:
+`typst_embedded_font_containers` yields Typst's own containers for a caller to
+splice in where it wants. `Packer` composes its catalog from system fonts,
+Typst's embedded fonts, and `--font-path` directories, in that order.
 
 ### Output formats
 

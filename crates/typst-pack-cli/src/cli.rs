@@ -209,8 +209,7 @@ struct CreateArgs {
     #[arg(long, help_heading = "Pack Contents")]
     embed_fonts: bool,
 
-    /// When embedding fonts, also embed fonts identical to Typst's embedded
-    /// fonts.
+    /// When embedding fonts, also embed the fonts Typst itself ships.
     #[arg(long, requires = "embed_fonts", help_heading = "Pack Contents")]
     include_typst_embedded_fonts: bool,
 

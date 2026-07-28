@@ -11,6 +11,7 @@ pub const VERSION: &str = concat!(
 mod compile;
 mod embedded;
 mod extract;
+mod font_catalog;
 #[cfg(feature = "fs")]
 mod fs_project;
 mod ignore_policy;
@@ -44,6 +45,11 @@ pub use compile::{
 };
 #[cfg(feature = "fs")]
 pub use extract::{ExtractError, ExtractOptions, ExtractReport, extract};
+#[cfg(feature = "embedded-fonts")]
+pub use font_catalog::typst_embedded_font_containers;
+pub use font_catalog::{
+    CandidateFontCatalog, CandidateFontContainer, CandidateFontFace, FontDisposition,
+};
 pub use ignore_policy::{IGNORE_FILE, ProjectIgnorePolicy, ProjectIgnorePolicyError};
 pub use manifest::{
     FORMAT_VERSION, FontManifest, MANIFEST_PATH, PackManifest, PackManifestError, PackMetadata,

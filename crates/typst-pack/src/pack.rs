@@ -237,6 +237,11 @@ pub struct FontFaceIdentity {
 }
 
 impl FontFaceIdentity {
+    /// The face at a container-local index within the given container.
+    pub(crate) fn new(container: FontContainerIdentity, index: u32) -> Self {
+        Self { container, index }
+    }
+
     /// The containing font file or collection.
     pub fn container(self) -> FontContainerIdentity {
         self.container
@@ -561,7 +566,7 @@ impl Pack {
             }
             let embedded = !entry.is_external();
             font_catalog.push(PackFontCatalogFace {
-                identity: FontFaceIdentity { container, index },
+                identity: FontFaceIdentity::new(container, index),
                 embedded,
             });
             match font_requirements

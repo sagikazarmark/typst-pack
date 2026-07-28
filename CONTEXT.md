@@ -16,10 +16,10 @@ directly, subject to the built-in exclusion in the Project Ignore Policy; Pack
 Creation uses the complete structural project tree described below.
 
 **Pack Creation**:
-The adapter-neutral operation that takes one Project Snapshot, an
-ordered candidate font catalog, and the Complete Package Trees resolved for it,
-runs one representative Typst request to select package and font requirements,
-and returns one Pack plus representative-compile warnings. It acquires nothing
+The adapter-neutral operation that takes one Project Snapshot, one Candidate
+Font Catalog, and the Complete Package Trees resolved for it, runs one
+representative Typst request to select package and font requirements, and
+returns one Pack plus representative-compile warnings. It acquires nothing
 itself; obtaining its inputs is Creation Preparation. Compiler observations
 select package and font requirements but never select project files. The
 representative request fixes the Typst Target, inputs, Document Time, and engine
@@ -31,8 +31,8 @@ caller can resolve them and invoke creation again.
 
 **Creation Preparation**:
 The acquisition phase that obtains Pack Creation's inputs: the project files,
-the candidate Font Containers and their order, and the Complete Package Trees
-for the specifications creation reported as missing. It acquires bytes and never
+the Candidate Font Catalog, and the Complete Package Trees for the
+specifications creation reported as missing. It acquires bytes and never
 transforms them; every transformation belongs to the core.
 
 **Creation Adapter**:
@@ -147,6 +147,15 @@ The exact bytes of one standalone font file or multi-face font collection. Its
 Canonical Identity is independent of source location, and every face in a
 collection travels in the same container.
 
+**Candidate Font Catalog**:
+The ordered sequence of Font Containers Pack Creation may select faces from,
+each carrying its own embedded-or-external disposition. Faces are expanded in
+container-local index order, catalog order decides which container offers a
+family, and nothing joins a supplied catalog implicitly. A Creation Adapter
+composes it during Creation Preparation; the reference filesystem adapter
+composes system fonts, Typst's embedded fonts, and scanned font directories, in
+that order.
+
 **Font Face Identity**:
 One exact face within a Font Container, identified by container identity and
 container-local face index. Family, style, coverage, and other metadata are
@@ -158,13 +167,13 @@ during Pack Creation. The requirement records whether the container is embedded
 or externally fulfilled.
 
 **Font Authority**:
-The explicitly configured responsibility that supplies the ordered candidate
-font catalog during Creation Preparation or obtains exact Font Containers for
+The explicitly configured responsibility that supplies the Candidate Font
+Catalog during Creation Preparation or obtains exact Font Containers for
 compilation. In the core, compilation receives already acquired Font Container
 Fulfillments rather than a public authority interface.
 
 **Pack Font Catalog**:
-The ordered projection of the creation font catalog containing exactly the Font
+The ordered projection of the Candidate Font Catalog containing exactly the Font
 Face Identities available to Pack compilation. Relative selection order is
 preserved. Other faces physically present in a required Font Container remain
 unavailable unless declared.
@@ -178,9 +187,12 @@ permission and do not contribute to identities.
 
 **Font Embedding**:
 The Pack Creation choice to embed selected Font Containers or record them for
-external fulfillment. Typst-embedded-font handling is an explicit creation
-option. The choice affects Pack Identity and self-containment; typst-pack does not
-derive a per-font legal policy from licensing metadata.
+external fulfillment. It is declared per container in the Candidate Font
+Catalog and never inferred from container bytes, so one Pack may embed one
+container and reference another, and Typst-embedded-font handling is an
+explicit creation option. The choice affects Pack Identity and
+self-containment; typst-pack does not derive a per-font legal policy from
+licensing metadata.
 
 ## Compilation Requests
 

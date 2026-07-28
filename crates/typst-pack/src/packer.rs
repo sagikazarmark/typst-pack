@@ -2,7 +2,7 @@
 
 #![cfg(feature = "fs")]
 
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fmt;
 #[cfg(feature = "diagnostics")]
 use std::path::Path;
@@ -19,10 +19,15 @@ use typst::utils::LazyHash;
 use typst::{Feature, Library, LibraryExt, World};
 use typst_kit::datetime::Time;
 use typst_kit::files::{FileLoader, FileStore, FsRoot, SystemFiles};
-use typst_kit::fonts::FontStore;
+use typst_kit::fonts::FontPath;
 
 use crate::compile::TypstTarget;
 use crate::embedded::EmbeddedTypst;
+#[cfg(feature = "embedded-fonts")]
+use crate::font_catalog::typst_embedded_font_containers;
+use crate::font_catalog::{
+    CandidateFontCatalog, CandidateFontContainer, CandidateFonts, FontDisposition,
+};
 use crate::fs_project;
 use crate::ignore_policy::ProjectIgnorePolicyError;
 use crate::manifest::PackMetadata;
@@ -105,9 +110,13 @@ impl Packer {
         self
     }
 
-    /// Whether font embedding also stores fonts that are identical to Typst's
-    /// embedded fonts. Defaults to `false`; consumers then need the
-    /// `embedded-fonts` feature or another source for those fonts.
+    /// Whether font embedding also stores the containers Typst embeds.
+    /// Defaults to `false`; consumers then need the `embedded-fonts` feature
+    /// or another source for those containers.
+    ///
+    /// This follows where a container came from, not what its bytes are: a
+    /// scanned directory holding a copy of one of Typst's containers is
+    /// embedded like any other scanned container.
     pub fn include_typst_embedded_fonts(mut self, include: bool) -> Self {
         self.include_typst_embedded_fonts = include;
         self
@@ -249,11 +258,15 @@ impl Packer {
             self.certificate.as_deref(),
         );
 
-        let fonts = font_store(
-            self.system_fonts,
-            self.typst_embedded_fonts,
-            &self.font_paths,
-        );
+        let font_sources = FontSources {
+            system: self.system_fonts,
+            typst_embedded: self.typst_embedded_fonts,
+            paths: &self.font_paths,
+            embed: self.embed_fonts,
+            include_typst_embedded: self.include_typst_embedded_fonts,
+        };
+        let font_catalog = font_sources.compose();
+        let fonts = font_catalog.expand();
 
         let primary = Arc::new(PrimaryLoader {
             system: SystemFiles::new(FsRoot::new(root.clone()), packages),
@@ -312,9 +325,6 @@ impl Packer {
         }
 
         let mut package_evidence = Vec::new();
-        let font_evidence = FontEvidence {
-            catalog: font_catalog_evidence(&world.fonts),
-        };
         let mut package_files: BTreeMap<String, (PackageSpec, FileId)> = BTreeMap::new();
         let (source_dependencies, file_dependencies, _) = world.take_dependency_observations();
         for id in source_dependencies.into_iter().chain(file_dependencies) {
@@ -356,11 +366,10 @@ impl Packer {
             }
         }
 
-        // Project selected faces back into the original candidate catalog order.
-        for font in world.used_fonts() {
-            let embed = self.embed_fonts
-                && (self.include_typst_embedded_fonts || !is_typst_embedded_font(&font));
-            builder = if embed {
+        // Project selected faces back into the original candidate catalog
+        // order, each under the disposition its container carries.
+        for (font, disposition) in world.used_fonts() {
+            builder = if disposition.is_embedded() {
                 builder.font(font.data().to_vec(), font.index())?
             } else {
                 builder.external_font(font.data().to_vec(), font.index())?
@@ -373,12 +382,7 @@ impl Packer {
 
         fs_project::revalidate(&snapshot, &root)?;
         revalidate_package_evidence(&package_evidence)?;
-        revalidate_font_evidence(
-            self.system_fonts,
-            self.typst_embedded_fonts,
-            &self.font_paths,
-            &font_evidence,
-        )?;
+        font_sources.revalidate(&font_catalog)?;
         let pack = builder.build()?;
 
         Ok(PackOutcome {
@@ -504,18 +508,20 @@ pub(crate) struct CreationWorld {
     main: FileId,
     sources: FileStore<Arc<PrimaryLoader>>,
     files: FileStore<Arc<PrimaryLoader>>,
-    fonts: FontStore,
+    fonts: CandidateFonts,
     used_font_indices: Mutex<BTreeSet<usize>>,
     time: Time,
 }
 
 impl CreationWorld {
-    fn used_fonts(&self) -> Vec<Font> {
+    /// The selected faces in candidate catalog order, each with the
+    /// disposition its container carries.
+    fn used_fonts(&self) -> Vec<(Font, FontDisposition)> {
         self.used_font_indices
             .lock()
             .expect("used font index lock poisoned")
             .iter()
-            .filter_map(|index| self.fonts.font(*index))
+            .filter_map(|index| Some((self.fonts.font(*index)?, self.fonts.disposition(*index)?)))
             .collect()
     }
     /// The canonicalized project root.
@@ -680,20 +686,6 @@ impl FileLoader for PrimaryLoader {
     }
 }
 
-/// Whether the font is one of Typst's embedded fonts.
-fn is_typst_embedded_font(font: &Font) -> bool {
-    #[cfg(feature = "embedded-fonts")]
-    {
-        typst_kit::fonts::embedded()
-            .any(|(default, _)| default.data().as_slice() == font.data().as_slice())
-    }
-    #[cfg(not(feature = "embedded-fonts"))]
-    {
-        let _ = font;
-        false
-    }
-}
-
 fn compile_creation_target(
     world: &dyn World,
     target: TypstTarget,
@@ -727,57 +719,71 @@ fn revalidate_package_evidence(packages: &[PackageEvidence]) -> Result<(), Packe
     Ok(())
 }
 
-fn font_store(system_fonts: bool, typst_embedded_fonts: bool, font_paths: &[PathBuf]) -> FontStore {
-    let mut fonts = FontStore::new();
-    if system_fonts {
-        fonts.extend(typst_kit::fonts::system());
-    }
-    #[cfg(feature = "embedded-fonts")]
-    if typst_embedded_fonts {
-        fonts.extend(typst_kit::fonts::embedded());
-    }
-    #[cfg(not(feature = "embedded-fonts"))]
-    let _ = typst_embedded_fonts;
-    for path in font_paths {
-        fonts.extend(typst_kit::fonts::scan(path));
-    }
-    fonts
+/// The font half of Creation Preparation for the filesystem adapter: the
+/// ambient sources it acquires candidate Font Containers from, and the
+/// disposition each source's containers carry.
+struct FontSources<'a> {
+    system: bool,
+    typst_embedded: bool,
+    paths: &'a [PathBuf],
+    embed: bool,
+    include_typst_embedded: bool,
 }
 
-fn revalidate_font_evidence(
-    system_fonts: bool,
-    typst_embedded_fonts: bool,
-    font_paths: &[PathBuf],
-    evidence: &FontEvidence,
-) -> Result<(), PackerError> {
-    let fonts = font_store(system_fonts, typst_embedded_fonts, font_paths);
-    if font_catalog_evidence(&fonts) != evidence.catalog {
-        return Err(PackerError::CreationEvidenceChanged {
-            path: "font catalog".to_owned(),
-        });
+impl FontSources<'_> {
+    /// Composes the candidate font catalog: system fonts, then Typst's
+    /// embedded fonts, then each scanned directory in the order it was added.
+    fn compose(&self) -> CandidateFontCatalog {
+        let mut catalog = CandidateFontCatalog::new();
+        let scanned = FontDisposition::embedded_if(self.embed);
+        if self.system {
+            catalog.extend(read_containers(typst_kit::fonts::system(), scanned));
+        }
+        #[cfg(feature = "embedded-fonts")]
+        if self.typst_embedded {
+            catalog.extend(typst_embedded_font_containers(
+                FontDisposition::embedded_if(self.embed && self.include_typst_embedded),
+            ));
+        }
+        #[cfg(not(feature = "embedded-fonts"))]
+        let _ = (self.typst_embedded, self.include_typst_embedded);
+        for path in self.paths {
+            catalog.extend(read_containers(typst_kit::fonts::scan(path), scanned));
+        }
+        catalog
     }
-    Ok(())
+
+    /// Fails when the fonts backing `catalog` no longer agree with the
+    /// filesystem, which is the font half of the Creation Evidence Fence.
+    fn revalidate(&self, catalog: &CandidateFontCatalog) -> Result<(), PackerError> {
+        if &self.compose() != catalog {
+            return Err(PackerError::CreationEvidenceChanged {
+                path: "font catalog".to_owned(),
+            });
+        }
+        Ok(())
+    }
 }
 
-struct FontEvidence {
-    catalog: Vec<(FontInfo, Option<Bytes>)>,
-}
-
-fn font_book_infos(book: &FontBook) -> Vec<FontInfo> {
-    let count = book
-        .families()
-        .flat_map(|(_, indices)| indices)
-        .max()
-        .map_or(0, |index| index + 1);
-    (0..count)
-        .filter_map(|index| book.info(index).cloned())
-        .collect()
-}
-
-fn font_catalog_evidence(fonts: &FontStore) -> Vec<(FontInfo, Option<Bytes>)> {
-    font_book_infos(fonts.book())
-        .into_iter()
-        .enumerate()
-        .map(|(index, info)| (info, fonts.font(index).map(|font| font.data().clone())))
-        .collect()
+/// Reads the containers behind scanned faces, one container per font file, in
+/// the order the scan first reported them.
+///
+/// A listed file that cannot be read offers no candidate face at all, so
+/// selection never reaches a container the adapter cannot supply.
+fn read_containers(
+    faces: impl Iterator<Item = (FontPath, FontInfo)>,
+    disposition: FontDisposition,
+) -> Vec<CandidateFontContainer> {
+    let mut seen = HashSet::new();
+    let mut containers = Vec::new();
+    for (source, _) in faces {
+        if !seen.insert(source.path.clone()) {
+            continue;
+        }
+        let Ok(data) = std::fs::read(&source.path) else {
+            continue;
+        };
+        containers.push(CandidateFontContainer::new(data, disposition));
+    }
+    containers
 }
