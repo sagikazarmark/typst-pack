@@ -26,7 +26,6 @@ parallel = ["dep:rayon"]
 # system font scanning. Not available on wasm targets.
 fs = [
     "dep:env_proxy",
-    "dep:ignore",
     "dep:rustls-pemfile",
     "dep:ureq",
     "dep:walkdir",
@@ -39,7 +38,7 @@ fs = [
 [dependencies]
 ecow = "0.2"
 env_proxy = { version = "0.4", optional = true }
-ignore = { version = "0.4", optional = true }
+ignore = "0.4"
 rayon = { workspace = true, optional = true }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"

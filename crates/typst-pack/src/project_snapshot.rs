@@ -1,141 +1,153 @@
-use std::collections::BTreeMap;
-use std::path::Path;
+//! One stabilized set of project files, assembled without a filesystem.
 
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
+use std::collections::BTreeMap;
+
 use typst::foundations::Bytes;
 
+use crate::ignore_policy::ProjectIgnorePolicy;
 use crate::pack::Pack;
-use crate::packer::PackerError;
 
-const IGNORE_FILE: &str = ".typkignore";
-
+/// One stabilized set of project files: canonical root-relative paths, exact
+/// bytes, and the entrypoint they were assembled around.
+///
+/// Membership is decided by the [`ProjectIgnorePolicy`] the snapshot was
+/// assembled under, not by the caller that supplied the entries.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ProjectSnapshot {
+pub struct ProjectSnapshot {
+    entrypoint: String,
     files: BTreeMap<String, Bytes>,
 }
 
 impl ProjectSnapshot {
-    pub(crate) fn acquire(root: &Path) -> Result<Self, PackerError> {
-        let policy_path = root.join(IGNORE_FILE);
-        let policy = build_policy(root, &policy_path)?;
-
-        let mut files = BTreeMap::new();
-        let mut walk = walkdir::WalkDir::new(root)
-            .follow_links(false)
-            .sort_by_file_name()
-            .into_iter();
-        while let Some(entry) = walk.next() {
-            let entry = entry.map_err(|error| PackerError::Walk(error.to_string()))?;
-            if entry.depth() == 0 {
-                continue;
-            }
-            let relative = entry
-                .path()
-                .strip_prefix(root)
-                .expect("walk remains beneath root");
-            let path = relative
-                .to_str()
-                .ok_or_else(|| PackerError::UnrepresentablePath {
-                    path: entry.path().to_owned(),
-                })?;
-            let file_type = entry.file_type();
-            let forced_policy = entry.depth() == 1 && path == IGNORE_FILE;
-            let built_in_excluded = Path::new(path)
-                .extension()
-                .is_some_and(|extension| extension == "typk");
-            let ignored = !forced_policy
-                && (built_in_excluded
-                    || policy
-                        .matched_path_or_any_parents(relative, file_type.is_dir())
-                        .is_ignore());
-
-            if file_type.is_dir() {
-                if ignored {
-                    walk.skip_current_dir();
-                }
-                continue;
-            }
-            if ignored {
-                continue;
-            }
-            if !file_type.is_file() {
-                return Err(PackerError::UnsupportedProjectEntry {
-                    path: entry.path().to_owned(),
-                });
-            }
-            let canonical = Pack::canonical_project_path(path).map_err(|message| {
-                PackerError::InvalidProjectPath {
-                    path: path.to_owned(),
-                    message,
-                }
-            })?;
-            let data = std::fs::read(entry.path()).map_err(|error| {
-                PackerError::io(
-                    &format!("failed to read project file `{}`", entry.path().display()),
-                    error,
-                )
-            })?;
-            files.insert(canonical, Bytes::new(data));
-        }
-        Ok(Self { files })
+    /// The canonical root-relative path of the entrypoint.
+    pub fn entrypoint(&self) -> &str {
+        &self.entrypoint
     }
 
-    pub(crate) fn files(&self) -> impl Iterator<Item = (&str, &Bytes)> {
+    /// The contained project files in canonical path order.
+    pub fn files(&self) -> impl Iterator<Item = (&str, &Bytes)> {
         self.files.iter().map(|(path, data)| (path.as_str(), data))
     }
 
-    pub(crate) fn file(&self, path: &str) -> Option<&Bytes> {
+    /// Looks up a contained project file by canonical root-relative path.
+    pub fn file(&self, path: &str) -> Option<&Bytes> {
         self.files.get(path)
-    }
-
-    pub(crate) fn revalidate(&self, root: &Path) -> Result<(), PackerError> {
-        let current = Self::acquire(root)?;
-        if current == *self {
-            return Ok(());
-        }
-        let path = self
-            .files
-            .iter()
-            .find(|(path, data)| current.files.get(*path) != Some(*data))
-            .map(|(path, _)| root.join(path))
-            .or_else(|| {
-                current
-                    .files
-                    .keys()
-                    .find(|path| !self.files.contains_key(*path))
-                    .map(|path| root.join(path))
-            })
-            .unwrap_or_else(|| root.to_owned());
-        Err(PackerError::CreationEvidenceChanged {
-            path: path.display().to_string(),
-        })
     }
 }
 
-fn build_policy(root: &Path, policy_path: &Path) -> Result<Gitignore, PackerError> {
-    let mut builder = GitignoreBuilder::new(root);
-    match std::fs::symlink_metadata(policy_path) {
-        Ok(metadata) => {
-            if !metadata.file_type().is_file() {
-                return Err(PackerError::UnsupportedProjectEntry {
-                    path: policy_path.to_owned(),
-                });
-            }
-            std::fs::read_to_string(policy_path)
-                .map_err(|error| PackerError::io("failed to read root `.typkignore`", error))?;
-            if let Some(error) = builder.add(policy_path) {
-                return Err(PackerError::InvalidIgnorePolicy(error.to_string()));
-            }
-        }
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => {
-            return Err(PackerError::io(
-                "failed to inspect root `.typkignore`",
-                error,
-            ));
+/// Assembles a [`ProjectSnapshot`] from the path-and-bytes entries a Creation
+/// Adapter acquired.
+///
+/// Assembly canonicalizes every supplied path, re-applies the Project Ignore
+/// Policy, and verifies that the entrypoint survives filtering, so project
+/// membership does not depend on adapters being well-behaved.
+#[derive(Debug)]
+pub struct ProjectSnapshotAssembly<'a> {
+    entrypoint: String,
+    policy: &'a ProjectIgnorePolicy,
+    budget: ProjectSnapshotBudget,
+}
+
+impl<'a> ProjectSnapshotAssembly<'a> {
+    /// Prepares assembly of a project with the given entrypoint under `policy`.
+    pub fn new(entrypoint: impl Into<String>, policy: &'a ProjectIgnorePolicy) -> Self {
+        Self {
+            entrypoint: entrypoint.into(),
+            policy,
+            budget: ProjectSnapshotBudget::default(),
         }
     }
-    builder
-        .build()
-        .map_err(|error| PackerError::InvalidIgnorePolicy(error.to_string()))
+
+    /// Bounds the assembled snapshot. Exclusion runs before the budget is
+    /// measured, so the budget governs what will actually be packed.
+    pub fn budget(mut self, budget: ProjectSnapshotBudget) -> Self {
+        self.budget = budget;
+        self
+    }
+
+    /// Assembles the snapshot from `entries`.
+    pub fn assemble(
+        &self,
+        entries: impl IntoIterator<Item = (impl AsRef<str>, impl Into<Vec<u8>>)>,
+    ) -> Result<ProjectSnapshot, ProjectSnapshotError> {
+        let entrypoint = canonical_project_path(&self.entrypoint)?;
+        if self.policy.excludes_file(&entrypoint) {
+            return Err(ProjectSnapshotError::ExcludedEntrypoint(entrypoint));
+        }
+
+        let mut files = BTreeMap::new();
+        let mut byte_size = 0u64;
+        for (path, data) in entries {
+            let path = canonical_project_path(path.as_ref())?;
+            if self.policy.excludes_file(&path) {
+                continue;
+            }
+            let data = data.into();
+            byte_size = byte_size.saturating_add(data.len() as u64);
+            if let Some(limit) = self.budget.max_bytes
+                && byte_size > limit
+            {
+                return Err(ProjectSnapshotError::ByteSizeExceeded { limit });
+            }
+            if files.insert(path.clone(), Bytes::new(data)).is_some() {
+                return Err(ProjectSnapshotError::DuplicatePath { path });
+            }
+            if let Some(limit) = self.budget.max_files
+                && files.len() > limit
+            {
+                return Err(ProjectSnapshotError::FileCountExceeded { limit });
+            }
+        }
+
+        if !files.contains_key(&entrypoint) {
+            return Err(ProjectSnapshotError::MissingEntrypoint(entrypoint));
+        }
+        Ok(ProjectSnapshot { entrypoint, files })
+    }
+}
+
+/// An optional bound on the size of an assembled [`ProjectSnapshot`].
+///
+/// A service operator uses it so that a malformed or hostile project fails
+/// fast. Both bounds are measured over the entries that survive exclusion.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct ProjectSnapshotBudget {
+    /// The largest number of contained project files, if bounded.
+    pub max_files: Option<usize>,
+    /// The largest total byte size of contained project files, if bounded.
+    pub max_bytes: Option<u64>,
+}
+
+/// Canonicalizes a supplied path so that the policy decides membership over
+/// the same path the Pack will contain.
+fn canonical_project_path(path: &str) -> Result<String, ProjectSnapshotError> {
+    Pack::canonical_project_path_without_membership(path).map_err(|message| {
+        ProjectSnapshotError::InvalidPath {
+            path: path.to_owned(),
+            message,
+        }
+    })
+}
+
+/// A failure while assembling a [`ProjectSnapshot`].
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ProjectSnapshotError {
+    /// A supplied path cannot name a root-relative project file.
+    #[error("project path `{path}` cannot be represented: {message}")]
+    InvalidPath { path: String, message: String },
+    /// Two supplied entries name one canonical project file.
+    #[error("project path `{path}` is supplied more than once")]
+    DuplicatePath { path: String },
+    /// The entrypoint is excluded by the Project Ignore Policy.
+    #[error("entrypoint `{0}` is excluded by the Project Ignore Policy")]
+    ExcludedEntrypoint(String),
+    /// The entrypoint is not among the supplied project files.
+    #[error("entrypoint `{0}` is not a supplied project file")]
+    MissingEntrypoint(String),
+    /// The project has more files than the budget allows.
+    #[error("the project has more than {limit} project file(s)")]
+    FileCountExceeded { limit: usize },
+    /// The project's project files are larger than the budget allows.
+    #[error("the project's files exceed {limit} byte(s)")]
+    ByteSizeExceeded { limit: u64 },
 }

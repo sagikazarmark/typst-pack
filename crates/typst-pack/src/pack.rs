@@ -237,6 +237,11 @@ pub struct FontFaceIdentity {
 }
 
 impl FontFaceIdentity {
+    /// The face at a container-local index within the given container.
+    pub(crate) fn new(container: FontContainerIdentity, index: u32) -> Self {
+        Self { container, index }
+    }
+
     /// The containing font file or collection.
     pub fn container(self) -> FontContainerIdentity {
         self.container
@@ -561,7 +566,7 @@ impl Pack {
             }
             let embedded = !entry.is_external();
             font_catalog.push(PackFontCatalogFace {
-                identity: FontFaceIdentity { container, index },
+                identity: FontFaceIdentity::new(container, index),
                 embedded,
             });
             match font_requirements
@@ -690,6 +695,22 @@ impl Pack {
 
     pub(crate) fn canonical_project_path(path: &str) -> Result<String, String> {
         canonical_path(PackPathRole::ProjectFile, path)
+            .map(CanonicalPath::into_string)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Canonicalizes a supplied project path, leaving membership to the
+    /// Project Ignore Policy that owns it.
+    pub(crate) fn canonical_project_path_without_membership(path: &str) -> Result<String, String> {
+        canonical_path_without_membership(PackPathRole::ProjectFile, path)
+            .map(CanonicalPath::into_string)
+            .map_err(|error| error.to_string())
+    }
+
+    /// Canonicalizes a supplied package-relative path, so that a tree is
+    /// looked up and contained under the same path.
+    pub(crate) fn canonical_package_path(path: &str) -> Result<String, String> {
+        canonical_path(PackPathRole::PackageFile, path)
             .map(CanonicalPath::into_string)
             .map_err(|error| error.to_string())
     }
@@ -1605,6 +1626,26 @@ impl PackBuilder {
 }
 
 fn canonical_path(role: PackPathRole, path: &str) -> Result<CanonicalPath, PackInvariantError> {
+    let canonical = canonical_path_without_membership(role, path)?;
+    // The built-in exclusion in the Project Ignore Policy binds every caller,
+    // so no route into a Pack can name a Pack as a project file.
+    if matches!(role, PackPathRole::ProjectFile | PackPathRole::Entrypoint)
+        && crate::ignore_policy::names_pack_path(canonical.as_str())
+    {
+        return Err(PackInvariantError::InvalidPath {
+            role,
+            path: path.to_owned(),
+            message: format!("`.{FILE_EXTENSION}` paths are excluded from project membership"),
+        });
+    }
+    Ok(canonical)
+}
+
+/// Canonicalizes a path for its role without deciding project membership.
+fn canonical_path_without_membership(
+    role: PackPathRole,
+    path: &str,
+) -> Result<CanonicalPath, PackInvariantError> {
     let invalid = |message: String| PackInvariantError::InvalidPath {
         role,
         path: path.to_owned(),

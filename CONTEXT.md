@@ -12,28 +12,66 @@ fixed set of contained project paths and bytes. A Pack identifies its exact
 package and font requirements and records whether each is embedded or must be
 fulfilled externally. A value exists as a Pack only after whole-Pack canonical
 and content-integrity validation. In-memory construction may choose project files
-directly; filesystem Pack Creation uses the complete structural project tree
-described below.
+directly, subject to the built-in exclusion in the Project Ignore Policy; Pack
+Creation uses the complete structural project tree described below.
 
 **Pack Creation**:
-The filesystem operation that stabilizes every eligible regular file beneath one
-project root, runs one representative Typst request to select package and font
-requirements, revalidates the project and selected dependency inputs, and returns
-one Pack plus representative-compile warnings. Compiler observations select
-package and font requirements but never select project files. The representative
-request fixes the Typst Target, inputs, Document Time, and engine features for
-that run only; these values do not become Pack state or restrict later output
-formats. Creation fails when the representative request does not compile or when
-project, selected package, or font evidence changes before the Pack is returned.
+The adapter-neutral operation that takes one Project Snapshot, one Candidate
+Font Catalog, and the Complete Package Trees resolved for it, runs one
+representative Typst request to select package and font requirements, and
+returns one Pack plus representative-compile warnings. It acquires nothing
+itself; obtaining its inputs is Creation Preparation. Compiler observations
+select package and font requirements but never select project files. The
+representative request fixes the Typst Target, inputs, Document Time, and engine
+features for that run only; these values do not become Pack state or restrict
+later output formats. Creation fails when the representative request does not
+compile, and when a supplied tree does not declare the specification it was
+supplied under. When that request needs a package tree it was not given,
+creation reports those exact package specifications instead of issuing a Pack,
+so the caller can resolve them and invoke creation again. Those specifications
+come from observed package requests rather than diagnostic text, creation
+retains nothing between invocations, and how many invocations a project takes
+is not semantic.
+
+**Creation Preparation**:
+The acquisition phase that obtains Pack Creation's inputs: the project files,
+the Candidate Font Catalog, and the Complete Package Trees for the
+specifications creation reported as missing. It acquires bytes and never
+transforms them; every transformation belongs to the core.
+
+**Creation Adapter**:
+The host-specific responsibility that performs Creation Preparation for one kind
+of host, supplying listing, reading, and fetching only. The reference adapter is
+the filesystem one, which additionally defaults the representative request's
+Document Time to the host clock and revalidates project and selected dependency
+evidence before the Pack is returned, failing creation when that evidence
+changed (the Creation Evidence Fence). Establishing that acquired bytes
+represent one consistent source state is the adapter's own obligation and is
+advisory: an adapter acquiring from mutable storage without revalidating still
+conforms, and may produce a Pack describing a source state that never existed
+simultaneously.
 
 **Project Ignore Policy**:
-The root-scoped exclusion policy applied by filesystem Pack Creation. Every
-`.typk` path is excluded by a non-overridable built-in rule. Additional ordered
-rules come from the root `.typkignore` and use Gitignore-style matching, including
-negation and last-match precedence. The root policy file itself is included;
-nested `.typkignore` files are ordinary project files. Unsupported unignored
-entries, unreadable files, invalid paths, malformed rules, and traversal failures
-prevent creation.
+The root-scoped exclusion policy that decides project membership. Every `.typk`
+path is excluded by a non-overridable built-in rule that binds every caller,
+including in-memory construction. Additional ordered rules come from the root
+`.typkignore` and use Gitignore-style matching, including negation and last-match
+precedence. The policy is determined by ignore-file bytes alone and matches a
+path without consulting a host, so a Creation Adapter can apply it to a listing
+before reading content. The root policy file itself is included; nested
+`.typkignore` files are ordinary project files. Malformed rules prevent creation,
+as do the unsupported unignored entries, unreadable files, invalid paths, and
+traversal failures a Creation Adapter reports.
+
+**Project Snapshot**:
+One stabilized set of project files with one entrypoint among them, represented
+by canonical root-relative path and exact bytes. It is assembled from
+path-and-bytes entries under one Project Ignore Policy, which assembly
+re-applies so that membership does not depend on a Creation Adapter being
+well-behaved. Assembly rejects entries that cannot name a root-relative project
+file and fails when the entrypoint does not survive filtering. A caller may
+bound the result by file count and total byte size; exclusion is applied before
+those bounds are measured.
 
 **Pack Identity**:
 The content identity of a Pack's canonical logical compilation state: fixed
@@ -89,7 +127,7 @@ host filesystem metadata.
 
 **Package Authority**:
 The explicitly configured responsibility that resolves package specifications
-during filesystem creation or obtains exact trees for compilation. In the core,
+during Creation Preparation or obtains exact trees for compilation. In the core,
 compilation receives already acquired Package Tree Fulfillments rather than a
 public authority interface. Configured offline behavior disables package
 downloading; it may still use explicit or local package sources.
@@ -113,6 +151,15 @@ The exact bytes of one standalone font file or multi-face font collection. Its
 Canonical Identity is independent of source location, and every face in a
 collection travels in the same container.
 
+**Candidate Font Catalog**:
+The ordered sequence of Font Containers Pack Creation may select faces from,
+each carrying its own embedded-or-external disposition. Faces are expanded in
+container-local index order, catalog order decides which container offers a
+family, and nothing joins a supplied catalog implicitly. A Creation Adapter
+composes it during Creation Preparation; the reference filesystem adapter
+composes system fonts, Typst's embedded fonts, and scanned font directories, in
+that order.
+
 **Font Face Identity**:
 One exact face within a Font Container, identified by container identity and
 container-local face index. Family, style, coverage, and other metadata are
@@ -124,13 +171,13 @@ during Pack Creation. The requirement records whether the container is embedded
 or externally fulfilled.
 
 **Font Authority**:
-The explicitly configured responsibility that supplies the ordered candidate
-font catalog during filesystem creation or obtains exact Font Containers for
+The explicitly configured responsibility that supplies the Candidate Font
+Catalog during Creation Preparation or obtains exact Font Containers for
 compilation. In the core, compilation receives already acquired Font Container
 Fulfillments rather than a public authority interface.
 
 **Pack Font Catalog**:
-The ordered projection of the creation font catalog containing exactly the Font
+The ordered projection of the Candidate Font Catalog containing exactly the Font
 Face Identities available to Pack compilation. Relative selection order is
 preserved. Other faces physically present in a required Font Container remain
 unavailable unless declared.
@@ -144,9 +191,12 @@ permission and do not contribute to identities.
 
 **Font Embedding**:
 The Pack Creation choice to embed selected Font Containers or record them for
-external fulfillment. Typst-embedded-font handling is an explicit creation
-option. The choice affects Pack Identity and self-containment; typst-pack does not
-derive a per-font legal policy from licensing metadata.
+external fulfillment. It is declared per container in the Candidate Font
+Catalog and never inferred from container bytes, so one Pack may embed one
+container and reference another, and Typst-embedded-font handling is an
+explicit creation option. The choice affects Pack Identity and
+self-containment; typst-pack does not derive a per-font legal policy from
+licensing metadata.
 
 ## Compilation Requests
 

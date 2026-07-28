@@ -9,12 +9,16 @@ pub const VERSION: &str = concat!(
 );
 
 mod compile;
+mod creation;
 mod embedded;
 mod extract;
+mod font_catalog;
+#[cfg(feature = "fs")]
+mod fs_project;
+mod ignore_policy;
 mod manifest;
 mod pack;
 mod packer;
-#[cfg(feature = "fs")]
 mod project_snapshot;
 mod world;
 mod world_trace;
@@ -40,8 +44,18 @@ pub use compile::{
     RequestValueOrigin, SvgOutputSpecification, TracepointKind, TypstInputsInventory, TypstTarget,
     compile, parse_page_selection,
 };
+pub use creation::{
+    CreationError, CreationOutcome, CreationRequest, IssuedPack, PackageDisposition,
+    ResolvedPackageTree, create,
+};
 #[cfg(feature = "fs")]
 pub use extract::{ExtractError, ExtractOptions, ExtractReport, extract};
+#[cfg(feature = "embedded-fonts")]
+pub use font_catalog::typst_embedded_font_containers;
+pub use font_catalog::{
+    CandidateFontCatalog, CandidateFontContainer, CandidateFontFace, FontDisposition,
+};
+pub use ignore_policy::{IGNORE_FILE, ProjectIgnorePolicy, ProjectIgnorePolicyError};
 pub use manifest::{
     FORMAT_VERSION, FontManifest, MANIFEST_PATH, PackManifest, PackManifestError, PackMetadata,
     PackageManifest, PackagesManifest, ProjectManifest,
@@ -54,6 +68,9 @@ pub use pack::{
 };
 #[cfg(feature = "fs")]
 pub use packer::{CreationDiagnosticContext, PackOutcome, Packer, PackerError};
+pub use project_snapshot::{
+    ProjectSnapshot, ProjectSnapshotAssembly, ProjectSnapshotBudget, ProjectSnapshotError,
+};
 #[cfg(feature = "fs")]
 pub use world::OfflineDownloader;
 

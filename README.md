@@ -126,10 +126,23 @@ container identity. Fonts are *not* embedded by default: compilation must find
 the declared exact containers among the configured system, Typst-embedded, or
 `--font-path` sources. Other available fonts are not exposed to Typst.
 
-With `--embed-fonts`, selected containers are stored in the pack, except those
-identical to Typst's embedded fonts. Pass `--include-typst-embedded-fonts` to
-store those too. Mind font licenses when redistributing embedded containers;
-licensing and acquisition metadata do not change font selection.
+With `--embed-fonts`, selected containers are stored in the pack, except the
+ones Typst itself ships. Pass `--include-typst-embedded-fonts` to store those
+too. Embedding follows where a container came from, not what its bytes are: a
+`--font-path` directory holding a copy of one of Typst's containers is embedded
+like any other scanned container. Mind font licenses when redistributing
+embedded containers; licensing and acquisition metadata do not change font
+selection.
+
+The Candidate Font Catalog creation selects from is one explicit ordered
+sequence: `CandidateFontCatalog` holds `CandidateFontContainer`s, each carrying
+its own embedded-or-external `FontDisposition`, so one pack can embed a
+redistributable container and reference a restrictively licensed one. Faces are
+expanded in container-local index order, catalog order decides which container
+wins a family, and nothing joins a catalog implicitly:
+`typst_embedded_font_containers` yields Typst's own containers for a caller to
+splice in where it wants. `Packer` composes its catalog from system fonts,
+Typst's embedded fonts, and `--font-path` directories, in that order.
 
 ### Output formats
 
@@ -224,6 +237,81 @@ let pack = Pack::builder("main.typ")
     .build()?;
 let bytes = pack.to_bytes()?;
 ```
+
+Building a pack by hand gives up the representative compile that discovers
+dependencies. `create` keeps it and still needs no crate feature: it takes the
+bytes a caller already holds, runs one representative Typst request, and issues
+the pack it selected. It acquires nothing itself and consults no wall clock, so
+the creation timestamp fixing that request's Document Time is required:
+
+```rust,ignore
+use typst_pack::{
+    create, CandidateFontCatalog, CandidateFontContainer, CreationRequest,
+    ProjectIgnorePolicy, ProjectSnapshotAssembly, ResolvedPackageTree,
+};
+
+let policy = ProjectIgnorePolicy::from_ignore_file(ignore_file_bytes)?;
+let project = ProjectSnapshotAssembly::new("main.typ", &policy).assemble([
+    ("main.typ", source_text.as_bytes().to_vec()),
+    ("figure.png", image_bytes),
+])?;
+
+let request = CreationRequest::new(project, creation_timestamp)
+    .font_catalog(CandidateFontCatalog::from_iter([
+        CandidateFontContainer::embedded(font_bytes),
+    ]))
+    .package_tree(ResolvedPackageTree::embedded(spec, package_files));
+let issued = create(&request)?.into_issued().expect("no package is missing");
+let bytes = issued.pack.to_bytes()?;
+```
+
+Compiler observations select package and font requirements; project files come
+from the Project Snapshot alone. Each supplied package tree and font container
+carries its own embedded-or-external disposition, which is what the pack's
+Package Requirements and Font Requirements record. `IssuedPack::warnings`
+retains the representative compile's warnings, and a representative request that
+does not compile fails creation instead of issuing an incomplete pack. The
+request is an owned value the core retains nothing of, so it can be run again.
+Obtaining its inputs is Creation Preparation, which belongs to the caller;
+`Packer` is the reference filesystem Creation Adapter.
+
+Package requirements can only be discovered by compiling, so creation resolves
+package acquisition through a resumable protocol rather than a callback. A
+request that read a package no supplied tree covers reports that exact
+specification instead of issuing a pack, which is a normal outcome and not a
+failure. The caller resolves it however its host allows and invokes creation
+again with the same request values and the tree added:
+
+```rust,ignore
+use typst_pack::{create, CreationOutcome, CreationRequest, ResolvedPackageTree};
+
+let mut resolved: Vec<ResolvedPackageTree> = Vec::new();
+let issued = loop {
+    let request = CreationRequest::new(project.clone(), creation_timestamp)
+        .package_trees(resolved.iter().cloned());
+    match create(&request)? {
+        CreationOutcome::Issued(issued) => break issued,
+        // Acquire each reported specification however this host allows: from a
+        // cache, over an asynchronous transport, or in a later request.
+        CreationOutcome::MissingPackages(missing) => {
+            for spec in missing {
+                resolved.push(acquire_tree(&spec)?);
+            }
+        }
+    }
+};
+```
+
+Reported specifications come from the package file requests the compiler made,
+never from diagnostic text, and always carry an exact version, because a Typst
+import specification always does. Because a failed import ends module
+evaluation, one round reports what that round reached, and a project needing
+several packages completes over repeated invocation. Nothing is retained
+between invocations, so a resume step is valid across a host request boundary
+and nothing in the core is `async`. A tree that does not declare the
+specification it was supplied under is the distinct
+`CreationError::MismatchedPackageTree` failure, so a loop that would otherwise
+never progress gets a diagnosis instead.
 
 Compilation-time Pack Overrides replace contained project-file bytes in memory:
 
@@ -331,8 +419,9 @@ fields are removed in place. Old fields and aliases are not accepted.
   adapters.
 - `parallel`: export independent page artifacts in parallel.
 
-All library crate features are opt-in. Fixed timestamp conversion for `DocumentTime`
-is part of the featureless core and remains available on wasm targets.
+All library crate features are opt-in. Pack Creation over supplied inputs
+(`create`) and fixed timestamp conversion for `DocumentTime` are part of the
+featureless core and remain available on wasm targets.
 
 ## Pack format
 
