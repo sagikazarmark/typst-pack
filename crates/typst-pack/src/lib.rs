@@ -45,7 +45,8 @@ pub use compile::{
     compile, parse_page_selection,
 };
 pub use creation::{
-    CreationError, CreationRequest, IssuedPack, PackageDisposition, ResolvedPackageTree, create,
+    CreationError, CreationOutcome, CreationRequest, IssuedPack, PackageDisposition,
+    ResolvedPackageTree, create,
 };
 #[cfg(feature = "fs")]
 pub use extract::{ExtractError, ExtractOptions, ExtractReport, extract};

@@ -25,9 +25,13 @@ select package and font requirements but never select project files. The
 representative request fixes the Typst Target, inputs, Document Time, and engine
 features for that run only; these values do not become Pack state or restrict
 later output formats. Creation fails when the representative request does not
-compile. When that request needs a package tree it was not given, creation
-reports those exact package specifications instead of issuing a Pack, so the
-caller can resolve them and invoke creation again.
+compile, and when a supplied tree does not declare the specification it was
+supplied under. When that request needs a package tree it was not given,
+creation reports those exact package specifications instead of issuing a Pack,
+so the caller can resolve them and invoke creation again. Those specifications
+come from observed package requests rather than diagnostic text, creation
+retains nothing between invocations, and how many invocations a project takes
+is not semantic.
 
 **Creation Preparation**:
 The acquisition phase that obtains Pack Creation's inputs: the project files,

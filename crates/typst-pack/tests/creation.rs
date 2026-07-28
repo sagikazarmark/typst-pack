@@ -9,8 +9,8 @@ use std::str::FromStr;
 
 use typst::syntax::package::PackageSpec;
 use typst_pack::{
-    CreationError, CreationRequest, PackMetadata, ProjectIgnorePolicy, ProjectSnapshot,
-    ProjectSnapshotAssembly, ResolvedPackageTree, TypstTarget, create,
+    CreationError, CreationOutcome, CreationRequest, IssuedPack, PackMetadata, ProjectIgnorePolicy,
+    ProjectSnapshot, ProjectSnapshotAssembly, ResolvedPackageTree, TypstTarget, create,
 };
 
 /// 2023-11-14T22:13:20Z, the Document Time every representative request here
@@ -27,6 +27,16 @@ fn project(entries: impl IntoIterator<Item = (&'static str, Vec<u8>)>) -> Projec
 
 fn document(source: &str) -> ProjectSnapshot {
     project([("main.typ", source.as_bytes().to_vec())])
+}
+
+/// The Pack of a request every tree of which is already supplied.
+fn issue(request: &CreationRequest) -> IssuedPack {
+    match create(request).unwrap() {
+        CreationOutcome::Issued(issued) => *issued,
+        CreationOutcome::MissingPackages(missing) => {
+            panic!("every tree was supplied, yet creation reported {missing:?} as missing")
+        }
+    }
 }
 
 fn spec(name: &str) -> PackageSpec {
@@ -54,7 +64,7 @@ fn a_pack_is_created_from_supplied_bytes_alone() {
         ("data/notes.txt", b"notes".to_vec()),
     ]);
 
-    let issued = create(&CreationRequest::new(snapshot, CREATION_TIMESTAMP)).unwrap();
+    let issued = issue(&CreationRequest::new(snapshot, CREATION_TIMESTAMP));
 
     assert_eq!(issued.pack.entrypoint(), "main.typ");
     // Project files come from the snapshot, never from compiler observations:
@@ -75,7 +85,7 @@ fn a_pack_is_created_from_supplied_bytes_alone() {
 fn representative_compile_warnings_are_returned_with_the_pack() {
     let snapshot = document("#set text(font: \"Definitely Missing\")\nWarning");
 
-    let issued = create(&CreationRequest::new(snapshot, CREATION_TIMESTAMP)).unwrap();
+    let issued = issue(&CreationRequest::new(snapshot, CREATION_TIMESTAMP));
 
     assert!(
         issued
@@ -108,7 +118,7 @@ fn the_creation_timestamp_fixes_the_representative_document_time() {
          #assert.eq(today.day(), 14)\n",
     );
 
-    create(&CreationRequest::new(snapshot, CREATION_TIMESTAMP)).unwrap();
+    issue(&CreationRequest::new(snapshot, CREATION_TIMESTAMP));
 }
 
 #[test]
@@ -128,8 +138,8 @@ fn the_request_is_reusable_and_creation_retains_nothing() {
     let request = CreationRequest::new(document("#rect(width: 5pt, height: 5pt)"), 0)
         .metadata(PackMetadata::new().with_name("Reused"));
 
-    let first = create(&request).unwrap();
-    let second = create(&request).unwrap();
+    let first = issue(&request);
+    let second = issue(&request);
 
     assert_eq!(first.pack.identity(), second.pack.identity());
     assert_eq!(
@@ -148,7 +158,7 @@ fn typst_inputs_reach_the_representative_request() {
     let mut inputs = typst::foundations::Dict::new();
     inputs.insert("key".into(), typst::foundations::Value::Str("value".into()));
 
-    create(&CreationRequest::new(snapshot, CREATION_TIMESTAMP).inputs(inputs)).unwrap();
+    issue(&CreationRequest::new(snapshot, CREATION_TIMESTAMP).inputs(inputs));
 
     let snapshot = document("#assert.eq(sys.inputs.at(\"key\"), \"value\")");
     let error = create(&CreationRequest::new(snapshot, CREATION_TIMESTAMP)).unwrap_err();
@@ -163,12 +173,11 @@ fn the_target_and_engine_features_belong_to_the_representative_request() {
     assert!(matches!(error, CreationError::Compile { .. }), "{error}");
 
     let snapshot = document("#html.elem(\"p\")[Paragraph]");
-    let issued = create(
+    let issued = issue(
         &CreationRequest::new(snapshot, CREATION_TIMESTAMP)
             .target(TypstTarget::Html)
             .feature(typst::Feature::Html),
-    )
-    .unwrap();
+    );
 
     // The target fixes that one run only; it does not become Pack state.
     assert_eq!(issued.pack.entrypoint(), "main.typ");
@@ -185,7 +194,7 @@ fn package_trees_are_supplied_per_specification_with_their_own_disposition() {
          #rect(width: (value + other) * 1pt, height: 1pt)",
     );
 
-    let issued = create(
+    let issued = issue(
         &CreationRequest::new(snapshot, CREATION_TIMESTAMP)
             .package_tree(ResolvedPackageTree::embedded(
                 embedded.clone(),
@@ -199,8 +208,7 @@ fn package_trees_are_supplied_per_specification_with_their_own_disposition() {
                 unused.clone(),
                 package_files("unused", "#let unused = 5"),
             )),
-    )
-    .unwrap();
+    );
 
     // Compiler observations select package requirements: the supplied tree the
     // document never imported is not one.
@@ -223,12 +231,209 @@ fn package_trees_are_supplied_per_specification_with_their_own_disposition() {
 }
 
 #[test]
-fn an_import_no_supplied_tree_satisfies_fails_the_representative_compile() {
+fn a_package_no_supplied_tree_covers_is_reported_as_a_resumable_outcome() {
     let snapshot = document("#import \"@local/absent:1.0.0\": value\n#value");
 
-    let error = create(&CreationRequest::new(snapshot, CREATION_TIMESTAMP)).unwrap_err();
+    let outcome = create(&CreationRequest::new(snapshot, CREATION_TIMESTAMP)).unwrap();
 
-    assert!(matches!(error, CreationError::Compile { .. }), "{error}");
+    // A normal outcome, not a failure, and no Pack: the caller resolves what it
+    // names and invokes creation again. The specification is the one the
+    // compiler asked for, fully versioned, so no diagnostic text is parsed.
+    let CreationOutcome::MissingPackages(missing) = outcome else {
+        panic!("the package no tree covers is reported, not packed");
+    };
+    assert_eq!(
+        missing
+            .iter()
+            .map(|spec| spec.to_string())
+            .collect::<Vec<_>>(),
+        ["@local/absent:1.0.0"]
+    );
+}
+
+/// A document needing `first`, which itself needs `third`, and `second`.
+const CHAINED_PACKAGES: &str = "#import \"@local/first:1.0.0\": first\n\
+                                #import \"@local/second:1.0.0\": second\n\
+                                #rect(width: (first + second) * 1pt, height: 1pt)";
+
+/// The tree a resume round can resolve for one reported specification,
+/// standing in for whatever acquisition the caller's host allows.
+fn resolvable(spec: &PackageSpec) -> ResolvedPackageTree {
+    let body = match spec.name.as_str() {
+        "first" => "#import \"@local/third:1.0.0\": third\n#let first = 1 + third",
+        "second" => "#let second = 2",
+        "third" => "#let third = 3",
+        name => panic!("no tree is resolvable for `{name}`"),
+    };
+    ResolvedPackageTree::embedded(spec.clone(), package_files(spec.name.as_str(), body))
+}
+
+/// Drives the resume protocol to an issued Pack, returning it with the trees
+/// the loop resolved. Every round builds a fresh Creation Request from the same
+/// values, as a caller resuming across a host request boundary must.
+fn resume(source: &str) -> (IssuedPack, Vec<ResolvedPackageTree>) {
+    let mut resolved: Vec<ResolvedPackageTree> = Vec::new();
+    // Bounded so that a loop making no progress fails instead of hanging; the
+    // number of rounds it actually takes is not asserted.
+    for _ in 0..8 {
+        let request = CreationRequest::new(document(source), CREATION_TIMESTAMP)
+            .package_trees(resolved.iter().cloned());
+        let outcome = create(&request).unwrap();
+        match outcome {
+            CreationOutcome::Issued(issued) => return (*issued, resolved),
+            CreationOutcome::MissingPackages(missing) => {
+                assert!(
+                    !missing.is_empty(),
+                    "a missing outcome names a specification"
+                );
+                resolved.extend(missing.iter().map(resolvable));
+            }
+        }
+    }
+    panic!("creation never issued a Pack");
+}
+
+#[test]
+fn a_project_needing_several_packages_completes_through_repeated_invocation() {
+    let (issued, resolved) = resume(CHAINED_PACKAGES);
+
+    assert_eq!(
+        issued
+            .pack
+            .package_requirements()
+            .iter()
+            .map(|requirement| requirement.spec().to_string())
+            .collect::<Vec<_>>(),
+        [
+            "@local/first:1.0.0",
+            "@local/second:1.0.0",
+            "@local/third:1.0.0"
+        ]
+    );
+    // The loop resolved exactly what creation reported, including the package
+    // only another package's tree imports.
+    assert_eq!(resolved.len(), 3);
+}
+
+#[test]
+fn a_resumed_creation_issues_the_pack_one_invocation_would_have() {
+    let (resumed, resolved) = resume(CHAINED_PACKAGES);
+
+    let single = issue(
+        &CreationRequest::new(document(CHAINED_PACKAGES), CREATION_TIMESTAMP)
+            .package_trees(resolved),
+    );
+
+    assert_eq!(resumed.pack.identity(), single.pack.identity());
+}
+
+/// Creates over one tree supplied for `@local/declared:1.0.0`, which the
+/// document imports, and returns the failure that tree produced.
+fn declared_tree_failure(files: Vec<(&'static str, Vec<u8>)>) -> CreationError {
+    let snapshot = document("#import \"@local/declared:1.0.0\": value\n#value");
+
+    create(
+        &CreationRequest::new(snapshot, CREATION_TIMESTAMP)
+            .package_tree(ResolvedPackageTree::embedded(spec("declared"), files)),
+    )
+    .unwrap_err()
+}
+
+/// Whether the failure is the distinct one a tree that does not declare its
+/// specification produces, rather than a missing-package outcome or a compile
+/// failure.
+fn is_mismatched_declared_tree(error: &CreationError) -> bool {
+    matches!(error, CreationError::MismatchedPackageTree { spec: reported, .. } if reported == &spec("declared"))
+}
+
+#[test]
+fn a_supplied_tree_that_declares_another_package_fails_creation() {
+    let error = declared_tree_failure(package_files("other", "#let value = 1"));
+
+    // A distinct failure, not a missing-package outcome: a caller that resolved
+    // this tree would otherwise be told the same specification is missing
+    // forever.
+    assert!(is_mismatched_declared_tree(&error), "{error}");
+}
+
+#[test]
+fn a_supplied_tree_that_declares_another_version_fails_creation() {
+    let error = declared_tree_failure(vec![
+        (
+            "typst.toml",
+            b"[package]\nname = \"declared\"\nversion = \"2.0.0\"\nentrypoint = \"lib.typ\"\n"
+                .to_vec(),
+        ),
+        ("lib.typ", b"#let value = 1".to_vec()),
+    ]);
+
+    assert!(is_mismatched_declared_tree(&error), "{error}");
+}
+
+#[test]
+fn a_tree_the_representative_request_never_reads_is_checked_too() {
+    // What the caller supplied is checked, not what one run happened to reach,
+    // exactly as a package path that cannot be represented is.
+    let unread = spec("unread");
+
+    let error = create(
+        &CreationRequest::new(document("#rect()"), CREATION_TIMESTAMP).package_tree(
+            ResolvedPackageTree::embedded(unread.clone(), package_files("other", "#let value = 1")),
+        ),
+    )
+    .unwrap_err();
+
+    assert!(
+        matches!(&error, CreationError::MismatchedPackageTree { spec, .. } if spec == &unread),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_tree_declaring_its_specification_is_accepted_whatever_else_it_declares() {
+    let declared = spec("declared");
+    let snapshot = document("#import \"@local/declared:1.0.0\": value\n#rect(width: value * 1pt)");
+    let files = vec![
+        (
+            "typst.toml",
+            b"[package]\n\
+              name = \"declared\"\n\
+              version = \"1.0.0\"\n\
+              entrypoint = \"lib.typ\"\n\
+              authors = [\"Author\"]\n\
+              license = \"MIT\"\n\
+              exclude = [\"tests/**\"]\n\
+              \n\
+              [template]\n\
+              path = \"template\"\n\
+              entrypoint = \"main.typ\"\n\
+              \n\
+              [tool.some-tool]\n\
+              key = \"value\"\n"
+                .to_vec(),
+        ),
+        ("lib.typ", b"#let value = 1".to_vec()),
+    ];
+
+    let issued = issue(
+        &CreationRequest::new(snapshot, CREATION_TIMESTAMP)
+            .package_tree(ResolvedPackageTree::embedded(declared.clone(), files)),
+    );
+
+    assert!(issued.pack.has_package(&declared));
+}
+
+#[test]
+fn a_supplied_tree_whose_declaration_cannot_be_read_fails_creation() {
+    let absent = declared_tree_failure(vec![("lib.typ", b"#let value = 1".to_vec())]);
+    let malformed = declared_tree_failure(vec![
+        ("typst.toml", b"[package\nname =".to_vec()),
+        ("lib.typ", b"#let value = 1".to_vec()),
+    ]);
+
+    for error in [absent, malformed] {
+        assert!(is_mismatched_declared_tree(&error), "{error}");
+    }
 }
 
 #[test]
@@ -255,10 +460,9 @@ fn a_supplied_tree_path_that_cannot_name_a_package_file_is_rejected() {
 mod fonts {
     use typst_pack::{
         CandidateFontCatalog, CandidateFontContainer, CreationRequest, FontContainerIdentity,
-        create,
     };
 
-    use crate::{CREATION_TIMESTAMP, document};
+    use crate::{CREATION_TIMESTAMP, document, issue};
 
     /// The exact bytes of the Font Container Typst ships the given family in.
     fn typst_container(family: &str) -> Vec<u8> {
@@ -279,8 +483,7 @@ mod fonts {
         ]);
 
         let issued =
-            create(&CreationRequest::new(snapshot, CREATION_TIMESTAMP).font_catalog(catalog))
-                .unwrap();
+            issue(&CreationRequest::new(snapshot, CREATION_TIMESTAMP).font_catalog(catalog));
 
         let requirements = issued.pack.font_requirements();
         let disposition = |data: &[u8]| {
@@ -320,8 +523,7 @@ mod fonts {
         ]);
 
         let issued =
-            create(&CreationRequest::new(snapshot, CREATION_TIMESTAMP).font_catalog(catalog))
-                .unwrap();
+            issue(&CreationRequest::new(snapshot, CREATION_TIMESTAMP).font_catalog(catalog));
 
         let requirements = issued.pack.font_requirements();
         assert_eq!(requirements.len(), 1);

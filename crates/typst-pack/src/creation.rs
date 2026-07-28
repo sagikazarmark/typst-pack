@@ -12,7 +12,7 @@ use std::sync::Mutex;
 use ecow::EcoVec;
 use typst::diag::{FileError, FileResult, PackageError, SourceDiagnostic, Warned};
 use typst::foundations::{Bytes, Datetime, Dict, Duration};
-use typst::syntax::package::PackageSpec;
+use typst::syntax::package::{PackageSpec, PackageVersion};
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
@@ -209,6 +209,44 @@ pub struct IssuedPack {
     pub warnings: EcoVec<SourceDiagnostic>,
 }
 
+/// What one Pack Creation invocation produced.
+///
+/// Package requirements can only be discovered by compiling, so creation
+/// resolves acquisition through a resumable protocol rather than a callback: a
+/// representative request that read a package no supplied tree covers reports
+/// that specification instead of issuing a Pack. The caller obtains the tree
+/// however its host allows and invokes creation again with the same Creation
+/// Request values and the reported trees added. Creation retains nothing
+/// between invocations, so a resume step is valid across a host request
+/// boundary and needs no asynchronous library interface.
+#[derive(Debug)]
+pub enum CreationOutcome {
+    /// The representative request ran over trees that covered every package it
+    /// read, so creation selected every requirement and issued a Pack.
+    Issued(Box<IssuedPack>),
+    /// The representative request read packages no supplied tree covers, in
+    /// canonical specification order. This is a normal, resumable outcome and
+    /// not a failure.
+    ///
+    /// Every specification comes from a package file request the compiler
+    /// actually made, so a caller never parses diagnostic text to drive its
+    /// loop, and every one carries an exact version, because a Typst import
+    /// specification always does.
+    MissingPackages(Vec<PackageSpec>),
+}
+
+impl CreationOutcome {
+    /// Takes the issued Pack, or `None` when creation reported missing
+    /// packages, for a caller that supplied every tree the document needs.
+    /// A caller driving the resume protocol matches the outcome instead.
+    pub fn into_issued(self) -> Option<IssuedPack> {
+        match self {
+            Self::Issued(issued) => Some(*issued),
+            Self::MissingPackages(_) => None,
+        }
+    }
+}
+
 /// A failure that issues no Pack.
 #[derive(Debug, thiserror::Error)]
 pub enum CreationError {
@@ -222,14 +260,15 @@ pub enum CreationError {
     /// The creation timestamp does not name a representable instant.
     #[error("invalid creation timestamp: {0}")]
     InvalidTimestamp(String),
-    /// The representative request read a file of a package no supplied tree
-    /// covers, so the Pack would omit a requirement the document needs.
+    /// A supplied tree does not declare the specification it was supplied
+    /// under, so it is not the tree the caller believes it supplied.
     ///
-    /// An unsatisfied import fails the representative compile, so reaching
-    /// this means the request compiled around a package it read; creation
-    /// fails rather than issuing an incomplete Pack.
-    #[error("no supplied tree satisfies package {spec}, which the representative request read")]
-    UnsuppliedPackage { spec: PackageSpec },
+    /// This is deliberately a failure rather than a missing-package outcome: a
+    /// caller resolving that specification and supplying this tree again would
+    /// otherwise be told the same specification is missing forever, with no
+    /// diagnosis.
+    #[error("the tree supplied for package {spec} does not satisfy it: {message}")]
+    MismatchedPackageTree { spec: PackageSpec, message: String },
     /// A supplied tree holds a path that cannot name a package file.
     #[error("package {spec} file `{path}` cannot be represented: {message}")]
     InvalidPackagePath {
@@ -243,12 +282,19 @@ pub enum CreationError {
 }
 
 /// Runs one representative Typst request over the supplied inputs and issues
-/// the Pack it selected.
+/// the Pack it selected, or reports the packages it needed and was not given.
 ///
 /// Compiler observations select package and font requirements; project files
 /// come from the Project Snapshot alone. Creation fails rather than issuing an
 /// incomplete Pack when the representative request does not compile.
-pub fn create(request: &CreationRequest) -> Result<IssuedPack, CreationError> {
+///
+/// A request that read a package no supplied tree covers returns
+/// [`CreationOutcome::MissingPackages`] instead: resolve those specifications,
+/// add their trees to the same request, and invoke creation again. Because a
+/// failed import ends module evaluation, one round reports what that round
+/// reached, and a project needing several packages completes over repeated
+/// invocation.
+pub fn create(request: &CreationRequest) -> Result<CreationOutcome, CreationError> {
     let packages = canonical_package_trees(request)?;
     let time = Time::fixed_timestamp(request.creation_timestamp)
         .map_err(|error| CreationError::InvalidTimestamp(error.to_string()))?;
@@ -273,6 +319,15 @@ pub fn create(request: &CreationRequest) -> Result<IssuedPack, CreationError> {
     };
 
     let Warned { output, warnings } = compile_creation_target(&world, request.target);
+    let observed = world.observed_packages();
+
+    // Reported before the compile outcome is inspected, because the import that
+    // needed a tree is exactly what failed the compile. The caller resolves
+    // these and invokes creation again rather than reading diagnostics.
+    if !observed.missing.is_empty() {
+        return Ok(CreationOutcome::MissingPackages(observed.missing));
+    }
+
     if let Err(errors) = output {
         return Err(CreationError::Compile { errors, warnings });
     }
@@ -284,12 +339,12 @@ pub fn create(request: &CreationRequest) -> Result<IssuedPack, CreationError> {
 
     // Packages, in canonical specification order. The whole Complete Package
     // Tree travels, not only the files the representative request read.
-    let observed = world.observed_packages();
     let loader = world.files.loader();
-    for spec in observed {
-        let Some(tree) = loader.packages.get(&spec.to_string()) else {
-            return Err(CreationError::UnsuppliedPackage { spec });
-        };
+    for spec in observed.supplied {
+        let tree = loader
+            .packages
+            .get(&spec.to_string())
+            .expect("observed package was partitioned as supplied");
         for (path, data) in &tree.files {
             builder = if tree.disposition.is_embedded() {
                 builder.package_file(spec.clone(), path, data.to_vec())?
@@ -313,14 +368,15 @@ pub fn create(request: &CreationRequest) -> Result<IssuedPack, CreationError> {
         builder = builder.metadata(metadata.clone());
     }
 
-    Ok(IssuedPack {
+    Ok(CreationOutcome::Issued(Box::new(IssuedPack {
         pack: builder.build()?,
         warnings,
-    })
+    })))
 }
 
 /// Canonicalizes every supplied tree before the representative request runs,
-/// so that a tree is looked up and contained under the same path.
+/// so that a tree is looked up and contained under the same path, and verifies
+/// that each satisfies the specification it was supplied under.
 fn canonical_package_trees(
     request: &CreationRequest,
 ) -> Result<BTreeMap<String, CanonicalPackageTree>, CreationError> {
@@ -337,6 +393,12 @@ fn canonical_package_trees(
             })?;
             files.insert(canonical, data.clone());
         }
+        verify_package_declaration(&tree.spec, &files).map_err(|message| {
+            CreationError::MismatchedPackageTree {
+                spec: tree.spec.clone(),
+                message,
+            }
+        })?;
         trees.insert(
             key.clone(),
             CanonicalPackageTree {
@@ -348,11 +410,84 @@ fn canonical_package_trees(
     Ok(trees)
 }
 
+/// The package-relative path of the declaration every package tree carries.
+const PACKAGE_DECLARATION_PATH: &str = "typst.toml";
+
+/// Verifies that a supplied tree declares the package it was supplied for.
+///
+/// Typst resolves a package import through this declaration, so a tree
+/// declaring another name or version cannot satisfy the specification it was
+/// supplied under, whatever else it holds. Every supplied tree is checked,
+/// read by the representative request or not, exactly as canonical package
+/// paths are: it states what the caller supplied, not what one run reached.
+///
+/// Only the declared name and version are read, rather than Typst's whole
+/// package manifest, because only those two decide whether the tree is the one
+/// the specification names. Everything else the declaration holds is the
+/// compiler's to interpret and to reject.
+fn verify_package_declaration(
+    spec: &PackageSpec,
+    files: &BTreeMap<String, Bytes>,
+) -> Result<(), String> {
+    let Some(data) = files.get(PACKAGE_DECLARATION_PATH) else {
+        return Err(format!("the tree holds no `{PACKAGE_DECLARATION_PATH}`"));
+    };
+    let text = data
+        .as_str()
+        .map_err(|error| format!("`{PACKAGE_DECLARATION_PATH}` is not valid UTF-8: {error}"))?;
+    let declaration: SuppliedPackageDeclaration = toml::from_str(text).map_err(|error| {
+        format!(
+            "`{PACKAGE_DECLARATION_PATH}` is malformed: {}",
+            error.message()
+        )
+    })?;
+
+    if declaration.package.name != spec.name.as_str() {
+        return Err(format!(
+            "`{PACKAGE_DECLARATION_PATH}` declares the name `{}`",
+            declaration.package.name
+        ));
+    }
+    if declaration.package.version != spec.version {
+        return Err(format!(
+            "`{PACKAGE_DECLARATION_PATH}` declares the version {}",
+            declaration.package.version
+        ));
+    }
+    Ok(())
+}
+
+/// The part of a supplied tree's declaration that names which package it is.
+#[derive(serde::Deserialize)]
+struct SuppliedPackageDeclaration {
+    package: DeclaredPackage,
+}
+
+/// The specification one supplied Complete Package Tree declares itself
+/// under.
+#[derive(serde::Deserialize)]
+struct DeclaredPackage {
+    name: String,
+    version: PackageVersion,
+}
+
 /// One supplied Complete Package Tree, keyed by canonical package-relative
 /// path.
 struct CanonicalPackageTree {
     files: BTreeMap<String, Bytes>,
     disposition: PackageDisposition,
+}
+
+/// The package specifications one representative request asked for, split by
+/// whether the supplied trees covered them.
+#[derive(Default)]
+struct ObservedPackages {
+    /// Specifications a supplied tree covers, which become Package
+    /// Requirements.
+    supplied: Vec<PackageSpec>,
+    /// Specifications no supplied tree covers, which creation reports so the
+    /// caller can resolve them and invoke creation again.
+    missing: Vec<PackageSpec>,
 }
 
 /// The world the representative request compiles against: supplied bytes and
@@ -367,17 +502,30 @@ struct SuppliedWorld<'a> {
 }
 
 impl SuppliedWorld<'_> {
-    /// The packages the representative request read a file of, in canonical
-    /// specification order.
-    fn observed_packages(&mut self) -> Vec<PackageSpec> {
+    /// The packages the representative request asked for a file of, split by
+    /// whether a supplied tree covers them, each in canonical specification
+    /// order.
+    ///
+    /// Both halves come from the requests the compiler made, not from what its
+    /// diagnostics said about them.
+    fn observed_packages(&mut self) -> ObservedPackages {
         let mut specs: BTreeMap<String, PackageSpec> = BTreeMap::new();
-        let (_, dependencies) = self.files.dependencies();
+        let (loader, dependencies) = self.files.dependencies();
         for id in dependencies {
             if let VirtualRoot::Package(spec) = id.root() {
                 specs.insert(spec.to_string(), spec.clone());
             }
         }
-        specs.into_values().collect()
+
+        let mut observed = ObservedPackages::default();
+        for (key, spec) in specs {
+            if loader.packages.contains_key(&key) {
+                observed.supplied.push(spec);
+            } else {
+                observed.missing.push(spec);
+            }
+        }
+        observed
     }
 
     /// The selected faces in candidate catalog order, each with the

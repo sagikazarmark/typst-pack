@@ -261,7 +261,7 @@ let request = CreationRequest::new(project, creation_timestamp)
         CandidateFontContainer::embedded(font_bytes),
     ]))
     .package_tree(ResolvedPackageTree::embedded(spec, package_files));
-let issued = create(&request)?;
+let issued = create(&request)?.into_issued().expect("no package is missing");
 let bytes = issued.pack.to_bytes()?;
 ```
 
@@ -274,6 +274,44 @@ does not compile fails creation instead of issuing an incomplete pack. The
 request is an owned value the core retains nothing of, so it can be run again.
 Obtaining its inputs is Creation Preparation, which belongs to the caller;
 `Packer` is the reference filesystem Creation Adapter.
+
+Package requirements can only be discovered by compiling, so creation resolves
+package acquisition through a resumable protocol rather than a callback. A
+request that read a package no supplied tree covers reports that exact
+specification instead of issuing a pack, which is a normal outcome and not a
+failure. The caller resolves it however its host allows and invokes creation
+again with the same request values and the tree added:
+
+```rust,ignore
+use typst_pack::{create, CreationOutcome, CreationRequest, ResolvedPackageTree};
+
+let mut resolved: Vec<ResolvedPackageTree> = Vec::new();
+let issued = loop {
+    let request = CreationRequest::new(project.clone(), creation_timestamp)
+        .package_trees(resolved.iter().cloned());
+    match create(&request)? {
+        CreationOutcome::Issued(issued) => break issued,
+        // Acquire each reported specification however this host allows: from a
+        // cache, over an asynchronous transport, or in a later request.
+        CreationOutcome::MissingPackages(missing) => {
+            for spec in missing {
+                resolved.push(acquire_tree(&spec)?);
+            }
+        }
+    }
+};
+```
+
+Reported specifications come from the package file requests the compiler made,
+never from diagnostic text, and always carry an exact version, because a Typst
+import specification always does. Because a failed import ends module
+evaluation, one round reports what that round reached, and a project needing
+several packages completes over repeated invocation. Nothing is retained
+between invocations, so a resume step is valid across a host request boundary
+and nothing in the core is `async`. A tree that does not declare the
+specification it was supplied under is the distinct
+`CreationError::MismatchedPackageTree` failure, so a loop that would otherwise
+never progress gets a diagnosis instead.
 
 Compilation-time Pack Overrides replace contained project-file bytes in memory:
 
