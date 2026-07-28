@@ -6,10 +6,10 @@ updates:
     schedule:
       interval: daily
     groups:
-      typst:
+      cargo-typst:
         patterns:
           - "typst*"
-      all:
+      cargo:
         patterns:
           - "*"
         exclude-patterns:
@@ -20,7 +20,7 @@ updates:
     schedule:
       interval: daily
     groups:
-      all:
+      github-actions:
         patterns:
           - "*"
     exclude-paths:
