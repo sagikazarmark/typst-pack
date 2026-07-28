@@ -183,10 +183,7 @@ pub(crate) struct CandidateFonts {
     faces: Vec<CandidateFontFace>,
 }
 
-// Only creation compiles against candidate faces. ADR-0008 puts creation in
-// the featureless core; until that operation lands, the filesystem Creation
-// Adapter is its only caller.
-#[cfg_attr(not(feature = "fs"), allow(dead_code))]
+// Only creation compiles against candidate faces.
 impl CandidateFonts {
     /// The selection metadata official Typst chooses faces from.
     pub(crate) fn book(&self) -> &LazyHash<FontBook> {

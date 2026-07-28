@@ -22,7 +22,7 @@ use typst_kit::files::{FileLoader, FileStore, FsRoot, SystemFiles};
 use typst_kit::fonts::FontPath;
 
 use crate::compile::TypstTarget;
-use crate::embedded::EmbeddedTypst;
+use crate::creation::compile_creation_target;
 #[cfg(feature = "embedded-fonts")]
 use crate::font_catalog::typst_embedded_font_containers;
 use crate::font_catalog::{
@@ -683,28 +683,6 @@ impl FileLoader for PrimaryLoader {
             Arc::clone(cache.entry(id).or_default())
         };
         entry.get_or_init(|| self.system.load(id)).clone()
-    }
-}
-
-fn compile_creation_target(
-    world: &dyn World,
-    target: TypstTarget,
-) -> Warned<Result<(), EcoVec<SourceDiagnostic>>> {
-    match target {
-        TypstTarget::Paged => {
-            let Warned { output, warnings } = EmbeddedTypst::compile_paged(world);
-            Warned {
-                output: output.map(|_| ()),
-                warnings,
-            }
-        }
-        TypstTarget::Html => {
-            let Warned { output, warnings } = EmbeddedTypst::compile_html(world);
-            Warned {
-                output: output.map(|_| ()),
-                warnings,
-            }
-        }
     }
 }
 

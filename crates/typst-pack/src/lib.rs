@@ -9,6 +9,7 @@ pub const VERSION: &str = concat!(
 );
 
 mod compile;
+mod creation;
 mod embedded;
 mod extract;
 mod font_catalog;
@@ -42,6 +43,9 @@ pub use compile::{
     PageSelection, PdfOutputSpecification, PdfStandardsValidationError, PngOutputSpecification,
     RequestValueOrigin, SvgOutputSpecification, TracepointKind, TypstInputsInventory, TypstTarget,
     compile, parse_page_selection,
+};
+pub use creation::{
+    CreationError, CreationRequest, IssuedPack, PackageDisposition, ResolvedPackageTree, create,
 };
 #[cfg(feature = "fs")]
 pub use extract::{ExtractError, ExtractOptions, ExtractReport, extract};

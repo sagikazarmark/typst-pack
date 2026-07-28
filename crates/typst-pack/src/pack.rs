@@ -707,6 +707,14 @@ impl Pack {
             .map_err(|error| error.to_string())
     }
 
+    /// Canonicalizes a supplied package-relative path, so that a tree is
+    /// looked up and contained under the same path.
+    pub(crate) fn canonical_package_path(path: &str) -> Result<String, String> {
+        canonical_path(PackPathRole::PackageFile, path)
+            .map(CanonicalPath::into_string)
+            .map_err(|error| error.to_string())
+    }
+
     /// The vendored packages and their files.
     pub fn packages(
         &self,
