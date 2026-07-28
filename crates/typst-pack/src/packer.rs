@@ -1,33 +1,45 @@
-//! Packing the structural closure of a project directory.
+//! The reference Creation Adapter: Creation Preparation over a project
+//! directory.
+//!
+//! The adapter acquires and the core transforms. It lists and reads the
+//! project, composes the Candidate Font Catalog out of the font sources the
+//! host offers, obtains the Complete Package Trees the core reports as
+//! missing, and resolves the creation timestamp; Pack Creation itself runs in
+//! the core over those bytes.
+//!
+//! Because the bytes it acquires come from mutable storage, this adapter also
+//! revalidates them before the Pack is returned, which is the Creation
+//! Evidence Fence. See [`Packer`] for the advisory obligation it discharges by
+//! doing so.
 
 #![cfg(feature = "fs")]
 
-use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt;
 #[cfg(feature = "diagnostics")]
 use std::path::Path;
 use std::path::PathBuf;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::Arc;
 
 use ecow::EcoVec;
-use typst::diag::{FileError, FileResult, SourceDiagnostic, Warned};
+use typst::diag::{FileError, FileResult, SourceDiagnostic};
 use typst::foundations::{Bytes, Datetime, Dict, Duration};
 use typst::syntax::package::PackageSpec;
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook, FontInfo};
 use typst::utils::LazyHash;
 use typst::{Feature, Library, LibraryExt, World};
-use typst_kit::datetime::Time;
-use typst_kit::files::{FileLoader, FileStore, FsRoot, SystemFiles};
-use typst_kit::fonts::FontPath;
+use typst_kit::files::{FileLoader, FileStore};
+use typst_kit::fonts::{FontPath, FontStore};
 
 use crate::compile::TypstTarget;
-use crate::creation::compile_creation_target;
+use crate::creation::{
+    CreationError, CreationOutcome, CreationRequest, IssuedPack, PackageDisposition, create,
+};
 #[cfg(feature = "embedded-fonts")]
 use crate::font_catalog::typst_embedded_font_containers;
-use crate::font_catalog::{
-    CandidateFontCatalog, CandidateFontContainer, CandidateFonts, FontDisposition,
-};
+use crate::font_catalog::{CandidateFontCatalog, CandidateFontContainer, FontDisposition};
+use crate::fs_packages::AcquiredPackages;
 use crate::fs_project;
 use crate::ignore_policy::ProjectIgnorePolicyError;
 use crate::manifest::PackMetadata;
@@ -35,13 +47,20 @@ use crate::pack::{Pack, PackBuildError};
 use crate::project_snapshot::{ProjectSnapshot, ProjectSnapshotError};
 use crate::world::system_packages;
 
-type PackageEvidence = (PackageSpec, PathBuf, Vec<(String, Bytes)>);
-
 /// Packs a Typst project directory into a [`Pack`].
 ///
 /// The packer snapshots every eligible regular file beneath the project root,
 /// then performs one representative compile to select package and font
 /// dependencies. Compiler observations never select project files.
+///
+/// It is the reference Creation Adapter: it acquires the project, the
+/// Candidate Font Catalog, and the package trees creation reports as missing,
+/// and [`create`](crate::create) selects requirements over those bytes. As an
+/// adapter over mutable storage, it also discharges the advisory obligation to
+/// establish that its acquired bytes represent one consistent source state:
+/// everything it acquired is revalidated before the Pack is returned, and
+/// creation fails with [`PackerError::CreationEvidenceChanged`] when any of it
+/// changed meanwhile.
 pub struct Packer {
     root: PathBuf,
     entrypoint: PathBuf,
@@ -249,14 +268,13 @@ impl Packer {
             &root,
             entrypoint.get_without_slash(),
         )?);
-        let mut builder = Pack::builder(snapshot.entrypoint());
 
-        let packages = system_packages(
+        let packages = Arc::new(AcquiredPackages::new(system_packages(
             self.package_path.as_deref(),
             self.package_cache_path.as_deref(),
             self.offline,
             self.certificate.as_deref(),
-        );
+        )));
 
         let font_sources = FontSources {
             system: self.system_fonts,
@@ -266,144 +284,174 @@ impl Packer {
             include_typst_embedded: self.include_typst_embedded_fonts,
         };
         let font_catalog = font_sources.compose();
-        let fonts = font_catalog.expand();
 
-        let primary = Arc::new(PrimaryLoader {
-            system: SystemFiles::new(FsRoot::new(root.clone()), packages),
-            project: Arc::clone(&snapshot),
-            cache: Mutex::new(HashMap::new()),
-        });
+        // The core consults no wall clock, so the adapter resolves the
+        // representative request's Document Time from the host's.
         let creation_timestamp = self.creation_timestamp.unwrap_or_else(|| {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map_or(0, |duration| duration.as_secs() as i64)
         });
-        let time = Time::fixed_timestamp(creation_timestamp)
-            .map_err(|error| PackerError::InvalidTimestamp(error.to_string()))?;
-        let mut world = CreationWorld {
+
+        let mut request =
+            CreationRequest::new(ProjectSnapshot::clone(&snapshot), creation_timestamp)
+                .font_catalog(font_catalog.clone())
+                .target(self.target)
+                .inputs(self.inputs.clone());
+        for feature in &self.features {
+            request = request.feature(*feature);
+        }
+        if let Some(metadata) = self.metadata.clone() {
+            request = request.metadata(metadata);
+        }
+
+        let mut world = AcquiredWorld {
             root: root.clone(),
             #[cfg(feature = "diagnostics")]
             workdir: std::env::current_dir()
                 .ok()
                 .map(|path| path.canonicalize().unwrap_or(path)),
-            library: LazyHash::new(
-                Library::builder()
-                    .with_inputs(self.inputs.clone())
-                    .with_features(self.features.iter().copied().collect())
-                    .build(),
-            ),
-            main: RootedPath::new(VirtualRoot::Project, entrypoint.clone()).intern(),
-            sources: FileStore::new(Arc::clone(&primary)),
-            files: FileStore::new(primary),
-            fonts,
-            used_font_indices: Mutex::new(BTreeSet::new()),
-            time,
+            library: LazyHash::new(Library::builder().build()),
+            main: RootedPath::new(VirtualRoot::Project, entrypoint).intern(),
+            files: FileStore::new(AcquiredLoader {
+                project: Arc::clone(&snapshot),
+                packages: Arc::clone(&packages),
+            }),
+            fonts: FontStore::new(),
         };
 
-        let target = self.target;
+        let disposition = if self.vendor_packages {
+            PackageDisposition::Embedded
+        } else {
+            PackageDisposition::External
+        };
         let mut timer = typst_kit::timer::Timer::new_or_placeholder(self.timings);
-        let mut compilation = None;
-        let timings = timer.record(&mut world, |world| {
-            compilation = Some(compile_creation_target(world, target));
+        let mut creation = None;
+        let timings = timer.record(&mut world, |_| {
+            creation = Some(resolve_and_create(request, &packages, disposition));
         });
-        let Some(Warned { output, warnings }) = compilation else {
+        let Some(creation) = creation else {
             return Err(PackerError::Timings(
                 timings
-                    .expect_err("timer did not execute creation compilation")
+                    .expect_err("timer did not execute creation")
                     .to_string(),
             ));
         };
         *timing_error = timings
             .err()
             .map(|error| PackerError::Timings(error.to_string()));
-        if let Err(errors) = output {
-            return creation_compile_error(world, errors, warnings);
-        }
+        let issued = match creation {
+            Ok(issued) => issued,
+            Err(error) => return Err(error.into_packer_error(world)),
+        };
+
         #[cfg(test)]
         if let Some(hook) = &self.after_creation_hook {
             hook();
         }
 
-        let mut package_evidence = Vec::new();
-        let mut package_files: BTreeMap<String, (PackageSpec, FileId)> = BTreeMap::new();
-        let (source_dependencies, file_dependencies, _) = world.take_dependency_observations();
-        for id in source_dependencies.into_iter().chain(file_dependencies) {
-            if let VirtualRoot::Package(spec) = id.root() {
-                package_files
-                    .entry(spec.to_string())
-                    .or_insert_with(|| (spec.clone(), id));
-            }
-        }
-
-        for (path, data) in snapshot.files() {
-            builder = builder.file(path, data.to_vec())?;
-        }
-
-        // Packages.
-        for (spec, id) in package_files.values() {
-            let package_root =
-                world
-                    .files
-                    .loader()
-                    .root(*id)
-                    .map_err(|err| PackerError::Package {
-                        spec: spec.clone(),
-                        message: err.to_string(),
-                    })?;
-            let tree = crate::world::read_complete_package_tree(package_root.path()).map_err(
-                |message| PackerError::Package {
-                    spec: spec.clone(),
-                    message,
-                },
-            )?;
-            package_evidence.push((spec.clone(), package_root.path().to_owned(), tree.clone()));
-            for (path, data) in tree {
-                builder = if self.vendor_packages {
-                    builder.package_file(spec.clone(), path, data.to_vec())?
-                } else {
-                    builder.external_package_file(spec.clone(), path, data.to_vec())?
-                };
-            }
-        }
-
-        // Project selected faces back into the original candidate catalog
-        // order, each under the disposition its container carries.
-        for (font, disposition) in world.used_fonts() {
-            builder = if disposition.is_embedded() {
-                builder.font(font.data().to_vec(), font.index())?
-            } else {
-                builder.external_font(font.data().to_vec(), font.index())?
-            };
-        }
-
-        if let Some(metadata) = self.metadata {
-            builder = builder.metadata(metadata);
-        }
-
+        // The Creation Evidence Fence: the Pack the core issued describes the
+        // bytes this adapter acquired, so it is withheld unless those bytes
+        // still agree with the filesystem they came from.
         fs_project::revalidate(&snapshot, &root)?;
-        revalidate_package_evidence(&package_evidence)?;
+        packages.revalidate()?;
         font_sources.revalidate(&font_catalog)?;
-        let pack = builder.build()?;
 
         Ok(PackOutcome {
-            pack,
-            warnings,
+            pack: issued.pack,
+            warnings: issued.warnings,
             #[cfg(feature = "diagnostics")]
             world,
         })
     }
 }
 
-fn creation_compile_error(
-    world: CreationWorld,
-    errors: EcoVec<SourceDiagnostic>,
-    warnings: EcoVec<SourceDiagnostic>,
-) -> Result<PackOutcome, PackerError> {
-    Err(PackerError::Compile {
-        world: Box::new(CreationDiagnosticContext { world }),
-        errors,
-        warnings,
-    })
+/// Runs creation over the acquired inputs, resolving what it reports as
+/// missing, until it issues a Pack.
+///
+/// Package requirements can only be discovered by compiling, so each round
+/// reports the exact specifications no supplied tree covers, the adapter
+/// obtains them through the Package Authority, and creation runs again over
+/// the larger set. Every round therefore either issues a Pack, adds a tree the
+/// request did not have, or fails.
+fn resolve_and_create(
+    mut request: CreationRequest,
+    packages: &AcquiredPackages,
+    disposition: PackageDisposition,
+) -> Result<IssuedPack, CreationFailure> {
+    let mut acquired: HashSet<String> = HashSet::new();
+    loop {
+        match create(&request)? {
+            CreationOutcome::Issued(issued) => return Ok(*issued),
+            CreationOutcome::MissingPackages(missing) => {
+                for spec in missing {
+                    if !acquired.insert(spec.to_string()) {
+                        // Creation reports only what no supplied tree covers,
+                        // so this cannot repeat; failing keeps that a
+                        // diagnosis rather than a loop that never progresses.
+                        return Err(CreationFailure::Adapter(PackerError::Package {
+                            message: "the representative creation compile did not accept the \
+                                      resolved package tree"
+                                .to_owned(),
+                            spec,
+                        }));
+                    }
+                    request = request.package_tree(packages.acquire(&spec, disposition)?);
+                }
+            }
+        }
+    }
+}
+
+/// A failure that ended one creation loop, before the adapter dressed it in
+/// its own vocabulary.
+enum CreationFailure {
+    /// The core issued no Pack.
+    Core(CreationError),
+    /// The adapter failed to acquire what the core reported as missing.
+    Adapter(PackerError),
+}
+
+impl CreationFailure {
+    /// Reports the failure in the filesystem adapter's vocabulary, handing a
+    /// failed representative compile the sources that render its diagnostics.
+    fn into_packer_error(self, world: AcquiredWorld) -> PackerError {
+        match self {
+            Self::Adapter(error) => error,
+            Self::Core(CreationError::Compile { errors, warnings }) => PackerError::Compile {
+                world: Box::new(CreationDiagnosticContext { world }),
+                errors,
+                warnings,
+            },
+            Self::Core(CreationError::InvalidTimestamp(message)) => {
+                PackerError::InvalidTimestamp(message)
+            }
+            Self::Core(CreationError::MismatchedPackageTree { spec, message }) => {
+                PackerError::Package { spec, message }
+            }
+            Self::Core(CreationError::InvalidPackagePath {
+                spec,
+                path,
+                message,
+            }) => PackerError::Package {
+                spec,
+                message: format!("file `{path}` cannot be represented: {message}"),
+            },
+            Self::Core(CreationError::Build(error)) => PackerError::Build(error),
+        }
+    }
+}
+
+impl From<CreationError> for CreationFailure {
+    fn from(error: CreationError) -> Self {
+        Self::Core(error)
+    }
+}
+
+impl From<PackerError> for CreationFailure {
+    fn from(error: PackerError) -> Self {
+        Self::Adapter(error)
+    }
 }
 
 /// The result of a successful [`Packer::pack`] run.
@@ -413,7 +461,7 @@ pub struct PackOutcome {
     /// Warnings emitted by the representative creation compile.
     pub warnings: EcoVec<SourceDiagnostic>,
     #[cfg(feature = "diagnostics")]
-    pub(crate) world: CreationWorld,
+    pub(crate) world: AcquiredWorld,
 }
 
 /// Opaque source context retained for first-party creation diagnostics.
@@ -422,7 +470,7 @@ pub struct PackOutcome {
 #[derive(Debug)]
 pub struct CreationDiagnosticContext {
     #[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
-    pub(crate) world: CreationWorld,
+    pub(crate) world: AcquiredWorld,
 }
 
 /// A failure while packing a project directory.
@@ -499,31 +547,24 @@ impl From<ProjectSnapshotError> for PackerError {
     }
 }
 
-/// The private snapshot-backed world used for creation compilation.
-pub(crate) struct CreationWorld {
+/// The bytes one creation acquired, as a world.
+///
+/// It compiles nothing: the representative request runs in the core, over the
+/// same bytes. This world exists so that what the adapter acquired can still be
+/// presented afterwards — creation diagnostics render their source context and
+/// timing spans resolve their file and line from here, without reading the
+/// project or a package tree a second time.
+pub(crate) struct AcquiredWorld {
     root: PathBuf,
     #[cfg(feature = "diagnostics")]
     workdir: Option<PathBuf>,
     library: LazyHash<Library>,
     main: FileId,
-    sources: FileStore<Arc<PrimaryLoader>>,
-    files: FileStore<Arc<PrimaryLoader>>,
-    fonts: CandidateFonts,
-    used_font_indices: Mutex<BTreeSet<usize>>,
-    time: Time,
+    files: FileStore<AcquiredLoader>,
+    fonts: FontStore,
 }
 
-impl CreationWorld {
-    /// The selected faces in candidate catalog order, each with the
-    /// disposition its container carries.
-    fn used_fonts(&self) -> Vec<(Font, FontDisposition)> {
-        self.used_font_indices
-            .lock()
-            .expect("used font index lock poisoned")
-            .iter()
-            .filter_map(|index| Some((self.fonts.font(*index)?, self.fonts.disposition(*index)?)))
-            .collect()
-    }
+impl AcquiredWorld {
     /// The canonicalized project root.
     #[cfg(feature = "diagnostics")]
     fn root(&self) -> &Path {
@@ -534,34 +575,22 @@ impl CreationWorld {
     fn workdir(&self) -> Option<&Path> {
         self.workdir.as_deref()
     }
-
-    fn take_dependency_observations(&mut self) -> (Vec<FileId>, Vec<FileId>, BTreeSet<usize>) {
-        let (_, sources) = self.sources.dependencies();
-        let sources = sources.collect();
-        let (_, files) = self.files.dependencies();
-        let files = files.collect();
-        let fonts = self
-            .used_font_indices
-            .lock()
-            .expect("used font index lock poisoned")
-            .clone();
-        (sources, files, fonts)
-    }
 }
 
-impl fmt::Debug for CreationWorld {
+impl fmt::Debug for AcquiredWorld {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("CreationWorld")
+        f.debug_struct("AcquiredWorld")
             .field("root", &self.root)
             .finish_non_exhaustive()
     }
 }
 
-impl World for CreationWorld {
+impl World for AcquiredWorld {
     fn library(&self) -> &LazyHash<Library> {
         &self.library
     }
 
+    /// No face at all: presentation resolves file requests, never fonts.
     fn book(&self) -> &LazyHash<FontBook> {
         self.fonts.book()
     }
@@ -571,31 +600,26 @@ impl World for CreationWorld {
     }
 
     fn source(&self, id: FileId) -> FileResult<Source> {
-        self.sources.source(id)
+        self.files.source(id)
     }
 
     fn file(&self, id: FileId) -> FileResult<Bytes> {
         self.files.file(id)
     }
 
-    fn font(&self, index: usize) -> Option<Font> {
-        let font = self.fonts.font(index);
-        if font.is_some() {
-            self.used_font_indices
-                .lock()
-                .expect("used font index lock poisoned")
-                .insert(index);
-        }
-        font
+    fn font(&self, _index: usize) -> Option<Font> {
+        None
     }
 
-    fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
-        self.time.today(offset)
+    /// Absent: the representative request's Document Time is the core's, and
+    /// presentation evaluates no document code.
+    fn today(&self, _offset: Option<Duration>) -> Option<Datetime> {
+        None
     }
 }
 
 #[cfg(feature = "diagnostics")]
-impl typst_kit::diagnostics::DiagnosticWorld for CreationWorld {
+impl typst_kit::diagnostics::DiagnosticWorld for AcquiredWorld {
     fn name(&self, id: FileId) -> String {
         match id.root() {
             VirtualRoot::Project => id
@@ -656,45 +680,22 @@ fn relative_path(path: &Path, base: &Path) -> Option<PathBuf> {
     Some(relative.iter().map(|part| part.as_os_str()).collect())
 }
 
-struct PrimaryLoader {
-    system: SystemFiles,
+/// Serves file requests from the bytes the adapter acquired, and from nothing
+/// else: no request reaches the filesystem a second time.
+struct AcquiredLoader {
     project: Arc<ProjectSnapshot>,
-    cache: Mutex<HashMap<FileId, Arc<OnceLock<FileResult<Bytes>>>>>,
+    packages: Arc<AcquiredPackages>,
 }
 
-impl PrimaryLoader {
-    fn root(&self, id: FileId) -> FileResult<FsRoot> {
-        self.system.root(id)
-    }
-}
-
-impl FileLoader for PrimaryLoader {
+impl FileLoader for AcquiredLoader {
     fn load(&self, id: FileId) -> FileResult<Bytes> {
-        if matches!(id.root(), VirtualRoot::Project) {
-            let path = id.vpath().get_without_slash();
-            return self
-                .project
-                .file(path)
-                .cloned()
-                .ok_or_else(|| FileError::NotFound(PathBuf::from(path)));
+        let path = id.vpath().get_without_slash();
+        match id.root() {
+            VirtualRoot::Project => self.project.file(path).cloned(),
+            VirtualRoot::Package(spec) => self.packages.file(spec, path),
         }
-        let entry = {
-            let mut cache = self.cache.lock().expect("primary file cache lock poisoned");
-            Arc::clone(cache.entry(id).or_default())
-        };
-        entry.get_or_init(|| self.system.load(id)).clone()
+        .ok_or_else(|| FileError::NotFound(PathBuf::from(path)))
     }
-}
-
-fn revalidate_package_evidence(packages: &[PackageEvidence]) -> Result<(), PackerError> {
-    for (spec, root, expected) in packages {
-        if crate::world::read_complete_package_tree(root).as_ref().ok() != Some(expected) {
-            return Err(PackerError::CreationEvidenceChanged {
-                path: spec.to_string(),
-            });
-        }
-    }
-    Ok(())
 }
 
 /// The font half of Creation Preparation for the filesystem adapter: the

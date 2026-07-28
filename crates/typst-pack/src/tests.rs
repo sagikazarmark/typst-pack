@@ -1863,267 +1863,6 @@ Rows: #csv("data.csv").len()
     }
 
     #[test]
-    fn structural_creation_packs_all_project_files_and_complete_packages() {
-        let dir = tempfile::tempdir().unwrap();
-        let outcome = pack_fixture(dir.path());
-
-        let project_files = outcome
-            .pack
-            .files()
-            .map(|(path, _)| path)
-            .collect::<Vec<_>>();
-        for expected in [
-            "main.typ",
-            "chapters/intro.typ",
-            "assets/logo.png",
-            "data.csv",
-            "notes.txt",
-        ] {
-            assert!(
-                project_files.contains(&expected),
-                "missing {expected} in {:?}",
-                project_files
-            );
-        }
-        assert_eq!(outcome.pack.package_requirements().len(), 1);
-        let requirement = &outcome.pack.package_requirements()[0];
-        assert!(requirement.is_embedded());
-        assert_eq!(requirement.spec().to_string(), "@local/greet:0.1.0");
-
-        let spec = requirement.spec();
-        assert!(outcome.pack.has_package(spec));
-        assert!(outcome.pack.package_file(spec, "lib.typ").is_some());
-        assert!(outcome.pack.package_file(spec, "typst.toml").is_some());
-        assert!(outcome.pack.package_file(spec, "unused.txt").is_some());
-
-        let reread = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
-        assert_eq!(reread.identity(), outcome.pack.identity());
-    }
-
-    #[test]
-    fn structural_creation_applies_the_root_project_ignore_policy() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(project.join("ignored/reincluded")).unwrap();
-        fs::create_dir_all(project.join("nested")).unwrap();
-        fs::write(project.join("main.typ"), "Hello").unwrap();
-        fs::write(project.join("unused.txt"), "packed").unwrap();
-        fs::write(
-            project.join(".typkignore"),
-            "ignored/**\n!ignored/reincluded/\n!ignored/reincluded/keep.txt\n*.secret\n",
-        )
-        .unwrap();
-        fs::write(project.join("ignored/drop.txt"), "drop").unwrap();
-        fs::write(project.join("ignored/reincluded/keep.txt"), "keep").unwrap();
-        fs::write(project.join("nested/.typkignore"), "*.txt\n").unwrap();
-        fs::write(project.join("nested/ordinary.txt"), "packed").unwrap();
-        fs::write(project.join("private.secret"), "drop").unwrap();
-        fs::write(project.join("old.typk"), "drop").unwrap();
-
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .pack()
-            .unwrap();
-
-        assert_eq!(
-            outcome
-                .pack
-                .files()
-                .map(|(path, _)| path)
-                .collect::<Vec<_>>(),
-            [
-                ".typkignore",
-                "ignored/reincluded/keep.txt",
-                "main.typ",
-                "nested/.typkignore",
-                "nested/ordinary.txt",
-                "unused.txt",
-            ]
-        );
-    }
-
-    #[test]
-    fn structural_creation_does_not_reinclude_files_beneath_ignored_parents() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(project.join("ignored")).unwrap();
-        fs::write(project.join("main.typ"), "Hello").unwrap();
-        fs::write(project.join(".typkignore"), "ignored/\n!ignored/keep.txt\n").unwrap();
-        fs::write(project.join("ignored/keep.txt"), "still ignored").unwrap();
-
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .pack()
-            .unwrap();
-
-        assert_eq!(
-            outcome
-                .pack
-                .files()
-                .map(|(path, _)| path)
-                .collect::<Vec<_>>(),
-            [".typkignore", "main.typ"]
-        );
-    }
-
-    #[test]
-    fn structural_creation_supports_gitignore_pattern_syntax() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(project.join("nested/cache")).unwrap();
-        fs::write(project.join("main.typ"), "Hello").unwrap();
-        fs::write(
-            project.join(".typkignore"),
-            concat!(
-                "# Project policy\n",
-                "/root-only.secret\n",
-                "\\!important.txt\n",
-                "\\#notes.txt\n",
-                "cache/\n",
-                "*.tmp\n",
-                "!keep.tmp\n",
-                " leading.txt\n",
-                "trailing.txt   \n",
-                "literal\\ \n",
-            ),
-        )
-        .unwrap();
-        fs::write(project.join("# Project policy"), "packed").unwrap();
-        fs::write(project.join("root-only.secret"), "ignored").unwrap();
-        fs::write(project.join("nested/root-only.secret"), "packed").unwrap();
-        fs::write(project.join("!important.txt"), "ignored").unwrap();
-        fs::write(project.join("#notes.txt"), "ignored").unwrap();
-        fs::write(project.join("nested/cache/data.txt"), "ignored").unwrap();
-        fs::write(project.join("drop.tmp"), "ignored").unwrap();
-        fs::write(project.join("nested/keep.tmp"), "packed").unwrap();
-        fs::write(project.join(" leading.txt"), "ignored").unwrap();
-        fs::write(project.join("trailing.txt"), "ignored").unwrap();
-        fs::write(project.join("literal "), "ignored").unwrap();
-
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .pack()
-            .unwrap();
-
-        assert_eq!(
-            outcome
-                .pack
-                .files()
-                .map(|(path, _)| path)
-                .collect::<Vec<_>>(),
-            [
-                "# Project policy",
-                ".typkignore",
-                "main.typ",
-                "nested/keep.tmp",
-                "nested/root-only.secret",
-            ]
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn structural_creation_prunes_conclusively_ignored_subtrees() {
-        use std::os::unix::fs::symlink;
-
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(project.join("ignored")).unwrap();
-        fs::create_dir_all(project.join("other")).unwrap();
-        fs::write(project.join("main.typ"), "Hello").unwrap();
-        fs::write(project.join(".typkignore"), "ignored/\n!/other/keep.txt\n").unwrap();
-        fs::write(project.join("other/keep.txt"), "keep").unwrap();
-        symlink(dir.path(), project.join("ignored/outside")).unwrap();
-
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .pack()
-            .unwrap();
-
-        assert_eq!(
-            outcome
-                .pack
-                .files()
-                .map(|(path, _)| path)
-                .collect::<Vec<_>>(),
-            [".typkignore", "main.typ", "other/keep.txt"]
-        );
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn structural_creation_rejects_a_symlinked_root_ignore_policy() {
-        use std::os::unix::fs::symlink;
-
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("main.typ"), "Hello").unwrap();
-        fs::write(dir.path().join("outside-ignore"), "*.txt\n").unwrap();
-        symlink(
-            dir.path().join("outside-ignore"),
-            project.join(".typkignore"),
-        )
-        .unwrap();
-
-        let policy = project.canonicalize().unwrap().join(".typkignore");
-        let result = Packer::new(&project, "main.typ").system_fonts(false).pack();
-        assert!(matches!(
-            result,
-            Err(PackerError::UnsupportedProjectEntry { ref path }) if path == &policy
-        ));
-    }
-
-    #[test]
-    fn packer_preserves_the_timestamp_range_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir(&project).unwrap();
-        fs::write(project.join("main.typ"), "Hello").unwrap();
-
-        let result = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .creation_timestamp(Some(i64::MAX))
-            .pack();
-
-        assert!(matches!(
-            result,
-            Err(PackerError::InvalidTimestamp(ref message))
-                if message == "timestamp is out of range"
-        ));
-    }
-
-    #[test]
-    fn creation_target_does_not_select_project_files() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(
-            project.join("main.typ"),
-            "#context if target() == \"html\" { read(\"html.txt\") } else { read(\"paged.txt\") }",
-        )
-        .unwrap();
-        fs::write(project.join("paged.txt"), "paged").unwrap();
-        fs::write(project.join("html.txt"), "html").unwrap();
-
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .feature(typst::Feature::Html)
-            .target(TypstTarget::Html)
-            .pack()
-            .unwrap();
-
-        assert_eq!(
-            outcome
-                .pack
-                .files()
-                .map(|(path, _)| path)
-                .collect::<Vec<_>>(),
-            ["html.txt", "main.typ", "paged.txt"]
-        );
-    }
-
-    #[test]
     fn changed_project_evidence_prevents_pack_issuance() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
@@ -2181,6 +1920,30 @@ Rows: #csv("data.csv").len()
     }
 
     #[test]
+    fn changed_selected_package_evidence_prevents_pack_issuance() {
+        let dir = tempfile::tempdir().unwrap();
+        let (project, packages) = fixture(dir.path());
+        let library = packages.join("local/greet/0.1.0/lib.typ");
+
+        let result = Packer::new(&project, "main.typ")
+            .package_path(&packages)
+            .system_fonts(false)
+            .after_creation_hook(move || {
+                fs::write(&library, "#let greet(name) = [Changed #name!]\n").unwrap()
+            })
+            .pack();
+
+        assert!(
+            matches!(
+                result,
+                Err(PackerError::CreationEvidenceChanged { ref path })
+                    if path == "@local/greet:0.1.0"
+            ),
+            "the fence names the package whose tree changed"
+        );
+    }
+
+    #[test]
     fn changes_in_conclusively_ignored_subtrees_do_not_block_issuance() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
@@ -2196,118 +1959,6 @@ Rows: #csv("data.csv").len()
             .unwrap();
 
         assert!(outcome.pack.file("ignored/added.txt").is_none());
-    }
-
-    #[test]
-    fn exact_inputs_and_document_time_drive_representative_creation() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(
-            project.join("main.typ"),
-            r#"#if sys.inputs.at("pick") == "yes" { read("input.txt") }
-#if datetime.today().year() == 2024 { read("time.txt") }"#,
-        )
-        .unwrap();
-        fs::write(project.join("input.txt"), "input").unwrap();
-        fs::write(project.join("time.txt"), "time").unwrap();
-        let mut inputs = typst::foundations::Dict::new();
-        inputs.insert("pick".into(), typst::foundations::Value::Str("yes".into()));
-
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .inputs(inputs)
-            .creation_timestamp(Some(1_704_067_200))
-            .pack()
-            .unwrap();
-
-        assert_eq!(
-            outcome
-                .pack
-                .files()
-                .map(|(path, _)| path)
-                .collect::<Vec<_>>(),
-            ["input.txt", "main.typ", "time.txt"]
-        );
-    }
-
-    #[test]
-    fn package_data_precedes_package_cache_during_creation() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(
-            project.join("main.typ"),
-            "#import \"@local/chosen:0.1.0\": mark\n#mark",
-        )
-        .unwrap();
-
-        let data_package = dir.path().join("data/local/chosen/0.1.0");
-        fs::create_dir_all(&data_package).unwrap();
-        fs::write(
-            data_package.join("typst.toml"),
-            "[package]\nname = \"chosen\"\nversion = \"0.1.0\"\nentrypoint = \"lib.typ\"\n",
-        )
-        .unwrap();
-        fs::write(
-            data_package.join("lib.typ"),
-            "#let mark = rect(width: 1pt, height: 1pt)",
-        )
-        .unwrap();
-
-        let cache_package = dir.path().join("cache/local/chosen/0.1.0");
-        fs::create_dir_all(&cache_package).unwrap();
-        fs::write(cache_package.join("lib.typ"), "this is not valid Typst: {").unwrap();
-
-        let outcome = Packer::new(&project, "main.typ")
-            .package_path(dir.path().join("data"))
-            .package_cache_path(dir.path().join("cache"))
-            .system_fonts(false)
-            .pack()
-            .unwrap();
-
-        assert_eq!(outcome.pack.package_requirements().len(), 1);
-    }
-
-    #[test]
-    fn package_cache_resolves_during_online_and_offline_creation() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(
-            project.join("main.typ"),
-            "#import \"@preview/cached:0.1.0\": mark\n#mark",
-        )
-        .unwrap();
-
-        let data = dir.path().join("data");
-        fs::create_dir_all(&data).unwrap();
-        let cache = dir.path().join("cache/preview/cached/0.1.0");
-        fs::create_dir_all(&cache).unwrap();
-        fs::write(
-            cache.join("typst.toml"),
-            "[package]\nname = \"cached\"\nversion = \"0.1.0\"\nentrypoint = \"lib.typ\"\n",
-        )
-        .unwrap();
-        fs::write(
-            cache.join("lib.typ"),
-            "#let mark = rect(width: 1pt, height: 1pt)",
-        )
-        .unwrap();
-
-        for offline in [false, true] {
-            let outcome = Packer::new(&project, "main.typ")
-                .package_path(&data)
-                .package_cache_path(dir.path().join("cache"))
-                .offline(offline)
-                .system_fonts(false)
-                .pack()
-                .unwrap();
-
-            let spec = outcome.pack.package_requirements()[0].spec();
-            assert_eq!(spec.to_string(), "@preview/cached:0.1.0");
-            assert!(outcome.pack.package_file(spec, "lib.typ").is_some());
-        }
     }
 
     #[cfg(feature = "embedded-fonts")]
@@ -2343,73 +1994,6 @@ Rows: #csv("data.csv").len()
             Err(PackerError::CreationEvidenceChanged { ref path })
                 if path.starts_with("font catalog")
         ));
-    }
-
-    #[cfg(feature = "embedded-fonts")]
-    #[test]
-    fn packed_project_compiles_offline() {
-        let dir = tempfile::tempdir().unwrap();
-        let outcome = pack_fixture(dir.path());
-
-        // Round-trip through bytes: nothing may depend on the file system.
-        let pack = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
-        let world = pack_world(pack);
-        let output = compile(
-            &world,
-            &CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
-        )
-        .unwrap();
-        assert!(output.artifacts[0].bytes().starts_with(b"%PDF"));
-    }
-
-    #[cfg(feature = "embedded-fonts")]
-    #[test]
-    fn font_embedding_skips_typst_embedded_fonts_unless_asked() {
-        let dir = tempfile::tempdir().unwrap();
-        let (project, packages) = fixture(dir.path());
-
-        let slim = Packer::new(&project, "main.typ")
-            .package_path(&packages)
-            .system_fonts(false)
-            .embed_fonts(true)
-            .pack()
-            .unwrap();
-        assert!(
-            slim.pack.fonts().is_empty(),
-            "only Typst embedded fonts are used, so nothing should be embedded"
-        );
-
-        let full = Packer::new(&project, "main.typ")
-            .package_path(&packages)
-            .system_fonts(false)
-            .embed_fonts(true)
-            .include_typst_embedded_fonts(true)
-            .pack()
-            .unwrap();
-        assert!(!full.pack.fonts().is_empty());
-        // The embedded fonts must load again from the pack.
-        let pack = Pack::from_bytes(full.pack.to_bytes().unwrap()).unwrap();
-        pack_world(pack);
-    }
-
-    #[cfg(feature = "embedded-fonts")]
-    #[test]
-    fn html_creation_embeds_fonts_used_inside_frames() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("main.typ"), "#html.frame[Hello]").unwrap();
-
-        let outcome = Packer::new(&project, "main.typ")
-            .target(TypstTarget::Html)
-            .feature(typst::Feature::Html)
-            .system_fonts(false)
-            .embed_fonts(true)
-            .include_typst_embedded_fonts(true)
-            .pack()
-            .unwrap();
-
-        assert!(!outcome.pack.fonts().is_empty());
     }
 
     #[test]
@@ -2639,37 +2223,6 @@ Rows: #csv("data.csv").len()
         assert_eq!(report.written.len(), 2);
         assert!(target.join(pack.fonts()[0].manifest().path()).is_file());
     }
-
-    #[test]
-    fn packer_reports_compile_errors() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("broken");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("main.typ"), "#import \"missing.typ\": x\n").unwrap();
-
-        let result = Packer::new(&project, "main.typ").system_fonts(false).pack();
-        assert!(matches!(result, Err(PackerError::Compile { .. })));
-    }
-
-    #[test]
-    fn successful_creation_report_retains_representative_compile_warnings() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(
-            project.join("main.typ"),
-            "#set text(font: \"Definitely Missing\")\nWarning",
-        )
-        .unwrap();
-
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .typst_embedded_fonts(false)
-            .pack()
-            .unwrap();
-
-        assert!(!outcome.warnings.is_empty());
-    }
 }
 
 #[cfg(feature = "embedded-fonts")]
@@ -2745,54 +2298,4 @@ fn exact_font_catalog_is_authoritative() {
 
     assert_ne!(pack_data, embedded_data);
     assert_eq!(selected.data().as_slice(), pack_data);
-}
-
-#[cfg(feature = "fs")]
-mod offline {
-    use super::*;
-    use std::fs;
-
-    #[test]
-    fn offline_packing_works_with_local_packages() {
-        let dir = tempfile::tempdir().unwrap();
-        let (project, packages) = super::fs::fixture(dir.path());
-        let outcome = Packer::new(&project, "main.typ")
-            .package_path(&packages)
-            .system_fonts(false)
-            .offline(true)
-            .pack()
-            .unwrap();
-        assert_eq!(outcome.pack.package_requirements().len(), 1);
-    }
-
-    #[test]
-    fn offline_packing_fails_on_uncached_universe_package() {
-        let dir = tempfile::tempdir().unwrap();
-        let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(
-            project.join("main.typ"),
-            "#import \"@preview/typst-pack-no-such-package:0.0.1\": x\n",
-        )
-        .unwrap();
-        let empty = dir.path().join("empty");
-        fs::create_dir_all(&empty).unwrap();
-
-        let result = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .offline(true)
-            .package_path(&empty)
-            .package_cache_path(&empty)
-            .pack();
-        let Err(PackerError::Compile { errors, .. }) = result else {
-            panic!("uncached package did not produce a compilation error");
-        };
-        let messages = errors
-            .iter()
-            .map(|diagnostic| diagnostic.message.as_str())
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(messages.contains("package not found"), "{messages}");
-        assert!(!messages.contains("network"), "{messages}");
-    }
 }

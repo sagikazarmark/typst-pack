@@ -14,6 +14,8 @@ mod embedded;
 mod extract;
 mod font_catalog;
 #[cfg(feature = "fs")]
+mod fs_packages;
+#[cfg(feature = "fs")]
 mod fs_project;
 mod ignore_policy;
 mod manifest;

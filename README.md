@@ -273,7 +273,16 @@ retains the representative compile's warnings, and a representative request that
 does not compile fails creation instead of issuing an incomplete pack. The
 request is an owned value the core retains nothing of, so it can be run again.
 Obtaining its inputs is Creation Preparation, which belongs to the caller;
-`Packer` is the reference filesystem Creation Adapter.
+`Packer` is the reference filesystem Creation Adapter, implemented over
+`create` like any other adapter.
+
+Establishing that the acquired bytes represent one consistent source state is
+the adapter's own obligation, and it is advisory: creation holds owned bytes and
+has nothing to re-read, so an adapter acquiring from mutable storage without
+revalidating still conforms, and may issue a pack describing a source state that
+never existed simultaneously. `Packer` discharges it: it revalidates the
+project, the package trees it acquired, and the font catalog before returning
+the pack, and fails creation when any of them changed while it ran.
 
 Package requirements can only be discovered by compiling, so creation resolves
 package acquisition through a resumable protocol rather than a callback. A

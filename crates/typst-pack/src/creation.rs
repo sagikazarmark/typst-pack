@@ -79,6 +79,23 @@ impl ResolvedPackageTree {
         }
     }
 
+    /// Supplies a tree from entries the caller already holds as [`Bytes`], so
+    /// that an adapter that read them does not copy every file to hand them
+    /// over. Gated only because the reference adapter is the one caller that
+    /// holds them; creation itself needs no feature.
+    #[cfg(feature = "fs")]
+    pub(crate) fn from_entries(
+        spec: PackageSpec,
+        files: Vec<(String, Bytes)>,
+        disposition: PackageDisposition,
+    ) -> Self {
+        Self {
+            spec,
+            files,
+            disposition,
+        }
+    }
+
     /// Supplies a tree whose bytes are stored in the Pack.
     pub fn embedded<I, P, D>(spec: PackageSpec, files: I) -> Self
     where
@@ -294,6 +311,18 @@ pub enum CreationError {
 /// failed import ends module evaluation, one round reports what that round
 /// reached, and a project needing several packages completes over repeated
 /// invocation.
+///
+/// # Adapter obligation
+///
+/// Establishing that the acquired bytes represent one consistent source state
+/// is the obligation of whoever performed Creation Preparation, and it is
+/// advisory: creation holds owned bytes and has nothing to re-read, so an
+/// adapter acquiring from mutable storage without revalidating still conforms,
+/// and may issue a Pack describing a source state that never existed
+/// simultaneously. [`Packer`](crate::Packer), the reference filesystem
+/// adapter, discharges it by revalidating the project, the trees it acquired,
+/// and the font catalog before returning the Pack, and fails creation when any
+/// of them changed.
 pub fn create(request: &CreationRequest) -> Result<CreationOutcome, CreationError> {
     let packages = canonical_package_trees(request)?;
     let time = Time::fixed_timestamp(request.creation_timestamp)
@@ -608,7 +637,7 @@ impl FileLoader for SuppliedLoader<'_> {
 
 /// Runs the representative request for the selected Typst Target, keeping only
 /// what selects requirements: whether it compiled, and its warnings.
-pub(crate) fn compile_creation_target(
+fn compile_creation_target(
     world: &dyn World,
     target: TypstTarget,
 ) -> Warned<Result<(), EcoVec<SourceDiagnostic>>> {
