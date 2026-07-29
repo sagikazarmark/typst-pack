@@ -143,6 +143,7 @@ pub struct CreationRequest {
     creation_timestamp: i64,
     fonts: CandidateFontCatalog,
     packages: BTreeMap<String, ResolvedPackageTree>,
+    unresolvable: BTreeMap<String, PackageError>,
     target: TypstTarget,
     inputs: Dict,
     features: Vec<Feature>,
@@ -160,6 +161,7 @@ impl CreationRequest {
             creation_timestamp,
             fonts: CandidateFontCatalog::new(),
             packages: BTreeMap::new(),
+            unresolvable: BTreeMap::new(),
             target: TypstTarget::Paged,
             inputs: Dict::new(),
             features: Vec::new(),
@@ -186,6 +188,24 @@ impl CreationRequest {
         for tree in trees {
             self = self.package_tree(tree);
         }
+        self
+    }
+
+    /// Declares that Creation Preparation could not resolve one reported
+    /// specification, and the failure it met doing so.
+    ///
+    /// Creation stops reporting that specification as missing, and the
+    /// representative request fails at the file request that needed it,
+    /// carrying `failure` as its diagnostic. An acquisition failure is
+    /// therefore reported at the import that asked for the package rather than
+    /// beside it, which is the only place the caller's own reason and the
+    /// source location it belongs to can meet: the specifications creation
+    /// reports name a package, never the file that imported it.
+    ///
+    /// A tree supplied for the same specification takes precedence, so a
+    /// caller that resolves it after all simply supplies it.
+    pub fn unresolvable_package(mut self, spec: PackageSpec, failure: PackageError) -> Self {
+        self.unresolvable.insert(spec.to_string(), failure);
         self
     }
 
@@ -250,6 +270,11 @@ pub enum CreationOutcome {
     /// actually made, so a caller never parses diagnostic text to drive its
     /// loop, and every one carries an exact version, because a Typst import
     /// specification always does.
+    ///
+    /// A caller that cannot resolve one declares it through
+    /// [`CreationRequest::unresolvable_package`] rather than abandoning the
+    /// loop, so that its own failure is reported at the import that needed the
+    /// package.
     MissingPackages(Vec<PackageSpec>),
 }
 
@@ -311,7 +336,9 @@ pub enum CreationError {
 /// add their trees to the same request, and invoke creation again. Because a
 /// failed import ends module evaluation, one round reports what that round
 /// reached, and a project needing several packages completes over repeated
-/// invocation.
+/// invocation. A specification the caller cannot resolve ends the loop through
+/// [`CreationRequest::unresolvable_package`], which fails the next round's
+/// representative request at the import that needed it.
 ///
 /// # Adapter obligation
 ///
@@ -342,6 +369,7 @@ pub fn create(request: &CreationRequest) -> Result<CreationOutcome, CreationErro
         files: FileStore::new(SuppliedLoader {
             project: &request.project,
             packages,
+            unresolvable: &request.unresolvable,
         }),
         fonts: request.fonts.expand(),
         used_font_indices: Mutex::new(BTreeSet::new()),
@@ -551,9 +579,13 @@ impl SuppliedWorld<'_> {
         for (key, spec) in specs {
             if loader.packages.contains_key(&key) {
                 observed.supplied.push(spec);
-            } else {
+            } else if !loader.unresolvable.contains_key(&key) {
                 observed.missing.push(spec);
             }
+            // A specification the caller declared unresolvable is neither. The
+            // representative request already failed at it, carrying the
+            // caller's own reason, and reporting it again would ask for what
+            // the caller said it cannot supply.
         }
         observed
     }
@@ -611,6 +643,9 @@ impl World for SuppliedWorld<'_> {
 struct SuppliedLoader<'a> {
     project: &'a ProjectSnapshot,
     packages: BTreeMap<String, CanonicalPackageTree>,
+    /// The specifications the caller declared it could not resolve, and the
+    /// failure it met, which the request that needs one fails with.
+    unresolvable: &'a BTreeMap<String, PackageError>,
 }
 
 impl FileLoader for SuppliedLoader<'_> {
@@ -623,10 +658,17 @@ impl FileLoader for SuppliedLoader<'_> {
                 .cloned()
                 .ok_or_else(|| FileError::NotFound(path.into())),
             VirtualRoot::Package(spec) => {
-                let tree = self
-                    .packages
-                    .get(&spec.to_string())
-                    .ok_or_else(|| FileError::Package(PackageError::NotFound(spec.clone())))?;
+                let key = spec.to_string();
+                let Some(tree) = self.packages.get(&key) else {
+                    // A supplied tree first, so a caller that resolved a
+                    // specification it had declared unresolvable is served it.
+                    return Err(FileError::Package(
+                        self.unresolvable
+                            .get(&key)
+                            .cloned()
+                            .unwrap_or_else(|| PackageError::NotFound(spec.clone())),
+                    ));
+                };
                 tree.files
                     .get(path)
                     .cloned()

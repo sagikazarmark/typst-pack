@@ -10,6 +10,7 @@
 use std::path::PathBuf;
 use std::sync::Mutex;
 
+use typst::diag::PackageError;
 use typst::foundations::Bytes;
 use typst::syntax::package::PackageSpec;
 use typst_kit::packages::SystemPackages;
@@ -44,20 +45,20 @@ impl AcquiredPackages {
     ///
     /// The whole tree is read, not only the files the representative request
     /// went on to ask for, because the Pack contains the complete tree.
+    ///
+    /// Failure keeps the Package Authority's own typed reason, because that
+    /// reason is what creation carries back to the import that needed the
+    /// package.
     pub(crate) fn acquire(
         &self,
         spec: &PackageSpec,
         disposition: PackageDisposition,
-    ) -> Result<ResolvedPackageTree, PackerError> {
-        let package = |message: String| PackerError::Package {
-            spec: spec.clone(),
-            message,
-        };
-        let root = self
-            .authority
-            .obtain(spec)
-            .map_err(|error| package(error.to_string()))?;
-        let files = read_complete_package_tree(root.path()).map_err(package)?;
+    ) -> Result<ResolvedPackageTree, PackageError> {
+        let root = self.authority.obtain(spec)?;
+        // A tree the authority resolved but this adapter cannot read is its
+        // own failure, not the authority's verdict on the specification.
+        let files = read_complete_package_tree(root.path())
+            .map_err(|message| PackageError::Other(Some(message.into())))?;
 
         self.trees
             .lock()

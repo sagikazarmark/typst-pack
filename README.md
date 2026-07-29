@@ -93,6 +93,11 @@ compile's target, inputs, date, features, and control flow. The root
 `.typkignore` files are ordinary project files, and every `.typk` path is always
 excluded. Symlinks and other unignored non-regular entries are rejected.
 
+The `.typk` exclusion is a canonical path invariant rather than a walker rule,
+so it binds every route into a pack, including direct in-memory construction and
+reading one back. A pack built in memory before that invariant existed, holding
+a project path with a `.typk` segment, no longer reads.
+
 Creation runs one representative compile from those stabilized bytes to select
 exact package and font dependencies. `--target paged|html` is optional and
 defaults to `paged`; it does not restrict later output formats. This concrete
@@ -337,6 +342,17 @@ and nothing in the core is `async`. A tree that does not declare the
 specification it was supplied under is the distinct
 `CreationError::MismatchedPackageTree` failure, so a loop that would otherwise
 never progress gets a diagnosis instead.
+
+A specification the caller cannot resolve ends the loop through
+`CreationRequest::unresolvable_package`, which takes the caller's own
+`PackageError`. Creation stops reporting that specification and fails the next
+representative request at the import that needed it, carrying that error as its
+diagnostic. This is how an acquisition failure keeps a source location: the
+specifications creation reports name a package, never the file that imported
+one, so only a failed representative request can point at the import. `Packer`
+drives it, which is why an unresolvable package still fails with
+`PackerError::Compile` and a spanned diagnostic rather than beside the source
+that asked for it.
 
 Resolving a reported specification against the Typst Universe registry needs
 the registry layout and the archive encoding, not an HTTP client. The
