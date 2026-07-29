@@ -13,8 +13,9 @@ categories = ["command-line-utilities", "text-processing", "filesystem"]
 
 [features]
 default = []
-# Internal opt-in for controlled package downloader integration tests.
-_test-package-download-probe = []
+# Internal opt-in for controlled package downloader integration tests. It
+# replaces the downloader egress uses, so it implies the capability it probes.
+_test-package-download-probe = ["egress"]
 # Retain the source context needed by diagnostic presentation adapters.
 diagnostics = ["typst-kit/emit-diagnostics"]
 # Ship Typst's embedded fonts (Libertinus Serif, New Computer Modern, ...) so
@@ -26,17 +27,28 @@ embedded-fonts = ["typst-kit/embedded-fonts"]
 package-acquisition = ["dep:flate2", "dep:tar"]
 # Export independent pages in parallel.
 parallel = ["dep:rayon"]
-# Filesystem-based packing: structural snapshot acquisition, package download and caching,
-# system font scanning. Not available on wasm targets.
+# Filesystem-based packing: structural snapshot acquisition, local package
+# directories and cache, system font scanning. Links no transport, so a build
+# with this feature alone cannot download under any runtime configuration. Not
+# available on wasm targets.
 fs = [
-    "dep:env_proxy",
-    "dep:rustls-pemfile",
-    "dep:ureq",
     "dep:walkdir",
-    "dep:webpki-roots",
     "typst-kit/scan-fonts",
     "typst-kit/system-files",
     "typst-kit/timer",
+]
+# Network egress: downloading packages from the Typst Universe registry during
+# filesystem creation, with the custom certificate and package cache directory
+# that only a download needs. This is what links an HTTP client and TLS roots
+# into the build, so the absence of egress is verifiable from the dependency
+# graph.
+egress = [
+    "dep:env_proxy",
+    "dep:rustls-pemfile",
+    "dep:ureq",
+    "dep:webpki-roots",
+    "fs",
+    "package-acquisition",
 ]
 
 [dependencies]

@@ -1,11 +1,11 @@
 //! A complete Typst [`World`] backed by a [`Pack`].
 
 use std::collections::BTreeMap;
-#[cfg(feature = "fs")]
+#[cfg(feature = "egress")]
 use std::io::{self, BufReader, Read};
 use std::path::PathBuf;
 use std::sync::Arc;
-#[cfg(feature = "fs")]
+#[cfg(feature = "egress")]
 use std::sync::OnceLock;
 
 use typst::diag::{FileError, FileResult};
@@ -20,18 +20,17 @@ use typst_kit::fonts::FontStore;
 use crate::compile::DocumentTime;
 use crate::pack::{CompilationDependencySnapshot, Pack, PackageFiles};
 
-#[cfg(feature = "fs")]
+#[cfg(feature = "egress")]
 const USER_AGENT: &str = concat!("typst-pack/", env!("CARGO_PKG_VERSION"));
 
 // Integration tests execute a separate non-`cfg(test)` binary.
-#[cfg(all(
-    feature = "fs",
-    feature = "_test-package-download-probe",
-    debug_assertions
-))]
+#[cfg(all(feature = "_test-package-download-probe", debug_assertions))]
 const PACKAGE_DOWNLOAD_PROBE_ENV: &str = "TYPST_PACK_TEST_PACKAGE_DOWNLOAD_PROBE";
 
-#[cfg(feature = "fs")]
+/// The Package Authority a build with egress resolves specifications through:
+/// the local package directories, the package cache, and a download from the
+/// Typst Universe registry unless creation is offline.
+#[cfg(feature = "egress")]
 #[doc(hidden)]
 pub fn system_packages(
     package_path: Option<&std::path::Path>,
@@ -61,14 +60,14 @@ pub fn system_packages(
     )
 }
 
-#[cfg(feature = "fs")]
+#[cfg(feature = "egress")]
 struct RustlsDownloader {
     user_agent: &'static str,
     certificate: Option<PathBuf>,
     tls: OnceLock<Result<Option<Arc<ureq::rustls::ClientConfig>>, String>>,
 }
 
-#[cfg(feature = "fs")]
+#[cfg(feature = "egress")]
 impl RustlsDownloader {
     fn new(user_agent: &'static str, certificate: Option<PathBuf>) -> Self {
         Self {
@@ -103,7 +102,7 @@ impl RustlsDownloader {
     }
 }
 
-#[cfg(feature = "fs")]
+#[cfg(feature = "egress")]
 impl typst_kit::downloader::Downloader for RustlsDownloader {
     fn stream(
         &self,
@@ -135,7 +134,7 @@ impl typst_kit::downloader::Downloader for RustlsDownloader {
     }
 }
 
-#[cfg(feature = "fs")]
+#[cfg(feature = "egress")]
 fn system_packages_with_online(
     package_path: Option<&std::path::Path>,
     package_cache_path: Option<&std::path::Path>,
@@ -143,7 +142,44 @@ fn system_packages_with_online(
     certificate: Option<&std::path::Path>,
     online: impl FnOnce(Option<&std::path::Path>) -> typst_kit::packages::UniversePackages,
 ) -> typst_kit::packages::SystemPackages {
-    use typst_kit::packages::{FsPackages, SystemPackages, UniversePackages};
+    use typst_kit::packages::{SystemPackages, UniversePackages};
+
+    let (data, cache) = local_package_directories(package_path, package_cache_path);
+    let universe = if offline {
+        UniversePackages::new(OfflineDownloader)
+    } else {
+        online(certificate)
+    };
+
+    SystemPackages::from_parts(data, cache, universe)
+}
+
+/// The Package Authority a build without egress resolves specifications
+/// through: the local package directories and whichever package cache the host
+/// has. No download is reachable, whatever the offline switch says, because no
+/// transport is linked in to reach one with.
+#[cfg(all(feature = "fs", not(feature = "egress")))]
+pub(crate) fn local_packages(
+    package_path: Option<&std::path::Path>,
+) -> typst_kit::packages::SystemPackages {
+    use typst_kit::packages::{SystemPackages, UniversePackages};
+
+    let (data, cache) = local_package_directories(package_path, None);
+
+    SystemPackages::from_parts(data, cache, UniversePackages::new(OfflineDownloader))
+}
+
+/// The local package directory and package cache a Package Authority reads,
+/// each explicitly chosen or the host's own.
+#[cfg(feature = "fs")]
+fn local_package_directories(
+    package_path: Option<&std::path::Path>,
+    package_cache_path: Option<&std::path::Path>,
+) -> (
+    Option<typst_kit::packages::FsPackages>,
+    Option<typst_kit::packages::FsPackages>,
+) {
+    use typst_kit::packages::FsPackages;
 
     let data = match package_path {
         Some(path) => Some(FsPackages::new(path)),
@@ -153,13 +189,7 @@ fn system_packages_with_online(
         Some(path) => Some(FsPackages::new(path)),
         None => FsPackages::system_cache(),
     };
-    let universe = if offline {
-        UniversePackages::new(OfflineDownloader)
-    } else {
-        online(certificate)
-    };
-
-    SystemPackages::from_parts(data, cache, universe)
+    (data, cache)
 }
 
 #[cfg(feature = "fs")]
@@ -380,24 +410,20 @@ impl FileLoader for PackLoader {
 /// that package resolution never accesses the network: every download
 /// attempt fails as not found, so only local directories (or the pack
 /// itself) can satisfy dependencies.
+///
+/// This is a runtime guarantee, for a build that can reach the network. A build
+/// without the `egress` feature links no transport at all, so it resolves
+/// packages this way whatever its runtime configuration.
 #[cfg(feature = "fs")]
 pub struct OfflineDownloader;
 
-#[cfg(all(
-    feature = "fs",
-    feature = "_test-package-download-probe",
-    debug_assertions
-))]
+#[cfg(all(feature = "_test-package-download-probe", debug_assertions))]
 struct PackageDownloadProbe {
     certificate: Option<PathBuf>,
     output: PathBuf,
 }
 
-#[cfg(all(
-    feature = "fs",
-    feature = "_test-package-download-probe",
-    debug_assertions
-))]
+#[cfg(all(feature = "_test-package-download-probe", debug_assertions))]
 impl typst_kit::downloader::Downloader for PackageDownloadProbe {
     fn stream(
         &self,
@@ -431,7 +457,7 @@ impl typst_kit::downloader::Downloader for OfflineDownloader {
     }
 }
 
-#[cfg(all(test, feature = "fs"))]
+#[cfg(all(test, feature = "egress"))]
 mod tests {
     use super::*;
 

@@ -333,6 +333,10 @@ fn exact_inputs_and_document_time_drive_representative_creation() {
     );
 }
 
+/// The package cache is where a download lands, so choosing its directory is
+/// only offered by a build that can download; a build without egress reads
+/// whichever cache the host has.
+#[cfg(feature = "egress")]
 #[test]
 fn package_data_precedes_package_cache_during_creation() {
     let dir = tempfile::tempdir().unwrap();
@@ -371,6 +375,7 @@ fn package_data_precedes_package_cache_during_creation() {
     assert_eq!(outcome.pack.package_requirements().len(), 1);
 }
 
+#[cfg(feature = "egress")]
 #[test]
 fn package_cache_resolves_during_online_and_offline_creation() {
     let dir = tempfile::tempdir().unwrap();
@@ -481,6 +486,7 @@ fn offline_creation_works_with_local_packages() {
     assert_eq!(outcome.pack.package_requirements().len(), 1);
 }
 
+#[cfg(feature = "egress")]
 #[test]
 fn offline_creation_fails_on_an_uncached_universe_package() {
     let dir = tempfile::tempdir().unwrap();
@@ -509,6 +515,36 @@ fn offline_creation_fails_on_an_uncached_universe_package() {
     let message = error.to_string();
     assert!(message.contains("package not found"), "{message}");
     // Offline never reaches the network, so it never reports one.
+    assert!(!message.contains("network"), "{message}");
+}
+
+/// A build without egress has no download capability under any runtime
+/// configuration: a Universe package no local source holds fails acquisition
+/// even though nothing asked for offline creation.
+#[cfg(not(feature = "egress"))]
+#[test]
+fn creation_without_egress_never_downloads_a_universe_package() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(
+        project.join("main.typ"),
+        "#import \"@preview/typst-pack-no-such-package:0.0.1\": x\n",
+    )
+    .unwrap();
+    let empty = dir.path().join("empty");
+    fs::create_dir_all(&empty).unwrap();
+
+    let result = Packer::new(&project, "main.typ")
+        .system_fonts(false)
+        .package_path(&empty)
+        .pack();
+
+    let Err(error @ PackerError::Package { .. }) = result else {
+        panic!("an undownloadable package did not fail package resolution");
+    };
+    let message = error.to_string();
+    assert!(message.contains("package not found"), "{message}");
     assert!(!message.contains("network"), "{message}");
 }
 

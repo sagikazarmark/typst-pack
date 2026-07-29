@@ -179,6 +179,12 @@ typst-pack = { version = "0.4", features = ["embedded-fonts", "fs"] }
 
 The core in-memory packing and compilation APIs require no crate features.
 
+Filesystem access and network egress are separately selectable, so the build
+above reads projects, local package directories, and system fonts from disk with
+no download capability compiled in at all: nothing in its dependency graph can
+reach the network. Add the `egress` feature to let filesystem creation download
+the packages a project imports.
+
 ```rust,ignore
 use typst_pack::{
     compile, CompilationOutputSpecification, OutputFormat, Pack,
@@ -283,6 +289,16 @@ revalidating still conforms, and may issue a pack describing a source state that
 never existed simultaneously. `Packer` discharges it: it revalidates the
 project, the package trees it acquired, and the font catalog before returning
 the pack, and fails creation when any of them changed while it ran.
+
+How far the adapter's own acquisition reaches is a build-time choice. With `fs`
+alone it resolves reported specifications from the local package directories and
+whichever package cache the host has, and fails creation with
+`PackerError::Package` when a specification is in neither; with `egress` it
+downloads the rest from the Typst Universe registry unless creation is offline.
+`Packer::certificate` and `Packer::package_cache_path`
+configure a download, so they need `egress`; `Packer::offline` does not, because
+a build without egress already resolves that way and code that sets it keeps
+compiling either way.
 
 Package requirements can only be discovered by compiling, so creation resolves
 package acquisition through a resumable protocol rather than a callback. A
@@ -449,9 +465,15 @@ fields are removed in place. Old fields and aliases are not accepted.
 
 ### Feature flags
 
-- `fs`: `Packer`, `extract`, package download and caching,
-  system font scanning. Requires a file system, so disable this for wasm
-  targets.
+- `fs`: `Packer`, `extract`, local package directories and cache, system font
+  scanning. Requires a file system, so disable this for wasm targets. It links
+  no transport, so a build with this feature alone cannot download under any
+  runtime configuration.
+- `egress`: package downloading during filesystem creation, with the custom
+  certificate and package cache directory only a download needs. Implies `fs`,
+  builds on `package-acquisition`, and is what links an HTTP client and TLS
+  roots, so the absence of network egress is verifiable from the dependency
+  graph rather than from a runtime flag.
 - `package-acquisition`: registry URL construction and bounded package archive
   expansion, for a caller that supplies its own transport. Pulls compression and
   archive support but no HTTP client.

@@ -45,6 +45,9 @@ use crate::ignore_policy::ProjectIgnorePolicyError;
 use crate::manifest::PackMetadata;
 use crate::pack::{Pack, PackBuildError};
 use crate::project_snapshot::{ProjectSnapshot, ProjectSnapshotError};
+#[cfg(not(feature = "egress"))]
+use crate::world::local_packages;
+#[cfg(feature = "egress")]
 use crate::world::system_packages;
 
 /// Packs a Typst project directory into a [`Pack`].
@@ -55,12 +58,17 @@ use crate::world::system_packages;
 ///
 /// It is the reference Creation Adapter: it acquires the project, the
 /// Candidate Font Catalog, and the package trees creation reports as missing,
-/// and [`create`](crate::create) selects requirements over those bytes. As an
-/// adapter over mutable storage, it also discharges the advisory obligation to
-/// establish that its acquired bytes represent one consistent source state:
-/// everything it acquired is revalidated before the Pack is returned, and
-/// creation fails with [`PackerError::CreationEvidenceChanged`] when any of it
-/// changed meanwhile.
+/// and [`create`](crate::create) selects requirements over those bytes. How far
+/// its acquisition reaches is a build-time choice: with the `fs` feature alone
+/// it resolves reported specifications from local package directories and the
+/// host's package cache, and with `egress` it downloads the rest unless
+/// creation is [offline](Self::offline).
+///
+/// As an adapter over mutable storage, it also discharges the advisory
+/// obligation to establish that its acquired bytes represent one consistent
+/// source state: everything it acquired is revalidated before the Pack is
+/// returned, and creation fails with
+/// [`PackerError::CreationEvidenceChanged`] when any of it changed meanwhile.
 pub struct Packer {
     root: PathBuf,
     entrypoint: PathBuf,
@@ -74,8 +82,10 @@ pub struct Packer {
     features: Vec<Feature>,
     target: TypstTarget,
     package_path: Option<PathBuf>,
+    #[cfg(feature = "egress")]
     package_cache_path: Option<PathBuf>,
     offline: bool,
+    #[cfg(feature = "egress")]
     certificate: Option<PathBuf>,
     creation_timestamp: Option<i64>,
     timings: Option<PathBuf>,
@@ -101,8 +111,10 @@ impl Packer {
             features: Vec::new(),
             target: TypstTarget::Paged,
             package_path: None,
+            #[cfg(feature = "egress")]
             package_cache_path: None,
             offline: false,
+            #[cfg(feature = "egress")]
             certificate: None,
             creation_timestamp: None,
             timings: None,
@@ -187,6 +199,11 @@ impl Packer {
     }
 
     /// Overrides the directory in which downloaded packages are cached.
+    ///
+    /// Only a build that can download has one, so this needs the `egress`
+    /// feature; without it, creation reads whichever package cache the host
+    /// has.
+    #[cfg(feature = "egress")]
     pub fn package_cache_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.package_cache_path = Some(path.into());
         self
@@ -197,13 +214,19 @@ impl Packer {
     ///
     /// When enabled, package dependencies must already exist in the local
     /// package directories; anything that would need to be downloaded fails
-    /// the compile as not found.
+    /// the compile as not found. A build without the `egress` feature behaves
+    /// this way regardless, having no transport to reach the network with, so
+    /// setting this stays available either way.
     pub fn offline(mut self, offline: bool) -> Self {
         self.offline = offline;
         self
     }
 
     /// Configures a custom CA certificate for package downloads.
+    ///
+    /// Only a download presents a certificate to verify, so this needs the
+    /// `egress` feature.
+    #[cfg(feature = "egress")]
     pub fn certificate(mut self, path: Option<PathBuf>) -> Self {
         self.certificate = path;
         self
@@ -231,6 +254,29 @@ impl Packer {
     pub(crate) fn after_creation_hook(mut self, hook: impl Fn() + 'static) -> Self {
         self.after_creation_hook = Some(Box::new(hook));
         self
+    }
+
+    /// The Package Authority this creation resolves reported specifications
+    /// through, which is as far as the host's capabilities reach.
+    #[cfg(feature = "egress")]
+    fn package_authority(&self) -> typst_kit::packages::SystemPackages {
+        system_packages(
+            self.package_path.as_deref(),
+            self.package_cache_path.as_deref(),
+            self.offline,
+            self.certificate.as_deref(),
+        )
+    }
+
+    /// Which, without egress, reaches the local package directories and the
+    /// host's package cache and no further.
+    #[cfg(not(feature = "egress"))]
+    fn package_authority(&self) -> typst_kit::packages::SystemPackages {
+        // There is no downloader to disable here, so the offline switch is
+        // already structurally satisfied: local package directories are all
+        // this build can resolve from either way.
+        let _ = self.offline;
+        local_packages(self.package_path.as_deref())
     }
 
     /// Snapshots the project, runs the representative compile, and assembles the Pack.
@@ -269,12 +315,7 @@ impl Packer {
             entrypoint.get_without_slash(),
         )?);
 
-        let packages = Arc::new(AcquiredPackages::new(system_packages(
-            self.package_path.as_deref(),
-            self.package_cache_path.as_deref(),
-            self.offline,
-            self.certificate.as_deref(),
-        )));
+        let packages = Arc::new(AcquiredPackages::new(self.package_authority()));
 
         let font_sources = FontSources {
             system: self.system_fonts,

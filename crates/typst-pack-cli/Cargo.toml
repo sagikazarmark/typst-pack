@@ -19,7 +19,9 @@ path = "src/main.rs"
 doc = false
 
 [dependencies]
-typst-pack = { workspace = true, features = ["diagnostics", "embedded-fonts", "fs", "parallel"] }
+# `egress` implies `fs`: the CLI reads projects from disk and downloads the
+# packages a creation compile observes.
+typst-pack = { workspace = true, features = ["diagnostics", "egress", "embedded-fonts", "parallel"] }
 
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4", features = ["derive", "env"] }

@@ -5,7 +5,7 @@
 //! representative request read and was not given, and the adapter obtains each
 //! of them through the configured Package Authority — local package
 //! directories, then the package cache, then a download unless creation is
-//! offline.
+//! offline or the build has no egress compiled in to download with.
 
 use std::path::PathBuf;
 use std::sync::Mutex;
