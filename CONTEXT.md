@@ -31,7 +31,11 @@ creation reports those exact package specifications instead of issuing a Pack,
 so the caller can resolve them and invoke creation again. Those specifications
 come from observed package requests rather than diagnostic text, creation
 retains nothing between invocations, and how many invocations a project takes
-is not semantic.
+is not semantic. A specification the caller declares unresolvable is no longer
+reported, and the representative request fails at the file request that needed
+it, carrying the caller's own failure; that is where an acquisition failure and
+the source location it belongs to meet, because a reported specification names
+a package and never the file that imported one.
 
 **Creation Preparation**:
 The acquisition phase that obtains Pack Creation's inputs: the project files,

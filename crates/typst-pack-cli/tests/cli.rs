@@ -3091,6 +3091,14 @@ fn create_offline_missing_package_does_not_activate_download_probe() {
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(!result.status.success(), "{stderr}");
     assert!(stderr.contains("package not found"), "{stderr}");
+    // A package the Package Authority cannot resolve is reported at the import
+    // that needed it, not beside it, so the diagnostic carries a source
+    // location the user can act on.
+    assert!(stderr.contains("main.typ:1:8"), "{stderr}");
+    assert!(
+        stderr.contains("#import \"@preview/offline-probe:0.1.0\""),
+        "{stderr}"
+    );
     assert!(result.stdout.is_empty(), "{:?}", result.stdout);
     assert!(!probe.exists());
     assert!(!output.exists());

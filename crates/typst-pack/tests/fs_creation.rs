@@ -507,15 +507,15 @@ fn offline_creation_fails_on_an_uncached_universe_package() {
         .package_cache_path(&empty)
         .pack();
 
-    // The adapter reports what it could not acquire, in its own vocabulary:
-    // resolving the specifications creation reported is its half of the work.
-    let Err(error @ PackerError::Package { .. }) = result else {
-        panic!("uncached package did not fail package resolution");
-    };
-    let message = error.to_string();
-    assert!(message.contains("package not found"), "{message}");
-    // Offline never reaches the network, so it never reports one.
-    assert!(!message.contains("network"), "{message}");
+    // A specification the Package Authority cannot resolve fails the
+    // representative request at the import that needed it, carrying the
+    // authority's own reason, so the failure keeps the source location the
+    // caller can act on.
+    assert_eq!(
+        unresolvable_package_diagnostics(result),
+        // Offline never reaches the network, so it never reports one.
+        ["package not found (searched for @preview/typst-pack-no-such-package:0.0.1)"]
+    );
 }
 
 /// A build without egress has no download capability under any runtime
@@ -540,12 +540,34 @@ fn creation_without_egress_never_downloads_a_universe_package() {
         .package_path(&empty)
         .pack();
 
-    let Err(error @ PackerError::Package { .. }) = result else {
-        panic!("an undownloadable package did not fail package resolution");
+    assert_eq!(
+        unresolvable_package_diagnostics(result),
+        ["package not found (searched for @preview/typst-pack-no-such-package:0.0.1)"]
+    );
+}
+
+/// The messages of the representative request that failed because the Package
+/// Authority could not resolve a specification creation reported.
+///
+/// Asserting on them is asserting that the failure reaches the import: only a
+/// failed representative request carries a span, and the adapter has none of
+/// its own to offer.
+fn unresolvable_package_diagnostics(
+    result: Result<typst_pack::PackOutcome, PackerError>,
+) -> Vec<String> {
+    let Err(PackerError::Compile { errors, .. }) = result else {
+        panic!("an unresolvable package did not fail the representative request");
     };
-    let message = error.to_string();
-    assert!(message.contains("package not found"), "{message}");
-    assert!(!message.contains("network"), "{message}");
+    for error in &errors {
+        assert!(
+            !error.span.is_detached(),
+            "the failure is reported away from the import that needed the package"
+        );
+    }
+    errors
+        .iter()
+        .map(|error| error.message.to_string())
+        .collect()
 }
 
 #[test]

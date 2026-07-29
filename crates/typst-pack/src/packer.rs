@@ -414,7 +414,14 @@ impl Packer {
 /// reports the exact specifications no supplied tree covers, the adapter
 /// obtains them through the Package Authority, and creation runs again over
 /// the larger set. Every round therefore either issues a Pack, adds a tree the
-/// request did not have, or fails.
+/// request did not have, declares one the Package Authority could not resolve,
+/// or fails.
+///
+/// A specification the authority cannot resolve is declared rather than
+/// returned. The next round's representative request then fails at the import
+/// that needed it, carrying the authority's own reason, so an unresolvable
+/// package is reported where the document asked for it exactly as it was
+/// before package resolution moved out of the representative compile.
 fn resolve_and_create(
     mut request: CreationRequest,
     packages: &AcquiredPackages,
@@ -427,9 +434,10 @@ fn resolve_and_create(
             CreationOutcome::MissingPackages(missing) => {
                 for spec in missing {
                     if !acquired.insert(spec.to_string()) {
-                        // Creation reports only what no supplied tree covers,
-                        // so this cannot repeat; failing keeps that a
-                        // diagnosis rather than a loop that never progresses.
+                        // Creation reports neither what a supplied tree covers
+                        // nor what was declared unresolvable, so this cannot
+                        // repeat; failing keeps that a diagnosis rather than a
+                        // loop that never progresses.
                         return Err(CreationFailure::Adapter(PackerError::Package {
                             message: "the representative creation compile did not accept the \
                                       resolved package tree"
@@ -437,7 +445,10 @@ fn resolve_and_create(
                             spec,
                         }));
                     }
-                    request = request.package_tree(packages.acquire(&spec, disposition)?);
+                    request = match packages.acquire(&spec, disposition) {
+                        Ok(tree) => request.package_tree(tree),
+                        Err(failure) => request.unresolvable_package(spec, failure),
+                    };
                 }
             }
         }

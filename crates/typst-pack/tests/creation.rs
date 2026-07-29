@@ -327,6 +327,66 @@ fn a_resumed_creation_issues_the_pack_one_invocation_would_have() {
     assert_eq!(resumed.pack.identity(), single.pack.identity());
 }
 
+#[test]
+fn a_specification_declared_unresolvable_fails_the_request_that_needed_it() {
+    let source = "#import \"@local/first:1.0.0\": first\n#first";
+    let reason = typst::diag::PackageError::NetworkFailed(Some("connection refused".into()));
+
+    let error = create(
+        &CreationRequest::new(document(source), CREATION_TIMESTAMP)
+            .unresolvable_package(spec("first"), reason),
+    )
+    .unwrap_err();
+
+    // The caller's own reason reaches the import that asked for the package,
+    // which is the only place it and a source location can meet.
+    let CreationError::Compile { errors, .. } = error else {
+        panic!("a declared-unresolvable specification did not fail the request: {error}");
+    };
+    assert_eq!(
+        errors
+            .iter()
+            .map(|error| error.message.to_string())
+            .collect::<Vec<_>>(),
+        ["failed to download package (connection refused)"]
+    );
+    assert!(errors.iter().all(|error| !error.span.is_detached()));
+}
+
+#[test]
+fn a_declared_specification_is_no_longer_reported_as_missing() {
+    let source = "#import \"@local/first:1.0.0\": first\n#first";
+    let request = CreationRequest::new(document(source), CREATION_TIMESTAMP).unresolvable_package(
+        spec("first"),
+        typst::diag::PackageError::NotFound(spec("first")),
+    );
+
+    // Reporting it again would ask the caller for what it said it cannot
+    // supply, which is a loop that never progresses.
+    assert!(matches!(
+        create(&request).unwrap_err(),
+        CreationError::Compile { .. }
+    ));
+}
+
+#[test]
+fn a_tree_supplied_for_a_declared_specification_takes_precedence() {
+    let source = "#import \"@local/first:1.0.0\": first\n#rect(width: first * 1pt, height: 1pt)";
+    let issued = issue(
+        &CreationRequest::new(document(source), CREATION_TIMESTAMP)
+            .unresolvable_package(
+                spec("first"),
+                typst::diag::PackageError::NotFound(spec("first")),
+            )
+            .package_tree(ResolvedPackageTree::embedded(
+                spec("first"),
+                package_files("first", "#let first = 1"),
+            )),
+    );
+
+    assert!(issued.pack.has_package(&spec("first")));
+}
+
 /// Creates over one tree supplied for `@local/declared:1.0.0`, which the
 /// document imports, and returns the failure that tree produced.
 fn declared_tree_failure(files: Vec<(&'static str, Vec<u8>)>) -> CreationError {
@@ -459,10 +519,11 @@ fn a_supplied_tree_path_that_cannot_name_a_package_file_is_rejected() {
 #[cfg(feature = "embedded-fonts")]
 mod fonts {
     use typst_pack::{
-        CandidateFontCatalog, CandidateFontContainer, CreationRequest, FontContainerIdentity,
+        CandidateFontCatalog, CandidateFontContainer, CreationOutcome, CreationRequest,
+        FontContainerIdentity, ResolvedPackageTree, create,
     };
 
-    use crate::{CREATION_TIMESTAMP, document, issue};
+    use crate::{CREATION_TIMESTAMP, document, issue, package_files, spec};
 
     /// The exact bytes of the Font Container Typst ships the given family in.
     fn typst_container(family: &str) -> Vec<u8> {
@@ -531,5 +592,52 @@ mod fonts {
             requirements[0].container_identity(),
             FontContainerIdentity::from_bytes(&serif)
         );
+    }
+
+    /// Face selection is recorded as the representative request asks for a
+    /// face, and Typst's memoization cache is deliberately not evicted between
+    /// resume rounds, so a round served from that cache must still select the
+    /// faces it used. Every other resume fixture lays out no text, which is
+    /// why this one exists.
+    #[test]
+    fn a_resumed_creation_selects_the_faces_one_invocation_would_have() {
+        let serif = typst_container("Libertinus Serif");
+        let catalog =
+            CandidateFontCatalog::from_iter([CandidateFontContainer::embedded(serif.clone())]);
+        // Text before the import, so the round that reports the missing
+        // package is one that already laid out a face.
+        let source = "Selected text\n\n#import \"@local/first:1.0.0\": first\n#first";
+
+        let mut resolved: Vec<ResolvedPackageTree> = Vec::new();
+        let resumed = loop {
+            let request = CreationRequest::new(document(source), CREATION_TIMESTAMP)
+                .font_catalog(catalog.clone())
+                .package_trees(resolved.iter().cloned());
+            match create(&request).unwrap() {
+                CreationOutcome::Issued(issued) => break *issued,
+                CreationOutcome::MissingPackages(missing) => {
+                    resolved.extend(missing.iter().map(|missing| {
+                        ResolvedPackageTree::embedded(
+                            missing.clone(),
+                            package_files(missing.name.as_str(), "#let first = [resolved]"),
+                        )
+                    }));
+                }
+            }
+        };
+
+        let single = issue(
+            &CreationRequest::new(document(source), CREATION_TIMESTAMP)
+                .font_catalog(catalog)
+                .package_trees(resolved),
+        );
+
+        assert_eq!(
+            resumed.pack.font_requirements().len(),
+            1,
+            "a resumed creation selected no face"
+        );
+        assert_eq!(resumed.pack.identity(), single.pack.identity());
+        let _ = spec("first");
     }
 }
