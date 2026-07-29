@@ -5,6 +5,10 @@
 //! with the `embedded-fonts` feature. The filesystem section covers the
 //! catalog the reference Creation Adapter composes.
 
+#[cfg(feature = "embedded-fonts")]
+#[path = "support/fonts.rs"]
+mod font_bytes;
+
 use typst_pack::{CandidateFontCatalog, CandidateFontContainer, FontDisposition};
 
 #[test]
@@ -37,11 +41,17 @@ mod containers {
         typst_embedded_font_containers,
     };
 
-    use crate::{two_face_collection, typst_font_container};
+    use crate::font_bytes::{font_collection, typst_container};
+
+    /// A two-face collection holding one container's face twice, so that
+    /// container-local face order is observable.
+    fn two_face_collection(font: &[u8]) -> Vec<u8> {
+        font_collection(&[font.to_vec(), font.to_vec()])
+    }
 
     #[test]
     fn faces_are_expanded_in_container_local_index_order() {
-        let collection = two_face_collection(&typst_font_container());
+        let collection = two_face_collection(&typst_container());
         let mut catalog = CandidateFontCatalog::new();
         catalog.push(CandidateFontContainer::embedded(collection.clone()));
 
@@ -63,7 +73,7 @@ mod containers {
 
     #[test]
     fn catalog_order_is_the_order_the_caller_chose() {
-        let first = typst_font_container();
+        let first = typst_container();
         let second = two_face_collection(&first);
         let mut catalog = CandidateFontCatalog::new();
         catalog.push(CandidateFontContainer::external(second.clone()));
@@ -85,7 +95,7 @@ mod containers {
 
     #[test]
     fn disposition_travels_per_container() {
-        let embedded = typst_font_container();
+        let embedded = typst_container();
         let external = two_face_collection(&embedded);
         let catalog = CandidateFontCatalog::from_iter([
             CandidateFontContainer::embedded(embedded),
@@ -108,7 +118,7 @@ mod containers {
 
     #[test]
     fn identical_bytes_do_not_decide_disposition() {
-        let data = typst_font_container();
+        let data = typst_container();
         let catalog = CandidateFontCatalog::from_iter([
             CandidateFontContainer::external(data.clone()),
             CandidateFontContainer::embedded(data.clone()),
@@ -132,7 +142,7 @@ mod containers {
         );
 
         let mut catalog = CandidateFontCatalog::new();
-        catalog.push(CandidateFontContainer::embedded(typst_font_container()));
+        catalog.push(CandidateFontContainer::embedded(typst_container()));
         catalog.extend(typst_embedded_font_containers(FontDisposition::External));
 
         let faces = catalog.faces();
@@ -154,7 +164,7 @@ mod filesystem {
 
     use typst_pack::{FontContainerIdentity, Packer};
 
-    use crate::{renamed_family, typst_font_container};
+    use crate::font_bytes::{family_of, renamed_family, typst_container};
 
     /// Writes `data` as the only font file of a fresh directory.
     fn font_directory(dir: &Path, name: &str, data: &[u8]) -> PathBuf {
@@ -176,14 +186,10 @@ mod filesystem {
         project
     }
 
-    fn family_of(font: &[u8]) -> String {
-        typst::text::FontInfo::new(font, 0).unwrap().family
-    }
-
     #[test]
     fn catalog_order_decides_which_container_offers_a_family() {
         let dir = tempfile::tempdir().unwrap();
-        let first = typst_font_container();
+        let first = typst_container();
         // Same family and variant, distinct bytes: only catalog order can
         // decide between them.
         let mut second = first.clone();
@@ -218,7 +224,7 @@ mod filesystem {
     #[test]
     fn one_catalog_produces_a_pack_with_mixed_font_dispositions() {
         let dir = tempfile::tempdir().unwrap();
-        let typst_font = typst_font_container();
+        let typst_font = typst_container();
         let typst_family = family_of(&typst_font);
         let scanned_family = format!("Z{}", &typst_family[1..]);
         let scanned_font = renamed_family(&typst_font, &typst_family, &scanned_family);
@@ -280,7 +286,7 @@ mod filesystem {
         // A scanned container whose bytes are exactly one Typst ships. Its
         // disposition comes from the catalog position it was supplied at, not
         // from a comparison against Typst's own containers.
-        let data = typst_font_container();
+        let data = typst_container();
         let project = project_using_family(dir.path(), &family_of(&data));
         let fonts = font_directory(dir.path(), "fonts", &data);
 
@@ -300,76 +306,4 @@ mod filesystem {
         );
         assert!(requirements[0].is_embedded());
     }
-}
-
-/// The exact bytes of the first Font Container Typst ships.
-#[cfg(feature = "embedded-fonts")]
-fn typst_font_container() -> Vec<u8> {
-    typst_kit::fonts::embedded()
-        .next()
-        .expect("Typst embedded fonts are available")
-        .0
-        .data()
-        .to_vec()
-}
-
-/// A two-face collection holding `font` twice, so that container-local face
-/// order is observable.
-#[cfg(feature = "embedded-fonts")]
-fn two_face_collection(font: &[u8]) -> Vec<u8> {
-    fn adjusted_font(font: &[u8], base: usize) -> Vec<u8> {
-        let mut adjusted = font.to_vec();
-        let table_count = usize::from(u16::from_be_bytes([font[4], font[5]]));
-        for table in 0..table_count {
-            let offset = 12 + table * 16 + 8;
-            let original = u32::from_be_bytes(font[offset..offset + 4].try_into().unwrap());
-            let adjusted_offset = original + u32::try_from(base).unwrap();
-            adjusted[offset..offset + 4].copy_from_slice(&adjusted_offset.to_be_bytes());
-        }
-        adjusted
-    }
-
-    let first_offset = 20;
-    let second_offset = (first_offset + font.len() + 3) & !3;
-    let mut collection = Vec::with_capacity(second_offset + font.len());
-    collection.extend_from_slice(b"ttcf");
-    collection.extend_from_slice(&0x0001_0000u32.to_be_bytes());
-    collection.extend_from_slice(&2u32.to_be_bytes());
-    collection.extend_from_slice(&u32::try_from(first_offset).unwrap().to_be_bytes());
-    collection.extend_from_slice(&u32::try_from(second_offset).unwrap().to_be_bytes());
-    collection.extend_from_slice(&adjusted_font(font, first_offset));
-    collection.resize(second_offset, 0);
-    collection.extend_from_slice(&adjusted_font(font, second_offset));
-    collection
-}
-
-/// The same container bytes under a different family name, so that a candidate
-/// container can offer a family no other container in the catalog offers.
-///
-/// The replacement has the family's exact length, so every name record keeps
-/// its offset and only the stored characters change.
-#[cfg(all(feature = "fs", feature = "embedded-fonts"))]
-fn renamed_family(font: &[u8], from: &str, to: &str) -> Vec<u8> {
-    assert_eq!(from.len(), to.len(), "the family name must keep its length");
-    let mut data = font.to_vec();
-    let wide = |name: &str| -> Vec<u8> {
-        name.encode_utf16()
-            .flat_map(|unit| unit.to_be_bytes())
-            .collect()
-    };
-    for (needle, replacement) in [
-        (from.as_bytes().to_vec(), to.as_bytes().to_vec()),
-        (wide(from), wide(to)),
-    ] {
-        let mut offset = 0;
-        while offset + needle.len() <= data.len() {
-            if data[offset..offset + needle.len()] == needle[..] {
-                data[offset..offset + needle.len()].copy_from_slice(&replacement);
-                offset += needle.len();
-            } else {
-                offset += 1;
-            }
-        }
-    }
-    data
 }
