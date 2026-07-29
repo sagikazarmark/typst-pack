@@ -2,10 +2,12 @@
 //!
 //! Filesystem access and network egress are separately selectable, so a
 //! deployment owner chooses whether the library can reach the network at all.
-//! These tests read the feature table alone: they keep the one door to a
-//! transport the only door, whichever features a build selects. What the
-//! resolved dependency graph of one build actually contains is a stronger
-//! property that only a graph check can establish.
+//! Read from the feature table, they keep the one door to a transport the only
+//! door, whichever features a build selects. What the resolved dependency graph
+//! of one build actually contains is a stronger property that only a graph
+//! check can establish; the containerized filesystem-without-egress check reads
+//! that graph, and the last test here holds the crates it probes to the ones
+//! this manifest can activate.
 
 use std::collections::BTreeSet;
 
@@ -44,6 +46,43 @@ fn egress_is_the_only_feature_that_links_a_transport() {
             "feature `{feature}` links {linked:?} without enabling egress"
         );
     }
+}
+
+/// The graph check can only find a transport crate it names, so the crates it
+/// probes are exactly the ones this manifest can activate.
+#[test]
+fn the_dependency_graph_check_probes_every_transport_crate() {
+    let named = TRANSPORT
+        .iter()
+        .copied()
+        // Another crate's feature is no entry of its own in a dependency graph;
+        // the transport it would bring is probed under its own name.
+        .filter(|transport| !transport.contains('/'))
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        probed_transport_crates(),
+        named,
+        "the filesystem-without-egress check must probe every transport crate, and only those"
+    );
+}
+
+/// The crates the graph check probes, read from the check itself.
+fn probed_transport_crates() -> BTreeSet<String> {
+    let dagger = include_str!("../../../dagger.dang");
+    let (_, probed) = dagger
+        .split_once("let transportCrates = [")
+        .expect("the filesystem-without-egress check must name the crates it probes");
+    let (probed, _) = probed
+        .split_once(']')
+        .expect("the probed crates must be one closed list");
+
+    probed
+        .split(',')
+        .map(|entry| entry.trim().trim_matches('"').to_owned())
+        .filter(|entry| !entry.is_empty())
+        .collect()
 }
 
 /// The transport crates a build with `feature` enabled links.

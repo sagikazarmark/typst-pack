@@ -137,7 +137,7 @@ type TypstPack {
   }
 
   """
-  Keep the featureless core and fixed Document Time available to wasm consumers.
+  Keep the featureless core, Pack Creation and fixed Document Time included, on wasm.
   """
   buildWasm: Directory! @check {
     Dagger
@@ -151,6 +151,32 @@ type TypstPack {
         package: ["typst-pack"],
         target: ["wasm32-unknown-unknown"],
       )
+  }
+
+  """
+  Run the filesystem suite for a build with no HTTP client in its dependency graph.
+  """
+  testFsWithoutEgress: String! @check {
+    # Every crate this manifest can activate that speaks HTTP.
+    let transportCrates = ["env_proxy", "rustls-pemfile", "ureq", "webpki-roots"]
+    let container = self.rust.container
+    let withoutEgress = container.withExec(dependencyGraphCommand("fs")).stdout
+    let withEgress = container.withExec(dependencyGraphCommand("egress")).stdout
+
+    transportCrates.each { transportCrate =>
+      let entry = "[" + transportCrate + " v"
+
+      assert { withoutEgress.contains(entry) == false }
+
+      # The egress build links every one of these, so reading it too keeps a
+      # name that matches nothing in either graph from passing as an absent
+      # transport.
+      assert { withEgress.contains(entry) }
+    }
+
+    self
+      .rust
+      .test(package: ["typst-pack"], noDefaultFeatures: true, feature: ["fs"])
   }
 
   """
@@ -562,6 +588,21 @@ enum PdfStandard {
   A_4F
   A_4E
   UA_1
+}
+
+# Reads every crate one typst-pack build links, dev-dependencies excluded, one
+# bracketed `name version` entry each, so that a name matches a crate rather
+# than part of one.
+let dependencyGraphCommand(feature: String!): [String!]! {
+  [
+    "cargo", "tree",
+    "--package", "typst-pack",
+    "--no-default-features",
+    "--features", feature,
+    "--edges", "normal,build",
+    "--prefix", "none",
+    "--format", "[{p}]",
+  ]
 }
 
 let outputFormatName(format: OutputFormat!): String! {

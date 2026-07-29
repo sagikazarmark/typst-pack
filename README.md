@@ -557,7 +557,9 @@ Run CI's containerized checks with [Dagger](https://dagger.io):
 
 The containerized suite includes the
 [embedded Typst CLI differential gate](docs/cli-parity.md), pinned to the exact
-official release used by the library.
+official release used by the library. It also verifies the build configurations
+the crate features promise: the featureless core for `wasm32-unknown-unknown`,
+and a filesystem build whose resolved dependency graph contains no HTTP client.
 
 ## License
 
