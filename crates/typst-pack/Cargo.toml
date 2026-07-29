@@ -20,6 +20,10 @@ diagnostics = ["typst-kit/emit-diagnostics"]
 # Ship Typst's embedded fonts (Libertinus Serif, New Computer Modern, ...) so
 # packs that only use them render without any font embedding.
 embedded-fonts = ["typst-kit/embedded-fonts"]
+# Transport-free package acquisition helpers: registry URL construction and
+# bounded package archive expansion. Pulls compression and archive support but
+# no HTTP client, so a host supplies its own transport.
+package-acquisition = ["dep:flate2", "dep:tar"]
 # Export independent pages in parallel.
 parallel = ["dep:rayon"]
 # Filesystem-based packing: structural snapshot acquisition, package download and caching,
@@ -38,12 +42,14 @@ fs = [
 [dependencies]
 ecow = "0.2"
 env_proxy = { version = "0.4", optional = true }
+flate2 = { version = "1", optional = true }
 ignore = "0.4"
 rayon = { workspace = true, optional = true }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "1.1"
 rustls-pemfile = { version = "2", optional = true }
+tar = { version = "0.4", default-features = false, optional = true }
 # Typst crates share internal types and must resolve to the same exact release.
 typst = { workspace = true }
 typst-html = "=0.15.1"
@@ -59,7 +65,10 @@ webpki-roots = { version = "1", optional = true }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [dev-dependencies]
+# The acquisition suite writes the archives the helpers expand.
+flate2 = "1"
 hayro-syntax = { workspace = true }
+tar = { version = "0.4", default-features = false }
 tempfile = { workspace = true }
 tiny-skia = "0.12"
 

@@ -20,6 +20,8 @@ mod fs_project;
 mod ignore_policy;
 mod manifest;
 mod pack;
+#[cfg(feature = "package-acquisition")]
+mod package_acquisition;
 mod packer;
 mod project_snapshot;
 mod world;
@@ -67,6 +69,11 @@ pub use pack::{
     Pack, PackBuildError, PackBuilder, PackFont, PackFontCatalogFace, PackIdentity,
     PackInvariantError, PackPathRole, PackReadError, PackWriteError, PackageRequirement,
     PackageTreeError, PackageTreeIdentity,
+};
+#[cfg(feature = "package-acquisition")]
+pub use package_acquisition::{
+    PACKAGE_REGISTRY_NAMESPACE, PACKAGE_REGISTRY_URL, PackageAcquisitionError,
+    PackageExpansionCeiling, expand_package_archive, package_archive_url,
 };
 #[cfg(feature = "fs")]
 pub use packer::{CreationDiagnosticContext, PackOutcome, Packer, PackerError};

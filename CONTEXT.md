@@ -132,6 +132,22 @@ compilation receives already acquired Package Tree Fulfillments rather than a
 public authority interface. Configured offline behavior disables package
 downloading; it may still use explicit or local package sources.
 
+**Package Registry**:
+The remote source a Creation Adapter fetches package archives from, addressed by
+one URL per exact package specification. Only the official Typst Universe
+namespace is served; a specification in any other namespace has no registry URL.
+The core owns URL construction, and fetching stays with the adapter, so no
+transport is implied.
+
+**Package Archive Expansion**:
+The core transformation from the archive bytes served for one specification into
+a Complete Package Tree. Only addressable regular files become entries, and a
+member whose path cannot name a package file is rejected. It takes a required
+expansion ceiling, charges every archive member against it, and fails past it
+rather than materializing what lies beyond, so a caller-named package cannot
+exhaust the process. The ceiling is required rather than defaulted so that the
+bound is always a deliberate choice.
+
 **External Package Fulfillment**:
 Supplying one non-embedded Package Requirement as a Complete Package Tree. The
 core canonicalizes and verifies the entire supplied tree against the requirement

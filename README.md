@@ -322,6 +322,36 @@ specification it was supplied under is the distinct
 `CreationError::MismatchedPackageTree` failure, so a loop that would otherwise
 never progress gets a diagnosis instead.
 
+Resolving a reported specification against the Typst Universe registry needs
+the registry layout and the archive encoding, not an HTTP client. The
+`package-acquisition` feature supplies both halves, so the loop above keeps its
+own transport — including one whose only network access is asynchronous:
+
+```rust,ignore
+use typst_pack::{
+    expand_package_archive, package_archive_url, PackageDisposition, PackageExpansionCeiling,
+};
+
+let url = package_archive_url(&spec)?;
+// Fetch the archive with whatever primitive this host provides.
+let archive = fetch(&url)?;
+let tree = expand_package_archive(
+    spec,
+    &archive,
+    PackageDisposition::Embedded,
+    // Required, so that the bound is always a deliberate choice.
+    PackageExpansionCeiling { max_bytes: 32 * 1024 * 1024 },
+)?;
+```
+
+Expansion stops at the ceiling and fails with
+`PackageAcquisitionError::ExpansionCeilingExceeded` rather than materializing
+what lies past it, so a caller-named package cannot exhaust the process. Every
+archive member is charged against the ceiling, but only addressable regular
+files become tree entries, and a member whose path cannot name a package file is
+rejected. A specification in a namespace the registry does not serve has no URL
+there and is reported as such.
+
 Compilation-time Pack Overrides replace contained project-file bytes in memory:
 
 ```rust,ignore
@@ -422,6 +452,9 @@ fields are removed in place. Old fields and aliases are not accepted.
 - `fs`: `Packer`, `extract`, package download and caching,
   system font scanning. Requires a file system, so disable this for wasm
   targets.
+- `package-acquisition`: registry URL construction and bounded package archive
+  expansion, for a caller that supplies its own transport. Pulls compression and
+  archive support but no HTTP client.
 - `embedded-fonts`: make Typst's bundled fonts available as intentional
   creation and external-fulfillment sources.
 - `diagnostics`: retain source context for first-party diagnostic presentation

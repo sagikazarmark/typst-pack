@@ -178,6 +178,7 @@ fn public_compilation_attests_the_approved_engine_and_exporters() {
             (cfg!(feature = "diagnostics"), "diagnostics"),
             (cfg!(feature = "embedded-fonts"), "embedded-fonts"),
             (cfg!(feature = "fs"), "fs"),
+            (cfg!(feature = "package-acquisition"), "package-acquisition"),
             (cfg!(feature = "parallel"), "parallel"),
         ] {
             if enabled {

@@ -80,10 +80,11 @@ impl ResolvedPackageTree {
     }
 
     /// Supplies a tree from entries the caller already holds as [`Bytes`], so
-    /// that an adapter that read them does not copy every file to hand them
-    /// over. Gated only because the reference adapter is the one caller that
-    /// holds them; creation itself needs no feature.
-    #[cfg(feature = "fs")]
+    /// that an adapter that read or expanded them does not copy every file to
+    /// hand them over. Gated only because the reference adapter and the
+    /// acquisition helpers are the callers that hold them; creation itself
+    /// needs no feature.
+    #[cfg(any(feature = "fs", feature = "package-acquisition"))]
     pub(crate) fn from_entries(
         spec: PackageSpec,
         files: Vec<(String, Bytes)>,

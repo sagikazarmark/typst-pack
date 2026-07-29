@@ -2949,11 +2949,13 @@ version = "0.4.0"
 dependencies = [
  "ecow",
  "env_proxy",
+ "flate2",
  "hayro-syntax",
  "ignore",
  "rayon",
  "rustls-pemfile",
  "serde",
+ "tar",
  "tempfile",
  "thiserror",
  "tiny-skia",
