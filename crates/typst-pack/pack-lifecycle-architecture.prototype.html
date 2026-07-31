@@ -389,6 +389,27 @@ pub fn decode(
 ) -&gt; Result&lt;Pack, pack_archive::DecodeError&gt;;</pre>
           </details>
           <details>
+            <summary>Reference filesystem Pack Assembler</summary>
+            <pre>pub struct FilesystemPackAssembler { /* private */ }
+
+impl FilesystemPackAssembler {
+    pub fn new(
+        config: FilesystemPackAssemblerConfig,
+    ) -&gt; Result&lt;Self, FilesystemPackAssemblerConfigError&gt;;
+
+    pub fn assemble(
+        &amp;self,
+        request: FilesystemPackAssemblyRequest&lt;'_&gt;,
+    ) -&gt; Result&lt;PackAssemblyReport,
+                 FilesystemPackAssemblyError&gt;;
+}
+
+// Config owns concrete host policy, authorities, clock, and limits.
+// A per-run request borrows roots and carries semantic controls.
+// The report owns the Pack and discovery warnings; no partial Pack
+// crosses an error.</pre>
+          </details>
+          <details>
             <summary>Compilation</summary>
             <pre>pub fn compile(
     request: PackCompilationRequest,
@@ -397,7 +418,13 @@ pub fn decode(
 
 // Private ordered phases:
 // accept request -&gt; establish identity -&gt; verify exact
-// fulfillments -&gt; materialize World -&gt; compile/export</pre>
+// fulfillments -&gt; materialize World -&gt; compile/export
+
+// Request acceptance resolves each semantic slot by origin:
+// caller supplied &gt; adapter resolved &gt; core defaulted.
+// Same-origin setters replace. Additive features form a canonical
+// union and retain the strongest origin. Fulfillments use a separate
+// duplicate-rejecting exact set.</pre>
           </details>
           <details>
             <summary>Planning and destination adapters</summary>
@@ -441,8 +468,6 @@ pub fn apply_pack_extraction_to_filesystem(
             <span>Not silently decided here</span>
           </div>
           <ul class="provisional">
-            <li>Concrete reference filesystem Pack Assembler request and terminal signatures.</li>
-            <li>Duplicate and precedence rules for repeated request-builder calls.</li>
             <li>Exact accessors used to inspect a <code>CompilationReport</code>.</li>
             <li>Exact stream and file publication operation names and recovery methods.</li>
           </ul>
@@ -451,12 +476,18 @@ pub fn apply_pack_extraction_to_filesystem(
     </section>
 
     <section class="review">
-      <h2>Review questions</h2>
+      <h2>Validated verdict</h2>
+      <p>
+        HITL review accepted the lifecycle composition and the 12-slice migration. It also fixed
+        the configured reference filesystem Pack Assembler seam and origin-priority rules for
+        compilation controls. No remaining provisional detail changes a domain invariant, seam,
+        execution phase, ownership contract, or preservation gate.
+      </p>
       <ol>
-        <li>Does any guided route permit an effect before its semantic plan or validated value exists?</li>
-        <li>Does any failure land in the wrong place: Error, Rejection, Outcome, Report, Receipt, or Progress?</li>
-        <li>Can the migration reorder any slices without coupling Pack validity back to representation or copying payloads?</li>
-        <li>Are the four provisional interface details implementation choices, or must one become another architecture decision?</li>
+        <li>No destination effect occurs before its semantic plan or validated value exists.</li>
+        <li>Errors, Rejections, Outcomes, Reports, Receipts, and Progress remain phase-specific.</li>
+        <li>Migration freezes interoperability before changing ownership, values, format, or workflows.</li>
+        <li>Remaining accessor and operation naming is implementation detail, not wayfinding fog.</li>
       </ol>
     </section>
   </main>
