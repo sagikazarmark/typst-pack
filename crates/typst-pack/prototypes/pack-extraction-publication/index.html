@@ -1,0 +1,706 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pack projection and publication seam prototype</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #f2f0e8;
+      --panel: #fffef9;
+      --ink: #172523;
+      --muted: #65716e;
+      --line: #d6d8ce;
+      --accent: #176b62;
+      --accent-soft: #dceee9;
+      --warn: #9a5a16;
+      --warn-soft: #f7e7ca;
+      --bad: #963f3a;
+      --bad-soft: #f3dcd8;
+      --good: #2f6a48;
+      --good-soft: #deecdf;
+      --shadow: 0 16px 42px rgba(28, 42, 39, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        linear-gradient(90deg, transparent 31px, rgba(23, 107, 98, 0.08) 32px, transparent 33px),
+        linear-gradient(rgba(23, 37, 35, 0.025) 1px, transparent 1px),
+        var(--paper);
+      background-size: auto, 100% 30px, auto;
+      font-family: Georgia, "Times New Roman", serif;
+    }
+
+    main {
+      width: min(1240px, calc(100% - 32px));
+      margin: 34px auto 72px;
+    }
+
+    header {
+      padding: 28px 0 24px;
+      border-top: 7px solid var(--ink);
+    }
+
+    h1 {
+      max-width: 900px;
+      margin: 9px 0 12px;
+      font-size: clamp(2.3rem, 6vw, 5rem);
+      font-weight: 500;
+      letter-spacing: -0.05em;
+      line-height: 0.96;
+    }
+
+    h2, h3 { margin-top: 0; }
+    h2 { font-size: 1.45rem; }
+    h3 { font-size: 1.05rem; }
+
+    p { line-height: 1.55; }
+
+    .mono, button, select, code, pre, .eyebrow, .label, .pill, .event {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .eyebrow {
+      color: var(--accent);
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.13em;
+      text-transform: uppercase;
+    }
+
+    .intro {
+      max-width: 940px;
+      color: #3f4c49;
+      font-size: 1.08rem;
+    }
+
+    .question {
+      max-width: 960px;
+      margin-top: 19px;
+      padding: 15px 18px;
+      border-left: 4px solid var(--accent);
+      background: var(--accent-soft);
+      line-height: 1.5;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(330px, 0.85fr);
+      gap: 18px;
+      align-items: start;
+    }
+
+    .panel {
+      margin-bottom: 18px;
+      padding: 20px;
+      border: 1px solid var(--line);
+      border-radius: 3px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .state-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 15px;
+    }
+
+    .datum {
+      min-height: 74px;
+      padding: 11px;
+      border: 1px solid var(--line);
+      background: #faf9f3;
+    }
+
+    .label {
+      margin-bottom: 6px;
+      color: var(--muted);
+      font-size: 0.72rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .value {
+      overflow-wrap: anywhere;
+      font-size: 0.94rem;
+      line-height: 1.35;
+    }
+
+    .status {
+      padding: 12px 14px;
+      border-left: 4px solid var(--accent);
+      background: var(--accent-soft);
+      line-height: 1.45;
+    }
+
+    .status.bad { border-color: var(--bad); background: var(--bad-soft); }
+    .status.warn { border-color: var(--warn); background: var(--warn-soft); }
+    .status.good { border-color: var(--good); background: var(--good-soft); }
+
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .control-group {
+      padding: 13px;
+      border: 1px solid var(--line);
+      background: #faf9f3;
+    }
+
+    .control-group.wide { grid-column: 1 / -1; }
+
+    button, select {
+      width: 100%;
+      border: 1px solid #9da8a4;
+      border-radius: 2px;
+      background: white;
+      color: var(--ink);
+      font-size: 0.78rem;
+    }
+
+    button {
+      margin-top: 7px;
+      padding: 9px 10px;
+      cursor: pointer;
+      text-align: left;
+    }
+
+    button:hover { border-color: var(--accent); background: var(--accent-soft); }
+    button.primary { border-color: var(--accent); background: var(--accent); color: white; }
+    button.danger { border-color: var(--bad); color: var(--bad); }
+    button:disabled { cursor: not-allowed; opacity: 0.45; }
+
+    select { margin-top: 7px; padding: 9px 8px; }
+
+    .entries {
+      display: grid;
+      gap: 7px;
+      margin-top: 12px;
+    }
+
+    .entry {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+      padding: 9px 10px;
+      border: 1px solid var(--line);
+      background: #faf9f3;
+    }
+
+    .entry-key { overflow-wrap: anywhere; font-size: 0.82rem; }
+
+    .pill {
+      padding: 3px 6px;
+      border-radius: 999px;
+      background: #e6e8e1;
+      color: #46514e;
+      font-size: 0.66rem;
+      white-space: nowrap;
+    }
+
+    .pill.good { background: var(--good-soft); color: var(--good); }
+    .pill.warn { background: var(--warn-soft); color: var(--warn); }
+    .pill.bad { background: var(--bad-soft); color: var(--bad); }
+
+    .event-log {
+      max-height: 260px;
+      overflow: auto;
+      border-top: 1px solid var(--line);
+    }
+
+    .event {
+      padding: 8px 3px;
+      border-bottom: 1px solid #e6e7e1;
+      color: #43504d;
+      font-size: 0.74rem;
+      line-height: 1.4;
+    }
+
+    pre {
+      overflow: auto;
+      margin: 0;
+      padding: 14px;
+      border: 1px solid #33413e;
+      background: #182522;
+      color: #e7eee9;
+      font-size: 0.72rem;
+      line-height: 1.48;
+    }
+
+    .walkthroughs {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .walkthrough {
+      padding: 15px;
+      border: 1px solid var(--line);
+      background: #faf9f3;
+    }
+
+    .walkthrough p { min-height: 72px; color: #53605d; font-size: 0.91rem; }
+
+    .decision-list {
+      display: grid;
+      gap: 9px;
+      padding: 0;
+      list-style: none;
+    }
+
+    .decision-list li {
+      padding: 10px 12px;
+      border-left: 3px solid var(--accent);
+      background: #faf9f3;
+      line-height: 1.45;
+    }
+
+    @media (max-width: 900px) {
+      .grid, .walkthroughs { grid-template-columns: 1fr; }
+      .state-grid { grid-template-columns: 1fr 1fr; }
+      .walkthrough p { min-height: auto; }
+    }
+
+    @media (max-width: 560px) {
+      main { width: min(100% - 20px, 1240px); margin-top: 14px; }
+      .controls, .state-grid { grid-template-columns: 1fr; }
+      .control-group.wide { grid-column: auto; }
+      .panel { padding: 14px; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">Throwaway logic prototype · issue “Prototype Pack extraction and publication”</div>
+      <h1>Plan semantics first. Publish bytes second.</h1>
+      <p class="intro">This demo tests whether one lifecycle shape remains truthful across two very different destinations: a filesystem can stage and commit a new tree, while object storage generally exposes deterministic partial progress.</p>
+      <div class="question"><strong>Question:</strong> Can featureless, owned, canonical plans keep Pack Extraction and Compilation Output Artifact semantics out of destination adapters without hiding conflict policy, partial writes, retry behavior, or payload ownership?</div>
+    </header>
+
+    <div class="grid">
+      <section>
+        <div class="panel">
+          <h2>Current state</h2>
+          <div class="state-grid" id="state-grid"></div>
+          <div class="status" id="status"></div>
+          <div class="entries" id="plan-entries"></div>
+        </div>
+
+        <div class="panel">
+          <h2>Free play</h2>
+          <div class="controls">
+            <div class="control-group">
+              <div class="label">1 · Semantic preparation</div>
+              <button data-action="BUILD_EXTRACTION">Plan project + package + font extraction</button>
+              <button data-action="BUILD_ARTIFACTS">Plan three selected PNG pages</button>
+              <button data-action="BUILD_EMPTY_ARTIFACTS">Plan a successful empty page result</button>
+              <button class="danger" data-action="BUILD_COLLISION">Try a colliding extraction projection</button>
+              <button class="danger" data-action="BUILD_REJECTED">Try a rejected compilation result</button>
+            </div>
+
+            <div class="control-group">
+              <div class="label">2 · Concrete destination policy</div>
+              <select id="policy">
+                <option value="fs-create">Filesystem · merge, refuse existing files</option>
+                <option value="fs-replace">Filesystem · merge, replace exact files</option>
+                <option value="fs-new-tree">Filesystem · publish absent root atomically</option>
+                <option value="object-create">Object store · create or verify</option>
+                <option value="object-replace">Object store · replace exact keys</option>
+              </select>
+              <button data-action="SEED_CONFLICT">Put different bytes at the first target</button>
+              <button data-action="SEED_MATCH">Put matching bytes at the first target</button>
+              <button data-action="TOGGLE_ROOT">Toggle destination-root existence</button>
+            </div>
+
+            <div class="control-group">
+              <div class="label">3 · Execute</div>
+              <button class="primary" data-action="PREFLIGHT">Appraise + preflight</button>
+              <button data-action="WRITE_NEXT">Write next planned entry</button>
+              <button data-action="WRITE_ALL">Run to first failure</button>
+              <button class="danger" data-action="FAIL_NEXT">Fail the next write</button>
+              <button data-action="RACE_MATCH">Race: create matching next target</button>
+              <button data-action="RACE_DIFFERENT">Race: create different next target</button>
+            </div>
+
+            <div class="control-group">
+              <div class="label">4 · Recover</div>
+              <button data-action="REPLAY">Replay the same owned plan</button>
+              <button data-action="CLEAR_FAILURE">Clear injected failure</button>
+              <button data-action="RESET_EXECUTION">Reset destination and execution</button>
+              <button data-action="RESET_ALL">Reset everything</button>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <aside>
+        <div class="panel">
+          <h2>Destination contents</h2>
+          <div class="entries" id="destination-entries"></div>
+        </div>
+
+        <div class="panel">
+          <h2>Operational evidence</h2>
+          <div class="event-log" id="event-log"></div>
+        </div>
+
+        <div class="panel">
+          <h2>Selected Rust seams</h2>
+          <pre><code>#[derive(Clone)] // clones handles, not payloads
+pub struct PackExtractionPlan { /* private */ }
+
+pub fn plan_pack_extraction(
+    pack: &amp;Pack,
+    selection: PackExtractionSelection,
+) -&gt; Result&lt;PackExtractionPlan, ExtractionPlanError&gt;;
+
+impl PackExtractionPlan {
+    pub fn pack_identity(&amp;self) -&gt; &amp;PackIdentity;
+    pub fn entries(&amp;self) -&gt; &amp;[PackExtractionEntry];
+}
+
+#[derive(Clone)] // clones handles, not payloads
+pub struct ArtifactPublicationPlan { /* private */ }
+
+pub fn plan_artifact_publication(
+    result: &amp;CompilationResult,
+) -&gt; Result&lt;ArtifactPublicationPlan, ArtifactPlanError&gt;;
+
+impl ArtifactPublicationPlan {
+    pub fn result_identity(&amp;self)
+        -&gt; &amp;CompilationResultIdentity;
+    pub fn entries(&amp;self)
+        -&gt; &amp;[ArtifactPublicationEntry];
+}
+
+pub enum FilesystemTreePolicy {
+    MergeCreateOnly,
+    MergeReplaceExactFiles,
+    PublishNewTree,
+}
+
+pub fn apply_extraction_to_filesystem(
+    plan: &amp;PackExtractionPlan,
+    destination: &amp;Path,
+    policy: FilesystemTreePolicy,
+) -&gt; Result&lt;PackExtractionReceipt,
+             PackExtractionFilesystemError&gt;;
+
+pub fn apply_artifacts_to_filesystem(
+    plan: &amp;ArtifactPublicationPlan,
+    destination: &amp;Path,
+    policy: FilesystemTreePolicy,
+) -&gt; Result&lt;ArtifactPublicationReceipt,
+             ArtifactPublicationFilesystemError&gt;;
+
+pub async fn publish_pack_extraction(
+    request: OpenDalExtractionRequest, // owns plan.clone()
+) -&gt; Result&lt;PublicationReport, PublicationError&gt;;
+
+pub async fn publish_compilation_artifacts(
+    request: OpenDalArtifactRequest, // owns plan.clone()
+) -&gt; Result&lt;PublicationReport, PublicationError&gt;;</code></pre>
+        </div>
+      </aside>
+    </div>
+
+    <section class="panel">
+      <h2>Guided walkthroughs</h2>
+      <div class="walkthroughs">
+        <article class="walkthrough">
+          <h3>Collision never reaches storage</h3>
+          <p>A project file named <span class="mono">packages</span> conflicts with package descendants. The semantic planner rejects it without consulting a destination.</p>
+          <button data-sequence="RESET_ALL,BUILD_COLLISION">Run walkthrough</button>
+        </article>
+        <article class="walkthrough">
+          <h3>Filesystem all-or-nothing</h3>
+          <p>An absent-root publication stages all entries. A late failure removes the private stage and leaves no visible destination tree.</p>
+          <button data-sequence="RESET_ALL,BUILD_EXTRACTION,POLICY_FS_NEW,PREFLIGHT,WRITE_NEXT,FAIL_NEXT,WRITE_ALL">Run walkthrough</button>
+        </article>
+        <article class="walkthrough">
+          <h3>Object-store replay</h3>
+          <p>Create-or-verify reports completed keys and an indeterminate failed write. Replaying compares exact bytes and safely finishes the plan.</p>
+          <button data-sequence="RESET_ALL,BUILD_ARTIFACTS,POLICY_OBJECT_CREATE,PREFLIGHT,WRITE_NEXT,FAIL_NEXT,WRITE_ALL,CLEAR_FAILURE,REPLAY,PREFLIGHT,WRITE_ALL">Run walkthrough</button>
+        </article>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Decisions this candidate makes visible</h2>
+      <ul class="decision-list">
+        <li><strong>Two semantic plan types, not one public generic byte-plan.</strong> They preserve Pack Identity or Compilation Result Identity and expose only their own role vocabulary. Concrete adapters privately share iteration machinery.</li>
+        <li><strong>Plans own shared immutable payload handles.</strong> Cloning a plan never copies payload bytes, OpenDAL requests own a cheap clone, and the original plan remains available for explicit replay.</li>
+        <li><strong>Filesystem policy stays filesystem-specific.</strong> Merge/create, merge/replace, and absent-root atomic publication are materially different promises and are not squeezed into OpenDAL’s create-or-verify and replace-exact-keys policies.</li>
+        <li><strong>Filesystem preflight is complete and commits are atomic per file.</strong> Known platform, topology, policy, and confinement failures precede writes. A merge may publish a partial set, but never a truncated planned file.</li>
+        <li><strong>Workflow-specific receipts describe storage facts.</strong> Failures retain committed files, created directories, residual staging state, and the failed phase without mutating the Pack, plan, or Compilation Result.</li>
+      </ul>
+    </section>
+  </main>
+
+  <script>
+    const Model = (() => {
+      const extractionEntries = () => [
+        { key: "main.typ", role: "project", bytes: "= Report" },
+        { key: "chapters/intro.typ", role: "project", bytes: "Introduction" },
+        { key: "fonts/atlas.ttf", role: "font", bytes: "font:atlas:v1" },
+        { key: "packages/preview/chart/1.2.0/lib.typ", role: "package", bytes: "chart-lib-v1" },
+      ];
+
+      const artifactEntries = () => [
+        { key: "page-02.png", role: "page 2", bytes: "png:page-2" },
+        { key: "page-07.png", role: "page 7", bytes: "png:page-7" },
+        { key: "page-12.png", role: "page 12", bytes: "png:page-12" },
+      ];
+
+      const initial = () => ({
+        plan: null,
+        planError: null,
+        policy: "fs-create",
+        rootExists: true,
+        destination: {},
+        staged: {},
+        queue: [],
+        completed: [],
+        phase: "unplanned",
+        failureKey: null,
+        failed: null,
+        events: ["Choose a semantic source and build a plan."],
+      });
+
+      const log = (state, message) => ({ ...state, events: [message, ...state.events].slice(0, 30) });
+      const canonical = entries => [...entries].sort((a, b) => a.key.localeCompare(b.key));
+      const isObject = policy => policy.startsWith("object-");
+
+      function collision(entries) {
+        const ordered = canonical(entries);
+        for (let index = 0; index < ordered.length; index += 1) {
+          const current = ordered[index].key;
+          const next = ordered[index + 1]?.key;
+          if (next === current || next?.startsWith(`${current}/`)) return [current, next];
+        }
+        return null;
+      }
+
+      function build(state, kind, entries, identity) {
+        const conflict = collision(entries);
+        if (conflict) {
+          return log({ ...state, plan: null, planError: `Projection collision: ${conflict[0]} ↔ ${conflict[1]}`, phase: "rejected", queue: [], completed: [], failed: null }, "Planner rejected colliding semantic roles before destination I/O.");
+        }
+        const plan = { kind, identity, entries: canonical(entries) };
+        return log({ ...state, plan, planError: null, phase: "planned", queue: [], completed: [], failed: null, staged: {} }, `Built owned ${kind} plan with ${entries.length} canonical entries.`);
+      }
+
+      function setPolicy(state, policy) {
+        return log({ ...state, policy, phase: state.plan ? "planned" : state.phase, queue: [], completed: [], failed: null, staged: {} }, `Selected ${policy} destination policy.`);
+      }
+
+      function preflight(state) {
+        if (!state.plan) return log(state, "No plan exists; semantic preparation must succeed first.");
+        const entries = state.plan.entries;
+
+        if (state.policy === "fs-new-tree" && state.rootExists) {
+          return log({ ...state, phase: "failed", failed: { phase: "preflight", certainty: "known unchanged", key: "<destination root>" } }, "Absent-root publication refused an existing destination before staging.");
+        }
+
+        const completed = [];
+        const queue = [];
+        for (const entry of entries) {
+          const existing = state.destination[entry.key];
+          if (state.policy === "fs-create" && existing !== undefined) {
+            return log({ ...state, phase: "failed", queue: [], completed: [], failed: { phase: "preflight", certainty: "known unchanged", key: entry.key } }, `Filesystem create policy found existing target ${entry.key}; no writes started.`);
+          }
+          if (state.policy === "object-create" && existing !== undefined) {
+            if (existing === entry.bytes) {
+              completed.push({ key: entry.key, outcome: "already matching" });
+              continue;
+            }
+            return log({ ...state, phase: "failed", queue: [], completed: [], failed: { phase: "preflight conflict", certainty: "known unchanged", key: entry.key } }, `Create-or-verify found different bytes at ${entry.key}; no writes started.`);
+          }
+          queue.push(entry);
+        }
+
+        const phase = queue.length ? "ready" : "complete";
+        return log({ ...state, phase, queue, completed, failed: null, staged: {} }, queue.length ? `Preflight passed; ${queue.length} entries remain to write.` : "Preflight proved every planned key already matches.");
+      }
+
+      function writeNext(state) {
+        if (state.phase !== "ready" && state.phase !== "writing") return log(state, "Preflight must leave the request ready before writing.");
+        if (!state.queue.length) return finish(state);
+
+        const [entry, ...rest] = state.queue;
+        const destination = state.destination[entry.key];
+
+        if (state.policy === "object-create" && destination !== undefined) {
+          if (destination === entry.bytes) {
+            const next = { ...state, queue: rest, completed: [...state.completed, { key: entry.key, outcome: "already matching after race" }], phase: rest.length ? "writing" : "complete" };
+            return log(next, `A race created matching bytes at ${entry.key}; treated as already matching.`);
+          }
+          return log({ ...state, phase: "failed", failed: { phase: "conditional create conflict", certainty: "known unchanged", key: entry.key } }, `A race created different bytes at ${entry.key}; publication stopped.`);
+        }
+
+        if (state.failureKey === entry.key) {
+          if (state.policy === "fs-new-tree") {
+            return log({ ...state, staged: {}, phase: "failed", failed: { phase: "staged write", certainty: "visible destination unchanged", key: entry.key } }, `Staged write failed at ${entry.key}; private stage removed, destination remains absent.`);
+          }
+          const certainty = isObject(state.policy) ? "indeterminate" : "indeterminate direct file write";
+          return log({ ...state, phase: "failed", failed: { phase: "write", certainty, key: entry.key } }, `Write failed at ${entry.key}; completed entries remain reported and the failed target is ${certainty}.`);
+        }
+
+        if (state.policy === "fs-new-tree") {
+          const staged = { ...state.staged, [entry.key]: entry.bytes };
+          const next = { ...state, staged, queue: rest, completed: [...state.completed, { key: entry.key, outcome: "staged" }], phase: rest.length ? "writing" : "committing" };
+          return rest.length ? log(next, `Staged ${entry.key}; nothing is visible yet.`) : finish(next);
+        }
+
+        let outcome = "created";
+        if (state.policy.endsWith("replace")) outcome = destination === undefined ? "written new" : "replaced";
+        const next = {
+          ...state,
+          destination: { ...state.destination, [entry.key]: entry.bytes },
+          queue: rest,
+          completed: [...state.completed, { key: entry.key, outcome }],
+          phase: rest.length ? "writing" : "complete",
+        };
+        return log(next, `${outcome}: ${entry.key}`);
+      }
+
+      function finish(state) {
+        if (state.policy === "fs-new-tree") {
+          return log({ ...state, destination: { ...state.staged }, staged: {}, rootExists: true, queue: [], phase: "complete", completed: state.completed.map(item => ({ ...item, outcome: "committed" })) }, "Committed the complete staged tree in one destination-root publication step.");
+        }
+        return log({ ...state, phase: "complete", queue: [] }, "Publication completed with an ordered operational report.");
+      }
+
+      function runAll(state) {
+        let next = state;
+        let guard = 100;
+        while ((next.phase === "ready" || next.phase === "writing" || next.phase === "committing") && guard > 0) {
+          next = writeNext(next);
+          guard -= 1;
+        }
+        return next;
+      }
+
+      function reducer(state, action) {
+        switch (action.type) {
+          case "BUILD_EXTRACTION":
+            return build(state, "Pack Extraction", extractionEntries(), "pack:sha256:8c1…");
+          case "BUILD_ARTIFACTS":
+            return build(state, "Artifact Publication", artifactEntries(), "result:sha256:74b…");
+          case "BUILD_EMPTY_ARTIFACTS":
+            return build(state, "Artifact Publication", [], "result:sha256:empty-pages…");
+          case "BUILD_COLLISION":
+            return build(state, "Pack Extraction", [
+              { key: "packages", role: "project", bytes: "user file" },
+              { key: "packages/preview/chart/1.2.0/lib.typ", role: "package", bytes: "package file" },
+            ], "pack:sha256:collision…");
+          case "BUILD_REJECTED":
+            return log({ ...state, plan: null, planError: "A rejected Compilation Result has no publishable artifacts", phase: "rejected", queue: [], completed: [], failed: null }, "Artifact planning rejected a non-succeeded Compilation Result.");
+          case "SET_POLICY": return setPolicy(state, action.policy);
+          case "POLICY_FS_NEW": return setPolicy(state, "fs-new-tree");
+          case "POLICY_OBJECT_CREATE": return setPolicy(state, "object-create");
+          case "SEED_CONFLICT": {
+            if (!state.plan?.entries.length) return log(state, "Build a nonempty plan before seeding a target.");
+            const key = state.plan.entries[0].key;
+            return log({ ...state, destination: { ...state.destination, [key]: "different bytes" }, rootExists: true, phase: "planned" }, `Placed different bytes at ${key}.`);
+          }
+          case "SEED_MATCH": {
+            if (!state.plan?.entries.length) return log(state, "Build a nonempty plan before seeding a target.");
+            const entry = state.plan.entries[0];
+            return log({ ...state, destination: { ...state.destination, [entry.key]: entry.bytes }, rootExists: true, phase: "planned" }, `Placed matching bytes at ${entry.key}.`);
+          }
+          case "TOGGLE_ROOT":
+            return log({ ...state, rootExists: !state.rootExists }, `Destination root is now ${!state.rootExists ? "present" : "absent"}.`);
+          case "PREFLIGHT": return preflight(state);
+          case "WRITE_NEXT": return writeNext(state);
+          case "WRITE_ALL": return runAll(state);
+          case "FAIL_NEXT": {
+            const key = state.queue[0]?.key || state.plan?.entries[0]?.key;
+            return key ? log({ ...state, failureKey: key }, `The next write to ${key} will fail.`) : log(state, "There is no planned write to fail.");
+          }
+          case "RACE_MATCH": {
+            const entry = state.queue[0];
+            return entry ? log({ ...state, destination: { ...state.destination, [entry.key]: entry.bytes }, rootExists: true }, `A concurrent writer created matching bytes at ${entry.key}.`) : log(state, "There is no queued target to race.");
+          }
+          case "RACE_DIFFERENT": {
+            const entry = state.queue[0];
+            return entry ? log({ ...state, destination: { ...state.destination, [entry.key]: "racing different bytes" }, rootExists: true }, `A concurrent writer created different bytes at ${entry.key}.`) : log(state, "There is no queued target to race.");
+          }
+          case "CLEAR_FAILURE": return log({ ...state, failureKey: null }, "Cleared the injected failure.");
+          case "REPLAY": return log({ ...state, phase: state.plan ? "planned" : state.phase, queue: [], completed: [], failed: null, staged: {} }, "Replaying the same immutable owned plan; destination facts are retained.");
+          case "RESET_EXECUTION": return log({ ...state, destination: {}, staged: {}, rootExists: false, queue: [], completed: [], failed: null, failureKey: null, phase: state.plan ? "planned" : "unplanned" }, "Reset destination and execution state; retained the semantic plan.");
+          case "RESET_ALL": return initial();
+          default: return state;
+        }
+      }
+
+      return { initial, reducer };
+    })();
+
+    let state = Model.initial();
+
+    const escapeHtml = value => String(value).replace(/[&<>'"]/g, character => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", "'": "&#39;", '"': "&quot;" })[character]);
+
+    function dispatch(type) {
+      state = Model.reducer(state, { type });
+      document.getElementById("policy").value = state.policy;
+      render();
+    }
+
+    function datum(label, value) {
+      return `<div class="datum"><div class="label">${escapeHtml(label)}</div><div class="value mono">${escapeHtml(value)}</div></div>`;
+    }
+
+    function render() {
+      const planName = state.plan ? `${state.plan.kind} · ${state.plan.entries.length} entries` : "none";
+      const failed = state.failed ? `${state.failed.phase} · ${state.failed.key} · ${state.failed.certainty}` : "none";
+      document.getElementById("state-grid").innerHTML = [
+        datum("Semantic plan", planName),
+        datum("Destination policy", state.policy),
+        datum("Phase", state.phase),
+        datum("Destination root", state.rootExists ? "present" : "absent"),
+        datum("Completed outcomes", state.completed.length),
+        datum("Failed operation", failed),
+      ].join("");
+
+      const status = document.getElementById("status");
+      const statusText = state.planError || state.events[0];
+      status.className = `status ${state.planError || state.failed ? "bad" : state.phase === "complete" ? "good" : state.failureKey ? "warn" : ""}`;
+      status.innerHTML = escapeHtml(statusText);
+
+      const completed = Object.fromEntries(state.completed.map(item => [item.key, item.outcome]));
+      document.getElementById("plan-entries").innerHTML = state.plan
+        ? state.plan.entries.map(entry => `<div class="entry"><div><div class="entry-key mono">${escapeHtml(entry.key)}</div><span class="pill">${escapeHtml(entry.role)}</span></div><span class="pill ${completed[entry.key] ? "good" : ""}">${escapeHtml(completed[entry.key] || "planned")}</span></div>`).join("") || `<div class="entry"><div class="entry-key">Empty successful plan: publication is a no-op.</div><span class="pill good">valid</span></div>`
+        : `<div class="entry"><div class="entry-key">No semantic plan.</div><span class="pill ${state.planError ? "bad" : "warn"}">${state.planError ? "rejected" : "waiting"}</span></div>`;
+
+      const destination = Object.entries(state.destination).sort(([a], [b]) => a.localeCompare(b));
+      document.getElementById("destination-entries").innerHTML = destination.length
+        ? destination.map(([key, bytes]) => `<div class="entry"><div><div class="entry-key mono">${escapeHtml(key)}</div><span class="pill">${escapeHtml(bytes)}</span></div><span class="pill good">visible</span></div>`).join("")
+        : `<div class="entry"><div class="entry-key">No visible planned targets.</div><span class="pill">empty</span></div>`;
+
+      document.getElementById("event-log").innerHTML = state.events.map(event => `<div class="event">${escapeHtml(event)}</div>`).join("");
+    }
+
+    document.querySelectorAll("[data-action]").forEach(button => button.addEventListener("click", () => dispatch(button.dataset.action)));
+    document.getElementById("policy").addEventListener("change", event => {
+      state = Model.reducer(state, { type: "SET_POLICY", policy: event.target.value });
+      render();
+    });
+    document.querySelectorAll("[data-sequence]").forEach(button => button.addEventListener("click", () => {
+      button.dataset.sequence.split(",").forEach(dispatch);
+    }));
+
+    render();
+  </script>
+</body>
+</html>
