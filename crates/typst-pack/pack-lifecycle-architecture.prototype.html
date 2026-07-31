@@ -1,0 +1,918 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pack Lifecycle Architecture Prototype</title>
+  <style>
+    :root {
+      --ink: #14213d;
+      --muted: #526178;
+      --paper: #f5f1e8;
+      --panel: #fffdf8;
+      --line: #c8d0d9;
+      --accent: #006d77;
+      --accent-soft: #d9efef;
+      --danger: #9f2d20;
+      --danger-soft: #f7dfda;
+      --shadow: 0 10px 30px rgba(20, 33, 61, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        linear-gradient(rgba(20, 33, 61, 0.035) 1px, transparent 1px),
+        linear-gradient(90deg, rgba(20, 33, 61, 0.035) 1px, transparent 1px),
+        var(--paper);
+      background-size: 24px 24px;
+      font: 16px/1.5 ui-monospace, "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+    }
+
+    button { font: inherit; }
+
+    .shell {
+      width: min(1500px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 36px 0 64px;
+    }
+
+    header {
+      border-top: 8px solid var(--accent);
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      padding: 28px clamp(20px, 4vw, 56px) 32px;
+    }
+
+    .eyebrow {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      align-items: center;
+      color: var(--accent);
+      font-size: 0.78rem;
+      font-weight: 800;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+    }
+
+    .badge {
+      border: 1px solid var(--accent);
+      border-radius: 999px;
+      padding: 3px 9px;
+    }
+
+    h1, h2, h3, p { margin-top: 0; }
+
+    h1 {
+      max-width: 900px;
+      margin: 18px 0 12px;
+      font: 800 clamp(2rem, 5vw, 4.4rem)/0.98 Georgia, "Times New Roman", serif;
+      letter-spacing: -0.045em;
+    }
+
+    .question {
+      max-width: 1060px;
+      margin: 0;
+      color: var(--muted);
+      font-size: clamp(1rem, 1.7vw, 1.2rem);
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.25fr) minmax(360px, 0.75fr);
+      gap: 20px;
+      margin-top: 20px;
+      align-items: start;
+    }
+
+    .stack { display: grid; gap: 20px; }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid rgba(20, 33, 61, 0.16);
+      box-shadow: var(--shadow);
+      padding: 22px;
+    }
+
+    .panel-title {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: baseline;
+      margin-bottom: 18px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .panel-title h2 { margin: 0; font-size: 1.05rem; }
+
+    .panel-title span { color: var(--muted); font-size: 0.8rem; }
+
+    .route {
+      display: grid;
+      grid-template-columns: repeat(5, minmax(120px, 1fr));
+      gap: 8px;
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+
+    .route-step {
+      min-height: 88px;
+      border: 1px solid var(--line);
+      border-top: 4px solid var(--line);
+      background: #faf8f2;
+      padding: 10px;
+    }
+
+    .route-step.active {
+      border-top-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .route-step strong { display: block; font-size: 0.82rem; }
+    .route-step small { display: block; margin-top: 6px; color: var(--muted); }
+
+    .state-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .state-card {
+      min-height: 112px;
+      border-left: 4px solid var(--accent);
+      background: #f7f7f2;
+      padding: 12px 14px;
+    }
+
+    .state-card h3 {
+      margin-bottom: 8px;
+      color: var(--muted);
+      font-size: 0.72rem;
+      letter-spacing: 0.06em;
+      text-transform: uppercase;
+    }
+
+    .state-card p, .state-card ul { margin-bottom: 0; font-size: 0.88rem; }
+
+    .state-card ul { padding-left: 18px; }
+
+    .last-change {
+      margin-top: 12px;
+      border: 1px solid var(--accent);
+      background: var(--accent-soft);
+      padding: 10px 12px;
+      font-size: 0.88rem;
+    }
+
+    .last-change.rejected {
+      border-color: var(--danger);
+      background: var(--danger-soft);
+      color: var(--danger);
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .action {
+      min-height: 54px;
+      border: 1px solid var(--ink);
+      background: transparent;
+      color: var(--ink);
+      cursor: pointer;
+      padding: 9px 11px;
+      text-align: left;
+    }
+
+    .action:hover, .action:focus-visible {
+      color: white;
+      background: var(--ink);
+      outline: 3px solid var(--accent-soft);
+      outline-offset: 1px;
+    }
+
+    .action.primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: white;
+    }
+
+    .scenario-tabs {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      padding-bottom: 8px;
+    }
+
+    .tab {
+      flex: 0 0 auto;
+      border: 1px solid var(--line);
+      background: #faf8f2;
+      color: var(--ink);
+      cursor: pointer;
+      padding: 8px 10px;
+    }
+
+    .tab.selected {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-weight: 800;
+    }
+
+    .scenario-copy {
+      min-height: 92px;
+      margin: 12px 0;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .walkthrough { display: grid; gap: 7px; }
+
+    .walkthrough button {
+      border: 1px solid var(--line);
+      background: #fff;
+      cursor: pointer;
+      padding: 10px 12px;
+      text-align: left;
+    }
+
+    .walkthrough button.current {
+      border-color: var(--accent);
+      box-shadow: inset 4px 0 var(--accent);
+    }
+
+    .walkthrough button.complete {
+      color: var(--muted);
+      text-decoration: line-through;
+    }
+
+    .walkthrough button:disabled { cursor: default; opacity: 0.62; }
+
+    .migration-list { display: grid; gap: 6px; }
+
+    .migration-step {
+      display: grid;
+      grid-template-columns: 34px 1fr;
+      gap: 10px;
+      border: 1px solid var(--line);
+      padding: 9px;
+      font-size: 0.84rem;
+    }
+
+    .migration-step .index {
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      background: var(--ink);
+      color: white;
+      font-weight: 800;
+    }
+
+    .migration-step.complete { background: var(--accent-soft); }
+    .migration-step.next { border: 2px solid var(--accent); }
+    .migration-step strong, .migration-step small { display: block; }
+    .migration-step small { margin-top: 3px; color: var(--muted); }
+
+    details { border-top: 1px solid var(--line); padding-top: 12px; }
+    details + details { margin-top: 12px; }
+    summary { cursor: pointer; font-weight: 800; }
+
+    pre {
+      overflow-x: auto;
+      margin: 12px 0 0;
+      padding: 14px;
+      background: var(--ink);
+      color: #eef7f7;
+      font-size: 0.78rem;
+      line-height: 1.55;
+    }
+
+    .provisional {
+      margin: 0;
+      padding-left: 20px;
+      color: var(--muted);
+      font-size: 0.88rem;
+    }
+
+    .review {
+      margin-top: 20px;
+      border: 2px solid var(--accent);
+      background: var(--panel);
+      padding: 22px;
+    }
+
+    .review ol { margin-bottom: 0; padding-left: 24px; }
+
+    @media (max-width: 980px) {
+      .layout { grid-template-columns: 1fr; }
+      .route { grid-template-columns: repeat(5, 170px); }
+    }
+
+    @media (max-width: 620px) {
+      .shell { width: min(100% - 18px, 1500px); padding-top: 10px; }
+      header, .panel, .review { padding: 16px; }
+      .state-grid, .controls { grid-template-columns: 1fr; }
+      h1 { font-size: 2.4rem; }
+    }
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header>
+      <div class="eyebrow">
+        <span class="badge">Throwaway prototype</span>
+        <span>Validate the complete Pack lifecycle architecture</span>
+      </div>
+      <h1>Can one Pack travel the whole lifecycle without crossing the wrong seam?</h1>
+      <p class="question">
+        This prototype tests whether the selected domain values, deep modules, phase ordering,
+        ownership rules, failures, and destination effects compose from source acquisition to
+        publication. It also tests whether the migration can preserve version-1 <code>.typk</code>,
+        filesystem, and CLI behavior while replacing one seam at a time.
+      </p>
+    </header>
+
+    <section class="layout">
+      <div class="stack">
+        <section class="panel">
+          <div class="panel-title">
+            <h2>Lifecycle route</h2>
+            <span id="route-status">No Pack yet</span>
+          </div>
+          <div class="route" id="route"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>Current state</h2>
+            <span>Full relevant state after every action</span>
+          </div>
+          <div class="state-grid" id="state-grid"></div>
+          <div class="last-change" id="last-change"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>Free play</h2>
+            <span>Try legal and illegal orderings</span>
+          </div>
+          <div class="controls" id="controls"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>Selected interface skeleton</h2>
+            <span>Shape, not production code</span>
+          </div>
+          <details open>
+            <summary>Semantic core and Pack Archive</summary>
+            <pre>pub fn create(
+    input: PackCreationInput&lt;'_&gt;,
+) -&gt; Result&lt;PackCreationOutcome, PackCreationError&gt;;
+
+pub fn encode(
+    pack: &amp;Pack,
+    limits: EncodeLimits,
+) -&gt; Result&lt;PackArchiveBytes, pack_archive::EncodeError&gt;;
+
+pub fn decode(
+    archive: &amp;PackArchiveBytes,
+    limits: DecodeLimits,
+) -&gt; Result&lt;Pack, pack_archive::DecodeError&gt;;</pre>
+          </details>
+          <details>
+            <summary>Compilation</summary>
+            <pre>pub fn compile(
+    request: PackCompilationRequest,
+    limits: CompilationLimits,
+) -&gt; Result&lt;CompilationReport, CompilationRequestRejection&gt;;
+
+// Private ordered phases:
+// accept request -&gt; establish identity -&gt; verify exact
+// fulfillments -&gt; materialize World -&gt; compile/export</pre>
+          </details>
+          <details>
+            <summary>Planning and destination adapters</summary>
+            <pre>pub fn plan_pack_extraction(
+    pack: &amp;Pack,
+    selection: PackExtractionSelection,
+) -&gt; Result&lt;PackExtractionPlan, PackExtractionPlanError&gt;;
+
+pub fn apply_pack_extraction_to_filesystem(
+    plan: &amp;PackExtractionPlan,
+    destination: &amp;Path,
+    policy: FilesystemTreePublicationPolicy,
+) -&gt; Result&lt;PackExtractionFilesystemReceipt,
+             PackExtractionFilesystemError&gt;;</pre>
+          </details>
+        </section>
+      </div>
+
+      <aside class="stack">
+        <section class="panel">
+          <div class="panel-title">
+            <h2>Guided walkthroughs</h2>
+            <span>Click steps in order</span>
+          </div>
+          <div class="scenario-tabs" id="scenario-tabs"></div>
+          <p class="scenario-copy" id="scenario-copy"></p>
+          <div class="walkthrough" id="walkthrough"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>Migration proof</h2>
+            <span id="migration-status">0 / 12 slices</span>
+          </div>
+          <div class="migration-list" id="migration-list"></div>
+        </section>
+
+        <section class="panel">
+          <div class="panel-title">
+            <h2>Still provisional</h2>
+            <span>Not silently decided here</span>
+          </div>
+          <ul class="provisional">
+            <li>Concrete reference filesystem Pack Assembler request and terminal signatures.</li>
+            <li>Duplicate and precedence rules for repeated request-builder calls.</li>
+            <li>Exact accessors used to inspect a <code>CompilationReport</code>.</li>
+            <li>Exact stream and file publication operation names and recovery methods.</li>
+          </ul>
+        </section>
+      </aside>
+    </section>
+
+    <section class="review">
+      <h2>Review questions</h2>
+      <ol>
+        <li>Does any guided route permit an effect before its semantic plan or validated value exists?</li>
+        <li>Does any failure land in the wrong place: Error, Rejection, Outcome, Report, Receipt, or Progress?</li>
+        <li>Can the migration reorder any slices without coupling Pack validity back to representation or copying payloads?</li>
+        <li>Are the four provisional interface details implementation choices, or must one become another architecture decision?</li>
+      </ol>
+    </section>
+  </main>
+
+  <script>
+    const Architecture = (() => {
+      const initialState = () => ({
+        project: "not acquired",
+        packages: "empty catalog",
+        pack: "none",
+        packIdentity: "not established",
+        archive: "none",
+        extraction: "none",
+        compilation: "none",
+        world: "not materialized",
+        destinationEffects: [],
+        evidence: [],
+        payloads: "no retained payloads",
+        migration: 0,
+        last: "Reset. Source acquisition may begin.",
+        rejected: false,
+      });
+
+      const reject = (state, message) => ({
+        ...state,
+        last: `Illegal route: ${message}`,
+        rejected: true,
+      });
+
+      const accept = (state, patch, message) => ({
+        ...state,
+        ...patch,
+        last: message,
+        rejected: false,
+      });
+
+      const hasPack = (state) => state.pack === "validated Pack";
+
+      function reduce(state, action) {
+        switch (action.type) {
+          case "RESET":
+            return initialState();
+          case "GATHER_PROJECT":
+            return accept(state, {
+              project: "validated Project Snapshot",
+              payloads: "Project Snapshot owns shared immutable payloads",
+              evidence: ["Filesystem gatherer selected membership before assembly"],
+            }, "The source-specific gatherer applied the Project Ignore Policy, bounded its reads, and submitted exact selected bytes to Project Snapshot assembly.");
+          case "DISCOVER_MISSING":
+            if (state.project !== "validated Project Snapshot") {
+              return reject(state, "Pack Creation requires a Project Snapshot.");
+            }
+            return accept(state, {
+              packages: "missing @preview/plotst and @preview/tablex",
+              evidence: [...state.evidence, "Missing package specifications are exact and canonical"],
+            }, "Pack Creation accepted its borrowed inputs, ran one Dependency Discovery, and returned a resumable Missing Package Specifications outcome. No Pack exists yet.");
+          case "RECORD_PACKAGE_FAILURE":
+            if (!state.packages.startsWith("missing")) {
+              return reject(state, "An acquisition failure must correspond to a reported missing specification.");
+            }
+            return accept(state, {
+              packages: "one Package Tree plus one acquisition failure",
+              evidence: [...state.evidence, "Failure data remains outside the Package Catalog"],
+            }, "Pack Assembly retained the failed acquisition separately so Dependency Discovery can attach it to the importing source request.");
+          case "SUPPLY_PACKAGES":
+            if (state.project !== "validated Project Snapshot") {
+              return reject(state, "Package Catalog preparation does not replace Project Snapshot acquisition.");
+            }
+            return accept(state, {
+              packages: "validated complete Package Catalog",
+              evidence: [...state.evidence, "Supplied Package Trees supersede older acquisition failures"],
+              payloads: "Project and package payloads use shared immutable allocations",
+            }, "Every Package Tree was validated before catalog insertion, including declarations that Dependency Discovery may not use.");
+          case "CREATE_PACK":
+            if (state.project !== "validated Project Snapshot" || state.packages !== "validated complete Package Catalog") {
+              return reject(state, "Pack Creation needs validated project, package, and font inputs. Use the prepared Package Catalog in this prototype.");
+            }
+            return accept(state, {
+              pack: "validated Pack",
+              packIdentity: "established from canonical semantic state",
+              payloads: "Pack shares selected immutable payloads; creation copied no payload bytes",
+              evidence: [...state.evidence, "Private Pack construction owns whole-Pack invariants"],
+            }, "Pack Creation returned Created with one validated Pack and discovery warnings. The Pack is independent of archive representation and host destinations.");
+          case "ACQUIRE_ARCHIVE":
+            return accept(state, {
+              archive: "bounded exact Pack Archive bytes",
+              payloads: "PackArchiveBytes uniquely owns its allocation and is not Clone",
+              evidence: [...state.evidence, "Acquisition applied mandatory finite limits"],
+            }, "A concrete source adapter acquired exact Pack Archive bytes without decoding them.");
+          case "DECODE_AMBIGUOUS":
+            if (!state.archive.includes("Pack Archive bytes")) {
+              return reject(state, "Pack Archive Decoding requires acquired exact bytes.");
+            }
+            return accept(state, {
+              pack: "none",
+              packIdentity: "not established",
+              evidence: [...state.evidence, "DecodeError::Archive rejected raw ZIP ambiguity"],
+            }, "Decoding rejected ambiguous raw archive members before domain interpretation. This is a Pack Archive error, not a Pack invariant error.");
+          case "DECODE_PACK":
+            if (!state.archive.includes("Pack Archive bytes")) {
+              return reject(state, "Pack Archive Decoding requires acquired exact bytes.");
+            }
+            return accept(state, {
+              pack: "validated Pack",
+              packIdentity: "established only after whole-Pack validation",
+              payloads: "Decoded semantic payloads are shared; archive bytes remain unique",
+              evidence: [...state.evidence, "Safe unknown entries were ignored without becoming Pack state"],
+            }, "The format module parsed version 1 and submitted sequence-shaped content to authoritative Pack construction. Only then did a Pack exist.");
+          case "ENCODE_TOO_SMALL":
+            if (!hasPack(state)) return reject(state, "Pack Archive Encoding requires a validated Pack.");
+            return accept(state, {
+              archive: "EncodeError::Limit; no archive value",
+              evidence: [...state.evidence, "The valid Pack survived an encoding-only failure"],
+            }, "The Pack remains valid although the selected representation limits cannot encode it. Pack validity did not absorb ZIP constraints.");
+          case "ENCODE_PACK":
+            if (!hasPack(state)) return reject(state, "Pack Archive Encoding requires a validated Pack.");
+            return accept(state, {
+              archive: "complete exact Pack Archive bytes",
+              payloads: "PackArchiveBytes uniquely owns the complete encoded allocation",
+              evidence: [...state.evidence, "Encoding performed no whole-Pack revalidation"],
+            }, "The format module produced complete version-1 Pack Archive bytes before destination publication began.");
+          case "PUBLISH_ARCHIVE_FAILURE":
+            if (state.archive !== "complete exact Pack Archive bytes") {
+              return reject(state, "Archive publication requires complete encoded bytes.");
+            }
+            return accept(state, {
+              destinationEffects: [...state.destinationEffects, "archive destination: Not Committed"],
+              evidence: [...state.evidence, "Exact encoded bytes retained for retry"],
+            }, "Atomic filesystem publication failed before commit. The error returned the exact PackArchiveBytes, so retry needs no re-encoding.");
+          case "PUBLISH_ARCHIVE":
+            if (state.archive !== "complete exact Pack Archive bytes") {
+              return reject(state, "Archive publication requires complete encoded bytes.");
+            }
+            return accept(state, {
+              destinationEffects: [...state.destinationEffects, "archive destination: Committed"],
+              evidence: [...state.evidence, "Pack Archive Publication Receipt"],
+            }, "A concrete filesystem adapter atomically committed the complete archive and issued a Publication Receipt.");
+          case "PLAN_COLLIDING_EXTRACTION":
+            if (!hasPack(state)) return reject(state, "Pack Extraction planning requires a Pack.");
+            return accept(state, {
+              extraction: "planning rejected a cross-role ancestor collision",
+              evidence: [...state.evidence, "No destination was accessed"],
+            }, "Semantic planning found a project/package path collision before any destination or write policy entered the operation.");
+          case "PLAN_EXTRACTION":
+            if (!hasPack(state)) return reject(state, "Pack Extraction planning requires a Pack.");
+            return accept(state, {
+              extraction: "owned Pack Extraction Plan",
+              payloads: "The plan owns shared payload handles and survives dropping the Pack",
+              evidence: [...state.evidence, "Plan contains no destination or write policy"],
+            }, "Pack Extraction produced one collision-checked, canonically ordered semantic plan.");
+          case "APPLY_EXTRACTION_PARTIAL":
+            if (state.extraction !== "owned Pack Extraction Plan") {
+              return reject(state, "Destination effects require a Pack Extraction Plan.");
+            }
+            return accept(state, {
+              destinationEffects: [...state.destinationEffects, "a.typ: Committed", "b.typ: Not Committed"],
+              evidence: [...state.evidence, "Ordered Publication Progress retained the failed path and staging residue"],
+            }, "Merge publication atomically committed one exact file, then failed on the next. The adapter reported truthful partial progress without exposing a truncated target.");
+          case "INVALID_COMPILE_REQUEST":
+            if (!hasPack(state)) return reject(state, "Pack Compilation requires a Pack.");
+            return accept(state, {
+              compilation: "Compilation Request Rejection",
+              world: "not materialized",
+              evidence: [...state.evidence, "All request issues aggregated before fulfillment inspection"],
+            }, "Invalid semantic controls were rejected before Compilation Identity, fulfillment verification, World materialization, or compiler execution.");
+          case "ACCEPT_COMPILE_REQUEST":
+            if (!hasPack(state)) return reject(state, "Pack Compilation requires a Pack.");
+            return accept(state, {
+              compilation: "accepted request with Compilation Identity",
+              world: "not materialized",
+              evidence: [...state.evidence, "Request inventory and implementation identities fixed"],
+            }, "The semantic request was accepted and canonicalized. Compilation Identity now exists, but no external fulfillment has been trusted and no World exists.");
+          case "VERIFY_BAD_FULFILLMENTS":
+            if (state.compilation !== "accepted request with Compilation Identity") {
+              return reject(state, "Exact-set fulfillment verification follows request acceptance.");
+            }
+            return accept(state, {
+              compilation: "Compilation Operation Outcome with complete fulfillment issues",
+              world: "not materialized",
+              evidence: [...state.evidence, "Missing, unexpected, embedded, and mismatched entries ordered canonically"],
+            }, "The accepted operation returned one report containing every independently detectable fulfillment issue. World materialization never began.");
+          case "VERIFY_FULFILLMENTS":
+            if (state.compilation !== "accepted request with Compilation Identity") {
+              return reject(state, "Exact-set fulfillment verification follows request acceptance.");
+            }
+            return accept(state, {
+              compilation: "exact Compilation Fulfillment Set verified",
+              evidence: [...state.evidence, "Every external requirement matched exactly once"],
+            }, "Validated Package Trees and Font Containers exactly fulfill the Pack's external requirements.");
+          case "MATERIALIZE_WORLD":
+            if (state.compilation !== "exact Compilation Fulfillment Set verified") {
+              return reject(state, "The private Pack-backed World may exist only after exact fulfillment verification.");
+            }
+            return accept(state, {
+              world: "private ambient-free Pack-backed World",
+              evidence: [...state.evidence, "No ambient filesystem, fonts, clock, environment, cache, or network"],
+            }, "The private embedded Typst adapter received one confined World assembled from the Pack, overrides, and verified fulfillments.");
+          case "COMPILER_REJECTS":
+            if (state.world !== "private ambient-free Pack-backed World") {
+              return reject(state, "Compiler execution requires the private verified World.");
+            }
+            return accept(state, {
+              compilation: "rejected semantic Compilation Result with no artifacts",
+              evidence: [...state.evidence, "Compiler diagnostics belong to a result, not a Rust error"],
+            }, "The compiler rejected the document. The accepted operation still returned a Compilation Result and Compilation Report with diagnostics and identities.");
+          case "COMPILER_SUCCEEDS":
+            if (state.world !== "private ambient-free Pack-backed World") {
+              return reject(state, "Compiler execution requires the private verified World.");
+            }
+            return accept(state, {
+              compilation: "succeeded Compilation Result with canonical artifacts",
+              payloads: "Artifacts own shared immutable payloads",
+              evidence: [...state.evidence, "Parallel completion order did not affect semantic ordering"],
+            }, "Compilation and export succeeded under invocation-scoped limits. Artifacts, diagnostics, trace, and identities are canonical.");
+          case "PLAN_ARTIFACTS":
+            if (state.compilation !== "succeeded Compilation Result with canonical artifacts") {
+              return reject(state, "Artifact publication planning accepts only a succeeded Compilation Result.");
+            }
+            return accept(state, {
+              compilation: "owned Compilation Artifact Publication Plan",
+              payloads: "The plan shares artifact payload handles",
+              evidence: [...state.evidence, "Artifact destinations remain outside Compilation Result"],
+            }, "A semantic plan assigned canonical relative paths to result artifacts without touching a destination.");
+          case "PUBLISH_ARTIFACTS":
+            if (state.compilation !== "owned Compilation Artifact Publication Plan") {
+              return reject(state, "Artifact destination effects require a publication plan.");
+            }
+            return accept(state, {
+              destinationEffects: [...state.destinationEffects, "compilation artifacts: Committed"],
+              evidence: [...state.evidence, "Artifact Filesystem Receipt"],
+            }, "A concrete destination adapter atomically published the planned artifacts and returned workflow-specific evidence.");
+          case "MIGRATE": {
+            if (action.index !== state.migration) {
+              return reject(state, `Migration slice ${action.index + 1} is not next. Complete slice ${state.migration + 1} first.`);
+            }
+            return accept(state, {
+              migration: state.migration + 1,
+              evidence: [...state.evidence, `Migration gate passed: ${migration[action.index].name}`],
+            }, `Migration slice ${action.index + 1} passed its preservation gates: ${migration[action.index].gate}`);
+          }
+          default:
+            return reject(state, `Unknown action ${action.type}.`);
+        }
+      }
+
+      const migration = [
+        { name: "Freeze interoperability", gate: "Version-1 fixtures, identity vectors, and CLI behavior are pinned before structural edits." },
+        { name: "Share immutable payloads", gate: "Semantic clones copy no payload bytes and identities remain unchanged." },
+        { name: "Validate input values", gate: "Package Trees, Font Containers, and catalogs reject ambiguity before use." },
+        { name: "Deepen Pack construction", gate: "One private sequence-shaped seam owns whole-Pack invariants and identity." },
+        { name: "Split Pack Archive format", gate: "Old and independent fixtures interoperate; representation failures leave valid Packs valid." },
+        { name: "Add acquisition and publication", gate: "Exact bytes are bounded, atomic file publication is old-or-complete, and retry material survives." },
+        { name: "Move membership to gatherers", gate: "Filesystem membership remains equal while core assembly loses source policy and budgets." },
+        { name: "Migrate Pack Creation and Assembly", gate: "Resumption, source order, offline policy, warnings, and CLI defaults remain stable." },
+        { name: "Complete amplification limits", gate: "Every dimension passes below, exactly-at, and one-over tests without changing identities." },
+        { name: "Complete compilation contracts", gate: "Request precedence, exact fulfillments, confinement, and canonical output remain stable." },
+        { name: "Split plans from destination effects", gate: "Extraction and artifact semantics are testable without filesystems; CLI workflows remain stable." },
+        { name: "Reorganize conformance evidence", gate: "Operation-specific suites replace obsolete tests only after each new seam is active." },
+      ];
+
+      return { initialState, reduce, migration };
+    })();
+
+    const actions = [
+      ["RESET", "Reset lifecycle"],
+      ["GATHER_PROJECT", "Gather Project Snapshot"],
+      ["DISCOVER_MISSING", "Discover missing packages"],
+      ["RECORD_PACKAGE_FAILURE", "Record acquisition failure"],
+      ["SUPPLY_PACKAGES", "Supply validated Package Trees"],
+      ["CREATE_PACK", "Create validated Pack"],
+      ["ACQUIRE_ARCHIVE", "Acquire Pack Archive bytes"],
+      ["DECODE_AMBIGUOUS", "Decode ambiguous archive"],
+      ["DECODE_PACK", "Decode valid archive"],
+      ["ENCODE_TOO_SMALL", "Encode under a tiny limit"],
+      ["ENCODE_PACK", "Encode Pack Archive"],
+      ["PUBLISH_ARCHIVE_FAILURE", "Fail archive publication"],
+      ["PUBLISH_ARCHIVE", "Publish archive atomically"],
+      ["PLAN_COLLIDING_EXTRACTION", "Plan colliding extraction"],
+      ["PLAN_EXTRACTION", "Plan Pack Extraction"],
+      ["APPLY_EXTRACTION_PARTIAL", "Partially apply extraction"],
+      ["INVALID_COMPILE_REQUEST", "Reject invalid compilation request"],
+      ["ACCEPT_COMPILE_REQUEST", "Accept compilation request"],
+      ["VERIFY_BAD_FULFILLMENTS", "Verify inexact fulfillments"],
+      ["VERIFY_FULFILLMENTS", "Verify exact fulfillments"],
+      ["MATERIALIZE_WORLD", "Materialize private World"],
+      ["COMPILER_REJECTS", "Compiler rejects document"],
+      ["COMPILER_SUCCEEDS", "Compile and export"],
+      ["PLAN_ARTIFACTS", "Plan artifact publication"],
+      ["PUBLISH_ARTIFACTS", "Publish artifacts"],
+    ];
+
+    const scenarios = [
+      {
+        name: "Resumable creation",
+        description: "Watch Pack Assembly retain source-specific failures outside the semantic catalog, then let a later Package Tree supersede the failure. No Pack exists until authoritative construction succeeds.",
+        steps: ["GATHER_PROJECT", "DISCOVER_MISSING", "RECORD_PACKAGE_FAILURE", "SUPPLY_PACKAGES", "CREATE_PACK"],
+      },
+      {
+        name: "Representation split",
+        description: "A valid Pack first fails an encoding-only limit, then encodes successfully. Publication can fail without losing exact retry bytes. Pack validity never absorbs ZIP limits or destination effects.",
+        steps: ["GATHER_PROJECT", "SUPPLY_PACKAGES", "CREATE_PACK", "ENCODE_TOO_SMALL", "ENCODE_PACK", "PUBLISH_ARCHIVE_FAILURE", "PUBLISH_ARCHIVE"],
+      },
+      {
+        name: "Decode boundary",
+        description: "Raw archive ambiguity is rejected before domain interpretation. A separate valid acquisition reaches whole-Pack validation and establishes Pack Identity only after decoding submits canonical content.",
+        steps: ["ACQUIRE_ARCHIVE", "DECODE_AMBIGUOUS", "ACQUIRE_ARCHIVE", "DECODE_PACK"],
+      },
+      {
+        name: "Compilation precedence",
+        description: "First prove semantic request rejection wins before fulfillment inspection. Then accept a request, observe an exact-set operational outcome without a World, and finally follow the successful confined path.",
+        steps: ["GATHER_PROJECT", "SUPPLY_PACKAGES", "CREATE_PACK", "INVALID_COMPILE_REQUEST", "ACCEPT_COMPILE_REQUEST", "VERIFY_BAD_FULFILLMENTS", "ACCEPT_COMPILE_REQUEST", "VERIFY_FULFILLMENTS", "MATERIALIZE_WORLD", "COMPILER_SUCCEEDS", "PLAN_ARTIFACTS", "PUBLISH_ARTIFACTS"],
+      },
+      {
+        name: "Extraction effects",
+        description: "A semantic collision fails before destination access. A valid owned plan then survives independently and a concrete merge adapter reports truthful partial progress after atomic per-file commits.",
+        steps: ["GATHER_PROJECT", "SUPPLY_PACKAGES", "CREATE_PACK", "PLAN_COLLIDING_EXTRACTION", "PLAN_EXTRACTION", "APPLY_EXTRACTION_PARTIAL"],
+      },
+      {
+        name: "Migration order",
+        description: "Advance through the implementation migration. Each slice is allowed only after the contracts that protect it are in place; try clicking a later migration slice in the Migration proof panel to see the dependency guard.",
+        steps: Architecture.migration.map((_, index) => `MIGRATE:${index}`),
+      },
+    ];
+
+    const routeSteps = [
+      ["Acquire", "Concrete gatherers and authorities"],
+      ["Validate", "Canonical semantic values"],
+      ["Transform", "Creation, codec, plans, compilation"],
+      ["Apply", "Concrete destination adapters"],
+      ["Evidence", "Outcome, Report, Receipt, Progress"],
+    ];
+
+    let state = Architecture.initialState();
+    let scenarioIndex = 0;
+    let scenarioStep = 0;
+
+    const $ = (id) => document.getElementById(id);
+
+    function dispatch(encoded) {
+      const [type, rawIndex] = encoded.split(":");
+      const action = type === "MIGRATE" ? { type, index: Number(rawIndex) } : { type };
+      state = Architecture.reduce(state, action);
+      render();
+    }
+
+    function activeRouteIndex() {
+      if (state.destinationEffects.length) return 4;
+      if (state.extraction.includes("Plan") || state.compilation.includes("Plan") || state.archive.includes("bytes")) return 3;
+      if (state.pack === "validated Pack" || state.compilation !== "none" || state.extraction !== "none") return 2;
+      if (state.project !== "not acquired" || state.packages !== "empty catalog") return 1;
+      return 0;
+    }
+
+    function renderRoute() {
+      const active = activeRouteIndex();
+      $("route").innerHTML = routeSteps.map(([name, copy], index) => `
+        <div class="route-step ${index <= active ? "active" : ""}">
+          <strong>${index + 1}. ${name}</strong>
+          <small>${copy}</small>
+        </div>
+      `).join("");
+      $("route-status").textContent = state.pack === "validated Pack" ? "Pack exists" : "No Pack yet";
+    }
+
+    function list(items, empty) {
+      if (!items.length) return `<p>${empty}</p>`;
+      return `<ul>${items.slice(-6).map((item) => `<li>${item}</li>`).join("")}</ul>`;
+    }
+
+    function renderState() {
+      const cards = [
+        ["Semantic values", `<p>Project: ${state.project}</p><p>Packages: ${state.packages}</p><p>Pack: ${state.pack}</p>`],
+        ["Identity and representation", `<p>Pack Identity: ${state.packIdentity}</p><p>Archive: ${state.archive}</p>`],
+        ["Compilation confinement", `<p>Compilation: ${state.compilation}</p><p>World: ${state.world}</p>`],
+        ["Plans and effects", `<p>Extraction: ${state.extraction}</p>${list(state.destinationEffects, "No destination effects")}`],
+        ["Ownership", `<p>${state.payloads}</p>`],
+        ["Retained evidence", list(state.evidence, "No terminal evidence yet")],
+      ];
+      $("state-grid").innerHTML = cards.map(([title, body]) => `
+        <article class="state-card"><h3>${title}</h3>${body}</article>
+      `).join("");
+      $("last-change").className = `last-change ${state.rejected ? "rejected" : ""}`;
+      $("last-change").textContent = state.last;
+    }
+
+    function renderControls() {
+      $("controls").innerHTML = actions.map(([type, label], index) => `
+        <button class="action ${index === 0 ? "primary" : ""}" data-action="${type}">${label}</button>
+      `).join("");
+      $("controls").querySelectorAll("button").forEach((button) => {
+        button.addEventListener("click", () => dispatch(button.dataset.action));
+      });
+    }
+
+    function selectScenario(index) {
+      scenarioIndex = index;
+      scenarioStep = 0;
+      state = Architecture.initialState();
+      render();
+    }
+
+    function runScenarioStep(index) {
+      if (index !== scenarioStep) return;
+      dispatch(scenarios[scenarioIndex].steps[index]);
+      scenarioStep += 1;
+      renderScenario();
+    }
+
+    function stepLabel(encoded) {
+      const [type, rawIndex] = encoded.split(":");
+      if (type === "MIGRATE") return Architecture.migration[Number(rawIndex)].name;
+      return actions.find(([action]) => action === type)?.[1] ?? type;
+    }
+
+    function renderScenario() {
+      $("scenario-tabs").innerHTML = scenarios.map((scenario, index) => `
+        <button class="tab ${index === scenarioIndex ? "selected" : ""}" data-scenario="${index}">${scenario.name}</button>
+      `).join("");
+      $("scenario-copy").textContent = scenarios[scenarioIndex].description;
+      $("walkthrough").innerHTML = scenarios[scenarioIndex].steps.map((step, index) => `
+        <button class="${index < scenarioStep ? "complete" : index === scenarioStep ? "current" : ""}"
+                data-step="${index}" ${index > scenarioStep ? "disabled" : ""}>
+          ${index + 1}. ${stepLabel(step)}
+        </button>
+      `).join("");
+      $("scenario-tabs").querySelectorAll("button").forEach((button) => {
+        button.addEventListener("click", () => selectScenario(Number(button.dataset.scenario)));
+      });
+      $("walkthrough").querySelectorAll("button").forEach((button) => {
+        button.addEventListener("click", () => runScenarioStep(Number(button.dataset.step)));
+      });
+    }
+
+    function renderMigration() {
+      $("migration-status").textContent = `${state.migration} / ${Architecture.migration.length} slices`;
+      $("migration-list").innerHTML = Architecture.migration.map((slice, index) => `
+        <button class="migration-step ${index < state.migration ? "complete" : index === state.migration ? "next" : ""}"
+                data-migration="${index}">
+          <span class="index">${index + 1}</span>
+          <span><strong>${slice.name}</strong><small>${slice.gate}</small></span>
+        </button>
+      `).join("");
+      $("migration-list").querySelectorAll("button").forEach((button) => {
+        button.addEventListener("click", () => dispatch(`MIGRATE:${button.dataset.migration}`));
+      });
+    }
+
+    function render() {
+      renderRoute();
+      renderState();
+      renderControls();
+      renderScenario();
+      renderMigration();
+    }
+
+    render();
+  </script>
+</body>
+</html>
