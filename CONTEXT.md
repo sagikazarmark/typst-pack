@@ -295,11 +295,13 @@ compilation controls, one Compilation Fulfillment Set, and optional operational
 report metadata. It is not itself a validated domain value.
 
 **Compilation Fulfillment Set**:
-The exact Package Tree Fulfillments and Font Container Fulfillments supplied for
-one Pack compilation. It must correspond exactly to the Pack's external
-requirements; entries for embedded or undeclared dependencies are invalid.
-Fulfillment bytes and their operational report metadata do not contribute to
-semantic request values.
+The Package Tree Fulfillments and Font Container Fulfillments supplied for one
+Pack compilation, with at most one entry per exact package specification or Font
+Container Identity. Construction rejects duplicate entries. After semantic
+request acceptance, compilation verifies that the set corresponds exactly to
+the Pack's external requirements; missing entries and entries for embedded or
+undeclared dependencies are invalid. Fulfillment bytes and their operational
+report metadata do not contribute to semantic request values.
 
 **Typst Target**:
 The selected Typst document model: Paged or HTML. A Discovery Specification
@@ -390,9 +392,12 @@ provenance, and fulfillment cache metadata do not contribute.
 
 **Compilation Operation Outcome**:
 A typed operational failure after request acceptance but before a semantic
-Compilation Result. Shipped outcomes cover missing, malformed, or identity-
-mismatched external package and font fulfillment. They retain request inventory,
-Compilation Identity, and fulfillment reporting through Compilation Report.
+Compilation Result. Shipped outcomes aggregate every independently detectable
+missing, unexpected, or identity-mismatched external package and font
+fulfillment in canonical order. Fulfillments carry validated Package Trees and
+Font Containers, so malformed raw dependency bytes fail before compilation when
+those values are constructed. Outcomes retain request inventory, Compilation
+Identity, and fulfillment reporting through Compilation Report.
 
 **Canonical Compilation Diagnostic**:
 One ordered compiler or exporter diagnostic containing severity, message, logical
