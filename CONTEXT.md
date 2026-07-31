@@ -16,18 +16,18 @@ directly, subject to the built-in exclusion in the Project Ignore Policy; Pack
 Creation uses the complete structural project tree described below.
 
 **Pack Creation**:
-The adapter-neutral operation that takes one Project Snapshot, one Candidate
-Font Catalog, and the Complete Package Trees resolved for it, runs one
-representative Typst request to select package and font requirements, and
-returns one Pack plus representative-compile warnings. It acquires nothing
-itself; obtaining its inputs is Creation Preparation. Compiler observations
-select package and font requirements but never select project files. The
-representative request fixes the Typst Target, inputs, Document Time, and engine
-features for that run only; these values do not become Pack state or restrict
-later output formats. Creation fails when the representative request does not
-compile, and when a supplied tree does not declare the specification it was
-supplied under. When that request needs a package tree it was not given,
-creation reports those exact package specifications instead of issuing a Pack,
+The adapter-neutral operation that takes one Project Snapshot, one Font Catalog,
+and one Package Catalog, performs Dependency Discovery to select package and font
+requirements, and returns one Pack plus discovery warnings. It acquires nothing
+itself; obtaining its inputs and coordinating repeated invocations belong to
+Pack Assembly. Compiler observations select package and font requirements but
+never select project files. The Discovery Specification fixes the Typst Target,
+inputs, Document Time, and engine features for that run only; these values do
+not become Pack state or restrict
+later output formats. Creation fails when Dependency Discovery does not compile,
+and when a supplied tree does not declare the specification it was supplied
+under. When Dependency Discovery needs a package tree it was not given, creation
+reports those exact package specifications instead of issuing a Pack,
 so the caller can resolve them and invoke creation again. Those specifications
 come from observed package requests rather than diagnostic text, creation
 retains nothing between invocations, and how many invocations a project takes
@@ -37,45 +37,60 @@ it, carrying the caller's own failure; that is where an acquisition failure and
 the source location it belongs to meet, because a reported specification names
 a package and never the file that imported one.
 
-**Creation Preparation**:
-The acquisition phase that obtains Pack Creation's inputs: the project files,
-the Candidate Font Catalog, and the Complete Package Trees for the
-specifications creation reported as missing. It acquires bytes and never
-transforms them; every transformation belongs to the core.
+**Dependency Discovery**:
+The representative Typst compilation phase within Pack Creation that selects
+package and font requirements from compiler observations. It never selects
+project membership and may run once per resumable Pack Creation invocation.
+_Avoid_: Creation Discovery, Precompilation
 
-**Creation Adapter**:
-The host-specific responsibility that performs Creation Preparation for one kind
-of host, supplying listing, reading, and fetching only. The reference adapter is
-the filesystem one, which additionally defaults the representative request's
-Document Time to the host clock and revalidates project and selected dependency
-evidence before the Pack is returned, failing creation when that evidence
-changed (the Creation Evidence Fence). Establishing that acquired bytes
-represent one consistent source state is the adapter's own obligation and is
-advisory: an adapter acquiring from mutable storage without revalidating still
-conforms, and may produce a Pack describing a source state that never existed
-simultaneously.
+**Discovery Specification**:
+The Typst Target, inputs, Document Time, and engine features used for one
+Dependency Discovery run. It is a Pack Creation request value and never becomes
+Pack state.
+
+**Pack Creation Outcome**:
+The normal result of one Pack Creation invocation. It is either `Created`,
+containing one Pack and discovery warnings, or `Missing Package
+Specifications`, containing the exact package specifications Pack Assembly must
+add to the Package Catalog before invoking creation again.
+
+**Pack Assembly**:
+The host-side workflow that provisions one Project Snapshot, one Font Catalog,
+and a Package Catalog containing the Package Trees requested by Pack Creation,
+invokes Pack Creation until it issues a Pack or reaches a terminal failure, and
+applies host-specific acquisition policy. Source-specific project gathering,
+listing, reading, and fetching belong to configured gatherers, authorities, and
+adapters; canonicalization, archive expansion, dependency selection, and
+whole-Pack validation remain core transformations.
+_Avoid_: Creation Preparation
+
+**Pack Assembler**:
+The workflow responsibility that performs Pack Assembly by coordinating
+configured authorities and adapters with core transformations and Pack Creation.
+The reference filesystem Pack Assembler additionally defaults the Discovery
+Specification's Document Time to the host clock. A Pack Assembler does not
+re-read acquired inputs solely to detect concurrent source mutation: a Pack
+represents the exact values acquired, with no guarantee that every source value
+coexisted at one instant.
+_Avoid_: Creation Adapter
 
 **Project Ignore Policy**:
-The root-scoped exclusion policy that decides project membership. Every `.typk`
-path is excluded by a non-overridable built-in rule that binds every caller,
-including in-memory construction. Additional ordered rules come from the root
-`.typkignore` and use Gitignore-style matching, including negation and last-match
-precedence. The policy is determined by ignore-file bytes alone and matches a
-path without consulting a host, so a Creation Adapter can apply it to a listing
-before reading content. The root policy file itself is included; nested
-`.typkignore` files are ordinary project files. Malformed rules prevent creation,
-as do the unsupported unignored entries, unreadable files, invalid paths, and
-traversal failures a Creation Adapter reports.
+The reference filesystem project gatherer's root-scoped exclusion policy.
+Ordered rules come from the root `.typkignore` and use Gitignore-style matching,
+including negation and last-match precedence. The gatherer applies it while
+traversing so excluded files are not read and excluded directories are not
+entered. The root policy file itself is included; nested `.typkignore` files are
+ordinary project files. Other source gatherers may select project membership by
+different source-specific means.
 
 **Project Snapshot**:
-One stabilized set of project files with one entrypoint among them, represented
-by canonical root-relative path and exact bytes. It is assembled from
-path-and-bytes entries under one Project Ignore Policy, which assembly
-re-applies so that membership does not depend on a Creation Adapter being
-well-behaved. Assembly rejects entries that cannot name a root-relative project
-file and fails when the entrypoint does not survive filtering. A caller may
-bound the result by file count and total byte size; exclusion is applied before
-those bounds are measured.
+One stabilized, source-selected set of project files with one entrypoint among
+them, represented by canonical root-relative path and exact bytes. Project
+Snapshot assembly rejects invalid or duplicate paths, excludes every `.typk`
+path by a non-overridable built-in rule, requires the entrypoint, and may bound
+the result by file count and total byte size. Source selection policy is not
+retained and does not contribute to Pack Identity except through the selected
+paths and bytes.
 
 **Pack Identity**:
 The content identity of a Pack's canonical logical compilation state: fixed
@@ -110,34 +125,87 @@ The side-effect-free static inventory exposed by validated Pack accessors and th
 compile the Pack.
 
 **Pack Extraction**:
-Projection of contained project files into an editable project tree. Packages and
-fonts are separate extraction choices; Pack metadata and Pack Overrides are
-excluded. Using the result for new Pack Creation does not preserve the original
-Pack Identity.
+The non-invertible workflow that projects contained project files into an
+editable project tree. Packages and fonts are separate extraction choices; Pack
+metadata and Pack Overrides are excluded. Its semantic portion selects and plans
+the projection, while a destination adapter applies that plan and reports writes
+or partial outcomes. Extraction is not Pack Archive Decoding, and using its
+result for new Pack Creation does not preserve the original Pack Identity.
+
+**Pack Extraction Plan**:
+The collision-checked, destination-relative projection of one Pack under explicit
+project, package, and font extraction choices. It contains no destination or
+write policy; destination I/O failures belong to the adapter and may produce a
+partial outcome.
+
+**Pack Extraction Request**:
+The workflow envelope that combines a Pack and extraction choices with a
+destination and conflict policy. Planning yields a Pack Extraction Plan before a
+destination adapter performs writes.
+
+**Pack Archive**:
+The interoperable byte representation of one Pack. A Pack Archive carries a Pack
+Manifest and the bytes required by that representation, but archive layout and
+encoding do not contribute to Pack Identity. A decoded value becomes a Pack only
+after whole-Pack validation. Safe unknown entries may be ignored during decoding
+and need not survive re-encoding.
+
+**Pack Archive Encoding**:
+The representation operation that converts a validated Pack into Pack Archive
+bytes. It does not publish those bytes or repeat whole-Pack validation. Encoding
+enforces representation-specific limits, so a valid Pack may still fail to encode
+in the current representation.
+
+**Pack Archive Decoding**:
+The representation operation that parses Pack Archive bytes and submits their
+declarations and content to whole-Pack validation. Decoding rejects malformed,
+unsafe, or ambiguous raw archive members before interpreting them as domain
+content. It is not Pack Extraction.
+
+**Pack Archive Publication**:
+The storage operation that writes exact Pack Archive bytes to a destination. It
+does not define their encoding.
+
+**Pack Archive Acquisition**:
+The storage operation that obtains exact Pack Archive bytes from a source. It
+does not decode or validate them.
 
 ## Packages
 
+**Package Catalog**:
+The Pack Creation input keyed by exact package specification. Each entry pairs a
+Package Tree with its intended embedded-or-external disposition; Pack Creation
+validates every claimed specification and Package Tree relationship before
+Dependency Discovery, whether or not discovery selects that entry.
+
+**Package Acquisition Failure**:
+An operational failure from attempting to acquire one specification returned by
+`Missing Package Specifications`. Pack Assembly carries it separately from the
+Package Catalog so Dependency Discovery can attach it to the importing source.
+
 **Package Requirement**:
 One dependency identified by an exact Typst package specification and the
-Canonical Identity of its Complete Package Tree. Source location and acquisition
+Canonical Identity of its Package Tree. Source location and acquisition
 metadata do not contribute. The requirement records whether that exact tree is
 embedded or externally fulfilled.
 
-**Complete Package Tree**:
+**Package Tree**:
 Every addressable regular file beneath one acquired package root, represented by
 canonical package-relative path and exact bytes. It includes package metadata and
-files not read by the representative request, but excludes empty directories and
-host filesystem metadata.
+files not read by Dependency Discovery, but excludes empty directories and
+host filesystem metadata. Completeness is an invariant: a partial set of package
+files is not a Package Tree.
+_Avoid_: Complete Package Tree
 
 **Package Authority**:
 The explicitly configured responsibility that resolves package specifications
-during Creation Preparation or obtains exact trees for compilation. In the core,
+during Pack Assembly or obtains exact trees for compilation. In the core,
 compilation receives already acquired Package Tree Fulfillments rather than a
 public authority interface. Configured offline behavior disables package
 downloading; it may still use explicit or local package sources.
 
 **Package Registry**:
-The remote source a Creation Adapter fetches package archives from, addressed by
+The remote source a Pack Assembler fetches package archives from, addressed by
 one URL per exact package specification. Only the official Typst Universe
 namespace is served; a specification in any other namespace has no registry URL.
 The core owns URL construction, and fetching stays with the adapter, so no
@@ -145,22 +213,22 @@ transport is implied.
 
 **Package Archive Expansion**:
 The core transformation from the archive bytes served for one specification into
-a Complete Package Tree. Only addressable regular files become entries, and a
+a Package Tree. Only addressable regular files become entries, and a
 member whose path cannot name a package file is rejected. It takes a required
 expansion ceiling, charges every archive member against it, and fails past it
 rather than materializing what lies beyond, so a caller-named package cannot
 exhaust the process. The ceiling is required rather than defaulted so that the
 bound is always a deliberate choice.
 
-**External Package Fulfillment**:
-Supplying one non-embedded Package Requirement as a Complete Package Tree. The
+**Package Tree Fulfillment**:
+Supplying one non-embedded Package Requirement as a Package Tree. The
 core canonicalizes and verifies the entire supplied tree against the requirement
 before Typst compilation. Optional provenance and cache-hit fields are
 caller-provided operational report metadata; they are not authenticated,
 identity-bearing, or semantic inputs.
 
 **Package Embedding**:
-The Pack Creation choice to embed every selected Complete Package Tree or record
+The Pack Creation choice to embed every selected Package Tree or record
 selected packages for external fulfillment. The choice affects Pack Identity and
 self-containment.
 
@@ -171,14 +239,15 @@ The exact bytes of one standalone font file or multi-face font collection. Its
 Canonical Identity is independent of source location, and every face in a
 collection travels in the same container.
 
-**Candidate Font Catalog**:
+**Font Catalog**:
 The ordered sequence of Font Containers Pack Creation may select faces from,
 each carrying its own embedded-or-external disposition. Faces are expanded in
 container-local index order, catalog order decides which container offers a
-family, and nothing joins a supplied catalog implicitly. A Creation Adapter
-composes it during Creation Preparation; the reference filesystem adapter
+family, and nothing joins a supplied catalog implicitly. A Pack Assembler
+composes it during Pack Assembly; the reference filesystem Pack Assembler
 composes system fonts, Typst's embedded fonts, and scanned font directories, in
 that order.
+_Avoid_: Candidate Font Catalog
 
 **Font Face Identity**:
 One exact face within a Font Container, identified by container identity and
@@ -191,18 +260,18 @@ during Pack Creation. The requirement records whether the container is embedded
 or externally fulfilled.
 
 **Font Authority**:
-The explicitly configured responsibility that supplies the Candidate Font
-Catalog during Creation Preparation or obtains exact Font Containers for
+The explicitly configured responsibility that supplies the Font Catalog during
+Pack Assembly or obtains exact Font Containers for
 compilation. In the core, compilation receives already acquired Font Container
 Fulfillments rather than a public authority interface.
 
 **Pack Font Catalog**:
-The ordered projection of the Candidate Font Catalog containing exactly the Font
+The ordered projection of the Font Catalog containing exactly the Font
 Face Identities available to Pack compilation. Relative selection order is
 preserved. Other faces physically present in a required Font Container remain
 unavailable unless declared.
 
-**External Font Fulfillment**:
+**Font Container Fulfillment**:
 Supplying one non-embedded Font Requirement as exact Font Container bytes. The
 core verifies container identity and every declared face before Typst
 compilation. Optional provenance and licensing fields are caller-provided
@@ -211,8 +280,8 @@ permission and do not contribute to identities.
 
 **Font Embedding**:
 The Pack Creation choice to embed selected Font Containers or record them for
-external fulfillment. It is declared per container in the Candidate Font
-Catalog and never inferred from container bytes, so one Pack may embed one
+external fulfillment. It is declared per container in the Font Catalog and never
+inferred from container bytes, so one Pack may embed one
 container and reference another, and Typst-embedded-font handling is an
 explicit creation option. The choice affects Pack Identity and
 self-containment; typst-pack does not derive a per-font legal policy from
@@ -220,9 +289,21 @@ licensing metadata.
 
 ## Compilation Requests
 
+**Pack Compilation Request**:
+The workflow envelope that combines one Pack, caller-supplied semantic
+compilation controls, one Compilation Fulfillment Set, and optional operational
+report metadata. It is not itself a validated domain value.
+
+**Compilation Fulfillment Set**:
+The exact Package Tree Fulfillments and Font Container Fulfillments supplied for
+one Pack compilation. It must correspond exactly to the Pack's external
+requirements; entries for embedded or undeclared dependencies are invalid.
+Fulfillment bytes and their operational report metadata do not contribute to
+semantic request values.
+
 **Typst Target**:
-The selected Typst document model: Paged or HTML. Pack Creation selects one target
-for its representative package/font run. A Compilation Output Specification
+The selected Typst document model: Paged or HTML. A Discovery Specification
+selects one target for Dependency Discovery. A Compilation Output Specification
 derives the target required for that compilation.
 
 **Document Format**:
@@ -321,7 +402,7 @@ Messages and source-derived values remain untrusted presentation data.
 **Pack Compilation Warning**:
 One Pack-owned warning produced while preparing or exporting an accepted
 compilation. It is distinct from official compiler or exporter diagnostics and
-from representative-compile warnings returned by Pack Creation.
+from discovery warnings returned by Pack Creation.
 
 **Compilation Access Trace**:
 The canonical set of project, package, and font requests observed by Typst. Each
