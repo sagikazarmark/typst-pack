@@ -1,0 +1,562 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prototype: Pack compilation preparation and execution</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #eef3ea;
+      --muted: #9eaa9a;
+      --paper: #101610;
+      --panel: #182118;
+      --panel-2: #202b20;
+      --line: #394739;
+      --lime: #b8ee72;
+      --amber: #ffc766;
+      --red: #ff7c75;
+      --cyan: #74d9d4;
+      --blue: #8eb8ff;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 82% 8%, #24331d 0, transparent 31rem),
+        linear-gradient(145deg, #0b100c, var(--paper));
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+    }
+
+    main { width: min(1500px, 96vw); margin: 0 auto; padding: 34px 0 70px; }
+
+    header {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 28px;
+      align-items: end;
+      margin-bottom: 24px;
+      border-bottom: 1px solid var(--line);
+      padding-bottom: 22px;
+    }
+
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { font-family: Georgia, serif; font-size: clamp(2.2rem, 5vw, 4.8rem); line-height: .94; margin-bottom: 12px; }
+    h2 { font-size: 1rem; letter-spacing: .08em; text-transform: uppercase; color: var(--lime); }
+    h3 { font-size: .95rem; margin-bottom: 8px; }
+    p { color: var(--muted); line-height: 1.55; }
+
+    .stamp {
+      border: 1px solid var(--amber);
+      color: var(--amber);
+      padding: 8px 12px;
+      transform: rotate(-2deg);
+      text-transform: uppercase;
+      font-size: .75rem;
+      letter-spacing: .1em;
+    }
+
+    .layout { display: grid; grid-template-columns: minmax(0, 1.3fr) minmax(350px, .7fr); gap: 18px; }
+    .stack { display: grid; gap: 18px; align-content: start; }
+
+    .panel {
+      background: color-mix(in srgb, var(--panel) 91%, transparent);
+      border: 1px solid var(--line);
+      border-radius: 3px;
+      padding: 18px;
+      box-shadow: 0 18px 55px rgba(0, 0, 0, .2);
+    }
+
+    .phase-line {
+      display: grid;
+      grid-template-columns: repeat(5, 1fr);
+      gap: 8px;
+      margin: 14px 0 20px;
+    }
+
+    .phase {
+      min-height: 74px;
+      padding: 10px;
+      border: 1px solid var(--line);
+      background: #111811;
+      color: var(--muted);
+      font-size: .76rem;
+      line-height: 1.35;
+    }
+
+    .phase strong { display: block; color: var(--ink); margin-bottom: 5px; }
+    .phase.active { border-color: var(--amber); box-shadow: inset 0 0 0 1px var(--amber); }
+    .phase.done { border-color: var(--lime); background: #192518; }
+    .phase.failed { border-color: var(--red); background: #281918; }
+    .phase.skipped { opacity: .46; text-decoration: line-through; }
+
+    .controls { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+    .controls.full { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+
+    button {
+      min-height: 42px;
+      border: 1px solid #526252;
+      background: var(--panel-2);
+      color: var(--ink);
+      font: inherit;
+      font-size: .78rem;
+      padding: 9px 11px;
+      cursor: pointer;
+      text-align: left;
+    }
+
+    button:hover { border-color: var(--lime); background: #283728; }
+    button:disabled { cursor: not-allowed; opacity: .35; }
+    button.primary { border-color: var(--lime); color: var(--lime); }
+    button.danger { border-color: var(--red); color: var(--red); }
+
+    label.toggle {
+      display: flex;
+      gap: 9px;
+      align-items: center;
+      min-height: 38px;
+      padding: 8px 10px;
+      border: 1px solid var(--line);
+      background: #111811;
+      color: var(--muted);
+      font-size: .78rem;
+    }
+
+    input { accent-color: var(--lime); }
+
+    pre {
+      margin: 0;
+      padding: 14px;
+      overflow: auto;
+      background: #0c110d;
+      border: 1px solid #2f3a30;
+      color: #dfe8da;
+      line-height: 1.48;
+      font-size: .75rem;
+    }
+
+    .state { min-height: 310px; white-space: pre-wrap; }
+    .log { display: grid; gap: 7px; max-height: 270px; overflow: auto; }
+    .event { border-left: 3px solid var(--blue); padding: 6px 9px; background: #111811; color: var(--muted); font-size: .75rem; line-height: 1.4; }
+    .event.error { border-color: var(--red); }
+    .event.success { border-color: var(--lime); }
+    .event.warn { border-color: var(--amber); }
+
+    .tabs { display: flex; gap: 8px; margin-bottom: 14px; flex-wrap: wrap; }
+    .tabs button { min-height: auto; }
+    .tabs button.selected { color: var(--cyan); border-color: var(--cyan); }
+    .walkthrough { display: none; }
+    .walkthrough.selected { display: grid; grid-template-columns: 1fr auto; gap: 18px; align-items: center; }
+    .walkthrough p { margin-bottom: 0; }
+
+    .decision-list { margin: 0; padding-left: 20px; color: var(--muted); line-height: 1.55; }
+    .decision-list strong { color: var(--ink); }
+    .badge { display: inline-block; color: var(--cyan); border: 1px solid var(--cyan); padding: 2px 6px; font-size: .7rem; }
+    .deferred { color: var(--amber); }
+
+    @media (max-width: 900px) {
+      header, .layout { grid-template-columns: 1fr; }
+      .stamp { width: fit-content; }
+      .phase-line { grid-template-columns: 1fr; }
+      .controls, .controls.full { grid-template-columns: 1fr; }
+      .walkthrough.selected { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div>
+        <div class="badge">LOGIC PROTOTYPE</div>
+        <h1>One seam.<br>Five hidden phases.</h1>
+        <p>Does one deep compilation interface preserve the distinctions callers need without exposing a reusable World, prepared state, compiler, exporter, or destination?</p>
+      </div>
+      <div class="stamp">Throwaway, not production</div>
+    </header>
+
+    <div class="layout">
+      <div class="stack">
+        <section class="panel">
+          <h2>Compilation microscope</h2>
+          <p>The controls expose private phases only so their ordering can be inspected. A real caller gets one <code>compile(request)</code> operation.</p>
+
+          <div class="phase-line" id="phase-line"></div>
+
+          <h3>Build the workflow envelope</h3>
+          <div class="controls">
+            <button data-action="BUILD_VALID">Build valid request</button>
+            <button class="danger" data-action="BUILD_INVALID">Build request with three semantic issues</button>
+          </div>
+
+          <h3 style="margin-top: 16px">Supply exact dependency values</h3>
+          <div class="controls full">
+            <label class="toggle"><input type="checkbox" id="missing-package"> Missing external package</label>
+            <label class="toggle"><input type="checkbox" id="mismatched-font"> Mismatched font identity</label>
+            <label class="toggle"><input type="checkbox" id="unexpected-tree"> Undeclared package tree</label>
+          </div>
+
+          <h3 style="margin-top: 16px">Inspect the private pipeline</h3>
+          <div class="controls full">
+            <button data-action="ACCEPT">1. Accept semantic request</button>
+            <button data-action="VERIFY">2. Verify fulfillments</button>
+            <button data-action="EXECUTE_SUCCESS">3. Execute successfully</button>
+            <button data-action="EXECUTE_REJECTED">3. Execute compiler rejection</button>
+            <button data-action="PLAN">4. Plan artifact publication</button>
+            <button class="primary" data-action="RUN">Run public compile seam</button>
+          </div>
+          <div class="controls" style="margin-top: 9px">
+            <button data-action="RESET">Reset</button>
+          </div>
+        </section>
+
+        <section class="panel">
+          <h2>Guided walkthroughs</h2>
+          <div class="tabs" id="tabs"></div>
+          <div id="walkthroughs"></div>
+        </section>
+
+        <section class="panel">
+          <h2>Decisions visible in this candidate</h2>
+          <ul class="decision-list">
+            <li><strong>One external seam.</strong> Request acceptance, exact fulfillment verification, private World materialization, compilation, and export are implementation stages, not caller-orchestrated modules.</li>
+            <li><strong>Validated dependency values.</strong> Fulfillments carry independently canonical <code>PackageTree</code> and <code>FontContainer</code> values. Compilation verifies Pack correspondence and identities, not raw syntax.</li>
+            <li><strong>A set is already unique.</strong> <code>CompilationFulfillmentSet</code> rejects duplicate package specifications and Font Container identities during construction; duplicate claims never become a Pack Compilation Request.</li>
+            <li><strong>Semantic rejection wins.</strong> Invalid controls return one complete <code>CompilationRequestRejection</code> before fulfillment values are inspected or a <code>CompilationIdentity</code> exists.</li>
+            <li><strong>Accepted operational failure remains reportable.</strong> Missing, unexpected, embedded, and identity-mismatched fulfillments are aggregated in canonical order inside a <code>CompilationOperationOutcome</code>. Malformed raw bytes fail before compilation while constructing the validated dependency value.</li>
+            <li><strong>Compiler rejection is a result.</strong> It owns diagnostics, trace, summary, and a result identity but no artifacts. It is not a Rust error or an operational outcome.</li>
+            <li><strong>Publication starts later.</strong> Only a succeeded <code>CompilationResult</code> can become a <code>CompilationArtifactPublicationPlan</code>; destinations and storage outcomes never enter compilation.</li>
+            <li class="deferred"><strong>Deferred:</strong> exact borrowing, allocation sharing, copy behavior, peak memory, and numeric ceilings belong to the lifecycle ownership and limits decision.</li>
+          </ul>
+        </section>
+      </div>
+
+      <aside class="stack">
+        <section class="panel">
+          <h2>Candidate Rust interface</h2>
+          <pre><code>pub fn compile(
+    request: PackCompilationRequest,
+) -&gt; Result&lt;
+    CompilationReport,
+    CompilationRequestRejection,
+&gt;;
+
+pub struct PackCompilationRequest { /* private */ }
+
+impl PackCompilationRequest {
+    pub fn new(
+        pack: Pack,
+        output: CompilationOutputSpecification,
+    ) -&gt; Self;
+
+    pub fn inputs(self, value: Dict) -&gt; Self;
+    pub fn adapter_resolved_inputs(self, value: Dict) -&gt; Self;
+    pub fn overrides(self, value: PackOverrideSet) -&gt; Self;
+    pub fn feature(self, value: Feature) -&gt; Self;
+    pub fn adapter_resolved_feature(self, value: Feature) -&gt; Self;
+    pub fn document_time(self, value: DocumentTime) -&gt; Self;
+    pub fn adapter_resolved_document_time(
+        self,
+        value: DocumentTime,
+    ) -&gt; Self;
+    pub fn fulfillments(
+        self,
+        value: CompilationFulfillmentSet,
+    ) -&gt; Self;
+}
+
+pub struct CompilationFulfillmentSet { /* private */ }
+
+impl CompilationFulfillmentSet {
+    pub fn new() -&gt; Self;
+    pub fn try_insert_package(
+        &amp;mut self,
+        specification: PackageSpec,
+        fulfillment: PackageTreeFulfillment,
+    ) -&gt; Result&lt;(), DuplicatePackageFulfillment&gt;;
+    pub fn try_insert_font(
+        &amp;mut self,
+        identity: FontContainerIdentity,
+        fulfillment: FontContainerFulfillment,
+    ) -&gt; Result&lt;(), DuplicateFontFulfillment&gt;;
+}
+
+pub struct PackageTreeFulfillment {
+    tree: PackageTree,
+    provenance: Option&lt;String&gt;,
+    cache_hit: bool,
+}
+
+pub struct FontContainerFulfillment {
+    container: FontContainer,
+    provenance: Option&lt;String&gt;,
+    licensing: Option&lt;String&gt;,
+}
+
+// No public PreparedCompilation, CompilationExecution,
+// World, compiler/exporter trait, or output sink.</code></pre>
+        </section>
+
+        <section class="panel">
+          <h2>Full state</h2>
+          <pre class="state" id="state"></pre>
+        </section>
+
+        <section class="panel">
+          <h2>Phase evidence</h2>
+          <div class="log" id="log"></div>
+        </section>
+      </aside>
+    </div>
+  </main>
+
+  <script>
+    const phases = [
+      ["request", "Accept request", "defaults, inventory, identity"],
+      ["fulfillment", "Verify fulfillments", "exact set and identities"],
+      ["world", "Materialize World", "private, confined, in memory"],
+      ["execution", "Compile and export", "embedded Typst adapter"],
+      ["publication", "Plan publication", "separate semantic module"],
+    ];
+
+    const fresh = () => ({
+      request: "absent",
+      semanticIssues: [],
+      fulfillmentFaults: [],
+      fulfillmentInspections: 0,
+      compilationIdentity: null,
+      requestInventory: null,
+      report: null,
+      world: "not materialized",
+      result: null,
+      artifacts: [],
+      publicationPlan: null,
+      phase: "request",
+      phaseStatus: {},
+      events: [],
+    });
+
+    let state = fresh();
+
+    const scenarios = [
+      {
+        name: "Rejection order",
+        text: "A semantically invalid PNG request also arrives with bad fulfillments. Acceptance returns every semantic issue, performs zero fulfillment inspections, and creates no Compilation Identity or Report.",
+        run: () => {
+          reset();
+          build(false);
+          document.querySelector("#missing-package").checked = true;
+          document.querySelector("#mismatched-font").checked = true;
+          accept();
+        },
+      },
+      {
+        name: "Exact-set failure",
+        text: "A valid request is accepted first. Verification then aggregates a missing package, mismatched font, and unexpected package tree into one accepted-request operational outcome. No World exists.",
+        run: () => {
+          reset();
+          build(true);
+          document.querySelector("#missing-package").checked = true;
+          document.querySelector("#mismatched-font").checked = true;
+          document.querySelector("#unexpected-tree").checked = true;
+          accept();
+          verify();
+        },
+      },
+      {
+        name: "Compiler rejection",
+        text: "Exact dependencies produce a private confined World. Typst rejection becomes a semantic Compilation Result with diagnostics and an identity, but no artifacts and therefore no publication plan.",
+        run: () => {
+          reset();
+          build(true);
+          accept();
+          verify();
+          execute(false);
+          plan();
+        },
+      },
+      {
+        name: "Success then publication",
+        text: "The deep seam returns owned semantic artifacts. Only afterward does a separate module derive canonical relative paths; no destination or write policy appears in compilation state.",
+        run: () => {
+          reset();
+          build(true);
+          accept();
+          verify();
+          execute(true);
+          plan();
+        },
+      },
+    ];
+
+    function reset() {
+      state = fresh();
+      document.querySelectorAll("input[type=checkbox]").forEach(input => input.checked = false);
+      render();
+    }
+
+    function record(message, kind = "") {
+      state.events.push({ message, kind });
+    }
+
+    function build(valid) {
+      state = fresh();
+      state.request = valid ? "workflow envelope: valid candidate" : "workflow envelope: invalid candidate";
+      state.semanticIssues = valid ? [] : [
+        "duplicate engine feature: html",
+        "PNG pixels-per-inch must be nonzero",
+        "Pack Override Set is bound to another Pack Identity",
+      ];
+      record(valid ? "Built a valid Pack Compilation Request." : "Built an envelope with three independent semantic issues.", valid ? "success" : "warn");
+      render();
+    }
+
+    function selectedFaults() {
+      const faults = [];
+      if (document.querySelector("#missing-package").checked) faults.push("missing package @preview/chart:1.2.0");
+      if (document.querySelector("#mismatched-font").checked) faults.push("font container identity mismatch: atlas");
+      if (document.querySelector("#unexpected-tree").checked) faults.push("undeclared package tree @preview/extra:1.0.0");
+      return faults;
+    }
+
+    function accept() {
+      if (state.request === "absent") return record("Build a request first.", "error"), render();
+      state.phase = "request";
+      state.fulfillmentFaults = selectedFaults();
+      if (state.semanticIssues.length) {
+        state.phaseStatus.request = "failed";
+        state.phaseStatus.fulfillment = "skipped";
+        state.phaseStatus.world = "skipped";
+        state.phaseStatus.execution = "skipped";
+        state.requestInventory = "complete rejected inventory";
+        state.report = null;
+        record(`Compilation Request Rejection contains ${state.semanticIssues.length} canonical issues. Fulfillments were not inspected.`, "error");
+      } else {
+        state.phaseStatus.request = "done";
+        state.requestInventory = "complete accepted inventory";
+        state.compilationIdentity = "compilation:v1:6a8f...d142";
+        state.phase = "fulfillment";
+        record("Request accepted; deterministic defaults and origins resolved; Compilation Identity established.", "success");
+      }
+      render();
+    }
+
+    function verify() {
+      if (state.phaseStatus.request !== "done") return record("Fulfillment verification is unreachable until request acceptance succeeds.", "error"), render();
+      state.fulfillmentFaults = selectedFaults();
+      state.fulfillmentInspections += 5;
+      state.phase = "fulfillment";
+      if (state.fulfillmentFaults.length) {
+        state.phaseStatus.fulfillment = "failed";
+        state.phaseStatus.world = "skipped";
+        state.phaseStatus.execution = "skipped";
+        state.report = `Compilation Report: operation outcome with ${state.fulfillmentFaults.length} issues`;
+        record(`Exact-set verification aggregated ${state.fulfillmentFaults.length} canonical issues. World materialization did not run.`, "error");
+      } else {
+        state.phaseStatus.fulfillment = "done";
+        state.phaseStatus.world = "done";
+        state.world = "private PackWorld: project + overrides + embedded/exact external dependencies";
+        state.phase = "execution";
+        record("All external requirements matched exactly. A private environment-independent World was materialized.", "success");
+      }
+      render();
+    }
+
+    function execute(success) {
+      if (state.phaseStatus.world !== "done") return record("Execution is unreachable without a verified private World.", "error"), render();
+      state.phase = "execution";
+      state.phaseStatus.execution = "done";
+      state.report = "Compilation Report: semantic result";
+      if (success) {
+        state.result = "Succeeded Compilation Result: result:v1:3d09...be71";
+        state.artifacts = ["output.pdf (42,814 bytes)"];
+        record("Embedded Typst compiled and exported successfully; one owned Compilation Output Artifact returned.", "success");
+      } else {
+        state.result = "Rejected Compilation Result: result:v1:ec1a...2f90";
+        state.artifacts = [];
+        record("Compiler rejection became an identity-bearing semantic result with diagnostics and no artifacts.", "warn");
+      }
+      state.phase = "publication";
+      render();
+    }
+
+    function plan() {
+      state.phase = "publication";
+      if (!state.result || !state.result.startsWith("Succeeded")) {
+        state.phaseStatus.publication = "failed";
+        state.publicationPlan = null;
+        record("Artifact publication planning rejects anything except a succeeded Compilation Result.", "error");
+      } else {
+        state.phaseStatus.publication = "done";
+        state.publicationPlan = { resultIdentity: "result:v1:3d09...be71", entries: ["output.pdf"] };
+        record("A separate semantic module derived a destination-free publication plan.", "success");
+      }
+      render();
+    }
+
+    function runPublicSeam() {
+      if (state.request === "absent") return record("Build a request first.", "error"), render();
+      accept();
+      if (state.phaseStatus.request !== "done") return;
+      verify();
+      if (state.phaseStatus.fulfillment !== "done") return;
+      execute(true);
+    }
+
+    function render() {
+      document.querySelector("#phase-line").innerHTML = phases.map(([id, name, detail]) => {
+        const status = state.phaseStatus[id] || (state.phase === id ? "active" : "");
+        return `<div class="phase ${status}"><strong>${name}</strong>${detail}</div>`;
+      }).join("");
+
+      const visible = { ...state };
+      delete visible.events;
+      document.querySelector("#state").textContent = JSON.stringify(visible, null, 2);
+      document.querySelector("#log").innerHTML = state.events.length
+        ? state.events.slice().reverse().map(event => `<div class="event ${event.kind}">${event.message}</div>`).join("")
+        : '<div class="event">No phases have run.</div>';
+    }
+
+    document.querySelectorAll("[data-action]").forEach(button => button.addEventListener("click", () => {
+      const actions = {
+        BUILD_VALID: () => build(true),
+        BUILD_INVALID: () => build(false),
+        ACCEPT: accept,
+        VERIFY: verify,
+        EXECUTE_SUCCESS: () => execute(true),
+        EXECUTE_REJECTED: () => execute(false),
+        PLAN: plan,
+        RUN: runPublicSeam,
+        RESET: reset,
+      };
+      actions[button.dataset.action]();
+    }));
+
+    const tabs = document.querySelector("#tabs");
+    const walkthroughs = document.querySelector("#walkthroughs");
+    scenarios.forEach((scenario, index) => {
+      const tab = document.createElement("button");
+      tab.textContent = scenario.name;
+      tab.className = index === 0 ? "selected" : "";
+      tab.addEventListener("click", () => selectScenario(index));
+      tabs.append(tab);
+
+      const article = document.createElement("article");
+      article.className = `walkthrough ${index === 0 ? "selected" : ""}`;
+      article.innerHTML = `<p>${scenario.text}</p><button class="primary">Run walkthrough</button>`;
+      article.querySelector("button").addEventListener("click", scenario.run);
+      walkthroughs.append(article);
+    });
+
+    function selectScenario(index) {
+      [...tabs.children].forEach((tab, i) => tab.classList.toggle("selected", i === index));
+      [...walkthroughs.children].forEach((item, i) => item.classList.toggle("selected", i === index));
+    }
+
+    render();
+  </script>
+</body>
+</html>
