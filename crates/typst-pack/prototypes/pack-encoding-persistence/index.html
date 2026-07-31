@@ -1,0 +1,731 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Pack Archive seam prototype</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --paper: #f3efe6;
+      --panel: #fffdf8;
+      --ink: #17212b;
+      --muted: #66717b;
+      --line: #d8d1c3;
+      --accent: #a43d2f;
+      --accent-soft: #f1d8d1;
+      --good: #21654e;
+      --good-soft: #dcebe3;
+      --warn: #8a5a12;
+      --warn-soft: #f5e8c9;
+      --shadow: 0 16px 40px rgba(34, 29, 22, 0.08);
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      background:
+        linear-gradient(rgba(23, 33, 43, 0.025) 1px, transparent 1px),
+        var(--paper);
+      background-size: 100% 28px;
+      color: var(--ink);
+      font-family: Georgia, "Times New Roman", serif;
+    }
+
+    main {
+      width: min(1180px, calc(100% - 32px));
+      margin: 36px auto 72px;
+    }
+
+    header {
+      border-top: 7px solid var(--ink);
+      padding: 26px 0 22px;
+    }
+
+    .eyebrow, button, .label, code, pre, .event, .tab {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    }
+
+    .eyebrow {
+      color: var(--accent);
+      font-size: 0.78rem;
+      font-weight: 700;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    h1 {
+      max-width: 820px;
+      margin: 10px 0 12px;
+      font-size: clamp(2.2rem, 5vw, 4.6rem);
+      font-weight: 500;
+      letter-spacing: -0.045em;
+      line-height: 0.98;
+    }
+
+    .intro {
+      max-width: 870px;
+      color: #3e4953;
+      font-size: 1.1rem;
+      line-height: 1.55;
+    }
+
+    .question {
+      margin-top: 20px;
+      padding: 15px 18px;
+      border-left: 4px solid var(--accent);
+      background: var(--accent-soft);
+      line-height: 1.45;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(320px, 0.85fr);
+      gap: 20px;
+      align-items: start;
+    }
+
+    .panel {
+      background: rgba(255, 253, 248, 0.96);
+      border: 1px solid var(--line);
+      box-shadow: var(--shadow);
+      padding: 20px;
+    }
+
+    .panel h2 {
+      margin: 0 0 15px;
+      font-size: 1.35rem;
+      font-weight: 600;
+    }
+
+    .state-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .state-item {
+      min-height: 88px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      background: #fff;
+    }
+
+    .label {
+      display: block;
+      margin-bottom: 7px;
+      color: var(--muted);
+      font-size: 0.7rem;
+      letter-spacing: 0.07em;
+      text-transform: uppercase;
+    }
+
+    .value {
+      font-size: 1rem;
+      line-height: 1.35;
+    }
+
+    .event {
+      margin-top: 10px;
+      padding: 12px;
+      border-left: 4px solid var(--good);
+      background: var(--good-soft);
+      font-size: 0.84rem;
+      line-height: 1.45;
+    }
+
+    .event.failure {
+      border-color: var(--accent);
+      background: var(--accent-soft);
+    }
+
+    .event.warning {
+      border-color: var(--warn);
+      background: var(--warn-soft);
+    }
+
+    .actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    button {
+      min-height: 42px;
+      padding: 9px 11px;
+      border: 1px solid var(--ink);
+      border-radius: 0;
+      background: var(--panel);
+      color: var(--ink);
+      cursor: pointer;
+      font-size: 0.77rem;
+      text-align: left;
+    }
+
+    button:hover, button:focus-visible {
+      outline: none;
+      background: var(--ink);
+      color: var(--panel);
+    }
+
+    button.primary {
+      border-color: var(--accent);
+      background: var(--accent);
+      color: white;
+    }
+
+    button.primary:hover, button.primary:focus-visible {
+      background: #7f2f25;
+    }
+
+    .design-choice {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+
+    .design-choice button.active {
+      background: var(--ink);
+      color: white;
+    }
+
+    pre {
+      overflow: auto;
+      margin: 0;
+      padding: 15px;
+      background: #111a22;
+      color: #e9e5db;
+      font-size: 0.75rem;
+      line-height: 1.55;
+      white-space: pre-wrap;
+    }
+
+    .contract {
+      margin: 13px 0 0;
+      padding: 0;
+      list-style: none;
+      color: #46515a;
+      font-size: 0.92rem;
+      line-height: 1.45;
+    }
+
+    .contract li {
+      padding: 8px 0;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .walkthroughs {
+      margin-top: 20px;
+    }
+
+    .tabs {
+      display: flex;
+      gap: 6px;
+      overflow-x: auto;
+      border-bottom: 1px solid var(--ink);
+    }
+
+    .tab {
+      flex: 0 0 auto;
+      border: 0;
+      border-top: 1px solid var(--line);
+      border-right: 1px solid var(--line);
+      border-left: 1px solid var(--line);
+      background: transparent;
+    }
+
+    .tab.active {
+      background: var(--ink);
+      color: white;
+    }
+
+    .scenario {
+      padding-top: 17px;
+    }
+
+    .scenario h3 {
+      margin: 0 0 7px;
+      font-size: 1.12rem;
+    }
+
+    .scenario p {
+      margin: 0 0 13px;
+      color: #4d5861;
+      line-height: 1.5;
+    }
+
+    .steps {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .steps button.done {
+      border-color: var(--good);
+      background: var(--good-soft);
+      color: var(--good);
+    }
+
+    .verdict {
+      margin-top: 20px;
+      border-top: 1px solid var(--ink);
+      padding-top: 16px;
+      line-height: 1.55;
+    }
+
+    @media (max-width: 820px) {
+      main { width: min(100% - 20px, 680px); margin-top: 18px; }
+      .layout { grid-template-columns: 1fr; }
+      .state-grid, .actions { grid-template-columns: 1fr; }
+      h1 { font-size: clamp(2.25rem, 13vw, 4rem); }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header>
+      <div class="eyebrow">Throwaway architecture prototype</div>
+      <h1>Keep the archive exact and the Pack semantic.</h1>
+      <p class="intro">
+        Drive acquisition, decoding, encoding, and publication independently. The demo exposes
+        what survives each failure, where limits apply, and whether a retry needs another encoding pass.
+      </p>
+      <div class="question">
+        <strong>Settled direction:</strong> use one owned, bounded exact-byte value, concrete
+        persistence adapters, and thin open/save conveniences over the explicit phases. Limits use
+        separate mandatory profiles, file replacement is atomic, and failed saves return encoded bytes.
+        Decoding borrows non-cloneable bytes; conveniences cover filesystem paths and standard streams.
+        Unknown members consume metadata limits only; atomicity makes no crash-durability promise.
+      </div>
+    </header>
+
+    <div class="layout">
+      <section class="panel">
+        <h2>Current lifecycle state</h2>
+        <div id="state" class="state-grid"></div>
+        <div id="event" class="event"></div>
+
+        <h2 style="margin-top: 22px">Free play</h2>
+        <div class="actions" id="actions"></div>
+      </section>
+
+      <aside class="panel">
+        <h2>Candidate interface</h2>
+        <div class="design-choice">
+          <button data-design="owned" class="active">Owned bytes</button>
+          <button data-design="staged">Generic staging</button>
+        </div>
+        <pre id="interface"></pre>
+        <ul id="contract" class="contract"></ul>
+      </aside>
+    </div>
+
+    <section class="panel walkthroughs">
+      <h2>Guided walkthroughs</h2>
+      <div id="tabs" class="tabs"></div>
+      <div id="scenario" class="scenario"></div>
+    </section>
+
+    <section class="verdict">
+      <strong>Selected direction:</strong> start with owned, non-cloneable archive bytes. Add thin
+      open/save conveniences whose errors preserve the acquisition/decode and encode/publication
+      distinction, with concrete adapters below them and no shared persistence trait. Add a
+      tempfile-backed archive value later only if measured sizes make archive residency material.
+    </section>
+  </main>
+
+  <script>
+    // Pure lifecycle model. The page below only dispatches actions and renders the returned state.
+    const ArchiveLifecycle = (() => {
+      const initial = (design = "owned") => ({
+        design,
+        source: "none",
+        acquiredBytes: "none",
+        pack: "none",
+        encodedBytes: "none",
+        destination: "unchanged",
+        memory: design === "owned" ? "No archive allocated" : "No staging allocated",
+        lastEvent: "Choose any action or start a guided walkthrough.",
+        eventKind: "success",
+      });
+
+      const reject = (state, message) => ({
+        ...state,
+        lastEvent: `Rejected action: ${message}`,
+        eventKind: "warning",
+      });
+
+      const reduce = (state, action) => {
+        switch (action.type) {
+          case "reset":
+            return initial(state.design);
+          case "design":
+            return {
+              ...initial(action.design),
+              lastEvent: action.design === "owned"
+                ? "Selected one owned exact-byte value."
+                : "Selected caller-chosen memory or tempfile staging.",
+            };
+          case "acquire":
+            return {
+              ...state,
+              source: "untrusted stdin, 18 MiB",
+              acquiredBytes: "exact, bounded, not yet validated",
+              pack: "none",
+              encodedBytes: "none",
+              destination: "unchanged",
+              memory: state.design === "owned"
+                ? "18 MiB archive resident"
+                : "18 MiB private staging; RAM or disk is caller policy",
+              lastEvent: "Acquisition stopped at EOF under the byte ceiling. No ZIP interpretation occurred.",
+              eventKind: "success",
+            };
+          case "acquire-too-large":
+            return {
+              ...initial(state.design),
+              source: "untrusted stdin, over ceiling",
+              lastEvent: "Acquisition read at most ceiling + 1 and returned no archive-byte value.",
+              eventKind: "failure",
+            };
+          case "decode":
+            if (state.acquiredBytes === "none") return reject(state, "acquire exact bytes before decoding");
+            return {
+              ...state,
+              pack: "validated Pack",
+              memory: state.design === "owned"
+                ? "18 MiB archive + retained decoded Pack bytes"
+                : "staging + retained decoded Pack bytes",
+              lastEvent: "The format module accepted raw members, enforced limits, and invoked Pack construction once.",
+              eventKind: "success",
+            };
+          case "decode-bomb":
+            if (state.acquiredBytes === "none") return reject(state, "acquire exact bytes before decoding");
+            return {
+              ...state,
+              pack: "none",
+              lastEvent: "Decode limit exceeded while inflating a member. No partial Pack escaped; exact source bytes remain available.",
+              eventKind: "failure",
+            };
+          case "seed-pack":
+            return {
+              ...initial(state.design),
+              pack: "validated Pack",
+              memory: "Pack payload only",
+              lastEvent: "Started with an in-memory Pack created through the semantic construction seam.",
+              eventKind: "success",
+            };
+          case "encode":
+            if (state.pack === "none") return reject(state, "a validated Pack is required for encoding");
+            return {
+              ...state,
+              encodedBytes: "complete exact .typk bytes",
+              memory: state.design === "owned"
+                ? "Pack payload + encoded archive"
+                : "Pack payload + bounded staging",
+              lastEvent: "Encoding completed under representation limits without repeating whole-Pack validation.",
+              eventKind: "success",
+            };
+          case "encode-unrepresentable":
+            if (state.pack === "none") return reject(state, "a validated Pack is required for encoding");
+            return {
+              ...state,
+              encodedBytes: "none",
+              destination: "unchanged",
+              memory: "Pack payload remains valid",
+              lastEvent: "Version-1 ZIP member-name limit failed. The Pack remains valid; no publishable bytes exist.",
+              eventKind: "failure",
+            };
+          case "publish-conflict":
+            if (state.encodedBytes === "none") return reject(state, "encode complete exact bytes before publication");
+            return {
+              ...state,
+              destination: "unchanged; existing file won",
+              lastEvent: "Create-new publication hit a conflict. Exact encoded bytes remain available for retry.",
+              eventKind: "failure",
+            };
+          case "publish-file":
+            if (state.encodedBytes === "none") return reject(state, "encode complete exact bytes before publication");
+            return {
+              ...state,
+              destination: "complete bytes atomically committed",
+              lastEvent: "The filesystem adapter staged and atomically committed the exact archive bytes.",
+              eventKind: "success",
+            };
+          case "publish-stdout-fail":
+            if (state.encodedBytes === "none") return reject(state, "encode complete exact bytes before publication");
+            return {
+              ...state,
+              destination: "stdout exposes a 64 KiB prefix",
+              lastEvent: "Stream publication failed after a visible prefix. Exact archive bytes remain available for a file retry.",
+              eventKind: "failure",
+            };
+          default:
+            return state;
+        }
+      };
+
+      return { initial, reduce };
+    })();
+
+    const interfaces = {
+      owned: {
+        code: `pub struct PackArchiveBytes(Vec<u8>);
+
+impl PackArchiveBytes {
+    pub fn from_vec(bytes: Vec<u8>) -> Self;
+    pub fn len(&self) -> u64;
+    pub fn as_slice(&self) -> &[u8];
+    pub fn into_vec(self) -> Vec<u8>;
+}
+
+pub struct DecodeLimits {
+    archive_bytes: u64,
+    members: u64,
+    manifest_bytes: u64,
+    member_bytes: u64,
+    total_decoded_bytes: u64,
+}
+
+pub struct EncodeLimits {
+    archive_bytes: u64,
+    members: u64,
+    manifest_bytes: u64,
+    member_bytes: u64,
+    total_content_bytes: u64,
+}
+
+pub fn decode(
+    archive: &PackArchiveBytes,
+    limits: DecodeLimits,
+) -> Result<Pack, DecodeError>;
+
+pub fn encode(
+    pack: &Pack,
+    limits: EncodeLimits,
+) -> Result<PackArchiveBytes, EncodeError>;
+
+// Concrete adapter, not a trait.
+pub fn publish_file(
+    archive: &PackArchiveBytes,
+    path: &Path,
+    policy: FilePublicationPolicy,
+) -> Result<PublicationReceipt, PublicationError>;
+
+// Thin composition; phase-specific causes stay visible.
+pub fn open_pack(
+    path: &Path,
+    limits: DecodeLimits,
+) -> Result<Pack, OpenPackError>;
+
+pub fn save_pack(
+    path: &Path,
+    pack: &Pack,
+    limits: EncodeLimits,
+    policy: FilePublicationPolicy,
+) -> Result<PublicationReceipt, SavePackError>;
+
+pub enum SavePackError {
+    Encode(EncodeError),
+    Publish {
+        archive: PackArchiveBytes,
+        source: FilePublicationError,
+    },
+}
+
+pub fn read_pack(
+    reader: impl Read,
+    limits: DecodeLimits,
+) -> Result<Pack, ReadPackError>;
+
+pub fn write_pack(
+    writer: impl Write,
+    pack: &Pack,
+    limits: EncodeLimits,
+) -> Result<StreamPublicationReceipt, WritePackError>;`,
+        contract: [
+          "Moves never copy payload bytes; cloning is intentionally unavailable.",
+          "Decode borrows exact bytes and the returned Pack retains none of them.",
+          "Decode peak: archive + retained Pack bytes + bounded codec overhead.",
+          "Encode finishes before any destination sees bytes.",
+          "Limit profiles are finite, operation-specific, and have no Default.",
+          "Unknown safe members count toward archive/member metadata, not bytes never decoded.",
+          "Atomic file failure leaves the destination unchanged; save returns retry bytes.",
+          "Atomic visibility does not claim fsync durability; archive bytes have no separate identity.",
+          "Open/save and read/write are conveniences, not a persistence or workflow trait.",
+          "Sync, deterministic, featureless format module; async stays in host adapters.",
+        ],
+      },
+      staged: {
+        code: `pub struct PackArchiveBytes<S> {
+    storage: S,
+    len: u64,
+}
+
+pub trait ArchiveStaging:
+    Read + Write + Seek { ... }
+
+pub fn decode<S: Read + Seek>(
+    archive: &mut PackArchiveBytes<S>,
+    limits: DecodeLimits,
+) -> Result<Pack, DecodeError>;
+
+pub fn encode<S: ArchiveStaging>(
+    pack: &Pack,
+    staging: S,
+    limits: EncodeLimits,
+) -> Result<PackArchiveBytes<S>, EncodeFailure<S>>;`,
+        contract: [
+          "Caller chooses memory or tempfile storage without changing codec behavior.",
+          "Large file decode can avoid retaining compressed bytes in process memory.",
+          "Storage capability and failure recovery become part of every codec call.",
+          "The broader interface is justified only if large-archive measurements require it.",
+        ],
+      },
+    };
+
+    const actions = [
+      ["Acquire bounded stdin", "acquire"],
+      ["Reject oversized source", "acquire-too-large"],
+      ["Decode valid archive", "decode"],
+      ["Reject expansion bomb", "decode-bomb"],
+      ["Start with valid Pack", "seed-pack"],
+      ["Encode Pack", "encode"],
+      ["Reject unrepresentable Pack", "encode-unrepresentable"],
+      ["Hit create-new conflict", "publish-conflict"],
+      ["Publish atomic file", "publish-file"],
+      ["Fail midway through stdout", "publish-stdout-fail"],
+      ["Reset", "reset"],
+    ];
+
+    const scenarios = [
+      {
+        name: "Safe file publication",
+        description: "A valid Pack is encoded completely before an existing destination is atomically replaced.",
+        steps: [["Start with valid Pack", "seed-pack"], ["Encode exact bytes", "encode"], ["Commit file", "publish-file"]],
+      },
+      {
+        name: "Untrusted input",
+        description: "An acquired stream is exact but not trusted. Expansion limits fail before any Pack exists.",
+        steps: [["Acquire stdin", "acquire"], ["Trigger expansion bomb", "decode-bomb"]],
+      },
+      {
+        name: "Valid but unencodable",
+        description: "Pack validity and version-1 representation limits are intentionally separate facts.",
+        steps: [["Start with valid Pack", "seed-pack"], ["Exceed ZIP name limit", "encode-unrepresentable"]],
+      },
+      {
+        name: "Retry without encoding",
+        description: "A destination failure must not consume exact bytes or force another encoding pass.",
+        steps: [["Start with valid Pack", "seed-pack"], ["Encode once", "encode"], ["Conflict", "publish-conflict"], ["Retry elsewhere", "publish-file"]],
+      },
+      {
+        name: "Non-atomic stream",
+        description: "Encoding remains atomic with respect to representation, but stdout publication cannot roll back a visible prefix.",
+        steps: [["Start with valid Pack", "seed-pack"], ["Encode before output", "encode"], ["Break stdout", "publish-stdout-fail"], ["Recover to file", "publish-file"]],
+      },
+    ];
+
+    let state = ArchiveLifecycle.initial();
+    let activeScenario = 0;
+    let completedSteps = 0;
+
+    const stateFields = [
+      ["Byte storage", s => s.design === "owned" ? "Owned Vec<u8>" : "Caller-chosen staging"],
+      ["Acquisition", s => s.source],
+      ["Acquired archive", s => s.acquiredBytes],
+      ["Semantic value", s => s.pack],
+      ["Encoded archive", s => s.encodedBytes],
+      ["Destination", s => s.destination],
+      ["Peak model", s => s.memory],
+      ["Execution", () => "sync codec; host-owned I/O"],
+    ];
+
+    function dispatch(type) {
+      state = ArchiveLifecycle.reduce(state, { type });
+      render();
+    }
+
+    function render() {
+      document.getElementById("state").innerHTML = stateFields.map(([label, value]) => `
+        <div class="state-item">
+          <span class="label">${label}</span>
+          <div class="value">${value(state)}</div>
+        </div>`).join("");
+
+      const event = document.getElementById("event");
+      event.textContent = state.lastEvent;
+      event.className = `event ${state.eventKind === "failure" ? "failure" : state.eventKind === "warning" ? "warning" : ""}`;
+
+      document.getElementById("interface").textContent = interfaces[state.design].code;
+      document.getElementById("contract").innerHTML = interfaces[state.design].contract
+        .map(item => `<li>${item}</li>`).join("");
+
+      document.querySelectorAll("[data-design]").forEach(button => {
+        button.classList.toggle("active", button.dataset.design === state.design);
+      });
+
+      renderScenario();
+    }
+
+    document.getElementById("actions").innerHTML = actions.map(([label, type], index) =>
+      `<button class="${index === 0 ? "primary" : ""}" data-action="${type}">${label}</button>`
+    ).join("");
+
+    document.getElementById("actions").addEventListener("click", event => {
+      const type = event.target.dataset.action;
+      if (type) dispatch(type);
+    });
+
+    document.querySelectorAll("[data-design]").forEach(button => {
+      button.addEventListener("click", () => {
+        state = ArchiveLifecycle.reduce(state, { type: "design", design: button.dataset.design });
+        completedSteps = 0;
+        render();
+      });
+    });
+
+    document.getElementById("tabs").innerHTML = scenarios.map((scenario, index) =>
+      `<button class="tab ${index === 0 ? "active" : ""}" data-tab="${index}">${scenario.name}</button>`
+    ).join("");
+
+    document.getElementById("tabs").addEventListener("click", event => {
+      if (event.target.dataset.tab === undefined) return;
+      activeScenario = Number(event.target.dataset.tab);
+      completedSteps = 0;
+      state = ArchiveLifecycle.initial(state.design);
+      document.querySelectorAll(".tab").forEach((tab, index) => tab.classList.toggle("active", index === activeScenario));
+      render();
+    });
+
+    function renderScenario() {
+      const scenario = scenarios[activeScenario];
+      document.getElementById("scenario").innerHTML = `
+        <h3>${scenario.name}</h3>
+        <p>${scenario.description}</p>
+        <div class="steps">
+          ${scenario.steps.map(([label, type], index) => `
+            <button class="${index < completedSteps ? "done" : ""}" data-step="${index}" data-type="${type}">
+              ${index + 1}. ${label}
+            </button>`).join("")}
+        </div>`;
+
+      document.querySelectorAll("[data-step]").forEach(button => {
+        button.addEventListener("click", () => {
+          const index = Number(button.dataset.step);
+          if (index !== completedSteps) {
+            state = ArchiveLifecycle.reduce(state, { type: "reset" });
+            completedSteps = 0;
+          }
+          state = ArchiveLifecycle.reduce(state, { type: button.dataset.type });
+          completedSteps = index + 1;
+          render();
+        });
+      });
+    }
+
+    render();
+  </script>
+</body>
+</html>
