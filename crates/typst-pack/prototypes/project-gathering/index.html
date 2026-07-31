@@ -1,0 +1,701 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Project Gathering Protocol Prototype</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17201d;
+      --muted: #5f6d68;
+      --paper: #f4f1e8;
+      --panel: #fffdf7;
+      --line: #d7d0c1;
+      --accent: #0b6b53;
+      --accent-soft: #dceee7;
+      --danger: #9f3b2f;
+      --warning: #9a650b;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+
+    * { box-sizing: border-box; }
+
+    body {
+      margin: 0;
+      color: var(--ink);
+      background: var(--paper);
+    }
+
+    main {
+      width: min(1180px, calc(100% - 32px));
+      margin: 0 auto;
+      padding: 48px 0 72px;
+    }
+
+    h1, h2, h3, p { margin-top: 0; }
+    h1 { max-width: 820px; font-size: clamp(2rem, 5vw, 4.4rem); line-height: .98; letter-spacing: -.055em; }
+    h2 { font-size: 1.15rem; letter-spacing: -.02em; }
+    h3 { font-size: .95rem; }
+
+    .intro {
+      max-width: 850px;
+      margin-bottom: 32px;
+      color: var(--muted);
+      font-size: 1.05rem;
+      line-height: 1.6;
+    }
+
+    .question {
+      display: inline-block;
+      margin-bottom: 18px;
+      padding: 6px 10px;
+      border: 1px solid var(--accent);
+      border-radius: 999px;
+      color: var(--accent);
+      font-size: .76rem;
+      font-weight: 750;
+      letter-spacing: .08em;
+      text-transform: uppercase;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.2fr) minmax(300px, .8fr);
+      gap: 20px;
+      align-items: start;
+    }
+
+    .panel {
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: 18px;
+      background: var(--panel);
+      box-shadow: 0 8px 28px rgba(45, 42, 34, .05);
+    }
+
+    .panel + .panel { margin-top: 20px; }
+
+    .state-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 16px;
+      align-items: baseline;
+      margin-bottom: 18px;
+    }
+
+    .phase {
+      padding: 5px 9px;
+      border-radius: 999px;
+      background: var(--accent-soft);
+      color: var(--accent);
+      font-size: .78rem;
+      font-weight: 750;
+    }
+
+    .state-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 10px;
+      margin-bottom: 16px;
+    }
+
+    .metric {
+      min-height: 78px;
+      padding: 12px;
+      border-radius: 12px;
+      background: #f1eee5;
+    }
+
+    .metric strong { display: block; margin-top: 8px; font-size: 1.25rem; }
+    .metric span { color: var(--muted); font-size: .72rem; text-transform: uppercase; letter-spacing: .06em; }
+
+    .lists {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .list-box {
+      min-height: 112px;
+      padding: 13px;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+    }
+
+    .list-box h3 { margin-bottom: 9px; }
+    .list-box ul { margin: 0; padding-left: 18px; color: var(--muted); font: .82rem/1.55 ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .empty { color: #8b938f; font-size: .82rem; font-style: italic; }
+
+    .notice {
+      margin-top: 14px;
+      padding: 12px 14px;
+      border-left: 4px solid var(--accent);
+      border-radius: 4px 10px 10px 4px;
+      background: var(--accent-soft);
+      line-height: 1.45;
+    }
+
+    .notice.error { border-color: var(--danger); background: #f6e3df; color: #6d251d; }
+    .notice.warning { border-color: var(--warning); background: #f8ecd3; color: #684503; }
+
+    .buttons { display: flex; flex-wrap: wrap; gap: 9px; }
+    button {
+      appearance: none;
+      padding: 9px 12px;
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      color: var(--ink);
+      background: #fff;
+      font: inherit;
+      font-size: .86rem;
+      font-weight: 650;
+      cursor: pointer;
+    }
+
+    button:hover { border-color: var(--accent); color: var(--accent); }
+    button.primary { border-color: var(--accent); color: white; background: var(--accent); }
+    button.active { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
+
+    .scenario-copy { margin: 12px 0 16px; color: var(--muted); line-height: 1.5; }
+    .steps { display: grid; gap: 8px; }
+    .steps button { text-align: left; }
+    .steps button.done { color: var(--muted); text-decoration: line-through; background: #f1eee5; }
+
+    pre {
+      margin: 0;
+      padding: 16px;
+      overflow-x: auto;
+      border-radius: 12px;
+      color: #e8f0ed;
+      background: #16231f;
+      font: .77rem/1.55 ui-monospace, SFMono-Regular, Menlo, monospace;
+      tab-size: 2;
+    }
+
+    .contract-copy { color: var(--muted); font-size: .9rem; line-height: 1.5; }
+    .log { max-height: 240px; overflow-y: auto; }
+    .log li { margin-bottom: 6px; color: var(--muted); font: .8rem/1.45 ui-monospace, SFMono-Regular, Menlo, monospace; }
+
+    @media (max-width: 820px) {
+      main { width: min(100% - 20px, 680px); padding-top: 28px; }
+      .grid { grid-template-columns: 1fr; }
+      .state-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+      .lists { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <span class="question">Throwaway logic prototype</span>
+    <h1>Who decides what gets read?</h1>
+    <p class="intro">
+      This demo tests storage-owned project membership. Each source-specific gatherer chooses how to
+      filter, prune, list, and read; the shared core receives exact selected entries only. Project Snapshot
+      assembly then enforces universal invariants, not source policy. The awkward case is deliberate: a
+      buggy over-inclusive gatherer can produce a larger but still valid Project Snapshot.
+    </p>
+
+    <div class="grid">
+      <section>
+        <div class="panel">
+          <div class="state-head">
+            <div>
+              <h2 id="scenario-title">Filesystem pruning</h2>
+              <div id="backend"></div>
+            </div>
+            <span class="phase" id="phase"></span>
+          </div>
+
+          <div class="state-grid" id="metrics"></div>
+
+          <div class="lists">
+            <div class="list-box">
+              <h3>Source-selected files</h3>
+              <div id="selected"></div>
+            </div>
+            <div class="list-box">
+              <h3>Suppressed source entries</h3>
+              <div id="suppressed"></div>
+            </div>
+            <div class="list-box">
+              <h3>Pending source work</h3>
+              <div id="pending"></div>
+            </div>
+            <div class="list-box">
+              <h3>Acquired exact bytes</h3>
+              <div id="acquired"></div>
+            </div>
+          </div>
+
+          <div class="notice" id="notice"></div>
+        </div>
+
+        <div class="panel">
+          <h2>Free play</h2>
+          <div class="buttons">
+            <button data-action="reset">Reset</button>
+            <button data-action="inspect-policy">Prepare source selection</button>
+            <button data-action="list-next">List next</button>
+            <button data-action="finish-listing">Finish listing</button>
+            <button data-action="read-next">Read next file</button>
+            <button data-action="assemble">Assemble snapshot</button>
+            <button class="primary" data-action="next">Run next legal step</button>
+          </div>
+        </div>
+
+        <div class="panel">
+          <h2>Event log</h2>
+          <ol class="log" id="log"></ol>
+        </div>
+      </section>
+
+      <aside>
+        <div class="panel">
+          <h2>Guided walkthroughs</h2>
+          <div class="buttons" id="scenario-tabs"></div>
+          <p class="scenario-copy" id="scenario-copy"></p>
+          <div class="steps" id="scenario-steps"></div>
+        </div>
+
+        <div class="panel">
+          <h2>Proposed Rust seam</h2>
+          <p class="contract-copy">
+            Filesystem and object-store gatherers have no common storage or policy interface. They own
+            source selection and produce exact path-and-byte entries. This is the only shared semantic seam.
+          </p>
+          <pre>pub struct ProjectSnapshotAssembly {
+    // entrypoint and universal budget
+}
+
+impl ProjectSnapshotAssembly {
+    pub fn new(
+        entrypoint: String,
+    ) -&gt; Self;
+
+    pub fn budget(
+        self,
+        budget: ProjectSnapshotBudget,
+    ) -&gt; Self;
+
+    pub fn assemble(
+        &amp;self,
+        selected: impl IntoIterator&lt;
+            Item = (String, Vec&lt;u8&gt;),
+        &gt;,
+    ) -&gt; Result&lt;ProjectSnapshot,
+                ProjectSnapshotError&gt;;
+}</pre>
+        </div>
+      </aside>
+    </div>
+  </main>
+
+  <script>
+    // Pure prototype module. It models the proposed core-owned phase protocol;
+    // the DOM below is only a viewer and dispatcher for this state machine.
+    const ProjectGatheringModel = (() => {
+      const scenarios = {
+        filesystem: {
+          title: "Filesystem pruning",
+          backend: "Hierarchical listing; excluded directories can stop traversal.",
+          copy: "The ignored build directory contains a symlink that would fail if visited. Watch the core return Prune before the adapter descends, then defer all ordinary reads until the survey is valid.",
+          entrypoint: "main.typ",
+          policy: { kind: "file", bytes: "build/\n*.typk\n", excludedDirs: ["build"], excludedFiles: [] },
+          listing: "hierarchical",
+          directories: {
+            "": [
+              { path: ".typkignore", kind: "file", bytes: "build/\n*.typk\n", cached: true },
+              { path: "main.typ", kind: "file", bytes: "#show: document" },
+              { path: "chapters", kind: "directory" },
+              { path: "build", kind: "directory" },
+              { path: "old.typk", kind: "file", bytes: "archive" }
+            ],
+            "chapters": [
+              { path: "chapters/one.typ", kind: "file", bytes: "= One" }
+            ],
+            "build": [
+              { path: "build/out.pdf", kind: "file", bytes: "pdf" },
+              { path: "build/current", kind: "unsupported" }
+            ]
+          },
+          steps: ["inspect-policy", "list-next", "list-next", "finish-listing", "read-next", "read-next", "read-next", "assemble"]
+        },
+        object: {
+          title: "Flat object-store listing",
+          backend: "Flat paginated listing; pruning saves reads but cannot undo enumeration.",
+          copy: "This object-store gatherer owns a manual prefix exclusion. It still pays flat listing cost for private objects, but it omits them from its read plan before handing selected entries to core.",
+          entrypoint: "main.typ",
+          policy: { kind: "custom", bytes: "", excludedDirs: ["private"], excludedFiles: [] },
+          listing: "flat",
+          pages: [
+            [
+              { path: "main.typ", kind: "file", bytes: "Hello" },
+              { path: "private", kind: "directory" },
+              { path: "private/key.txt", kind: "file", bytes: "secret" }
+            ],
+            [
+              { path: "images/logo.svg", kind: "file", bytes: "<svg/>" },
+              { path: "bundle.typk", kind: "file", bytes: "archive" }
+            ]
+          ],
+          steps: ["inspect-policy", "list-next", "list-next", "finish-listing", "read-next", "read-next", "assemble"]
+        },
+        overinclusive: {
+          title: "Over-inclusive gatherer",
+          backend: "Filesystem gathering with a simulated selection bug.",
+          copy: "The gatherer parses an exclusion for build/ but fails to apply it. Core still rejects universal invalidity, but build/secret.txt is canonical and therefore enters the valid Project Snapshot.",
+          entrypoint: "main.typ",
+          policy: { kind: "file", bytes: "build/\n", excludedDirs: ["build"], excludedFiles: [] },
+          ignoreSourceSelection: true,
+          overinclusive: true,
+          listing: "hierarchical",
+          directories: {
+            "": [
+              { path: ".typkignore", kind: "file", bytes: "build/\n", cached: true },
+              { path: "main.typ", kind: "file", bytes: "Hello" },
+              { path: "build", kind: "directory" }
+            ],
+            "build": [
+              { path: "build/secret.txt", kind: "file", bytes: "should have been excluded" }
+            ]
+          },
+          steps: ["inspect-policy", "list-next", "list-next", "finish-listing", "read-next", "read-next", "read-next", "assemble"]
+        },
+        unsupported: {
+          title: "Eligible unsupported entry",
+          backend: "Hierarchical listing; an unignored symlink is not a project file.",
+          copy: "The survey discovers an unsupported eligible entry after one ordinary file. Because reads are deferred, gathering fails without reading that file or returning a partial Project Snapshot.",
+          entrypoint: "main.typ",
+          policy: { kind: "missing", bytes: "", excludedDirs: [], excludedFiles: [] },
+          listing: "hierarchical",
+          directories: {
+            "": [
+              { path: "main.typ", kind: "file", bytes: "Hello" },
+              { path: "latest", kind: "unsupported" }
+            ]
+          },
+          steps: ["inspect-policy", "list-next"]
+        },
+        oversized: {
+          title: "Bounded content read",
+          backend: "Flat listing with a 16-byte per-file acquisition ceiling.",
+          copy: "Metadata does not establish the limit. The adapter reads through the core-issued ceiling, observes one extra byte, and reports a deterministic acquisition failure without assembling a snapshot.",
+          entrypoint: "main.typ",
+          policy: { kind: "missing", bytes: "", excludedDirs: [], excludedFiles: [] },
+          listing: "flat",
+          pages: [[
+            { path: "main.typ", kind: "file", bytes: "This source is larger than sixteen bytes." }
+          ]],
+          limits: { fileBytes: 16, files: 8, totalBytes: 64 },
+          steps: ["inspect-policy", "list-next", "finish-listing", "read-next"]
+        }
+      };
+
+      const defaults = { fileBytes: 64, files: 8, totalBytes: 128 };
+
+      function initial(name) {
+        const scenario = scenarios[name];
+        return {
+          scenario: name,
+          phase: "awaiting policy",
+          pendingDirectories: scenario.listing === "hierarchical" ? [""] : [],
+          nextPage: 0,
+          listed: 0,
+          retained: [],
+          suppressed: [],
+          readPlan: [],
+          acquired: [],
+          policyBytesCached: false,
+          bytes: 0,
+          error: null,
+          notice: "Prepare this source gatherer's selection behavior before surveying the source.",
+          noticeKind: "normal",
+          log: ["Gathering created; no source content has been read."],
+          completedSteps: []
+        };
+      }
+
+      function clone(state) {
+        return {
+          ...state,
+          pendingDirectories: [...state.pendingDirectories],
+          retained: state.retained.map(item => ({ ...item })),
+          suppressed: state.suppressed.map(item => ({ ...item })),
+          readPlan: state.readPlan.map(item => ({ ...item })),
+          acquired: state.acquired.map(item => ({ ...item })),
+          log: [...state.log],
+          completedSteps: [...state.completedSteps]
+        };
+      }
+
+      function fail(next, message) {
+        next.phase = "failed";
+        next.error = message;
+        next.notice = message;
+        next.noticeKind = "error";
+        next.log.push(`FAILED: ${message}`);
+        return next;
+      }
+
+      function hasExcludedAncestor(path, policy) {
+        return policy.excludedDirs.some(dir => path === dir || path.startsWith(`${dir}/`));
+      }
+
+      function isExcluded(entry, policy) {
+        if (entry.path.split("/").some(part => part.endsWith(".typk"))) return true;
+        if (hasExcludedAncestor(entry.path, policy)) return true;
+        return policy.excludedFiles.includes(entry.path);
+      }
+
+      function isBuiltInExcluded(entry) {
+        return entry.path.split("/").some(part => part.endsWith(".typk"));
+      }
+
+      function inspectPolicy(next, scenario) {
+        if (next.phase !== "awaiting policy") return illegal(next, "Policy inspection is only legal at the start.");
+        if (scenario.policy.kind === "unsupported") return fail(next, "The selected Project Ignore Policy could not be constructed.");
+
+        next.phase = "surveying";
+        if (scenario.policy.kind === "file") {
+          next.policyBytesCached = true;
+          next.log.push("Filesystem gatherer read and parsed root .typkignore once; its private file handle retains those exact bytes.");
+        } else if (scenario.policy.kind === "custom") {
+          next.log.push("Object-store gatherer prepared its own manual prefix selection; it has no project file of its own.");
+        } else {
+          next.log.push("Source gatherer selected no optional exclusion policy.");
+        }
+        next.notice = "Source-specific selection is ready. The gatherer surveys before performing ordinary reads.";
+        return next;
+      }
+
+      function processEntries(next, entries, scenario, label) {
+        const limits = { ...defaults, ...(scenario.limits || {}) };
+        next.log.push(`Adapter reported ${entries.length} entries from ${label}.`);
+        for (const entry of entries) {
+          next.listed += 1;
+          const excluded = scenario.ignoreSourceSelection
+            ? isBuiltInExcluded(entry)
+            : isExcluded(entry, scenario.policy);
+          if (entry.kind === "directory") {
+            if (excluded) {
+              next.suppressed.push({ path: entry.path, reason: "pruned directory" });
+              next.log.push(`Source gatherer pruned ${entry.path}`);
+            } else {
+              next.log.push(`Source gatherer descended into ${entry.path}`);
+              if (scenario.listing === "hierarchical") next.pendingDirectories.push(entry.path);
+            }
+            continue;
+          }
+
+          if (excluded) {
+            next.suppressed.push({ path: entry.path, reason: "ignored before read" });
+            next.log.push(`Source gatherer ignored ${entry.path} before reading content.`);
+            continue;
+          }
+
+          if (entry.kind !== "file") {
+            return fail(next, `Unsupported eligible source entry: ${entry.path}. No ordinary file was read.`);
+          }
+
+          if (next.retained.some(item => item.path === entry.path)) {
+            return fail(next, `The source listed ${entry.path} more than once.`);
+          }
+
+          next.retained.push({ ...entry });
+          next.log.push(`Source gatherer retained ${entry.path} for its deferred read plan.`);
+          if (next.retained.length > limits.files) {
+            return fail(next, `Project file count exceeds the configured limit of ${limits.files}.`);
+          }
+        }
+        return next;
+      }
+
+      function listNext(next, scenario) {
+        if (next.phase !== "surveying") return illegal(next, "Listing is only legal during the source survey.");
+        if (scenario.listing === "hierarchical") {
+          if (!next.pendingDirectories.length) return illegal(next, "No requested directory remains to list.");
+          const directory = next.pendingDirectories.shift();
+          const entries = scenario.directories[directory] || [];
+          processEntries(next, entries, scenario, directory || "project root");
+        } else {
+          if (next.nextPage >= scenario.pages.length) return illegal(next, "No object-listing page remains.");
+          const page = scenario.pages[next.nextPage];
+          next.nextPage += 1;
+          processEntries(next, page, scenario, `flat page ${next.nextPage}`);
+        }
+        if (next.phase !== "failed") {
+          next.notice = scenario.listing === "flat"
+            ? "Flat enumeration may include excluded descendants; this gatherer omits them from its own read plan."
+            : "The source gatherer can prune excluded directories using its native traversal controls.";
+        }
+        return next;
+      }
+
+      function listingDone(state, scenario) {
+        return scenario.listing === "hierarchical"
+          ? state.pendingDirectories.length === 0
+          : state.nextPage >= scenario.pages.length;
+      }
+
+      function finishListing(next, scenario) {
+        if (next.phase !== "surveying") return illegal(next, "The read plan can only be made from an active survey.");
+        if (!listingDone(next, scenario)) return illegal(next, "The adapter has not completed its listing obligation.");
+        const entrypoint = next.retained.find(item => item.path === scenario.entrypoint && item.kind === "file");
+        if (!entrypoint) return fail(next, `Entrypoint ${scenario.entrypoint} is absent or excluded.`);
+
+        next.readPlan = next.retained.sort((a, b) => a.path.localeCompare(b.path));
+        next.phase = next.readPlan.length ? "reading exact bytes" : "ready to assemble";
+        next.notice = `Survey accepted. ${next.readPlan.length} bounded ordinary reads are now authorized.`;
+        next.log.push("Source gatherer closed its selected membership and issued a bounded read plan.");
+        return next;
+      }
+
+      function readNext(next, scenario) {
+        if (next.phase !== "reading exact bytes") return illegal(next, "There is no authorized ordinary read right now.");
+        const limits = { ...defaults, ...(scenario.limits || {}) };
+        const file = next.readPlan.shift();
+        if (file.bytes.length > limits.fileBytes) {
+          return fail(next, `${file.path} crossed its ${limits.fileBytes}-byte read ceiling.`);
+        }
+        if (next.bytes + file.bytes.length > limits.totalBytes) {
+          return fail(next, `Acquired project bytes crossed the ${limits.totalBytes}-byte total ceiling.`);
+        }
+        next.acquired.push({ ...file });
+        next.bytes += file.bytes.length;
+        next.log.push(file.cached
+          ? `Adapter moved ${file.bytes.length} cached policy bytes for ${file.path} into core; no second source read occurred.`
+          : `Adapter moved ${file.bytes.length} exact bytes for ${file.path} into core.`);
+        if (!next.readPlan.length) {
+          next.phase = "ready to assemble";
+          next.notice = "All authorized reads are complete. Project Snapshot assembly is now the final authority.";
+        } else {
+          next.notice = `${next.readPlan.length} authorized read(s) remain.`;
+        }
+        return next;
+      }
+
+      function assemble(next, scenario) {
+        if (next.phase !== "ready to assemble") return illegal(next, "Assembly requires an exact result for every authorized read.");
+        const before = next.acquired.length;
+        next.acquired = next.acquired.filter(item => !isBuiltInExcluded(item));
+        const entrypoint = next.acquired.some(item => item.path === scenario.entrypoint);
+        if (!entrypoint) return fail(next, `Authoritative assembly rejected missing entrypoint ${scenario.entrypoint}.`);
+        next.phase = "complete";
+        next.notice = scenario.overinclusive
+          ? "Project Snapshot complete, including build/secret.txt. Source policy is intentionally outside core validation."
+          : "Project Snapshot complete. Assembly checked universal paths, built-in exclusions, budgets, duplicates, and entrypoint presence.";
+        next.log.push(`Project Snapshot assembly checked ${before} selected entries and returned immutable exact bytes.`);
+        return next;
+      }
+
+      function illegal(next, message) {
+        next.notice = message;
+        next.noticeKind = "warning";
+        next.log.push(`Rejected transition: ${message}`);
+        return next;
+      }
+
+      function nextAction(state, scenario) {
+        if (state.phase === "awaiting policy") return "inspect-policy";
+        if (state.phase === "surveying") return listingDone(state, scenario) ? "finish-listing" : "list-next";
+        if (state.phase === "reading exact bytes") return "read-next";
+        if (state.phase === "ready to assemble") return "assemble";
+        return null;
+      }
+
+      function reduce(state, action) {
+        if (action.type === "reset") return initial(action.scenario || state.scenario);
+        const scenario = scenarios[state.scenario];
+        const next = clone(state);
+        next.noticeKind = "normal";
+        const type = action.type === "next" ? nextAction(next, scenario) : action.type;
+        if (!type) return illegal(next, "This gathering run is terminal. Reset or choose another scenario.");
+
+        let result;
+        if (type === "inspect-policy") result = inspectPolicy(next, scenario);
+        else if (type === "list-next") result = listNext(next, scenario);
+        else if (type === "finish-listing") result = finishListing(next, scenario);
+        else if (type === "read-next") result = readNext(next, scenario);
+        else if (type === "assemble") result = assemble(next, scenario);
+        else result = illegal(next, `Unknown action: ${type}`);
+
+        if (!result.completedSteps.includes(type)) result.completedSteps.push(type);
+        return result;
+      }
+
+      return { scenarios, initial, reduce, nextAction };
+    })();
+
+    let state = ProjectGatheringModel.initial("filesystem");
+
+    function list(items, render) {
+      if (!items.length) return '<span class="empty">None</span>';
+      return `<ul>${items.map(item => `<li>${render(item)}</li>`).join("")}</ul>`;
+    }
+
+    function render() {
+      const scenario = ProjectGatheringModel.scenarios[state.scenario];
+      document.getElementById("scenario-title").textContent = scenario.title;
+      document.getElementById("backend").textContent = scenario.backend;
+      document.getElementById("phase").textContent = state.phase;
+
+      const ordinaryAcquired = state.acquired.length;
+      const metrics = [
+        ["Source entries seen", state.listed],
+        ["Selected files", state.retained.length],
+        ["Ordinary reads", ordinaryAcquired],
+        ["Exact bytes held", state.bytes],
+        ["Pending reads", state.readPlan.length],
+        ["Result", state.phase === "complete" ? "Snapshot" : state.error ? "None" : "Pending"]
+      ];
+      document.getElementById("metrics").innerHTML = metrics
+        .map(([label, value]) => `<div class="metric"><span>${label}</span><strong>${value}</strong></div>`)
+        .join("");
+
+      document.getElementById("selected").innerHTML = list(state.retained, item => item.path);
+      document.getElementById("suppressed").innerHTML = list(state.suppressed, item => `${item.path} (${item.reason})`);
+      const pending = scenario.listing === "hierarchical"
+        ? state.pendingDirectories.map(path => path || "project root")
+        : Array.from({ length: Math.max(0, scenario.pages.length - state.nextPage) }, (_, i) => `flat page ${state.nextPage + i + 1}`);
+      document.getElementById("pending").innerHTML = list(pending, item => item);
+      document.getElementById("acquired").innerHTML = list(state.acquired, item => `${item.path} (${item.bytes.length} bytes)`);
+
+      const notice = document.getElementById("notice");
+      notice.textContent = state.notice;
+      notice.className = `notice${state.noticeKind === "error" ? " error" : state.noticeKind === "warning" ? " warning" : ""}`;
+      document.getElementById("log").innerHTML = state.log.map(item => `<li>${item}</li>`).join("");
+
+      document.getElementById("scenario-tabs").innerHTML = Object.entries(ProjectGatheringModel.scenarios)
+        .map(([key, value]) => `<button class="${key === state.scenario ? "active" : ""}" data-scenario="${key}">${value.title}</button>`)
+        .join("");
+      document.getElementById("scenario-copy").textContent = scenario.copy;
+      document.getElementById("scenario-steps").innerHTML = scenario.steps
+        .map((action, index) => `<button class="${state.completedSteps.includes(action) ? "done" : ""}" data-step="${action}">${index + 1}. ${action.replaceAll("-", " ")}</button>`)
+        .join("");
+
+      document.querySelectorAll("[data-scenario]").forEach(button => {
+        button.addEventListener("click", () => {
+          state = ProjectGatheringModel.initial(button.dataset.scenario);
+          render();
+        });
+      });
+      document.querySelectorAll("[data-step]").forEach(button => {
+        button.addEventListener("click", () => {
+          state = ProjectGatheringModel.reduce(state, { type: button.dataset.step });
+          render();
+        });
+      });
+    }
+
+    document.querySelectorAll("[data-action]").forEach(button => {
+      button.addEventListener("click", () => {
+        state = ProjectGatheringModel.reduce(state, { type: button.dataset.action });
+        render();
+      });
+    });
+
+    render();
+  </script>
+</body>
+</html>
