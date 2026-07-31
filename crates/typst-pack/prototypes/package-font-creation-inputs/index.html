@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Prototype: Package and font creation inputs</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --ink: #17201d;
+      --muted: #65706b;
+      --paper: #f4f1e9;
+      --panel: #fffdf8;
+      --line: #d8d2c5;
+      --accent: #176b57;
+      --accent-soft: #dcebe5;
+      --danger: #9b3d31;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font: 16px/1.5 ui-sans-serif, system-ui, sans-serif;
+    }
+    main { width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: 42px 0 72px; }
+    h1, h2, h3 { line-height: 1.15; }
+    h1 { max-width: 800px; margin: 8px 0 12px; font-size: clamp(2rem, 5vw, 4rem); letter-spacing: -0.04em; }
+    h2 { margin-top: 0; font-size: 1.3rem; }
+    h3 { margin: 0 0 8px; font-size: 1rem; }
+    p { max-width: 820px; }
+    code, pre { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+    .kicker { color: var(--accent); font-weight: 800; letter-spacing: 0.12em; text-transform: uppercase; }
+    .lede { font-size: 1.15rem; color: #37423e; }
+    .grid { display: grid; grid-template-columns: 1.1fr 0.9fr; gap: 18px; margin-top: 28px; }
+    .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; padding: 20px; }
+    .state-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .state-card { border-top: 3px solid var(--line); padding-top: 10px; min-height: 110px; }
+    .state-card strong { display: block; margin-bottom: 4px; }
+    .state-card ul { margin: 0; padding-left: 20px; }
+    .empty, .muted { color: var(--muted); }
+    .outcome { border-color: var(--accent); }
+    .outcome strong { color: var(--accent); }
+    .error { color: var(--danger); }
+    .actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    button {
+      border: 1px solid #bcb5a7;
+      border-radius: 999px;
+      background: #fff;
+      color: var(--ink);
+      padding: 8px 12px;
+      font: inherit;
+      cursor: pointer;
+    }
+    button:hover, button:focus-visible { border-color: var(--accent); outline: none; }
+    button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    button.done { background: var(--accent-soft); border-color: var(--accent); color: var(--accent); }
+    .tabs { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 14px; }
+    .tabs button[aria-selected="true"] { background: var(--ink); color: #fff; border-color: var(--ink); }
+    .walkthrough-step { display: flex; align-items: center; gap: 10px; margin: 8px 0; }
+    .step-number { width: 24px; color: var(--muted); text-align: right; }
+    .decision { margin: 10px 0; padding: 12px; background: #f5f8f6; border-left: 3px solid var(--accent); }
+    .decision b { display: block; }
+    details { margin-top: 18px; }
+    summary { cursor: pointer; font-weight: 700; }
+    pre { overflow: auto; padding: 16px; background: #17201d; color: #e9eee9; border-radius: 10px; font-size: 0.84rem; }
+    .log { max-height: 180px; overflow: auto; margin: 0; padding-left: 24px; }
+    footer { margin-top: 28px; color: var(--muted); }
+    @media (max-width: 800px) {
+      .grid { grid-template-columns: 1fr; }
+      .state-grid { grid-template-columns: 1fr; }
+      main { width: min(100% - 20px, 1180px); padding-top: 24px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <div class="kicker">Throwaway logic prototype</div>
+  <h1>Package and font creation inputs</h1>
+  <p class="lede">Can a small set of validated values support eager input checks, ordered font selection, and stateless package discovery without exposing acquisition machinery to Pack Creation?</p>
+
+  <section class="grid">
+    <div class="panel">
+      <h2>Current state</h2>
+      <div id="state" class="state-grid"></div>
+    </div>
+    <div class="panel">
+      <h2>Free play</h2>
+      <p class="muted">Pack Assembly changes catalogs between calls. <code>create</code> only borrows the values for one synchronous Dependency Discovery run.</p>
+      <div id="actions" class="actions"></div>
+      <h3 style="margin-top: 22px">Event log</h3>
+      <ol id="log" class="log"></ol>
+    </div>
+  </section>
+
+  <section class="panel" style="margin-top: 18px">
+    <h2>Guided walkthroughs</h2>
+    <div id="tabs" class="tabs"></div>
+    <div id="walkthrough"></div>
+  </section>
+
+  <section class="grid">
+    <div class="panel">
+      <h2>Recommended decisions</h2>
+      <div class="decision"><b>Validate before Pack Creation</b><span><code>PackageTree</code>, <code>PackageCatalog</code>, <code>FontContainer</code>, and <code>DiscoverySpecification</code> establish their own local invariants. Whole-Pack invariants still belong to the private Pack construction seam.</span></div>
+      <div class="decision"><b>Treat duplicate font bytes as distinct positions</b><span>Font Catalog position remains semantic. Identical bytes may carry different dispositions; the first selected position decides the requirement.</span></div>
+      <div class="decision"><b>Keep authorities out of the shared core interface</b><span>Concrete filesystem and host workflows own acquisition. Add a shared authority trait only after two production workflows demonstrate the same contract.</span></div>
+      <div class="decision"><b>Carry stable failures separately</b><span>A typst-pack-owned reason preserves absent-package, absent-version, network, malformed-archive, and other cases without exposing the compiler type. A Package Tree wins over an older failure; otherwise the private engine adapter attaches it to the importing source request.</span></div>
+      <div class="decision"><b>Resume by mutating one validated catalog</b><span><code>PackageCatalog::try_insert</code> verifies each new exact specification and tree. Each synchronous <code>create</code> call only borrows the current catalog, so no large resource value is rebuilt merely to cross an await point.</span></div>
+    </div>
+    <div class="panel">
+      <h2>Questions this prototype exposes</h2>
+      <ol>
+        <li>Run “Nested resumption”: does the borrowed invocation make the stateless resume loop clear without introducing a continuation or session?</li>
+        <li>Run “Failure attachment”: does the stable failure reason preserve enough information at the importing source?</li>
+        <li>Run “Font positions”: does identity equality remaining separate from disposition match the intended model?</li>
+      </ol>
+    </div>
+  </section>
+
+  <section class="panel" style="margin-top: 18px">
+    <h2>Candidate Rust interface</h2>
+    <p class="muted">Illustrative only. Ownership and global limit contracts remain for the map's dedicated lifecycle-contract decision.</p>
+    <pre><code>pub enum EmbeddingDisposition { Embedded, External }
+
+pub struct PackageTree { /* canonical paths, exact owned bytes, identity */ }
+impl PackageTree {
+    pub fn from_files(
+        files: impl IntoIterator&lt;Item = (impl AsRef&lt;str&gt;, impl Into&lt;Vec&lt;u8&gt;&gt;)&gt;,
+    ) -&gt; Result&lt;Self, PackageTreeError&gt;;
+}
+
+pub struct PackageCatalog { /* exact PackageSpec order */ }
+impl PackageCatalog {
+    // Rejects duplicate specifications and verifies typst.toml name/version.
+    pub fn try_insert(
+        &amp;mut self,
+        specification: PackageSpec,
+        tree: PackageTree,
+        disposition: EmbeddingDisposition,
+    ) -&gt; Result&lt;(), PackageCatalogError&gt;;
+}
+
+pub struct FontContainer { /* exact bytes, identity, local faces */ }
+impl FontContainer {
+    pub fn from_bytes(bytes: Vec&lt;u8&gt;) -&gt; Result&lt;Self, FontContainerError&gt;;
+}
+
+pub struct FontCatalog { /* ordered positional entries; duplicates allowed */ }
+impl FontCatalog {
+    pub fn push(&amp;mut self, container: FontContainer, disposition: EmbeddingDisposition);
+}
+
+pub struct DiscoverySpecification { /* target, inputs, Document Time, features */ }
+pub enum PackageAcquisitionFailureReason {
+    NotFound,
+    VersionNotFound { latest: PackageVersion },
+    NetworkFailed { detail: Option&lt;String&gt; },
+    MalformedArchive { detail: Option&lt;String&gt; },
+    Other { detail: Option&lt;String&gt; },
+}
+pub struct PackageAcquisitionFailures { /* exact spec -&gt; stable reason */ }
+
+pub struct PackCreationInput&lt;'a&gt; {
+    pub project: &amp;'a ProjectSnapshot,
+    pub packages: &amp;'a PackageCatalog,
+    pub fonts: &amp;'a FontCatalog,
+    pub package_failures: &amp;'a PackageAcquisitionFailures,
+    pub discovery: &amp;'a DiscoverySpecification,
+    pub metadata: Option&lt;&amp;'a PackMetadata&gt;,
+}
+
+pub fn create(
+    input: PackCreationInput&lt;'_&gt;,
+) -&gt; Result&lt;PackCreationOutcome, PackCreationError&gt;;
+
+pub enum PackCreationOutcome {
+    Created { pack: Pack, warnings: Vec&lt;DiscoveryWarning&gt; },
+    MissingPackageSpecifications(Vec&lt;PackageSpec&gt;),
+}
+
+// Transport-free core transformation: no specification or disposition policy.
+pub fn expand_package_archive(
+    archive: &amp;[u8],
+    ceiling: PackageExpansionCeiling,
+) -&gt; Result&lt;PackageTree, PackageArchiveExpansionError&gt;;
+
+// Concrete reference workflow modules; intentionally no shared authority trait.
+#[cfg(feature = "fs")]
+impl FsPackageAuthority {
+    fn acquire(
+        &amp;self,
+        specification: &amp;PackageSpec,
+    ) -&gt; Result&lt;PackageTree, PackageAcquisitionFailureReason&gt;;
+}
+
+#[cfg(feature = "fs")]
+impl FsFontAuthority {
+    // System, explicit Typst-embedded, then scanned directories in configured order.
+    fn acquire_catalog(&amp;self) -&gt; FontCatalog;
+}</code></pre>
+  </section>
+
+  <footer>Prototype only. No production behavior, public interface, or <code>.typk</code> representation is changed here.</footer>
+</main>
+
+<script>
+const Model = (() => {
+  const fresh = () => ({
+    packages: [],
+    failures: [],
+    fonts: [],
+    outcome: "Not invoked",
+    detail: "Pack Assembly owns the values.",
+    log: ["Started with an empty Package Catalog and Font Catalog."],
+  });
+
+  const packageIndex = (state, spec) => state.packages.findIndex(item => item.spec === spec);
+  const append = (state, message) => ({ ...state, log: [...state.log, message] });
+
+  function reduce(state, action) {
+    if (action.type === "reset") return fresh();
+
+    if (action.type === "invalid-package") {
+      return append({ ...state, outcome: "Input rejected", detail: "The unused tree's typst.toml does not declare its Package Catalog key." },
+        "PackageCatalog::try_insert rejected an invalid unused entry before Dependency Discovery.");
+    }
+
+    if (action.type === "invalid-font") {
+      return append({ ...state, outcome: "Input rejected", detail: "Malformed bytes never become a Font Container." },
+        "FontContainer::from_bytes rejected malformed bytes before catalog insertion.");
+    }
+
+    if (action.type === "package") {
+      const packages = state.packages.slice();
+      const entry = { spec: action.spec, disposition: action.disposition };
+      const index = packageIndex(state, action.spec);
+      if (index >= 0) packages[index] = entry; else packages.push(entry);
+      packages.sort((a, b) => a.spec.localeCompare(b.spec));
+      const failures = state.failures.filter(item => item.spec !== action.spec);
+      return append({ ...state, packages, failures, outcome: "Catalog changed", detail: `${action.spec} is now available.` },
+        `Pack Assembly inserted ${action.spec} as ${action.disposition}; no core continuation was resumed.`);
+    }
+
+    if (action.type === "failure") {
+      const failures = state.failures.filter(item => item.spec !== action.spec);
+      failures.push({ spec: action.spec, reason: action.reason });
+      return append({ ...state, failures, outcome: "Failure recorded", detail: "The failure is operational and contributes to no identity." },
+        `Pack Assembly recorded an acquisition failure for ${action.spec}.`);
+    }
+
+    if (action.type === "font") {
+      const fonts = [...state.fonts, { identity: action.identity, family: action.family, disposition: action.disposition }];
+      return append({ ...state, fonts, outcome: "Catalog changed", detail: `Font position ${fonts.length - 1} was appended without deduplication.` },
+        `Added ${action.disposition} Font Container ${action.identity} at position ${fonts.length - 1}.`);
+    }
+
+    if (action.type === "discover") {
+      const a = "@preview/a:1.0.0";
+      const b = "@preview/b:1.0.0";
+      const selectedFont = state.fonts.find(font => font.family === "Shared Sans");
+      if (packageIndex(state, a) < 0) {
+        return append({ ...state, outcome: "Missing Package Specifications", detail: `${a}; the call retained no state.${selectedFont ? ` Font position ${state.fonts.indexOf(selectedFont)} was observed first.` : ""}` },
+          `Dependency Discovery reported ${a}; Pack Assembly may await acquisition before a new call.`);
+      }
+      if (packageIndex(state, b) < 0) {
+        const failed = state.failures.find(item => item.spec === b);
+        if (failed) {
+          return append({ ...state, outcome: "Dependency Discovery failed", detail: `${failed.reason} at @preview/a:1.0.0/lib.typ:1:1.` },
+            "The private engine adapter attached Package Acquisition Failure to the import that requested package B.");
+        }
+        return append({ ...state, outcome: "Missing Package Specifications", detail: `${b}; discovered while compiling package A.` },
+          `Dependency Discovery reported transitive package ${b}; the previous call retained no state.`);
+      }
+      const fontDetail = selectedFont
+        ? ` Shared Sans came from position ${state.fonts.indexOf(selectedFont)} (${selectedFont.disposition}).`
+        : " No font requirement was selected.";
+      return append({ ...state, outcome: "Created", detail: `Whole-Pack validation succeeded.${fontDetail}` },
+        "Pack Creation returned a validated Pack; package and font acquisition machinery remained outside core.");
+    }
+
+    return state;
+  }
+
+  return { fresh, reduce };
+})();
+
+const actions = {
+  reset: { label: "Reset", action: { type: "reset" } },
+  discover: { label: "Invoke Pack Creation", primary: true, action: { type: "discover" } },
+  addA: { label: "Acquire package A", action: { type: "package", spec: "@preview/a:1.0.0", disposition: "Embedded" } },
+  addB: { label: "Acquire package B", action: { type: "package", spec: "@preview/b:1.0.0", disposition: "External" } },
+  failB: { label: "Fail package B", action: { type: "failure", spec: "@preview/b:1.0.0", reason: "registry unavailable" } },
+  invalidPackage: { label: "Insert invalid unused package", action: { type: "invalid-package" } },
+  invalidFont: { label: "Insert malformed font", action: { type: "invalid-font" } },
+  externalFont: { label: "Add external Shared Sans", action: { type: "font", identity: "sha256:shared", family: "Shared Sans", disposition: "External" } },
+  embeddedDuplicateFont: { label: "Add embedded duplicate", action: { type: "font", identity: "sha256:shared", family: "Shared Sans", disposition: "Embedded" } },
+};
+
+const walkthroughs = [
+  {
+    name: "Nested resumption",
+    intro: "Package A is requested by the project; package B is requested from inside A. Watch every core call end before Pack Assembly acquires the next exact tree.",
+    steps: ["reset", "discover", "addA", "discover", "addB", "discover"],
+  },
+  {
+    name: "Failure attachment",
+    intro: "An acquisition failure has no import span. The next discovery call supplies the span by encountering the failed request inside package A; a later tree still wins.",
+    steps: ["reset", "addA", "failB", "discover", "addB", "discover"],
+  },
+  {
+    name: "Eager validation",
+    intro: "Unused malformed inputs are rejected by the value that owns their local invariant, before the private engine adapter runs.",
+    steps: ["reset", "invalidPackage", "invalidFont", "discover"],
+  },
+  {
+    name: "Font positions",
+    intro: "Identical Font Container bytes may occupy two positions with different dispositions. The first position offering the family is selected; identity equality does not merge policy.",
+    steps: ["reset", "externalFont", "embeddedDuplicateFont", "addA", "addB", "discover"],
+  },
+];
+
+let state = Model.fresh();
+let activeWalkthrough = 0;
+let completedSteps = new Set();
+
+function list(items, render) {
+  if (!items.length) return '<span class="empty">None</span>';
+  return `<ul>${items.map(render).join("")}</ul>`;
+}
+
+function render() {
+  document.querySelector("#state").innerHTML = `
+    <div class="state-card"><strong>Package Catalog</strong>${list(state.packages, item => `<li><code>${item.spec}</code> · ${item.disposition}</li>`)}</div>
+    <div class="state-card"><strong>Package Acquisition Failures</strong>${list(state.failures, item => `<li><code>${item.spec}</code> · ${item.reason}</li>`)}</div>
+    <div class="state-card"><strong>Font Catalog positions</strong>${list(state.fonts, (item, index) => `<li>${index}: <code>${item.identity}</code> · ${item.disposition}</li>`)}</div>
+    <div class="state-card outcome"><strong>${state.outcome}</strong><span>${state.detail}</span></div>`;
+
+  document.querySelector("#log").innerHTML = state.log.map(item => `<li>${item}</li>`).join("");
+  document.querySelector("#actions").innerHTML = Object.entries(actions).map(([key, item]) =>
+    `<button data-action="${key}" class="${item.primary ? "primary" : ""}">${item.label}</button>`).join("");
+  document.querySelectorAll("[data-action]").forEach(button => button.addEventListener("click", () => dispatch(button.dataset.action)));
+
+  document.querySelector("#tabs").innerHTML = walkthroughs.map((item, index) =>
+    `<button data-tab="${index}" aria-selected="${index === activeWalkthrough}">${item.name}</button>`).join("");
+  document.querySelectorAll("[data-tab]").forEach(button => button.addEventListener("click", () => {
+    activeWalkthrough = Number(button.dataset.tab);
+    completedSteps = new Set();
+    state = Model.fresh();
+    render();
+  }));
+
+  const walkthrough = walkthroughs[activeWalkthrough];
+  document.querySelector("#walkthrough").innerHTML = `<p>${walkthrough.intro}</p>` + walkthrough.steps.map((key, index) => `
+    <div class="walkthrough-step">
+      <span class="step-number">${index + 1}.</span>
+      <button data-step="${index}" class="${completedSteps.has(index) ? "done" : ""}">${actions[key].label}</button>
+    </div>`).join("");
+  document.querySelectorAll("[data-step]").forEach(button => button.addEventListener("click", () => {
+    const index = Number(button.dataset.step);
+    const key = walkthrough.steps[index];
+    completedSteps.add(index);
+    state = Model.reduce(state, actions[key].action);
+    render();
+  }));
+}
+
+function dispatch(key) {
+  state = Model.reduce(state, actions[key].action);
+  render();
+}
+
+render();
+</script>
+</body>
+</html>
