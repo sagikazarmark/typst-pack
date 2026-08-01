@@ -13,8 +13,8 @@ use std::str::FromStr;
 use typst::syntax::package::PackageSpec;
 use typst_pack::{
     CreationOutcome, CreationRequest, PackageAcquisitionError, PackageDisposition,
-    PackageExpansionCeiling, ProjectIgnorePolicy, ProjectSnapshotAssembly, ResolvedPackageTree,
-    create, expand_package_archive, package_archive_url,
+    PackageExpansionCeiling, ProjectSnapshotAssembly, ResolvedPackageTree, create,
+    expand_package_archive, package_archive_url,
 };
 
 fn spec(text: &str) -> PackageSpec {
@@ -93,9 +93,7 @@ fn archive_bytes_expand_into_the_complete_package_tree_of_a_specification() {
     assert_eq!(tree.disposition(), PackageDisposition::External);
     // The whole tree travels, in canonical package-relative path order.
     assert_eq!(
-        tree.files()
-            .map(|(path, data)| (path, data.as_ref()))
-            .collect::<Vec<(&str, &[u8])>>(),
+        tree.files().collect::<Vec<(&str, &[u8])>>(),
         [
             ("assets/logo.svg", &b"<svg/>"[..]),
             ("lib.typ", &b"#let value = 1"[..]),
@@ -139,7 +137,7 @@ fn package_expansion_ceiling_does_not_contribute_to_pack_identity() {
         GENEROUS_CEILING,
     )
     .unwrap();
-    let project = ProjectSnapshotAssembly::new("main.typ", &ProjectIgnorePolicy::built_in())
+    let project = ProjectSnapshotAssembly::new("main.typ")
         .assemble([(
             "main.typ",
             b"#import \"@preview/example:1.0.0\": value\n#rect(width: value * 1pt, height: 1pt)"
@@ -353,7 +351,7 @@ fn fetch(url: &str) -> Option<Vec<u8>> {
 
 #[test]
 fn a_resume_loop_fetches_and_expands_what_creation_reported() {
-    let project = ProjectSnapshotAssembly::new("main.typ", &ProjectIgnorePolicy::built_in())
+    let project = ProjectSnapshotAssembly::new("main.typ")
         .assemble([(
             "main.typ",
             b"#import \"@preview/example:1.0.0\": value\n\

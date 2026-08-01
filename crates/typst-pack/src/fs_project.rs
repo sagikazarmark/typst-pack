@@ -1,5 +1,4 @@
-//! The project half of Creation Preparation for the reference Creation
-//! Adapter, the filesystem one.
+//! Project gathering for the reference filesystem Pack Assembler.
 //!
 //! Acquisition is list, filter, then read: the walker lists the entries beneath
 //! the project root, the Project Ignore Policy decides which of them are
@@ -28,7 +27,7 @@ pub(crate) fn acquire_snapshot(
         })?;
         entries.push((path, data));
     }
-    Ok(ProjectSnapshotAssembly::new(entrypoint, &policy).assemble(entries)?)
+    Ok(ProjectSnapshotAssembly::new(entrypoint).assemble(entries)?)
 }
 
 /// Fails when the project files backing `snapshot` no longer agree with the

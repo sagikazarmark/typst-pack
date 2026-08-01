@@ -261,16 +261,17 @@ Building a pack by hand gives up the representative compile that discovers
 dependencies. `create` keeps it and still needs no crate feature: it takes the
 bytes a caller already holds, runs one representative Typst request, and issues
 the pack it selected. It acquires nothing itself and consults no wall clock, so
-the creation timestamp fixing that request's Document Time is required:
+the creation timestamp fixing that request's Document Time is required. Project
+Snapshot assembly accepts entries already selected by the caller; source-specific
+ignore policy and resource limits belong to the gatherer that obtains them:
 
 ```rust,ignore
 use typst_pack::{
     create, CandidateFontCatalog, CandidateFontContainer, CreationRequest,
-    ProjectIgnorePolicy, ProjectSnapshotAssembly, ResolvedPackageTree,
+    ProjectSnapshotAssembly, ResolvedPackageTree,
 };
 
-let policy = ProjectIgnorePolicy::from_ignore_file(ignore_file_bytes)?;
-let project = ProjectSnapshotAssembly::new("main.typ", &policy).assemble([
+let project = ProjectSnapshotAssembly::new("main.typ").assemble([
     ("main.typ", source_text.as_bytes().to_vec()),
     ("figure.png", image_bytes),
 ])?;

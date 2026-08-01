@@ -2,14 +2,16 @@
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
+use crate::pack::names_pack_path;
+
 /// The root-relative path of the root Project Ignore Policy file.
 pub const IGNORE_FILE: &str = ".typkignore";
 
 /// The root-scoped exclusion policy that decides project membership.
 ///
 /// The policy is determined by ignore-file bytes alone and matches a path
-/// without consulting a host, so a Creation Adapter can apply it to a listing
-/// before reading content.
+/// without consulting a host, so the filesystem project gatherer can apply it
+/// to a listing before reading content.
 #[derive(Debug)]
 pub struct ProjectIgnorePolicy {
     rules: Gitignore,
@@ -51,9 +53,9 @@ impl ProjectIgnorePolicy {
     /// Whether the policy excludes the file at the given root-relative path.
     ///
     /// The path is matched as given, with `/` separators and no leading
-    /// separator, so that a Creation Adapter can filter a listing before
-    /// reading content. Project Snapshot assembly canonicalizes paths before
-    /// matching them, and is what decides membership authoritatively.
+    /// separator, so that the filesystem project gatherer can filter a listing
+    /// before reading content. Project Snapshot assembly receives the entries
+    /// already selected by that gatherer and does not apply this policy.
     pub fn excludes_file(&self, path: &str) -> bool {
         self.excludes(path, false)
     }
@@ -87,17 +89,6 @@ impl ProjectIgnorePolicy {
         }
         self.rules.matched(path, is_directory).is_ignore()
     }
-}
-
-/// Whether any segment of a root-relative path names a Pack.
-///
-/// This is the built-in exclusion that no policy rule can override.
-pub(crate) fn names_pack_path(path: &str) -> bool {
-    path.split('/').any(|segment| {
-        std::path::Path::new(segment)
-            .extension()
-            .is_some_and(|extension| extension == crate::pack::FILE_EXTENSION)
-    })
 }
 
 /// A failure while parsing a Project Ignore Policy.

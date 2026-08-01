@@ -30,8 +30,7 @@ use typst::syntax::package::PackageSpec;
 use typst_pack::{
     CandidateFontCatalog, CandidateFontContainer, CreationError, CreationOutcome, CreationRequest,
     FontContainerIdentity, FontDisposition, IGNORE_FILE, Pack, PackageDisposition,
-    ProjectIgnorePolicy, ProjectSnapshotAssembly, ProjectSnapshotError, ResolvedPackageTree,
-    create,
+    ProjectIgnorePolicy, ProjectSnapshotAssembly, ResolvedPackageTree, create,
 };
 
 /// 2023-11-14T22:13:20Z, the Document Time every representative request in the
@@ -330,17 +329,18 @@ enum Failure {
 /// Project Snapshot, composes the catalog, and drives the resume protocol.
 fn create_in_memory(fixture: &Fixture) -> Result<Created, Failure> {
     let policy = fixture.policy();
-    let snapshot = ProjectSnapshotAssembly::new(fixture.entrypoint, &policy)
+    if policy.excludes_file(fixture.entrypoint) {
+        return Err(Failure::ExcludedEntrypoint);
+    }
+    let snapshot = ProjectSnapshotAssembly::new(fixture.entrypoint)
         .assemble(
             fixture
                 .project
                 .iter()
+                .filter(|(path, _)| !policy.excludes_file(path))
                 .map(|(path, data)| (*path, data.clone())),
         )
-        .map_err(|error| match error {
-            ProjectSnapshotError::ExcludedEntrypoint(_) => Failure::ExcludedEntrypoint,
-            error => panic!("in-memory snapshot assembly failed unexpectedly: {error}"),
-        })?;
+        .unwrap();
     let catalog = fixture.candidate_catalog();
 
     let mut resolved: Vec<ResolvedPackageTree> = Vec::new();

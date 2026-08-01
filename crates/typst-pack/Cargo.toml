@@ -80,6 +80,7 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 # The acquisition suite writes the archives the helpers expand.
 flate2 = "1"
 hayro-syntax = { workspace = true }
+proptest = "1"
 tar = { version = "0.4", default-features = false }
 tempfile = { workspace = true }
 tiny-skia = "0.12"

@@ -79,9 +79,7 @@ pub use package_acquisition::{
 #[cfg(feature = "fs")]
 pub use packer::{CreationDiagnosticContext, PackOutcome, Packer, PackerError};
 pub use payload::PackArchiveBytes;
-pub use project_snapshot::{
-    ProjectSnapshot, ProjectSnapshotAssembly, ProjectSnapshotBudget, ProjectSnapshotError,
-};
+pub use project_snapshot::{ProjectSnapshot, ProjectSnapshotAssembly, ProjectSnapshotError};
 #[cfg(feature = "fs")]
 pub use world::OfflineDownloader;
 

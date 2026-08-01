@@ -3,11 +3,10 @@
 use typst::foundations::{Datetime, Dict, Smart, Value};
 use typst_pack::{
     CompilationOutputSpecification, CompilationRequestRejection, CompilationResult,
-    CreationOutcome, CreationRequest, CreationTimestamp, DocumentTime, HtmlOutputSpecification,
-    Pack, PackCompilationRequest, PackMetadata, PackOverrideSet, PackageDisposition,
-    PdfOutputSpecification, PngOutputSpecification, ProjectIgnorePolicy, ProjectSnapshotAssembly,
-    ProjectSnapshotBudget, RequestValueOrigin, SvgOutputSpecification,
-    compile as compile_to_report, create, parse_page_selection,
+    CreationTimestamp, DocumentTime, HtmlOutputSpecification, Pack, PackCompilationRequest,
+    PackMetadata, PackOverrideSet, PackageDisposition, PdfOutputSpecification,
+    PngOutputSpecification, RequestValueOrigin, SvgOutputSpecification,
+    compile as compile_to_report, parse_page_selection,
 };
 
 fn svg_output() -> CompilationOutputSpecification {
@@ -375,7 +374,7 @@ fn compilation_identity_binds_pack_inputs_overrides_features_and_document_time()
 }
 
 #[test]
-fn identities_exclude_metadata_request_origins_and_project_limits() {
+fn identities_exclude_metadata_and_request_origins() {
     let metadata = PackMetadata::new()
         .with_name("Named Pack")
         .with_description("Operational description")
@@ -473,33 +472,6 @@ fn identities_exclude_metadata_request_origins_and_project_limits() {
         default_empty_overrides.result_identity(),
         caller_empty_overrides.result_identity()
     );
-
-    let policy = ProjectIgnorePolicy::built_in();
-    let entries = [
-        ("main.typ", b"#rect(width: 1pt, height: 1pt)".to_vec()),
-        ("unused.txt", b"unused".to_vec()),
-    ];
-    let exact = ProjectSnapshotAssembly::new("main.typ", &policy)
-        .budget(ProjectSnapshotBudget {
-            max_files: Some(entries.len()),
-            max_bytes: Some(entries.iter().map(|(_, data)| data.len() as u64).sum()),
-        })
-        .assemble(entries.clone())
-        .unwrap();
-    let generous = ProjectSnapshotAssembly::new("main.typ", &policy)
-        .budget(ProjectSnapshotBudget {
-            max_files: Some(1_000),
-            max_bytes: Some(1_000_000),
-        })
-        .assemble(entries)
-        .unwrap();
-    let issue = |project| match create(&CreationRequest::new(project, 1_700_000_000)).unwrap() {
-        CreationOutcome::Issued(issued) => issued.pack,
-        CreationOutcome::MissingPackages(missing) => {
-            panic!("unexpected missing packages: {missing:?}")
-        }
-    };
-    assert_eq!(issue(exact).identity(), issue(generous).identity());
 }
 
 #[test]

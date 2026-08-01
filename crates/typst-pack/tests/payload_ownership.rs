@@ -1,7 +1,7 @@
 use typst_pack::{
     CompilationOutputSpecification, CreationOutcome, CreationRequest, Pack, PackArchiveBytes,
-    PackCompilationRequest, PackageDisposition, ProjectIgnorePolicy, ProjectSnapshotAssembly,
-    ResolvedPackageTree, SvgOutputSpecification, compile, create,
+    PackCompilationRequest, PackageDisposition, ProjectSnapshotAssembly, ResolvedPackageTree,
+    SvgOutputSpecification, compile, create,
 };
 
 #[cfg(feature = "embedded-fonts")]
@@ -12,7 +12,7 @@ mod fonts;
 fn project_snapshot_moves_and_shares_payload_bytes() {
     let source = b"= Shared payload".to_vec();
     let source_pointer = source.as_ptr();
-    let snapshot = ProjectSnapshotAssembly::new("main.typ", &ProjectIgnorePolicy::built_in())
+    let snapshot = ProjectSnapshotAssembly::new("main.typ")
         .assemble([("main.typ", source)])
         .unwrap();
     let files: Vec<(&str, &[u8])> = snapshot.files().collect();
@@ -62,7 +62,7 @@ fn font_values_and_pack_creation_share_container_payloads() {
     let mut catalog = CandidateFontCatalog::new();
     catalog.push(container.clone());
     let source = format!("#set text(font: \"{family}\")\nShared").into_bytes();
-    let snapshot = ProjectSnapshotAssembly::new("main.typ", &ProjectIgnorePolicy::built_in())
+    let snapshot = ProjectSnapshotAssembly::new("main.typ")
         .assemble([("main.typ", source)])
         .unwrap();
     let request = CreationRequest::new(snapshot, 1_700_000_000).font_catalog(catalog);
@@ -115,7 +115,7 @@ fn compilation_artifact_clones_share_payload_bytes() {
 fn pack_creation_reuses_project_and_package_payloads() {
     let project_source = b"#import \"@local/example:1.0.0\": value\n#value".to_vec();
     let project_pointer = project_source.as_ptr();
-    let snapshot = ProjectSnapshotAssembly::new("main.typ", &ProjectIgnorePolicy::built_in())
+    let snapshot = ProjectSnapshotAssembly::new("main.typ")
         .assemble([("main.typ", project_source)])
         .unwrap();
 

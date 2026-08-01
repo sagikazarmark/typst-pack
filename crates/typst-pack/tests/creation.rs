@@ -9,8 +9,8 @@ use std::str::FromStr;
 
 use typst::syntax::package::PackageSpec;
 use typst_pack::{
-    CreationError, CreationOutcome, CreationRequest, IssuedPack, PackMetadata, ProjectIgnorePolicy,
-    ProjectSnapshot, ProjectSnapshotAssembly, ResolvedPackageTree, TypstTarget, create,
+    CreationError, CreationOutcome, CreationRequest, IssuedPack, PackMetadata, ProjectSnapshot,
+    ProjectSnapshotAssembly, ResolvedPackageTree, TypstTarget, create,
 };
 
 /// 2023-11-14T22:13:20Z, the Document Time every representative request here
@@ -19,8 +19,7 @@ const CREATION_TIMESTAMP: i64 = 1_700_000_000;
 
 /// Assembles a project whose entrypoint is `main.typ`.
 fn project(entries: impl IntoIterator<Item = (&'static str, Vec<u8>)>) -> ProjectSnapshot {
-    let policy = ProjectIgnorePolicy::built_in();
-    ProjectSnapshotAssembly::new("main.typ", &policy)
+    ProjectSnapshotAssembly::new("main.typ")
         .assemble(entries)
         .unwrap()
 }

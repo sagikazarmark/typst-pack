@@ -20,6 +20,16 @@ use crate::payload::{PackArchiveBytes, SharedBytes};
 /// The conventional file extension for packs.
 pub const FILE_EXTENSION: &str = "typk";
 
+/// Whether any segment of a root-relative path names a Pack.
+pub(crate) fn names_pack_path(path: &str) -> bool {
+    path.split('/').any(|segment| {
+        segment.strip_prefix('.') == Some(FILE_EXTENSION)
+            || std::path::Path::new(segment)
+                .extension()
+                .is_some_and(|extension| extension == FILE_EXTENSION)
+    })
+}
+
 const PROJECT_PREFIX: &str = "project/";
 const PACKAGES_PREFIX: &str = "packages/";
 const MAX_ZIP_ENTRY_NAME_LEN: usize = u16::MAX as usize;
@@ -703,14 +713,6 @@ impl Pack {
 
     pub(crate) fn canonical_project_path(path: &str) -> Result<String, String> {
         canonical_path(PackPathRole::ProjectFile, path)
-            .map(CanonicalPath::into_string)
-            .map_err(|error| error.to_string())
-    }
-
-    /// Canonicalizes a supplied project path, leaving membership to the
-    /// Project Ignore Policy that owns it.
-    pub(crate) fn canonical_project_path_without_membership(path: &str) -> Result<String, String> {
-        canonical_path_without_membership(PackPathRole::ProjectFile, path)
             .map(CanonicalPath::into_string)
             .map_err(|error| error.to_string())
     }
@@ -1710,10 +1712,9 @@ impl PackBuilder {
 
 fn canonical_path(role: PackPathRole, path: &str) -> Result<CanonicalPath, PackInvariantError> {
     let canonical = canonical_path_without_membership(role, path)?;
-    // The built-in exclusion in the Project Ignore Policy binds every caller,
-    // so no route into a Pack can name a Pack as a project file.
+    // No route into a Pack can name a Pack as a project file.
     if matches!(role, PackPathRole::ProjectFile | PackPathRole::Entrypoint)
-        && crate::ignore_policy::names_pack_path(canonical.as_str())
+        && names_pack_path(canonical.as_str())
     {
         return Err(PackInvariantError::InvalidPath {
             role,

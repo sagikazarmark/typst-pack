@@ -587,14 +587,10 @@ impl From<ProjectSnapshotError> for PackerError {
             ProjectSnapshotError::InvalidPath { path, message } => {
                 Self::InvalidProjectPath { path, message }
             }
-            // A walked entrypoint that no longer survives assembly was either
-            // excluded by the policy or is not a regular file; the adapter has
-            // reported both as an excluded entrypoint since it walked trees.
-            ProjectSnapshotError::ExcludedEntrypoint(path)
-            | ProjectSnapshotError::MissingEntrypoint(path) => Self::IgnoredEntrypoint(path),
-            error @ (ProjectSnapshotError::DuplicatePath { .. }
-            | ProjectSnapshotError::FileCountExceeded { .. }
-            | ProjectSnapshotError::ByteSizeExceeded { .. }) => Self::Snapshot(error),
+            // A selected entrypoint absent after the structural walk was either
+            // excluded by policy or was not an eligible regular file.
+            ProjectSnapshotError::MissingEntrypoint(path) => Self::IgnoredEntrypoint(path),
+            error @ ProjectSnapshotError::DuplicatePath { .. } => Self::Snapshot(error),
         }
     }
 }
