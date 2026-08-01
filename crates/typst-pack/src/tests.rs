@@ -1124,7 +1124,7 @@ fn pack_roundtrip_in_memory() {
 
 #[cfg(feature = "embedded-fonts")]
 #[test]
-fn full_unicode_pack_roundtrip_is_equivalent_and_idempotent() {
+fn full_unicode_pack_remains_semantically_equivalent_after_reencoding() {
     let vendored = "@local/example:1.0.0"
         .parse::<typst::syntax::package::PackageSpec>()
         .unwrap();
@@ -1148,15 +1148,16 @@ fn full_unicode_pack_roundtrip_is_equivalent_and_idempotent() {
         .build()
         .unwrap();
 
-    let bytes = pack.to_bytes().unwrap();
-    let reread = Pack::from_bytes(bytes.clone()).unwrap();
+    let reread = Pack::from_bytes(pack.to_bytes().unwrap()).unwrap();
 
     assert_eq!(reread.manifest(), pack.manifest());
     assert_eq!(reread.file("资料/说明.txt").unwrap().as_slice(), b"Notes");
     assert!(reread.file("品牌/图.png").is_some());
     assert_eq!(reread.packages().count(), 1);
     assert_eq!(reread.fonts().len(), 1);
-    assert_eq!(reread.to_bytes().unwrap(), bytes);
+    let reread_again = Pack::from_bytes(reread.to_bytes().unwrap()).unwrap();
+    assert_eq!(reread_again.identity(), pack.identity());
+    assert_eq!(reread_again.manifest(), pack.manifest());
 }
 
 #[test]
@@ -1368,6 +1369,41 @@ fn read_accepts_safe_directory_entries() {
 }
 
 #[test]
+fn read_rejects_safe_unknown_entries_that_are_not_regular_files() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
+    let bytes = with_first_zip_entry_unix_mode(
+        raw_stored_zip(&[
+            ("future/link", b"target"),
+            (MANIFEST_PATH, manifest),
+            ("project/main.typ", b"Hello"),
+        ]),
+        0o120777,
+    );
+
+    assert!(matches!(
+        Pack::from_bytes(bytes),
+        Err(PackReadError::UnsupportedEntryType(ref name)) if name == "future/link"
+    ));
+}
+
+#[test]
+fn unsupported_archive_member_names_are_escaped_when_rendered() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
+    let bytes = with_first_zip_entry_unix_mode(
+        raw_stored_zip(&[
+            ("future/line\nbreak", b"target"),
+            (MANIFEST_PATH, manifest),
+            ("project/main.typ", b"Hello"),
+        ]),
+        0o120777,
+    );
+
+    let message = Pack::from_bytes(bytes).unwrap_err().to_string();
+    assert!(message.contains(r"line\nbreak"));
+    assert!(!message.contains('\n'));
+}
+
+#[test]
 fn read_rejects_a_windows_prefix_hidden_by_a_current_directory_alias() {
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
     let bytes = raw_stored_zip(&[
@@ -1501,6 +1537,21 @@ fn read_rejects_distinct_raw_names_with_one_decoded_identity() {
                 ..
             }
         )) if canonical == "project/é.txt"
+    ));
+}
+
+#[test]
+fn read_rejects_invalid_utf8_raw_names_marked_as_utf8() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
+    let bytes = raw_stored_zip_with_raw_names(&[
+        (MANIFEST_PATH.as_bytes(), false, manifest),
+        (b"project/main.typ", false, b"Hello"),
+        (b"future/\xff.bin", true, b"invalid name"),
+    ]);
+
+    assert!(matches!(
+        Pack::from_bytes(bytes),
+        Err(PackReadError::InvalidUtf8EntryName(ref name)) if name == b"future/\xff.bin"
     ));
 }
 

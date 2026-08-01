@@ -505,11 +505,13 @@ featureless core and remain available on wasm targets.
 
 ## Pack format
 
-A pack is a Zip archive (Deflate), conventionally named `*.typk`, with this
+A pack is a Zip archive, conventionally named `*.typk`, with this semantic
+layout. The encoder uses Deflate and emits the manifest first; readers also
+accept interoperable ZIP encodings and member orderings that preserve the same
 layout:
 
 ```text
-typst-pack.toml                     manifest (always first)
+typst-pack.toml                     manifest
 project/<path>                      project files, root-relative
 packages/<ns>/<name>/<version>/<path>   vendored package files
 fonts/<file>                        embedded font files
@@ -550,10 +552,16 @@ name = "Quarterly report"
 authors = ["Jane Doe"]
 ```
 
-Readers ignore unknown top-level archive entries and reject manifests whose
-`format-version` is not the exact supported version. Paths inside the archive
-are validated, root-relative virtual paths. Extraction rejects existing
-symlinked entries within the selected destination before writing.
+Readers ignore safe unknown regular-file and directory entries and reject
+manifests whose `format-version` is not the exact supported version. Raw member
+names must be well-formed for their declared ZIP encoding, member paths must be
+safe root-relative virtual paths, and non-directory members must be regular
+files. Unknown entries are not Pack semantics and may disappear after decoding
+and re-encoding. Pack Archive compatibility is semantic; exact ZIP bytes,
+compression details, timestamps, and member ordering are not preserved.
+
+Extraction rejects existing symlinked entries within the selected destination
+before writing.
 
 The format version remains 1 and is explicitly unstable: readers reject old
 discovery, Resource Slot, `external-resources`, and `packages.external` fields

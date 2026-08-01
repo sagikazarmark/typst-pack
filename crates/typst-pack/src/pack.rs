@@ -921,9 +921,16 @@ impl Pack {
         let central_directory_start = archive.central_directory_start();
         let mut reader = archive.into_inner();
         let raw_entries = raw_central_entries(&mut reader, central_directory_start)?;
+        if let Some(entry) = raw_entries
+            .iter()
+            .find(|entry| entry.utf8 && std::str::from_utf8(&entry.name).is_err())
+        {
+            return Err(PackReadError::InvalidUtf8EntryName(entry.name.clone()));
+        }
         let mut archive = ZipArchive::new(reader)?;
         const FILE_TYPE_MASK: u32 = 0o170000;
         const REGULAR_FILE: u32 = 0o100000;
+        const DIRECTORY: u32 = 0o040000;
 
         let mut manifest_entry = None;
         for index in 0..archive.len() {
@@ -981,10 +988,8 @@ impl Pack {
         }
         struct UnknownEntry {
             index: usize,
-            archive_name: String,
             raw_name: Vec<u8>,
             canonical_name: String,
-            regular_file: bool,
         }
 
         let mut project_entries = Vec::new();
@@ -1002,7 +1007,11 @@ impl Pack {
                 canonical_name.clone(),
                 &raw_name,
             )?;
-            if entry.is_dir() {
+            if entry.is_dir()
+                && entry
+                    .unix_mode()
+                    .is_none_or(|mode| matches!(mode & FILE_TYPE_MASK, 0 | DIRECTORY))
+            {
                 continue;
             }
             let regular_file = entry.is_file()
@@ -1050,12 +1059,13 @@ impl Pack {
                 )?;
                 package_entries.push(PackageEntry { index, spec, path });
             } else {
+                if !regular_file {
+                    return Err(PackReadError::UnsupportedEntryType(archive_name));
+                }
                 unknown_entries.push(UnknownEntry {
                     index,
-                    archive_name,
                     raw_name,
                     canonical_name,
-                    regular_file,
                 });
             }
         }
@@ -1068,9 +1078,6 @@ impl Pack {
         let mut font_entries = Vec::new();
         for entry in unknown_entries {
             if let Some(path) = font_paths.get(entry.canonical_name.as_str()) {
-                if !entry.regular_file {
-                    return Err(PackReadError::UnsupportedEntryType(entry.archive_name));
-                }
                 register_archive_identity(
                     &mut canonical_archive_entries,
                     path.to_string(),
@@ -1304,6 +1311,7 @@ fn zip_file_options(size: usize) -> SimpleFileOptions {
 
 struct RawCentralEntry {
     name: Vec<u8>,
+    utf8: bool,
 }
 
 fn raw_central_entries<R: Read + Seek>(
@@ -1323,13 +1331,17 @@ fn raw_central_entries<R: Read + Seek>(
 
         let mut fixed = [0; 42];
         reader.read_exact(&mut fixed)?;
+        let flags = u16::from_le_bytes([fixed[4], fixed[5]]);
         let name_len = u16::from_le_bytes([fixed[24], fixed[25]]) as usize;
         let extra_len = u16::from_le_bytes([fixed[26], fixed[27]]) as i64;
         let comment_len = u16::from_le_bytes([fixed[28], fixed[29]]) as i64;
         let mut name = vec![0; name_len];
         reader.read_exact(&mut name)?;
         reader.seek(SeekFrom::Current(extra_len + comment_len))?;
-        entries.push(RawCentralEntry { name });
+        entries.push(RawCentralEntry {
+            name,
+            utf8: flags & (1 << 11) != 0,
+        });
     }
     Ok(entries)
 }
@@ -1373,6 +1385,8 @@ pub enum PackReadError {
     DuplicateArchiveEntry(Vec<u8>),
     #[error("the archive contains entries with ambiguous effective names")]
     AmbiguousArchiveEntries,
+    #[error("the archive contains a malformed UTF-8 entry name {0:?}")]
+    InvalidUtf8EntryName(Vec<u8>),
     #[error("the {MANIFEST_PATH} manifest is not a regular file")]
     ManifestNotFile,
     #[error("the {MANIFEST_PATH} manifest could not be read: {0}")]
@@ -1385,7 +1399,7 @@ pub enum PackReadError {
     UnsafeEntry(String),
     #[error("invalid archive entry `{entry}`: {message}")]
     InvalidEntry { entry: String, message: String },
-    #[error("archive entry `{0}` is not a regular file")]
+    #[error("archive entry {0:?} is not a regular file")]
     UnsupportedEntryType(String),
     #[error(transparent)]
     Invariant(#[from] PackInvariantError),
