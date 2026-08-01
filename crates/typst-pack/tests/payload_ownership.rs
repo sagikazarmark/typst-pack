@@ -50,17 +50,20 @@ fn failed_pack_archive_decode_preserves_retry_ownership() {
 #[cfg(feature = "embedded-fonts")]
 #[test]
 fn font_values_and_pack_creation_share_container_payloads() {
-    use typst_pack::{CandidateFontCatalog, CandidateFontContainer};
+    use typst_pack::{FontCatalog, FontCatalogEntry, FontContainer, FontDisposition};
 
     let font = fonts::typst_container();
     let family = fonts::family_of(&font);
     let font_pointer = font.as_ptr();
-    let container = CandidateFontContainer::embedded(font);
+    let container = FontContainer::new(font).unwrap();
     assert_eq!(container.data().as_ptr(), font_pointer);
     assert_eq!(container.clone().data().as_ptr(), container.data().as_ptr());
 
-    let mut catalog = CandidateFontCatalog::new();
-    catalog.push(container.clone());
+    let mut catalog = FontCatalog::new();
+    catalog.push(FontCatalogEntry::new(
+        container.clone(),
+        FontDisposition::Embedded,
+    ));
     let source = format!("#set text(font: \"{family}\")\nShared").into_bytes();
     let snapshot = ProjectSnapshotAssembly::new("main.typ")
         .assemble([("main.typ", source)])

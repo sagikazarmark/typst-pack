@@ -1,4 +1,4 @@
-//! The ordered candidate font catalog Pack Creation selects faces from.
+//! The ordered Font Catalog Pack Creation selects faces from.
 //!
 //! The catalog itself is core: its tests run on a build with no crate feature
 //! enabled, except the ones that need real font bytes, which Typst only ships
@@ -9,23 +9,22 @@
 #[path = "support/fonts.rs"]
 mod font_bytes;
 
-use typst_pack::{CandidateFontCatalog, CandidateFontContainer, FontDisposition};
+use typst_pack::{FontCatalog, FontContainer, FontContainerError, FontDisposition};
 
 #[test]
 fn an_empty_catalog_offers_no_faces() {
-    let catalog = CandidateFontCatalog::new();
+    let catalog = FontCatalog::new();
 
-    assert!(catalog.containers().is_empty());
+    assert!(catalog.entries().is_empty());
     assert!(catalog.faces().is_empty());
 }
 
 #[test]
-fn a_container_that_holds_no_face_contributes_nothing() {
-    let mut catalog = CandidateFontCatalog::new();
-    catalog.push(CandidateFontContainer::embedded(b"not a font".to_vec()));
-
-    assert_eq!(catalog.containers().len(), 1);
-    assert!(catalog.faces().is_empty());
+fn a_container_that_holds_no_readable_face_is_rejected() {
+    assert_eq!(
+        FontContainer::new(b"not a font".to_vec()).unwrap_err(),
+        FontContainerError::NoReadableFace
+    );
 }
 
 #[test]
@@ -37,7 +36,7 @@ fn a_disposition_names_whether_container_bytes_travel_in_the_pack() {
 #[cfg(feature = "embedded-fonts")]
 mod containers {
     use typst_pack::{
-        CandidateFontCatalog, CandidateFontContainer, FontContainerIdentity, FontDisposition,
+        FontCatalog, FontCatalogEntry, FontContainer, FontContainerIdentity, FontDisposition,
         typst_embedded_font_containers,
     };
 
@@ -50,12 +49,27 @@ mod containers {
     }
 
     #[test]
+    fn standalone_container_identity_depends_only_on_exact_bytes() {
+        let data = typst_container();
+        let expected = FontContainerIdentity::from_bytes(&data);
+
+        let first = FontContainer::new(data.clone()).unwrap();
+        let second = FontContainer::new(data).unwrap();
+
+        assert_eq!(first.identity(), expected);
+        assert_eq!(second.identity(), expected);
+        assert_eq!(first.faces().len(), 1);
+        assert_eq!(first.faces()[0].identity().index(), 0);
+    }
+
+    #[test]
     fn faces_are_expanded_in_container_local_index_order() {
         let collection = two_face_collection(&typst_container());
-        let mut catalog = CandidateFontCatalog::new();
-        catalog.push(CandidateFontContainer::embedded(collection.clone()));
+        let data_pointer = collection.as_ptr();
+        let identity = FontContainerIdentity::from_bytes(&collection);
+        let container = FontContainer::new(collection).unwrap();
 
-        let faces = catalog.faces();
+        let faces = container.faces();
         assert_eq!(
             faces
                 .iter()
@@ -63,11 +77,15 @@ mod containers {
                 .collect::<Vec<_>>(),
             [0, 1]
         );
-        let container = FontContainerIdentity::from_bytes(&collection);
         assert!(
             faces
                 .iter()
-                .all(|face| face.identity().container() == container)
+                .all(|face| face.identity().container() == identity)
+        );
+        assert!(
+            faces
+                .iter()
+                .all(|face| face.data().as_ptr() == data_pointer)
         );
     }
 
@@ -75,9 +93,15 @@ mod containers {
     fn catalog_order_is_the_order_the_caller_chose() {
         let first = typst_container();
         let second = two_face_collection(&first);
-        let mut catalog = CandidateFontCatalog::new();
-        catalog.push(CandidateFontContainer::external(second.clone()));
-        catalog.push(CandidateFontContainer::embedded(first.clone()));
+        let mut catalog = FontCatalog::new();
+        catalog.push(FontCatalogEntry::new(
+            FontContainer::new(second.clone()).unwrap(),
+            FontDisposition::External,
+        ));
+        catalog.push(FontCatalogEntry::new(
+            FontContainer::new(first.clone()).unwrap(),
+            FontDisposition::Embedded,
+        ));
 
         assert_eq!(
             catalog
@@ -97,9 +121,15 @@ mod containers {
     fn disposition_travels_per_container() {
         let embedded = typst_container();
         let external = two_face_collection(&embedded);
-        let catalog = CandidateFontCatalog::from_iter([
-            CandidateFontContainer::embedded(embedded),
-            CandidateFontContainer::external(external),
+        let catalog = FontCatalog::from_iter([
+            FontCatalogEntry::new(
+                FontContainer::new(embedded).unwrap(),
+                FontDisposition::Embedded,
+            ),
+            FontCatalogEntry::new(
+                FontContainer::new(external).unwrap(),
+                FontDisposition::External,
+            ),
         ]);
 
         assert_eq!(
@@ -119,11 +149,13 @@ mod containers {
     #[test]
     fn identical_bytes_do_not_decide_disposition() {
         let data = typst_container();
-        let catalog = CandidateFontCatalog::from_iter([
-            CandidateFontContainer::external(data.clone()),
-            CandidateFontContainer::embedded(data.clone()),
+        let container = FontContainer::new(data).unwrap();
+        let catalog = FontCatalog::from_iter([
+            FontCatalogEntry::new(container.clone(), FontDisposition::External),
+            FontCatalogEntry::new(container, FontDisposition::Embedded),
         ]);
 
+        assert_eq!(catalog.entries().len(), 2);
         let faces = catalog.faces();
         assert_eq!(faces[0].identity(), faces[1].identity());
         assert_eq!(faces[0].disposition(), FontDisposition::External);
@@ -132,18 +164,18 @@ mod containers {
 
     #[test]
     fn typst_embedded_fonts_are_containers_the_caller_places_itself() {
-        let containers =
-            typst_embedded_font_containers(FontDisposition::External).collect::<Vec<_>>();
+        let containers = typst_embedded_font_containers().collect::<Vec<_>>();
         assert!(!containers.is_empty());
-        assert!(
-            containers
-                .iter()
-                .all(|container| container.disposition() == FontDisposition::External)
-        );
 
-        let mut catalog = CandidateFontCatalog::new();
-        catalog.push(CandidateFontContainer::embedded(typst_container()));
-        catalog.extend(typst_embedded_font_containers(FontDisposition::External));
+        let mut catalog = FontCatalog::new();
+        catalog.push(FontCatalogEntry::new(
+            FontContainer::new(typst_container()).unwrap(),
+            FontDisposition::Embedded,
+        ));
+        catalog.extend(
+            typst_embedded_font_containers()
+                .map(|container| FontCatalogEntry::new(container, FontDisposition::External)),
+        );
 
         let faces = catalog.faces();
         assert_eq!(faces[0].disposition(), FontDisposition::Embedded);

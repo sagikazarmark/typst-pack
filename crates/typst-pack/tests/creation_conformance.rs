@@ -28,7 +28,7 @@ use std::str::FromStr;
 
 use typst::syntax::package::PackageSpec;
 use typst_pack::{
-    CandidateFontCatalog, CandidateFontContainer, CreationError, CreationOutcome, CreationRequest,
+    CreationError, CreationOutcome, CreationRequest, FontCatalog, FontCatalogEntry, FontContainer,
     FontContainerIdentity, FontDisposition, IGNORE_FILE, Pack, PackageCatalog, PackageCatalogIssue,
     PackageDisposition, PackageTree, ProjectIgnorePolicy, ProjectSnapshotAssembly, create,
 };
@@ -80,14 +80,14 @@ enum PackageSource {
     },
 }
 
-/// One candidate Font Container the fixture offers, at the catalog position it
+/// One Font Container the fixture offers, at the catalog position it
 /// is declared in.
 struct FontFixture {
     source: FontSource,
     disposition: FontDisposition,
 }
 
-/// Where a fixture's candidate Font Container comes from.
+/// Where a fixture's Font Container comes from.
 enum FontSource {
     /// Exact container bytes, which the filesystem adapter offers by scanning a
     /// directory holding them and nothing else.
@@ -161,7 +161,7 @@ impl Fixture {
         self
     }
 
-    /// Offers one candidate Font Container at the end of the catalog.
+    /// Offers one Font Container at the end of the catalog.
     fn font(mut self, source: FontSource, disposition: FontDisposition) -> Self {
         self.fonts.push(FontFixture {
             source,
@@ -180,18 +180,23 @@ impl Fixture {
         }
     }
 
-    /// The Candidate Font Catalog the fixture's containers compose, in the
-    /// order they were declared.
-    fn candidate_catalog(&self) -> CandidateFontCatalog {
-        let mut catalog = CandidateFontCatalog::new();
+    /// The Font Catalog the fixture's containers compose, in declaration order.
+    fn font_catalog(&self) -> FontCatalog {
+        let mut catalog = FontCatalog::new();
         for font in &self.fonts {
             match &font.source {
                 FontSource::Scanned(data) => {
-                    catalog.push(CandidateFontContainer::new(data.clone(), font.disposition));
+                    catalog.push(FontCatalogEntry::new(
+                        FontContainer::new(data.clone()).unwrap(),
+                        font.disposition,
+                    ));
                 }
                 #[cfg(feature = "embedded-fonts")]
                 FontSource::TypstEmbedded => {
-                    catalog.extend(typst_pack::typst_embedded_font_containers(font.disposition));
+                    catalog.extend(
+                        typst_pack::typst_embedded_font_containers()
+                            .map(|container| FontCatalogEntry::new(container, font.disposition)),
+                    );
                 }
             }
         }
@@ -340,7 +345,7 @@ fn create_in_memory(fixture: &Fixture) -> Result<Created, Failure> {
                 .map(|(path, data)| (*path, data.clone())),
         )
         .unwrap();
-    let catalog = fixture.candidate_catalog();
+    let catalog = fixture.font_catalog();
 
     let mut resolved: Vec<(PackageSpec, PackageTree, PackageDisposition)> = Vec::new();
     for _ in 0..RESUME_BOUND {
@@ -976,23 +981,6 @@ fn representative_compile_warnings_are_returned_by_every_adapter() {
 // ---------------------------------------------------------------------------
 // Fonts
 // ---------------------------------------------------------------------------
-
-#[test]
-fn a_container_offering_no_face_contributes_nothing() {
-    // The reference adapter's font scan never indexes these bytes at all, while
-    // an in-memory adapter holds a container that expands to no face. The two
-    // reach an empty catalog by different routes and must still describe the
-    // same Pack.
-    let fixture = Fixture::document("#rect(width: 10pt, height: 10pt)").font(
-        FontSource::Scanned(b"not a font".to_vec()),
-        FontDisposition::Embedded,
-    );
-
-    let created = conform(&fixture);
-
-    assert!(font_requirements(&created.pack).is_empty());
-    assert!(font_catalog(&created.pack).is_empty());
-}
 
 /// Face selection out of catalogs holding real font bytes, which Typst only
 /// ships with the `embedded-fonts` feature.

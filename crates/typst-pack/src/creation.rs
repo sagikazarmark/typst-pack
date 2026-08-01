@@ -1,7 +1,7 @@
 //! Pack Creation: one representative Typst request over supplied inputs.
 //!
 //! Creation acquires nothing. The caller supplies a [`ProjectSnapshot`], a
-//! [`CandidateFontCatalog`], and the Package Trees resolved for the
+//! [`FontCatalog`], and the Package Trees resolved for the
 //! document, all as bytes it already holds, so the operation runs wherever the
 //! core runs — including a host with no filesystem and no clock. Obtaining
 //! those inputs belongs to Pack Assembly and a Pack Assembler.
@@ -22,7 +22,7 @@ use typst_kit::files::{FileLoader, FileStore};
 
 use crate::compile::TypstTarget;
 use crate::embedded::EmbeddedTypst;
-use crate::font_catalog::{CandidateFontCatalog, CandidateFonts, FontDisposition};
+use crate::font_catalog::{CatalogFonts, FontCatalog, FontDisposition};
 use crate::manifest::PackMetadata;
 use crate::pack::{Pack, PackBuildError};
 use crate::package_catalog::PackageCatalog;
@@ -37,7 +37,7 @@ use crate::project_snapshot::ProjectSnapshot;
 pub struct CreationRequest {
     project: ProjectSnapshot,
     creation_timestamp: i64,
-    fonts: CandidateFontCatalog,
+    fonts: FontCatalog,
     packages: PackageCatalog,
     unresolvable: BTreeMap<String, PackageError>,
     target: TypstTarget,
@@ -55,7 +55,7 @@ impl CreationRequest {
         Self {
             project,
             creation_timestamp,
-            fonts: CandidateFontCatalog::new(),
+            fonts: FontCatalog::new(),
             packages: PackageCatalog::new(),
             unresolvable: BTreeMap::new(),
             target: TypstTarget::Paged,
@@ -65,9 +65,9 @@ impl CreationRequest {
         }
     }
 
-    /// Offers the Candidate Font Catalog creation may select faces from.
+    /// Offers the Font Catalog creation may select faces from.
     /// Defaults to an empty catalog, which offers no face at all.
-    pub fn font_catalog(mut self, catalog: CandidateFontCatalog) -> Self {
+    pub fn font_catalog(mut self, catalog: FontCatalog) -> Self {
         self.fonts = catalog;
         self
     }
@@ -321,7 +321,7 @@ struct SuppliedWorld<'a> {
     library: LazyHash<Library>,
     main: FileId,
     files: FileStore<SuppliedLoader<'a>>,
-    fonts: CandidateFonts,
+    fonts: CatalogFonts,
     used_font_indices: Mutex<BTreeSet<usize>>,
     time: Time,
 }

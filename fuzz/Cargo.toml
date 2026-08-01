@@ -19,5 +19,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "font_container"
+path = "fuzz_targets/font_container.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

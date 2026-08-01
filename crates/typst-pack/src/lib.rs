@@ -56,7 +56,8 @@ pub use extract::{ExtractError, ExtractOptions, ExtractReport, extract};
 #[cfg(feature = "embedded-fonts")]
 pub use font_catalog::typst_embedded_font_containers;
 pub use font_catalog::{
-    CandidateFontCatalog, CandidateFontContainer, CandidateFontFace, FontDisposition,
+    FontCatalog, FontCatalogEntry, FontCatalogFace, FontContainer, FontContainerError,
+    FontContainerFace, FontDisposition,
 };
 pub use ignore_policy::{IGNORE_FILE, ProjectIgnorePolicy, ProjectIgnorePolicyError};
 pub use manifest::{

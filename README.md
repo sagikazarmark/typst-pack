@@ -139,12 +139,13 @@ like any other scanned container. Mind font licenses when redistributing
 embedded containers; licensing and acquisition metadata do not change font
 selection.
 
-The Candidate Font Catalog creation selects from is one explicit ordered
-sequence: `CandidateFontCatalog` holds `CandidateFontContainer`s, each carrying
-its own embedded-or-external `FontDisposition`, so one pack can embed a
-redistributable container and reference a restrictively licensed one. Faces are
-expanded in container-local index order, catalog order decides which container
-wins a family, and nothing joins a catalog implicitly:
+The Font Catalog creation selects from is one explicit ordered sequence:
+`FontContainer` validates exact bytes before `FontCatalog` pairs each position
+with an embedded-or-external `FontDisposition`, so one pack can embed a
+redistributable container and reference a restrictively licensed one. Repeated
+container identities remain distinct positions. Faces are expanded in
+container-local index order, catalog order decides which container wins a
+family, and nothing joins a catalog implicitly:
 `typst_embedded_font_containers` yields Typst's own containers for a caller to
 splice in where it wants. `Packer` composes its catalog from system fonts,
 Typst's embedded fonts, and `--font-path` directories, in that order.
@@ -267,8 +268,9 @@ ignore policy and resource limits belong to the gatherer that obtains them:
 
 ```rust,ignore
 use typst_pack::{
-    create, CandidateFontCatalog, CandidateFontContainer, CreationRequest,
-    PackageCatalog, PackageDisposition, PackageTree, ProjectSnapshotAssembly,
+    create, CreationRequest, FontCatalog, FontCatalogEntry, FontContainer,
+    FontDisposition, PackageCatalog, PackageDisposition, PackageTree,
+    ProjectSnapshotAssembly,
 };
 
 let project = ProjectSnapshotAssembly::new("main.typ").assemble([
@@ -282,8 +284,11 @@ let packages = PackageCatalog::from_entries([(
     PackageDisposition::Embedded,
 )])?;
 let request = CreationRequest::new(project, creation_timestamp)
-    .font_catalog(CandidateFontCatalog::from_iter([
-        CandidateFontContainer::embedded(font_bytes),
+    .font_catalog(FontCatalog::from_iter([
+        FontCatalogEntry::new(
+            FontContainer::new(font_bytes)?,
+            FontDisposition::Embedded,
+        ),
     ]))
     .package_catalog(packages);
 let issued = create(&request)?.into_issued().expect("no package is missing");

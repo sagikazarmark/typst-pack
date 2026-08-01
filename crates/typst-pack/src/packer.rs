@@ -2,7 +2,7 @@
 //! directory.
 //!
 //! The adapter acquires and the core transforms. It lists and reads the
-//! project, composes the Candidate Font Catalog out of the font sources the
+//! project, composes the Font Catalog out of the font sources the
 //! host offers, obtains the Package Trees the core reports as
 //! missing, and resolves the creation timestamp; Pack Creation itself runs in
 //! the core over those bytes.
@@ -36,7 +36,7 @@ use crate::compile::TypstTarget;
 use crate::creation::{CreationError, CreationOutcome, CreationRequest, IssuedPack, create};
 #[cfg(feature = "embedded-fonts")]
 use crate::font_catalog::typst_embedded_font_containers;
-use crate::font_catalog::{CandidateFontCatalog, CandidateFontContainer, FontDisposition};
+use crate::font_catalog::{FontCatalog, FontCatalogEntry, FontContainer, FontDisposition};
 use crate::fs_packages::{AcquirePackageError, AcquiredPackages};
 use crate::fs_project;
 use crate::ignore_policy::ProjectIgnorePolicyError;
@@ -58,7 +58,7 @@ use crate::world::system_packages;
 /// dependencies. Compiler observations never select project files.
 ///
 /// It is the reference Pack Assembler: it acquires the project, the
-/// Candidate Font Catalog, and the package trees creation reports as missing,
+/// Font Catalog, and the package trees creation reports as missing,
 /// and [`create`](crate::create) selects requirements over those bytes. How far
 /// its acquisition reaches is a build-time choice: with the `fs` feature alone
 /// it resolves reported specifications from local package directories and the
@@ -758,7 +758,7 @@ impl FileLoader for AcquiredLoader {
 }
 
 /// The font acquisition half of Pack Assembly for the filesystem adapter: the
-/// ambient sources it acquires candidate Font Containers from, and the
+/// ambient sources it acquires Font Containers from, and the
 /// disposition each source's containers carry.
 struct FontSources<'a> {
     system: bool,
@@ -769,19 +769,22 @@ struct FontSources<'a> {
 }
 
 impl FontSources<'_> {
-    /// Composes the candidate font catalog: system fonts, then Typst's
+    /// Composes the Font Catalog: system fonts, then Typst's
     /// embedded fonts, then each scanned directory in the order it was added.
-    fn compose(&self) -> CandidateFontCatalog {
-        let mut catalog = CandidateFontCatalog::new();
+    fn compose(&self) -> FontCatalog {
+        let mut catalog = FontCatalog::new();
         let scanned = FontDisposition::embedded_if(self.embed);
         if self.system {
             catalog.extend(read_containers(typst_kit::fonts::system(), scanned));
         }
         #[cfg(feature = "embedded-fonts")]
         if self.typst_embedded {
-            catalog.extend(typst_embedded_font_containers(
-                FontDisposition::embedded_if(self.embed && self.include_typst_embedded),
-            ));
+            let disposition =
+                FontDisposition::embedded_if(self.embed && self.include_typst_embedded);
+            catalog.extend(
+                typst_embedded_font_containers()
+                    .map(|container| FontCatalogEntry::new(container, disposition)),
+            );
         }
         #[cfg(not(feature = "embedded-fonts"))]
         let _ = (self.typst_embedded, self.include_typst_embedded);
@@ -793,7 +796,7 @@ impl FontSources<'_> {
 
     /// Fails when the fonts backing `catalog` no longer agree with the
     /// filesystem, which is the font half of the Creation Evidence Fence.
-    fn revalidate(&self, catalog: &CandidateFontCatalog) -> Result<(), PackerError> {
+    fn revalidate(&self, catalog: &FontCatalog) -> Result<(), PackerError> {
         if &self.compose() != catalog {
             return Err(PackerError::CreationEvidenceChanged {
                 path: "font catalog".to_owned(),
@@ -811,7 +814,7 @@ impl FontSources<'_> {
 fn read_containers(
     faces: impl Iterator<Item = (FontPath, FontInfo)>,
     disposition: FontDisposition,
-) -> Vec<CandidateFontContainer> {
+) -> Vec<FontCatalogEntry> {
     let mut seen = HashSet::new();
     let mut containers = Vec::new();
     for (source, _) in faces {
@@ -821,7 +824,9 @@ fn read_containers(
         let Ok(data) = std::fs::read(&source.path) else {
             continue;
         };
-        containers.push(CandidateFontContainer::new(data, disposition));
+        if let Ok(container) = FontContainer::new(data) {
+            containers.push(FontCatalogEntry::new(container, disposition));
+        }
     }
     containers
 }

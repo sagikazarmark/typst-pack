@@ -535,12 +535,12 @@ fn a_supplied_tree_path_that_cannot_name_a_package_file_is_rejected() {
     );
 }
 
-/// Face selection out of the supplied Candidate Font Catalog.
+/// Face selection out of the supplied Font Catalog.
 #[cfg(feature = "embedded-fonts")]
 mod fonts {
     use typst_pack::{
-        CandidateFontCatalog, CandidateFontContainer, CreationOutcome, CreationRequest,
-        FontContainerIdentity, create,
+        CreationOutcome, CreationRequest, FontCatalog, FontCatalogEntry, FontContainer,
+        FontContainerIdentity, FontDisposition, create,
     };
 
     use crate::{
@@ -561,9 +561,15 @@ mod fonts {
         let serif = typst_container("Libertinus Serif");
         let mono = typst_container("DejaVu Sans Mono");
         let snapshot = document("Serif text\n\n#text(font: \"DejaVu Sans Mono\")[Mono text]\n");
-        let catalog = CandidateFontCatalog::from_iter([
-            CandidateFontContainer::embedded(serif.clone()),
-            CandidateFontContainer::external(mono.clone()),
+        let catalog = FontCatalog::from_iter([
+            FontCatalogEntry::new(
+                FontContainer::new(serif.clone()).unwrap(),
+                FontDisposition::Embedded,
+            ),
+            FontCatalogEntry::new(
+                FontContainer::new(mono.clone()).unwrap(),
+                FontDisposition::External,
+            ),
         ]);
 
         let issued =
@@ -581,7 +587,7 @@ mod fonts {
         assert_eq!(requirements.len(), 2);
         assert_eq!(disposition(&serif), Some(true));
         assert_eq!(disposition(&mono), Some(false));
-        // The Pack Font Catalog keeps the candidate catalog's relative order.
+        // The Pack Font Catalog keeps the supplied catalog's relative order.
         assert_eq!(
             issued
                 .pack
@@ -601,9 +607,12 @@ mod fonts {
         let serif = typst_container("Libertinus Serif");
         let mono = typst_container("DejaVu Sans Mono");
         let snapshot = document("Serif text only\n");
-        let catalog = CandidateFontCatalog::from_iter([
-            CandidateFontContainer::embedded(serif.clone()),
-            CandidateFontContainer::embedded(mono),
+        let catalog = FontCatalog::from_iter([
+            FontCatalogEntry::new(
+                FontContainer::new(serif.clone()).unwrap(),
+                FontDisposition::Embedded,
+            ),
+            FontCatalogEntry::new(FontContainer::new(mono).unwrap(), FontDisposition::Embedded),
         ]);
 
         let issued =
@@ -617,6 +626,25 @@ mod fonts {
         );
     }
 
+    #[test]
+    fn selection_uses_the_first_matching_catalog_position_and_its_disposition() {
+        let serif = FontContainer::new(typst_container("Libertinus Serif")).unwrap();
+        let catalog = FontCatalog::from_iter([
+            FontCatalogEntry::new(serif.clone(), FontDisposition::External),
+            FontCatalogEntry::new(serif, FontDisposition::Embedded),
+        ]);
+
+        let issued = issue(
+            &CreationRequest::new(document("Selected text"), CREATION_TIMESTAMP)
+                .font_catalog(catalog),
+        );
+
+        assert_eq!(issued.pack.font_requirements().len(), 1);
+        assert!(!issued.pack.font_requirements()[0].is_embedded());
+        assert_eq!(issued.pack.font_catalog().len(), 1);
+        assert!(!issued.pack.font_catalog()[0].is_embedded());
+    }
+
     /// Face selection is recorded as the representative request asks for a
     /// face, and Typst's memoization cache is deliberately not evicted between
     /// resume rounds, so a round served from that cache must still select the
@@ -625,8 +653,10 @@ mod fonts {
     #[test]
     fn a_resumed_creation_selects_the_faces_one_invocation_would_have() {
         let serif = typst_container("Libertinus Serif");
-        let catalog =
-            CandidateFontCatalog::from_iter([CandidateFontContainer::embedded(serif.clone())]);
+        let catalog = FontCatalog::from_iter([FontCatalogEntry::new(
+            FontContainer::new(serif.clone()).unwrap(),
+            FontDisposition::Embedded,
+        )]);
         // Text before the import, so the round that reports the missing
         // package is one that already laid out a face.
         let source = "Selected text\n\n#import \"@local/first:1.0.0\": first\n#first";
