@@ -22,6 +22,7 @@ mod manifest;
 mod pack;
 #[cfg(feature = "package-acquisition")]
 mod package_acquisition;
+mod package_catalog;
 mod packer;
 mod payload;
 mod project_snapshot;
@@ -49,10 +50,7 @@ pub use compile::{
     RequestValueOrigin, SvgOutputSpecification, TracepointKind, TypstInputsInventory, TypstTarget,
     compile, parse_page_selection,
 };
-pub use creation::{
-    CreationError, CreationOutcome, CreationRequest, IssuedPack, PackageDisposition,
-    ResolvedPackageTree, create,
-};
+pub use creation::{CreationError, CreationOutcome, CreationRequest, IssuedPack, create};
 #[cfg(feature = "fs")]
 pub use extract::{ExtractError, ExtractOptions, ExtractReport, extract};
 #[cfg(feature = "embedded-fonts")]
@@ -69,12 +67,16 @@ pub use pack::{
     FILE_EXTENSION, FontCatalogError, FontContainerIdentity, FontFaceIdentity, FontRequirement,
     Pack, PackBuildError, PackBuilder, PackFont, PackFontCatalogFace, PackIdentity,
     PackInvariantError, PackPathRole, PackReadError, PackWriteError, PackageRequirement,
-    PackageTreeError, PackageTreeIdentity,
+    PackageTreeIdentity,
 };
 #[cfg(feature = "package-acquisition")]
 pub use package_acquisition::{
     PACKAGE_REGISTRY_NAMESPACE, PACKAGE_REGISTRY_URL, PackageAcquisitionError,
     PackageExpansionCeiling, expand_package_archive, package_archive_url,
+};
+pub use package_catalog::{
+    PackageCatalog, PackageCatalogEntry, PackageCatalogError, PackageCatalogIssue,
+    PackageDisposition, PackageTree, PackageTreeError, PackageTreeIssue,
 };
 #[cfg(feature = "fs")]
 pub use packer::{CreationDiagnosticContext, PackOutcome, Packer, PackerError};

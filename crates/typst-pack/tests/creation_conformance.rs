@@ -1,7 +1,7 @@
 //! The cross-adapter creation conformance corpus.
 //!
 //! One corpus of fixtures expressed as bytes — project files, ignore files,
-//! package trees, font containers — driven through two Creation Adapters: the
+//! package trees, font containers — driven through two Pack Assemblers: the
 //! reference filesystem one over a temporary directory, and an in-memory one
 //! that assembles a Project Snapshot directly and drives the resume protocol.
 //! Both must issue a Pack with the same Pack Identity, which is the property
@@ -29,8 +29,8 @@ use std::str::FromStr;
 use typst::syntax::package::PackageSpec;
 use typst_pack::{
     CandidateFontCatalog, CandidateFontContainer, CreationError, CreationOutcome, CreationRequest,
-    FontContainerIdentity, FontDisposition, IGNORE_FILE, Pack, PackageDisposition,
-    ProjectIgnorePolicy, ProjectSnapshotAssembly, ResolvedPackageTree, create,
+    FontContainerIdentity, FontDisposition, IGNORE_FILE, Pack, PackageCatalog, PackageCatalogIssue,
+    PackageDisposition, PackageTree, ProjectIgnorePolicy, ProjectSnapshotAssembly, create,
 };
 
 /// 2023-11-14T22:13:20Z, the Document Time every representative request in the
@@ -57,7 +57,7 @@ struct Fixture {
     fonts: Vec<FontFixture>,
 }
 
-/// One Complete Package Tree an adapter may resolve for the fixture.
+/// One Package Tree an adapter may resolve for the fixture.
 struct PackageFixture {
     spec: PackageSpec,
     source: PackageSource,
@@ -200,16 +200,22 @@ impl Fixture {
 
     /// The tree an in-memory host resolves for one reported specification,
     /// standing in for whatever acquisition that host allows.
-    fn resolve(&self, spec: &PackageSpec) -> Result<ResolvedPackageTree, Failure> {
+    fn resolve(
+        &self,
+        spec: &PackageSpec,
+    ) -> Result<(PackageSpec, PackageTree, PackageDisposition), Failure> {
         let package = self
             .packages
             .iter()
             .find(|package| &package.spec == spec)
             .unwrap_or_else(|| panic!("the fixture offers no tree for `{spec}`"));
         match &package.source {
-            PackageSource::Files(files) => Ok(ResolvedPackageTree::new(
+            PackageSource::Files(files) => Ok((
                 spec.clone(),
-                files.iter().map(|(path, data)| (*path, data.clone())),
+                PackageTree::from_owned_entries(
+                    files.iter().map(|(path, data)| (*path, data.clone())),
+                )
+                .unwrap(),
                 package.disposition,
             )),
             #[cfg(feature = "package-acquisition")]
@@ -222,18 +228,14 @@ impl Fixture {
                 let bytes = self
                     .serve(&url)
                     .expect("the stand-in registry serves that URL");
-                typst_pack::expand_package_archive(
-                    spec.clone(),
-                    bytes,
-                    package.disposition,
-                    *ceiling,
-                )
-                .map_err(|error| match error {
-                    typst_pack::PackageAcquisitionError::ExpansionCeilingExceeded { .. } => {
-                        Failure::ExpansionCeiling
-                    }
-                    error => panic!("the fixture archive failed to expand: {error}"),
-                })
+                typst_pack::expand_package_archive(spec.clone(), bytes, *ceiling)
+                    .map(|tree| (spec.clone(), tree, package.disposition))
+                    .map_err(|error| match error {
+                        typst_pack::PackageAcquisitionError::ExpansionCeilingExceeded {
+                            ..
+                        } => Failure::ExpansionCeiling,
+                        error => panic!("the fixture archive failed to expand: {error}"),
+                    })
             }
         }
     }
@@ -285,10 +287,7 @@ fn package_files(name: &str, body: &str) -> Vec<(&'static str, Vec<u8>)> {
             .into_bytes(),
         ),
         ("lib.typ", body.as_bytes().to_vec()),
-        (
-            "unread.txt",
-            b"the whole Complete Package Tree travels".to_vec(),
-        ),
+        ("unread.txt", b"the whole Package Tree travels".to_vec()),
     ]
 }
 
@@ -296,7 +295,7 @@ fn package_files(name: &str, body: &str) -> Vec<(&'static str, Vec<u8>)> {
 // Adapter results
 // ---------------------------------------------------------------------------
 
-/// What one Creation Adapter produced for a fixture.
+/// What one Pack Assembler produced for a fixture.
 struct Created {
     pack: Pack,
     warnings: Vec<String>,
@@ -321,10 +320,10 @@ enum Failure {
 }
 
 // ---------------------------------------------------------------------------
-// The in-memory Creation Adapter
+// The in-memory Pack Assembler
 // ---------------------------------------------------------------------------
 
-/// Creation Preparation for a host with no filesystem: the fixture's bytes are
+/// Pack Assembly for a host with no filesystem: the fixture's bytes are
 /// already held, so the adapter derives the policy from them, assembles the
 /// Project Snapshot, composes the catalog, and drives the resume protocol.
 fn create_in_memory(fixture: &Fixture) -> Result<Created, Failure> {
@@ -343,13 +342,22 @@ fn create_in_memory(fixture: &Fixture) -> Result<Created, Failure> {
         .unwrap();
     let catalog = fixture.candidate_catalog();
 
-    let mut resolved: Vec<ResolvedPackageTree> = Vec::new();
+    let mut resolved: Vec<(PackageSpec, PackageTree, PackageDisposition)> = Vec::new();
     for _ in 0..RESUME_BOUND {
         // Every round builds the request afresh from the same values, as a
         // caller resuming across a host request boundary must.
+        let packages =
+            PackageCatalog::from_entries(resolved.iter().cloned()).map_err(|error| {
+                if error.issues().iter().any(|issue| {
+                    matches!(issue, PackageCatalogIssue::DuplicateSpecification { .. })
+                }) {
+                    panic!("the adapter resolved one specification twice");
+                }
+                Failure::UnsatisfiedPackage
+            })?;
         let request = CreationRequest::new(snapshot.clone(), CREATION_TIMESTAMP)
             .font_catalog(catalog.clone())
-            .package_trees(resolved.iter().cloned());
+            .package_catalog(packages);
         match create(&request) {
             Ok(CreationOutcome::Issued(issued)) => {
                 return Ok(Created {
@@ -367,9 +375,6 @@ fn create_in_memory(fixture: &Fixture) -> Result<Created, Failure> {
                 }
             }
             Err(CreationError::Compile { .. }) => return Err(Failure::Compile),
-            Err(CreationError::MismatchedPackageTree { .. }) => {
-                return Err(Failure::UnsatisfiedPackage);
-            }
             Err(error) => panic!("in-memory creation failed unexpectedly: {error}"),
         }
     }
@@ -386,7 +391,7 @@ fn messages(warnings: &[typst::diag::SourceDiagnostic]) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// The reference filesystem Creation Adapter
+// The reference filesystem Pack Assembler
 // ---------------------------------------------------------------------------
 
 /// How the reference adapter is configured to offer one fixture, or `None`
@@ -487,7 +492,7 @@ impl Fixture {
     }
 }
 
-/// Creation Preparation over a real project directory: the fixture's bytes are
+/// Pack Assembly over a real project directory: the fixture's bytes are
 /// written out as a project tree, a package path, and one directory per scanned
 /// font container, and the reference adapter acquires them from there.
 #[cfg(feature = "fs")]
@@ -536,7 +541,11 @@ fn create_on_filesystem(fixture: &Fixture, plan: &FilesystemPlan) -> Result<Crea
             warnings: messages(&outcome.warnings),
         }),
         Err(PackerError::IgnoredEntrypoint(_)) => Err(Failure::ExcludedEntrypoint),
-        Err(PackerError::Package { .. }) => Err(Failure::UnsatisfiedPackage),
+        Err(
+            PackerError::Package { .. }
+            | PackerError::InvalidPackageTree { .. }
+            | PackerError::InvalidPackageCatalog(_),
+        ) => Err(Failure::UnsatisfiedPackage),
         Err(PackerError::Compile { .. }) => Err(Failure::Compile),
         Err(error) => panic!("filesystem creation failed unexpectedly: {error}"),
     }
@@ -846,7 +855,7 @@ fn a_project_requiring_several_packages_completes_over_repeated_invocation() {
             ("@local/outer:1.0.0".to_owned(), true),
         ]
     );
-    // The whole Complete Package Tree travels, not only what was read.
+    // The whole Package Tree travels, not only what was read.
     assert!(
         created
             .pack

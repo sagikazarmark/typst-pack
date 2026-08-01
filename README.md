@@ -113,7 +113,7 @@ delete paths or authorize undeclared packages and fonts.
 
 All observed package dependencies are vendored into the pack by default.
 With `--no-vendor-packages`, each dependency is instead recorded as an exact
-package specification and Complete Package Tree identity. Compilation acquires
+package specification and Package Tree identity. Compilation acquires
 the whole tree from the configured package directory, cache, or Typst Universe,
 verifies it before invoking Typst, and exposes only the verified paths and bytes.
 Undeclared package locations and ambient caches cannot satisfy imports.
@@ -268,7 +268,7 @@ ignore policy and resource limits belong to the gatherer that obtains them:
 ```rust,ignore
 use typst_pack::{
     create, CandidateFontCatalog, CandidateFontContainer, CreationRequest,
-    ProjectSnapshotAssembly, ResolvedPackageTree,
+    PackageCatalog, PackageDisposition, PackageTree, ProjectSnapshotAssembly,
 };
 
 let project = ProjectSnapshotAssembly::new("main.typ").assemble([
@@ -276,11 +276,16 @@ let project = ProjectSnapshotAssembly::new("main.typ").assemble([
     ("figure.png", image_bytes),
 ])?;
 
+let packages = PackageCatalog::from_entries([(
+    spec,
+    PackageTree::from_owned_entries(package_files)?,
+    PackageDisposition::Embedded,
+)])?;
 let request = CreationRequest::new(project, creation_timestamp)
     .font_catalog(CandidateFontCatalog::from_iter([
         CandidateFontContainer::embedded(font_bytes),
     ]))
-    .package_tree(ResolvedPackageTree::embedded(spec, package_files));
+    .package_catalog(packages);
 let issued = create(&request)?.into_issued().expect("no package is missing");
 let bytes = issued.pack.to_bytes()?;
 ```
@@ -292,8 +297,8 @@ Package Requirements and Font Requirements record. `IssuedPack::warnings`
 retains the representative compile's warnings, and a representative request that
 does not compile fails creation instead of issuing an incomplete pack. The
 request is an owned value the core retains nothing of, so it can be run again.
-Obtaining its inputs is Creation Preparation, which belongs to the caller;
-`Packer` is the reference filesystem Creation Adapter, implemented over
+Obtaining its inputs belongs to Pack Assembly;
+`Packer` is the reference filesystem Pack Assembler, implemented over
 `create` like any other adapter.
 
 Establishing that the acquired bytes represent one consistent source state is
@@ -322,19 +327,22 @@ failure. The caller resolves it however its host allows and invokes creation
 again with the same request values and the tree added:
 
 ```rust,ignore
-use typst_pack::{create, CreationOutcome, CreationRequest, ResolvedPackageTree};
+use typst_pack::{
+    create, CreationOutcome, CreationRequest, PackageCatalog, PackageDisposition,
+};
 
-let mut resolved: Vec<ResolvedPackageTree> = Vec::new();
+let mut catalog = PackageCatalog::new();
 let issued = loop {
     let request = CreationRequest::new(project.clone(), creation_timestamp)
-        .package_trees(resolved.iter().cloned());
+        .package_catalog(catalog.clone());
     match create(&request)? {
         CreationOutcome::Issued(issued) => break issued,
         // Acquire each reported specification however this host allows: from a
         // cache, over an asynchronous transport, or in a later request.
         CreationOutcome::MissingPackages(missing) => {
             for spec in missing {
-                resolved.push(acquire_tree(&spec)?);
+                let tree = acquire_tree(&spec)?;
+                catalog.insert(spec, tree, PackageDisposition::Embedded)?;
             }
         }
     }
@@ -347,10 +355,9 @@ import specification always does. Because a failed import ends module
 evaluation, one round reports what that round reached, and a project needing
 several packages completes over repeated invocation. Nothing is retained
 between invocations, so a resume step is valid across a host request boundary
-and nothing in the core is `async`. A tree that does not declare the
-specification it was supplied under is the distinct
-`CreationError::MismatchedPackageTree` failure, so a loop that would otherwise
-never progress gets a diagnosis instead.
+and nothing in the core is `async`. `PackageCatalog::insert` eagerly rejects a
+tree whose `typst.toml` does not declare the claimed name and version, so a loop
+that would otherwise never progress gets a diagnosis before creation runs.
 
 A specification the caller cannot resolve ends the loop through
 `CreationRequest::unresolvable_package`, which takes the caller's own
@@ -370,7 +377,7 @@ own transport — including one whose only network access is asynchronous:
 
 ```rust,ignore
 use typst_pack::{
-    expand_package_archive, package_archive_url, PackageDisposition, PackageExpansionCeiling,
+    expand_package_archive, package_archive_url, PackageExpansionCeiling,
 };
 
 let url = package_archive_url(&spec)?;
@@ -379,7 +386,6 @@ let archive = fetch(&url)?;
 let tree = expand_package_archive(
     spec,
     &archive,
-    PackageDisposition::Embedded,
     // Required, so that the bound is always a deliberate choice.
     PackageExpansionCeiling { max_bytes: 32 * 1024 * 1024 },
 )?;

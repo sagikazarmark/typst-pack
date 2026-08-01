@@ -16,7 +16,7 @@ use typst_layout::PagedDocument;
 use typst_pdf::{PdfOptions, PdfStandard, PdfStandards, Timestamp};
 
 use crate::embedded::EmbeddedTypst;
-use crate::pack::{CompilationDependencySnapshotError, FontCatalogError, PackageTreeError};
+use crate::pack::{CompilationDependencySnapshotError, FontCatalogError, PackageFulfillmentError};
 use crate::payload::SharedBytes;
 use crate::world::PackWorld;
 use crate::world_trace::{WorldTrace, logical_path};
@@ -2058,12 +2058,12 @@ fn finalize_result(mut result: CompilationResult) -> CompilationResult {
     result
 }
 
-pub(crate) fn package_tree_outcome(error: PackageTreeError) -> CompilationOperationOutcome {
+pub(crate) fn package_tree_outcome(error: PackageFulfillmentError) -> CompilationOperationOutcome {
     match error {
-        PackageTreeError::Missing { packages } => {
+        PackageFulfillmentError::Missing { packages } => {
             CompilationOperationOutcome::MissingExternalPackageFulfillment { packages }
         }
-        PackageTreeError::Mismatched {
+        PackageFulfillmentError::Mismatched {
             spec,
             expected,
             actual,
@@ -2080,7 +2080,7 @@ pub(crate) fn package_tree_outcome(error: PackageTreeError) -> CompilationOperat
             expected_byte_length,
             actual_byte_length,
         },
-        PackageTreeError::Malformed {
+        PackageFulfillmentError::Malformed {
             spec,
             path,
             message,

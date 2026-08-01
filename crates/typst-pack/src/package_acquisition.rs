@@ -1,23 +1,20 @@
-//! The package half of Creation Preparation for a Creation Adapter that
-//! supplies its own transport.
+//! Package acquisition for a Pack Assembler that supplies its own transport.
 //!
 //! Creation reports the exact specifications its representative request needs
 //! and was not given. These helpers cover the two transformations between that
 //! report and a resolved tree — constructing the registry URL of a
 //! specification, and expanding the archive bytes fetched from it into a
-//! Complete Package Tree — so a caller reimplements neither the registry layout
+//! Package Tree — so a caller reimplements neither the registry layout
 //! nor the archive encoding. Fetching those bytes is the adapter's own
 //! obligation and stays outside: nothing here needs an HTTP client, so the
 //! helpers are usable on a host whose only network access is asynchronous.
 
-use std::collections::BTreeMap;
 use std::io::Read;
 
 use typst::foundations::Bytes;
 use typst::syntax::package::PackageSpec;
 
-use crate::creation::{PackageDisposition, ResolvedPackageTree};
-use crate::pack::Pack;
+use crate::package_catalog::{PackageTree, PackageTreeError};
 
 /// The URL of the package registry these helpers describe the layout of, the
 /// official Typst Universe registry. There is no standardized registry
@@ -29,8 +26,8 @@ pub const PACKAGE_REGISTRY_URL: &str = "https://packages.typst.org";
 /// layout says nothing about.
 pub const PACKAGE_REGISTRY_NAMESPACE: &str = "preview";
 
-/// The URL of the archive holding one exact package specification's Complete
-/// Package Tree.
+/// The URL of the archive holding one exact package specification's Package
+/// Tree.
 ///
 /// No index lookup is involved: creation only ever reports fully versioned
 /// specifications, because a Typst import specification always carries an exact
@@ -58,7 +55,7 @@ pub struct PackageExpansionCeiling {
 }
 
 /// Expands the archive bytes served for one exact package specification into
-/// the Complete Package Tree creation accepts as a resolved tree for it.
+/// the Package Tree creation accepts as a resolved tree for it.
 ///
 /// The bytes are the gzip-compressed tar a registry serves, which the caller
 /// fetched with whatever primitive its host provides; expansion itself needs no
@@ -73,22 +70,18 @@ pub struct PackageExpansionCeiling {
 /// ceiling and not by what the archive claims. Every member is charged against
 /// it, whether or not that member becomes a package file.
 ///
-/// Whether the expanded tree actually declares `spec` is settled by creation,
-/// which reports a tree that does not as
-/// [`CreationError::MismatchedPackageTree`](crate::CreationError::MismatchedPackageTree).
 pub fn expand_package_archive(
     spec: PackageSpec,
     archive: &[u8],
-    disposition: PackageDisposition,
     ceiling: PackageExpansionCeiling,
-) -> Result<ResolvedPackageTree, PackageAcquisitionError> {
+) -> Result<PackageTree, PackageAcquisitionError> {
     let malformed = |message: String| PackageAcquisitionError::MalformedArchive {
         spec: spec.clone(),
         message,
     };
 
     let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(archive));
-    let mut files: BTreeMap<String, Bytes> = BTreeMap::new();
+    let mut files: Vec<(String, Bytes)> = Vec::new();
     let mut expanded = 0u64;
 
     for entry in archive
@@ -115,14 +108,6 @@ pub fn expand_package_archive(
             .to_str()
             .ok_or_else(|| malformed(format!("path `{}` is not valid UTF-8", path.display())))?
             .to_owned();
-        let path = Pack::canonical_package_path(&path).map_err(|message| {
-            PackageAcquisitionError::InvalidPackagePath {
-                spec: spec.clone(),
-                path,
-                message,
-            }
-        })?;
-
         // Read one byte past what the ceiling still allows, so that a member
         // holding more than it declared is measured by what it expands to
         // rather than by what it claims.
@@ -137,18 +122,16 @@ pub fn expand_package_archive(
         }
         expanded += data.len() as u64;
 
-        files.insert(path, Bytes::new(data));
+        files.push((path, Bytes::new(data)));
     }
 
-    Ok(ResolvedPackageTree::from_entries(
-        spec,
-        files.into_iter().collect(),
-        disposition,
-    ))
+    PackageTree::from_typst_entries(files)
+        .map_err(|source| PackageAcquisitionError::InvalidPackageTree { spec, source })
 }
 
-/// A failure while acquiring one Complete Package Tree.
-#[derive(Debug, thiserror::Error)]
+/// A failure while acquiring one Package Tree.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum PackageAcquisitionError {
     /// The registry does not serve the specification's namespace, so it has no
     /// URL there.
@@ -164,13 +147,12 @@ pub enum PackageAcquisitionError {
         ceiling: PackageExpansionCeiling,
     },
     /// The bytes are not the archive a registry serves for the specification.
-    #[error("the archive for {spec} is malformed: {message}")]
+    #[error("the archive for {spec} is malformed: {message:?}")]
     MalformedArchive { spec: PackageSpec, message: String },
-    /// The archive holds an entry whose path cannot name a package file.
-    #[error("the archive for {spec} holds `{path}`, which cannot be represented: {message}")]
-    InvalidPackagePath {
+    /// The archive does not expand into a valid Package Tree.
+    #[error("the archive for {spec} does not contain a valid package tree: {source}")]
+    InvalidPackageTree {
         spec: PackageSpec,
-        path: String,
-        message: String,
+        source: PackageTreeError,
     },
 }

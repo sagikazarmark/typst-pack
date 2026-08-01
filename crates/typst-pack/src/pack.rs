@@ -106,11 +106,15 @@ impl CompilationDependencySnapshot {
     }
 }
 
-/// The canonical content identity of one Complete Package Tree.
+/// The canonical content identity of one Package Tree.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct PackageTreeIdentity(u128);
 
 impl PackageTreeIdentity {
+    pub(crate) fn from_digest(digest: u128) -> Self {
+        Self(digest)
+    }
+
     pub fn digest(self) -> [u8; 16] {
         self.0.to_be_bytes()
     }
@@ -133,7 +137,7 @@ impl PackageTreeIdentity {
     }
 }
 
-/// One exact package specification and Complete Package Tree identity.
+/// One exact package specification and Package Tree identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageRequirement {
     spec: PackageSpec,
@@ -770,7 +774,7 @@ impl Pack {
     pub(crate) fn materialize_package_trees(
         &self,
         fulfillments: BTreeMap<String, Vec<(String, Bytes)>>,
-    ) -> Result<BTreeMap<String, PackageFiles>, PackageTreeError> {
+    ) -> Result<BTreeMap<String, PackageFiles>, PackageFulfillmentError> {
         let missing = self
             .package_requirements
             .iter()
@@ -779,7 +783,7 @@ impl Pack {
             .map(|requirement| requirement.spec.clone())
             .collect::<Vec<_>>();
         if !missing.is_empty() {
-            return Err(PackageTreeError::Missing { packages: missing });
+            return Err(PackageFulfillmentError::Missing { packages: missing });
         }
 
         let mut materialized = self.packages.clone();
@@ -793,7 +797,7 @@ impl Pack {
             for (path, data) in &fulfillments[&key] {
                 let canonical =
                     canonical_path(PackPathRole::PackageFile, path).map_err(|error| {
-                        PackageTreeError::Malformed {
+                        PackageFulfillmentError::Malformed {
                             spec: requirement.spec.clone(),
                             path: path.clone(),
                             message: error.to_string(),
@@ -803,7 +807,7 @@ impl Pack {
                     .insert(canonical, SharedBytes::from_typst(data.clone()))
                     .is_some()
                 {
-                    return Err(PackageTreeError::Malformed {
+                    return Err(PackageFulfillmentError::Malformed {
                         spec: requirement.spec.clone(),
                         path: path.clone(),
                         message: "duplicate package file path".to_owned(),
@@ -816,7 +820,7 @@ impl Pack {
                 .map(|path| (path, PackPathRole::PackageFile))
                 .collect();
             if let Some(conflict) = find_path_tree_conflict(paths) {
-                return Err(PackageTreeError::Malformed {
+                return Err(PackageFulfillmentError::Malformed {
                     spec: requirement.spec.clone(),
                     path: conflict.descendant.to_string(),
                     message: format!("file path has file ancestor `{}`", conflict.ancestor),
@@ -827,7 +831,7 @@ impl Pack {
                 || actual_file_count != requirement.file_count
                 || actual_byte_length != requirement.byte_length
             {
-                return Err(PackageTreeError::Mismatched {
+                return Err(PackageFulfillmentError::Mismatched {
                     spec: requirement.spec.clone(),
                     expected: requirement.tree,
                     actual,
@@ -1223,12 +1227,12 @@ pub enum FontCatalogError {
     },
 }
 
-/// A Pack-owned failure to materialize exact Complete Package Trees.
+/// A Pack-owned failure to materialize exact Package Trees.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum PackageTreeError {
+pub(crate) enum PackageFulfillmentError {
     #[error("exact package trees {packages:?} are unavailable")]
     Missing { packages: Vec<PackageSpec> },
-    #[error("package fulfillment for {spec} does not match its Complete Package Tree identity")]
+    #[error("package fulfillment for {spec} does not match its Package Tree identity")]
     Mismatched {
         spec: PackageSpec,
         expected: PackageTreeIdentity,
@@ -1250,7 +1254,7 @@ pub enum PackageTreeError {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum CompilationDependencySnapshotError {
     #[error(transparent)]
-    Package(Box<PackageTreeError>),
+    Package(Box<PackageFulfillmentError>),
     #[error(transparent)]
     Font(FontCatalogError),
 }
@@ -1258,27 +1262,8 @@ pub(crate) enum CompilationDependencySnapshotError {
 fn package_tree_identity(
     files: &BTreeMap<CanonicalPath, SharedBytes>,
 ) -> (PackageTreeIdentity, u64, u64) {
-    let file_count = files.len() as u64;
-    let byte_length = files.values().map(|data| data.len() as u64).sum();
-    let projection = files
-        .iter()
-        .map(|(path, data)| {
-            (
-                path.as_str(),
-                data.len() as u64,
-                typst::utils::hash128(data),
-            )
-        })
-        .collect::<Vec<_>>();
-    (
-        PackageTreeIdentity(typst::utils::hash128(&(
-            PACKAGE_TREE_IDENTITY_SCHEMA,
-            file_count,
-            byte_length,
-            projection,
-        ))),
-        file_count,
-        byte_length,
+    crate::package_catalog::derive_package_tree_identity(
+        files.iter().map(|(path, data)| (path.as_str(), data)),
     )
 }
 
@@ -1520,7 +1505,7 @@ impl PackBuilder {
         Ok(self)
     }
 
-    /// Adds a file to an exact Complete Package Tree fulfilled outside the Pack.
+    /// Adds a file to an exact Package Tree fulfilled outside the Pack.
     pub fn external_package_file(
         self,
         spec: PackageSpec,
@@ -1938,10 +1923,10 @@ pub enum PackInvariantError {
     #[error("invalid package spec `{spec}`: {message}")]
     InvalidPackageSpec { spec: String, message: String },
     /// A Package Requirement has a malformed or unsupported tree identity.
-    #[error("package requirement `{spec}` has an invalid Complete Package Tree identity")]
+    #[error("package requirement `{spec}` has an invalid Package Tree identity")]
     InvalidPackageRequirement { spec: String },
     /// Embedded package bytes disagree with their declared tree identity.
-    #[error("embedded package `{0}` does not match its declared Complete Package Tree identity")]
+    #[error("embedded package `{0}` does not match its declared Package Tree identity")]
     MismatchedEmbeddedPackageIdentity(String),
     /// A contained path cannot fit in ZIP's filename field after adding its role prefix.
     #[error("the {role} path `{path}` exceeds ZIP's filename length limit")]

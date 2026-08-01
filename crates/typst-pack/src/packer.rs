@@ -1,9 +1,9 @@
-//! The reference Creation Adapter: Creation Preparation over a project
+//! The reference Pack Assembler: Pack Assembly over a project
 //! directory.
 //!
 //! The adapter acquires and the core transforms. It lists and reads the
 //! project, composes the Candidate Font Catalog out of the font sources the
-//! host offers, obtains the Complete Package Trees the core reports as
+//! host offers, obtains the Package Trees the core reports as
 //! missing, and resolves the creation timestamp; Pack Creation itself runs in
 //! the core over those bytes.
 //!
@@ -33,17 +33,18 @@ use typst_kit::files::{FileLoader, FileStore};
 use typst_kit::fonts::{FontPath, FontStore};
 
 use crate::compile::TypstTarget;
-use crate::creation::{
-    CreationError, CreationOutcome, CreationRequest, IssuedPack, PackageDisposition, create,
-};
+use crate::creation::{CreationError, CreationOutcome, CreationRequest, IssuedPack, create};
 #[cfg(feature = "embedded-fonts")]
 use crate::font_catalog::typst_embedded_font_containers;
 use crate::font_catalog::{CandidateFontCatalog, CandidateFontContainer, FontDisposition};
-use crate::fs_packages::AcquiredPackages;
+use crate::fs_packages::{AcquirePackageError, AcquiredPackages};
 use crate::fs_project;
 use crate::ignore_policy::ProjectIgnorePolicyError;
 use crate::manifest::PackMetadata;
 use crate::pack::{Pack, PackBuildError};
+use crate::package_catalog::{
+    PackageCatalog, PackageCatalogError, PackageDisposition, PackageTreeError,
+};
 use crate::project_snapshot::{ProjectSnapshot, ProjectSnapshotError};
 #[cfg(not(feature = "egress"))]
 use crate::world::local_packages;
@@ -56,7 +57,7 @@ use crate::world::system_packages;
 /// then performs one representative compile to select package and font
 /// dependencies. Compiler observations never select project files.
 ///
-/// It is the reference Creation Adapter: it acquires the project, the
+/// It is the reference Pack Assembler: it acquires the project, the
 /// Candidate Font Catalog, and the package trees creation reports as missing,
 /// and [`create`](crate::create) selects requirements over those bytes. How far
 /// its acquisition reaches is a build-time choice: with the `fs` feature alone
@@ -428,6 +429,7 @@ fn resolve_and_create(
     disposition: PackageDisposition,
 ) -> Result<IssuedPack, CreationFailure> {
     let mut acquired: HashSet<String> = HashSet::new();
+    let mut catalog = PackageCatalog::new();
     loop {
         match create(&request)? {
             CreationOutcome::Issued(issued) => return Ok(*issued),
@@ -445,9 +447,19 @@ fn resolve_and_create(
                             spec,
                         }));
                     }
-                    request = match packages.acquire(&spec, disposition) {
-                        Ok(tree) => request.package_tree(tree),
-                        Err(failure) => request.unresolvable_package(spec, failure),
+                    request = match packages.acquire(&spec) {
+                        Ok(tree) => {
+                            catalog
+                                .insert(spec.clone(), tree, disposition)
+                                .map_err(PackerError::InvalidPackageCatalog)?;
+                            request.package_catalog(catalog.clone())
+                        }
+                        Err(AcquirePackageError::Authority(failure)) => {
+                            request.unresolvable_package(spec, failure)
+                        }
+                        Err(AcquirePackageError::InvalidTree(source)) => {
+                            return Err(PackerError::InvalidPackageTree { spec, source }.into());
+                        }
                     };
                 }
             }
@@ -478,17 +490,6 @@ impl CreationFailure {
             Self::Core(CreationError::InvalidTimestamp(message)) => {
                 PackerError::InvalidTimestamp(message)
             }
-            Self::Core(CreationError::MismatchedPackageTree { spec, message }) => {
-                PackerError::Package { spec, message }
-            }
-            Self::Core(CreationError::InvalidPackagePath {
-                spec,
-                path,
-                message,
-            }) => PackerError::Package {
-                spec,
-                message: format!("file `{path}` cannot be represented: {message}"),
-            },
             Self::Core(CreationError::Build(error)) => PackerError::Build(error),
         }
     }
@@ -527,6 +528,7 @@ pub struct CreationDiagnosticContext {
 
 /// A failure while packing a project directory.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PackerError {
     #[error("{message}: {source}")]
     Io {
@@ -549,6 +551,15 @@ pub enum PackerError {
     Timings(String),
     #[error("failed to load package {spec}: {message}")]
     Package { spec: PackageSpec, message: String },
+    /// A Package Authority returned bytes that do not form a Package Tree.
+    #[error("package {spec} does not contain a valid package tree: {source}")]
+    InvalidPackageTree {
+        spec: PackageSpec,
+        source: PackageTreeError,
+    },
+    /// The acquired Package Trees do not form a valid Package Catalog.
+    #[error(transparent)]
+    InvalidPackageCatalog(PackageCatalogError),
     #[error("failed to walk directory: {0}")]
     Walk(String),
     #[error(transparent)]
@@ -746,7 +757,7 @@ impl FileLoader for AcquiredLoader {
     }
 }
 
-/// The font half of Creation Preparation for the filesystem adapter: the
+/// The font acquisition half of Pack Assembly for the filesystem adapter: the
 /// ambient sources it acquires candidate Font Containers from, and the
 /// disposition each source's containers carry.
 struct FontSources<'a> {

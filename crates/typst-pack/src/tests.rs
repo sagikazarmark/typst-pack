@@ -1,7 +1,7 @@
 //! Crate tests.
 
 use crate::compile::{CompileError, compile as compile_request, compile_world as compile};
-use crate::pack::CompilationDependencySnapshotError;
+use crate::pack::{CompilationDependencySnapshotError, PackageFulfillmentError};
 use crate::world::{PackWorld, PackWorldConstructionError};
 use crate::*;
 
@@ -1136,7 +1136,7 @@ fn pack_world_construction_rejects_incomplete_dependencies_and_invalid_overrides
             &std::collections::BTreeMap::new(),
         ),
         Err(CompilationDependencySnapshotError::Package(error))
-            if matches!(*error, PackageTreeError::Missing { .. })
+            if matches!(*error, PackageFulfillmentError::Missing { .. })
     ));
 
     let pack = Pack::builder("main.typ")

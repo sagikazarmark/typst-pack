@@ -9,8 +9,9 @@ use std::str::FromStr;
 
 use typst::syntax::package::PackageSpec;
 use typst_pack::{
-    CreationError, CreationOutcome, CreationRequest, IssuedPack, PackMetadata, ProjectSnapshot,
-    ProjectSnapshotAssembly, ResolvedPackageTree, TypstTarget, create,
+    CreationError, CreationOutcome, CreationRequest, IssuedPack, PackMetadata, PackageCatalog,
+    PackageCatalogError, PackageCatalogIssue, PackageDisposition, PackageTree, PackageTreeIssue,
+    ProjectSnapshot, ProjectSnapshotAssembly, TypstTarget, create,
 };
 
 /// 2023-11-14T22:13:20Z, the Document Time every representative request here
@@ -42,7 +43,7 @@ fn spec(name: &str) -> PackageSpec {
     PackageSpec::from_str(&format!("@local/{name}:1.0.0")).unwrap()
 }
 
-/// The Complete Package Tree of a package whose `lib.typ` holds `body`.
+/// The Package Tree of a package whose `lib.typ` holds `body`.
 fn package_files(name: &str, body: &str) -> Vec<(&'static str, Vec<u8>)> {
     vec![
         (
@@ -54,6 +55,28 @@ fn package_files(name: &str, body: &str) -> Vec<(&'static str, Vec<u8>)> {
         ),
         ("lib.typ", body.as_bytes().to_vec()),
     ]
+}
+
+type CatalogEntry = (PackageSpec, PackageTree, PackageDisposition);
+
+fn package_entry(
+    spec: PackageSpec,
+    files: impl IntoIterator<Item = (&'static str, Vec<u8>)>,
+    disposition: PackageDisposition,
+) -> CatalogEntry {
+    (
+        spec,
+        PackageTree::from_owned_entries(files).unwrap(),
+        disposition,
+    )
+}
+
+fn package_catalog(entries: impl IntoIterator<Item = CatalogEntry>) -> PackageCatalog {
+    PackageCatalog::from_entries(entries).unwrap()
+}
+
+fn embedded_package(spec: PackageSpec, files: Vec<(&'static str, Vec<u8>)>) -> CatalogEntry {
+    package_entry(spec, files, PackageDisposition::Embedded)
 }
 
 #[test]
@@ -194,19 +217,18 @@ fn package_trees_are_supplied_per_specification_with_their_own_disposition() {
     );
 
     let issued = issue(
-        &CreationRequest::new(snapshot, CREATION_TIMESTAMP)
-            .package_tree(ResolvedPackageTree::embedded(
+        &CreationRequest::new(snapshot, CREATION_TIMESTAMP).package_catalog(package_catalog([
+            embedded_package(
                 embedded.clone(),
                 package_files("embedded", "#let value = 3"),
-            ))
-            .package_tree(ResolvedPackageTree::external(
+            ),
+            package_entry(
                 external.clone(),
                 package_files("external", "#let other = 4"),
-            ))
-            .package_tree(ResolvedPackageTree::embedded(
-                unused.clone(),
-                package_files("unused", "#let unused = 5"),
-            )),
+                PackageDisposition::External,
+            ),
+            embedded_package(unused.clone(), package_files("unused", "#let unused = 5")),
+        ])),
     );
 
     // Compiler observations select package requirements: the supplied tree the
@@ -224,7 +246,7 @@ fn package_trees_are_supplied_per_specification_with_their_own_disposition() {
     assert!(issued.pack.has_package(&embedded));
     assert!(!issued.pack.has_package(&external));
     assert!(!issued.pack.has_package(&unused));
-    // The whole Complete Package Tree travels, not only the observed files.
+    // The whole Package Tree travels, not only the observed files.
     assert!(issued.pack.package_file(&embedded, "typst.toml").is_some());
     assert!(issued.pack.package_file(&embedded, "lib.typ").is_some());
 }
@@ -257,26 +279,26 @@ const CHAINED_PACKAGES: &str = "#import \"@local/first:1.0.0\": first\n\
 
 /// The tree a resume round can resolve for one reported specification,
 /// standing in for whatever acquisition the caller's host allows.
-fn resolvable(spec: &PackageSpec) -> ResolvedPackageTree {
+fn resolvable(spec: &PackageSpec) -> CatalogEntry {
     let body = match spec.name.as_str() {
         "first" => "#import \"@local/third:1.0.0\": third\n#let first = 1 + third",
         "second" => "#let second = 2",
         "third" => "#let third = 3",
         name => panic!("no tree is resolvable for `{name}`"),
     };
-    ResolvedPackageTree::embedded(spec.clone(), package_files(spec.name.as_str(), body))
+    embedded_package(spec.clone(), package_files(spec.name.as_str(), body))
 }
 
 /// Drives the resume protocol to an issued Pack, returning it with the trees
 /// the loop resolved. Every round builds a fresh Creation Request from the same
 /// values, as a caller resuming across a host request boundary must.
-fn resume(source: &str) -> (IssuedPack, Vec<ResolvedPackageTree>) {
-    let mut resolved: Vec<ResolvedPackageTree> = Vec::new();
+fn resume(source: &str) -> (IssuedPack, Vec<CatalogEntry>) {
+    let mut resolved: Vec<CatalogEntry> = Vec::new();
     // Bounded so that a loop making no progress fails instead of hanging; the
     // number of rounds it actually takes is not asserted.
     for _ in 0..8 {
         let request = CreationRequest::new(document(source), CREATION_TIMESTAMP)
-            .package_trees(resolved.iter().cloned());
+            .package_catalog(package_catalog(resolved.iter().cloned()));
         let outcome = create(&request).unwrap();
         match outcome {
             CreationOutcome::Issued(issued) => return (*issued, resolved),
@@ -320,7 +342,7 @@ fn a_resumed_creation_issues_the_pack_one_invocation_would_have() {
 
     let single = issue(
         &CreationRequest::new(document(CHAINED_PACKAGES), CREATION_TIMESTAMP)
-            .package_trees(resolved),
+            .package_catalog(package_catalog(resolved)),
     );
 
     assert_eq!(resumed.pack.identity(), single.pack.identity());
@@ -377,10 +399,10 @@ fn a_tree_supplied_for_a_declared_specification_takes_precedence() {
                 spec("first"),
                 typst::diag::PackageError::NotFound(spec("first")),
             )
-            .package_tree(ResolvedPackageTree::embedded(
+            .package_catalog(package_catalog([embedded_package(
                 spec("first"),
                 package_files("first", "#let first = 1"),
-            )),
+            )])),
     );
 
     assert!(issued.pack.has_package(&spec("first")));
@@ -388,21 +410,25 @@ fn a_tree_supplied_for_a_declared_specification_takes_precedence() {
 
 /// Creates over one tree supplied for `@local/declared:1.0.0`, which the
 /// document imports, and returns the failure that tree produced.
-fn declared_tree_failure(files: Vec<(&'static str, Vec<u8>)>) -> CreationError {
-    let snapshot = document("#import \"@local/declared:1.0.0\": value\n#value");
-
-    create(
-        &CreationRequest::new(snapshot, CREATION_TIMESTAMP)
-            .package_tree(ResolvedPackageTree::embedded(spec("declared"), files)),
-    )
-    .unwrap_err()
+fn declared_tree_failure(files: Vec<(&'static str, Vec<u8>)>) -> PackageCatalogError {
+    PackageCatalog::from_entries([embedded_package(spec("declared"), files)]).unwrap_err()
 }
 
 /// Whether the failure is the distinct one a tree that does not declare its
 /// specification produces, rather than a missing-package outcome or a compile
 /// failure.
-fn is_mismatched_declared_tree(error: &CreationError) -> bool {
-    matches!(error, CreationError::MismatchedPackageTree { spec: reported, .. } if reported == &spec("declared"))
+fn is_mismatched_declared_tree(error: &PackageCatalogError) -> bool {
+    error.issues().iter().any(|issue| {
+        matches!(
+            issue,
+            PackageCatalogIssue::MissingDeclaration { spec: reported }
+                | PackageCatalogIssue::DeclarationNotUtf8 { spec: reported }
+                | PackageCatalogIssue::MalformedDeclaration { spec: reported, .. }
+                | PackageCatalogIssue::MismatchedName { spec: reported, .. }
+                | PackageCatalogIssue::MismatchedVersion { spec: reported, .. }
+                if reported == &spec("declared")
+        )
+    })
 }
 
 #[test]
@@ -435,15 +461,16 @@ fn a_tree_the_representative_request_never_reads_is_checked_too() {
     // exactly as a package path that cannot be represented is.
     let unread = spec("unread");
 
-    let error = create(
-        &CreationRequest::new(document("#rect()"), CREATION_TIMESTAMP).package_tree(
-            ResolvedPackageTree::embedded(unread.clone(), package_files("other", "#let value = 1")),
-        ),
-    )
+    let error = PackageCatalog::from_entries([embedded_package(
+        unread.clone(),
+        package_files("other", "#let value = 1"),
+    )])
     .unwrap_err();
 
     assert!(
-        matches!(&error, CreationError::MismatchedPackageTree { spec, .. } if spec == &unread),
+        error.issues().iter().any(
+            |issue| matches!(issue, PackageCatalogIssue::MismatchedName { spec, .. } if spec == &unread)
+        ),
         "{error}"
     );
 }
@@ -476,7 +503,7 @@ fn a_tree_declaring_its_specification_is_accepted_whatever_else_it_declares() {
 
     let issued = issue(
         &CreationRequest::new(snapshot, CREATION_TIMESTAMP)
-            .package_tree(ResolvedPackageTree::embedded(declared.clone(), files)),
+            .package_catalog(package_catalog([embedded_package(declared.clone(), files)])),
     );
 
     assert!(issued.pack.has_package(&declared));
@@ -497,19 +524,13 @@ fn a_supplied_tree_whose_declaration_cannot_be_read_fails_creation() {
 
 #[test]
 fn a_supplied_tree_path_that_cannot_name_a_package_file_is_rejected() {
-    let absent = spec("malformed");
-    let snapshot = document("#rect()");
-
-    let error = create(
-        &CreationRequest::new(snapshot, CREATION_TIMESTAMP).package_tree(
-            ResolvedPackageTree::embedded(absent.clone(), [("../escape.typ", b"nope".to_vec())]),
-        ),
-    )
-    .unwrap_err();
+    let error = PackageTree::from_owned_entries([("../escape.typ", b"nope".to_vec())]).unwrap_err();
 
     assert!(
-        matches!(&error, CreationError::InvalidPackagePath { spec, path, .. }
-            if spec == &absent && path == "../escape.typ"),
+        error.issues().iter().any(
+            |issue| matches!(issue, PackageTreeIssue::InvalidPath { path, .. }
+                if path == "../escape.typ")
+        ),
         "{error}"
     );
 }
@@ -519,10 +540,13 @@ fn a_supplied_tree_path_that_cannot_name_a_package_file_is_rejected() {
 mod fonts {
     use typst_pack::{
         CandidateFontCatalog, CandidateFontContainer, CreationOutcome, CreationRequest,
-        FontContainerIdentity, ResolvedPackageTree, create,
+        FontContainerIdentity, create,
     };
 
-    use crate::{CREATION_TIMESTAMP, document, issue, package_files, spec};
+    use crate::{
+        CREATION_TIMESTAMP, CatalogEntry, document, embedded_package, issue, package_catalog,
+        package_files, spec,
+    };
 
     /// The exact bytes of the Font Container Typst ships the given family in.
     fn typst_container(family: &str) -> Vec<u8> {
@@ -607,16 +631,16 @@ mod fonts {
         // package is one that already laid out a face.
         let source = "Selected text\n\n#import \"@local/first:1.0.0\": first\n#first";
 
-        let mut resolved: Vec<ResolvedPackageTree> = Vec::new();
+        let mut resolved: Vec<CatalogEntry> = Vec::new();
         let resumed = loop {
             let request = CreationRequest::new(document(source), CREATION_TIMESTAMP)
                 .font_catalog(catalog.clone())
-                .package_trees(resolved.iter().cloned());
+                .package_catalog(package_catalog(resolved.iter().cloned()));
             match create(&request).unwrap() {
                 CreationOutcome::Issued(issued) => break *issued,
                 CreationOutcome::MissingPackages(missing) => {
                     resolved.extend(missing.iter().map(|missing| {
-                        ResolvedPackageTree::embedded(
+                        embedded_package(
                             missing.clone(),
                             package_files(missing.name.as_str(), "#let first = [resolved]"),
                         )
@@ -628,7 +652,7 @@ mod fonts {
         let single = issue(
             &CreationRequest::new(document(source), CREATION_TIMESTAMP)
                 .font_catalog(catalog)
-                .package_trees(resolved),
+                .package_catalog(package_catalog(resolved)),
         );
 
         assert_eq!(

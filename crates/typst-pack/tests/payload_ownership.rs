@@ -1,7 +1,7 @@
 use typst_pack::{
     CompilationOutputSpecification, CreationOutcome, CreationRequest, Pack, PackArchiveBytes,
-    PackCompilationRequest, PackageDisposition, ProjectSnapshotAssembly, ResolvedPackageTree,
-    SvgOutputSpecification, compile, create,
+    PackCompilationRequest, PackageCatalog, PackageDisposition, PackageTree,
+    ProjectSnapshotAssembly, SvgOutputSpecification, compile, create,
 };
 
 #[cfg(feature = "embedded-fonts")]
@@ -122,18 +122,15 @@ fn pack_creation_reuses_project_and_package_payloads() {
     let package_source = b"#let value = 42".to_vec();
     let package_pointer = package_source.as_ptr();
     let package: typst::syntax::package::PackageSpec = "@local/example:1.0.0".parse().unwrap();
-    let tree = ResolvedPackageTree::new(
-        package.clone(),
-        [
-            (
-                "typst.toml",
-                b"[package]\nname = \"example\"\nversion = \"1.0.0\"\nentrypoint = \"lib.typ\"\n"
-                    .to_vec(),
-            ),
-            ("lib.typ", package_source),
-        ],
-        PackageDisposition::Embedded,
-    );
+    let tree = PackageTree::from_owned_entries([
+        (
+            "typst.toml",
+            b"[package]\nname = \"example\"\nversion = \"1.0.0\"\nentrypoint = \"lib.typ\"\n"
+                .to_vec(),
+        ),
+        ("lib.typ", package_source),
+    ])
+    .unwrap();
     let tree_files: Vec<(&str, &[u8])> = tree.files().collect();
     assert_eq!(
         tree_files
@@ -147,7 +144,10 @@ fn pack_creation_reuses_project_and_package_payloads() {
     drop(tree_files);
 
     let tree_clone = tree.clone();
-    let request = CreationRequest::new(snapshot.clone(), 1_700_000_000).package_tree(tree);
+    let catalog =
+        PackageCatalog::from_entries([(package.clone(), tree, PackageDisposition::Embedded)])
+            .unwrap();
+    let request = CreationRequest::new(snapshot.clone(), 1_700_000_000).package_catalog(catalog);
     let CreationOutcome::Issued(issued) = create(&request).unwrap() else {
         panic!("the supplied package tree should issue a Pack");
     };
