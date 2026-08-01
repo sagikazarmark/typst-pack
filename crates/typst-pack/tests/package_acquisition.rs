@@ -123,6 +123,47 @@ fn a_tree_expanding_to_exactly_the_ceiling_is_accepted() {
 }
 
 #[test]
+fn package_expansion_ceiling_does_not_contribute_to_pack_identity() {
+    let example = spec("@preview/example:1.0.0");
+    let bytes = archive(&[("typst.toml", DECLARATION), ("lib.typ", b"#let value = 1")]);
+    let exact = PackageExpansionCeiling {
+        max_bytes: (DECLARATION.len() + b"#let value = 1".len()) as u64,
+    };
+    let exact_tree =
+        expand_package_archive(example.clone(), &bytes, PackageDisposition::Embedded, exact)
+            .unwrap();
+    let generous_tree = expand_package_archive(
+        example,
+        &bytes,
+        PackageDisposition::Embedded,
+        GENEROUS_CEILING,
+    )
+    .unwrap();
+    let project = ProjectSnapshotAssembly::new("main.typ", &ProjectIgnorePolicy::built_in())
+        .assemble([(
+            "main.typ",
+            b"#import \"@preview/example:1.0.0\": value\n#rect(width: value * 1pt, height: 1pt)"
+                .to_vec(),
+        )])
+        .unwrap();
+    let issue = |tree| match create(
+        &CreationRequest::new(project.clone(), CREATION_TIMESTAMP).package_tree(tree),
+    )
+    .unwrap()
+    {
+        CreationOutcome::Issued(issued) => issued.pack,
+        CreationOutcome::MissingPackages(missing) => {
+            panic!("the supplied tree did not cover {missing:?}")
+        }
+    };
+
+    assert_eq!(
+        issue(exact_tree).identity(),
+        issue(generous_tree).identity()
+    );
+}
+
+#[test]
 fn an_archive_expanding_past_the_ceiling_is_not_expanded_at_all() {
     // A hundred and twenty-eight megabytes of zeros in a few kilobytes of
     // archive, against a four-kilobyte ceiling. Expansion reads no further than

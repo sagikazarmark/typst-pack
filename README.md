@@ -424,7 +424,18 @@ fn arbitrary_world(world: &dyn typst::World) {
 }
 ```
 
-Typst 0.15.0 owns language evaluation, layout, official diagnostics, document
+Destinations remain adapter facts rather than semantic compilation request
+values:
+
+```compile_fail
+use typst_pack::PackCompilationRequest;
+
+fn add_destination(request: PackCompilationRequest) {
+    let _ = request.destination("output.pdf");
+}
+```
+
+Typst 0.15.1 owns language evaluation, layout, official diagnostics, document
 structures, and PDF, PNG, SVG, and HTML export behavior. typst-pack owns Pack
 creation and validity, the fixed set of contained project paths, exact package
 and font verification, Pack Overrides, request identities and reports, and later

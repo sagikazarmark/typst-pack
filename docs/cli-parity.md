@@ -1,6 +1,6 @@
 # Embedded Typst CLI parity inventory
 
-This inventory is tied to Typst 0.15.0. It supplements
+This inventory is tied to Typst 0.15.1. It supplements
 [ADR-0005](adr/0005-align-cli-with-embedded-typst.md) and must be reviewed before
 the embedded Typst release changes. Follow the complete
 [embedded Typst upgrade procedure](embedded-typst-upgrade.md); the approved
@@ -8,11 +8,11 @@ crate set and classified differential matrix live in
 `crates/typst-pack/embedded-typst.toml`.
 
 The process differential gate is `crates/typst-pack-cli/tests/official_typst_cli.rs`. Dagger downloads
-the official Typst 0.15.0 release artifact, verifies its published SHA-256
+the official Typst 0.15.1 release artifact, verifies its published SHA-256
 digest, and exposes it through `TYPST_PACK_OFFICIAL_TYPST`. The test then checks
 the binary's version against the `EngineIdentity` produced by public Pack
-compilation. A missing oracle is permitted only outside that dedicated gate; a
-missing, replaced, or version-mismatched oracle fails the gate.
+compilation. Missing oracle and packaged binaries are permitted only outside
+that dedicated gate; missing, replaced, or version-mismatched tooling fails it.
 
 ## Shared behavior
 
@@ -20,12 +20,12 @@ missing, replaced, or version-mismatched oracle fails the gate.
 | --- | --- | --- |
 | PDF, PNG, SVG, and HTML compilation and artifact bytes | Public Typst compiler and exporter crates | `official_typst_compile_is_the_process_level_parity_baseline`; `crates/typst-pack/tests/official_typst_oracle.rs` |
 | Typst inputs, features, document time, and PDF creation time | Public `Library`, `Features`, `World::today`, and exporter controls; CLI environment resolution is mirrored | `official_typst_compile_gates_shared_environment_diagnostics_and_exit_behavior`; `crates/typst-pack/tests/official_typst_oracle.rs`; `crates/typst-pack-cli/tests/cli.rs` |
-| Complete packages, exact fonts, Pack Overrides, and offline dependency authority | Public Typst `World` requests wrapped by Pack verification; offline is Pack policy | `crates/typst-pack/tests/official_typst_oracle.rs`; `crates/typst-pack/tests/compilation.rs`; package, font, override, and offline cases in `crates/typst-pack-cli/tests/cli.rs` |
+| Complete packages, exact fonts, Pack Overrides, and offline dependency authority | Public Typst `World` requests wrapped by Pack verification; offline is Pack policy | `official_typst_compile_gates_pack_source_and_data_overrides`; `crates/typst-pack/tests/official_typst_oracle.rs`; `crates/typst-pack/tests/compilation.rs`; package, font, override, and offline cases in `crates/typst-pack-cli/tests/cli.rs` |
 | Diagnostic content, ordering, rendering, and process exit status | `SourceDiagnostic` and `typst-kit::diagnostics`; process exit policy is mirrored | `official_typst_compile_gates_shared_environment_diagnostics_and_exit_behavior`; diagnostic cases in `crates/typst-pack/tests/official_typst_oracle.rs` and `crates/typst-pack-cli/tests/cli.rs` |
-| Option spelling, aliases, value parsing, defaults, conflicts, and help wording | Clap adapter mirrors Typst 0.15.0 because Typst exposes no stable reusable CLI parser | parsing, conflict, help, and environment cases in `crates/typst-pack-cli/tests/cli.rs` |
-| Output format inference and page-template expansion | Mirrors Typst 0.15.0 because no public CLI planning API exists | format, page-range, template, and collision cases in `crates/typst-pack-cli/tests/cli.rs` |
-| Dependency JSON, zero, and Make serialization | Mirrors Typst 0.15.0 with Pack-aware input provenance | dependency cases in `crates/typst-pack-cli/tests/cli.rs` |
-| Font, package, certificate, timestamp, jobs, timing, and viewer environment resolution | `typst-kit` where public; remaining process policy mirrors Typst 0.15.0 | corresponding environment and automation cases in `crates/typst-pack-cli/tests/cli.rs` |
+| Option spelling, aliases, value parsing, defaults, conflicts, and help wording | Clap adapter mirrors Typst 0.15.1 because Typst exposes no stable reusable CLI parser | parsing, conflict, help, and environment cases in `crates/typst-pack-cli/tests/cli.rs` |
+| Output format inference and page-template expansion | Mirrors Typst 0.15.1 because no public CLI planning API exists | format, page-range, template, and collision cases in `crates/typst-pack-cli/tests/cli.rs` |
+| Dependency JSON, zero, and Make serialization | Mirrors Typst 0.15.1 with Pack-aware input provenance | dependency cases in `crates/typst-pack-cli/tests/cli.rs` |
+| Font, package, certificate, timestamp, jobs, timing, and viewer environment resolution | `typst-kit` where public; remaining process policy mirrors Typst 0.15.1 | corresponding environment and automation cases in `crates/typst-pack-cli/tests/cli.rs` |
 
 `World`, `Library`, the synchronous Typst compiler call, and all official
 exporter calls in this table are private mechanisms of the embedded adapter.
@@ -37,7 +37,7 @@ The mirrored rows are the complete parity-review list. They must not be moved
 behind private or unstable Typst CLI internals. An embedded Typst upgrade must
 compare each row against the new official command before updating expectations.
 
-The individual Typst 0.15.0 mirrors in those rows are:
+The individual Typst 0.15.1 mirrors in those rows are:
 
 - `--input` trimming and empty-key rejection;
 - output-format inference and the `pdf`, `png`, `svg`, and `html` values;

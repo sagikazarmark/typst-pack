@@ -865,6 +865,75 @@ fn pack_font_catalog_preserves_declared_faces_and_container_disposition() {
     );
 }
 
+#[cfg(feature = "embedded-fonts")]
+#[test]
+fn pack_identity_binds_font_container_face_disposition_and_catalog_order() {
+    #[derive(Clone)]
+    struct FontCase {
+        data: Vec<u8>,
+        index: u32,
+        disposition: FontDisposition,
+    }
+
+    let collection = two_face_collection(&embedded_font_data());
+    let mut other_collection = collection.clone();
+    other_collection.push(0);
+    let build = |fonts: &[FontCase]| {
+        let mut builder = Pack::builder("main.typ")
+            .file("main.typ", b"font identity".to_vec())
+            .unwrap();
+        for font in fonts {
+            builder = if font.disposition.is_embedded() {
+                builder.font(font.data.clone(), font.index).unwrap()
+            } else {
+                builder
+                    .external_font(font.data.clone(), font.index)
+                    .unwrap()
+            };
+        }
+        builder.build().unwrap()
+    };
+    let baseline = FontCase {
+        data: collection.clone(),
+        index: 0,
+        disposition: FontDisposition::Embedded,
+    };
+    let baseline_identity = build(std::slice::from_ref(&baseline)).identity();
+
+    assert_ne!(
+        build(&[FontCase {
+            data: other_collection.clone(),
+            ..baseline.clone()
+        }])
+        .identity(),
+        baseline_identity
+    );
+    assert_ne!(
+        build(&[FontCase {
+            index: 1,
+            ..baseline.clone()
+        }])
+        .identity(),
+        baseline_identity
+    );
+    assert_ne!(
+        build(&[FontCase {
+            disposition: FontDisposition::External,
+            ..baseline.clone()
+        }])
+        .identity(),
+        baseline_identity
+    );
+    let other = FontCase {
+        data: other_collection,
+        ..baseline.clone()
+    };
+    assert_ne!(
+        build(&[baseline.clone(), other.clone()]).identity(),
+        build(&[other, baseline]).identity()
+    );
+}
+
 #[test]
 fn malformed_external_font_is_a_pack_owned_pre_compilation_outcome() {
     let data = b"not a font";

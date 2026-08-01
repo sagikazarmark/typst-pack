@@ -56,8 +56,13 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
-    let executable = std::env::var_os(TEST_BINARY_ENV)
-        .unwrap_or_else(|| env!("CARGO_BIN_EXE_typst-pack").into());
+    let executable = match std::env::var_os(TEST_BINARY_ENV) {
+        Some(executable) => executable,
+        None if std::env::var_os("TYPST_PACK_REQUIRE_OFFICIAL_TYPST").is_some() => {
+            panic!("{TEST_BINARY_ENV} is required by the official CLI parity gate")
+        }
+        None => env!("CARGO_BIN_EXE_typst-pack").into(),
+    };
     let mut command = Command::new(executable);
     for variable in [
         "SOURCE_DATE_EPOCH",
@@ -493,6 +498,72 @@ fn official_typst_compile_gates_package_font_and_offline_request_routing() {
         std::fs::read(pack_pdf).unwrap(),
         std::fs::read(official_pdf).unwrap(),
         "verified package and font fulfillment drifted from official Typst"
+    );
+}
+
+#[test]
+fn official_typst_compile_gates_pack_source_and_data_overrides() {
+    let Some(official) = OfficialTypstCli::from_environment() else {
+        eprintln!("skipping official CLI parity outside its pinned Dagger gate");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let source = "#import \"chapter.typ\": source-width\n\
+                  #let data-width = int(read(\"data.txt\"))\n\
+                  #set page(width: 100pt, height: 20pt, margin: 0pt)\n\
+                  #rect(width: (source-width + data-width) * 1pt, height: 5pt)";
+    let project = write_project(directory.path(), source);
+    std::fs::write(project.join("chapter.typ"), "#let source-width = 20").unwrap();
+    std::fs::write(project.join("data.txt"), "30").unwrap();
+
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", source.as_bytes().to_vec())
+        .unwrap()
+        .file("chapter.typ", b"#let source-width = 10".to_vec())
+        .unwrap()
+        .file("data.txt", b"10".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let pack_path = directory.path().join("overrides.typk");
+    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    let source_replacement = directory.path().join("chapter-replacement.typ");
+    let data_replacement = directory.path().join("data-replacement.txt");
+    std::fs::write(&source_replacement, "#let source-width = 20").unwrap();
+    std::fs::write(&data_replacement, "30").unwrap();
+    let official_svg = directory.path().join("overrides-official.svg");
+    let pack_svg = directory.path().join("overrides-pack.svg");
+
+    let official_result = official.compile(
+        &project,
+        [
+            "main.typ",
+            official_svg.to_str().unwrap(),
+            "--ignore-system-fonts",
+        ],
+    );
+    let pack_result = pack_command(
+        directory.path(),
+        &[
+            pack_path.to_str().unwrap(),
+            pack_svg.to_str().unwrap(),
+            "--override",
+            "chapter.typ",
+            source_replacement.to_str().unwrap(),
+            "--override",
+            "data.txt",
+            data_replacement.to_str().unwrap(),
+            "--ignore-system-fonts",
+        ],
+    );
+
+    assert_success(&official_result);
+    assert_success(&pack_result);
+    assert_eq!(pack_result.stderr, official_result.stderr);
+    assert_eq!(
+        std::fs::read(pack_svg).unwrap(),
+        std::fs::read(official_svg).unwrap(),
+        "Pack Override output differs from direct official Typst input"
     );
 }
 

@@ -1,6 +1,8 @@
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 pub enum DifferentialCategory {
+    Compiler,
     Diagnostics,
+    Environment,
     Fonts,
     Html,
     Packages,
@@ -9,12 +11,15 @@ pub enum DifferentialCategory {
     Png,
     SharedRequests,
     Svg,
+    World,
 }
 
 impl DifferentialCategory {
     pub const fn as_str(self) -> &'static str {
         match self {
+            Self::Compiler => "compiler",
             Self::Diagnostics => "diagnostics",
+            Self::Environment => "environment",
             Self::Fonts => "fonts",
             Self::Html => "html",
             Self::Packages => "packages",
@@ -23,6 +28,7 @@ impl DifferentialCategory {
             Self::Png => "png",
             Self::SharedRequests => "shared-requests",
             Self::Svg => "svg",
+            Self::World => "world",
         }
     }
 }
@@ -44,7 +50,15 @@ use DifferentialSuite as Suite;
 
 pub const DIFFERENTIAL_COVERAGE: &[DifferentialCoverage] = &[
     DifferentialCoverage {
+        category: Category::Compiler,
+        suites: &[Suite::IndependentOracle, Suite::OfficialCli],
+    },
+    DifferentialCoverage {
         category: Category::Diagnostics,
+        suites: &[Suite::IndependentOracle, Suite::OfficialCli],
+    },
+    DifferentialCoverage {
+        category: Category::Environment,
         suites: &[Suite::IndependentOracle, Suite::OfficialCli],
     },
     DifferentialCoverage {
@@ -61,7 +75,7 @@ pub const DIFFERENTIAL_COVERAGE: &[DifferentialCoverage] = &[
     },
     DifferentialCoverage {
         category: Category::PackOverrides,
-        suites: &[Suite::IndependentOracle],
+        suites: &[Suite::IndependentOracle, Suite::OfficialCli],
     },
     DifferentialCoverage {
         category: Category::Pdf,
@@ -77,6 +91,10 @@ pub const DIFFERENTIAL_COVERAGE: &[DifferentialCoverage] = &[
     },
     DifferentialCoverage {
         category: Category::Svg,
+        suites: &[Suite::IndependentOracle, Suite::OfficialCli],
+    },
+    DifferentialCoverage {
+        category: Category::World,
         suites: &[Suite::IndependentOracle, Suite::OfficialCli],
     },
 ];
