@@ -2,7 +2,7 @@
 
 ## Status
 
-Accepted
+Accepted, amended by ADR-0012
 
 ## Context
 
@@ -28,8 +28,8 @@ No generic project-storage, gathering, or ignore-policy interface is introduced.
 Source gatherers submit their exact selected path-and-byte entries to
 `ProjectSnapshotAssembly`, which remains the one shared core seam. Assembly owns
 canonical root-relative paths, duplicate rejection, the non-overridable `.typk`
-exclusion, entrypoint presence, exact owned bytes, canonical ordering, and
-snapshot budgets. It does not receive or reapply source-selection policy.
+exclusion, entrypoint presence, exact owned bytes, and canonical ordering. It
+does not receive or reapply source-selection policy.
 
 Source gatherers should complete their structural survey and reject detectable
 selection failures before ordinary content reads. Their storage operations,
@@ -37,6 +37,10 @@ pagination, concurrency, acquisition limits, and operational errors remain
 source-specific. A gatherer may cache bytes acquired while preparing selection,
 such as root `.typkignore` bytes, and later move those exact bytes into the
 selected entries without a second source read.
+
+ADR-0012 removes the separate Project Snapshot assembly budget. Source-specific
+gatherers still bound traversal and reads before handing already-owned entries to
+assembly; those operational ceilings do not become Project Snapshot invariants.
 
 This decision amends ADR-0008's assignment of Project Ignore Policy matching to
 the core and its guarantee that Project Snapshot membership is independent of
