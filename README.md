@@ -113,7 +113,7 @@ delete paths or authorize undeclared packages and fonts.
 
 All observed package dependencies are vendored into the pack by default.
 With `--no-vendor-packages`, each dependency is instead recorded as an exact
-package specification and Complete Package Tree identity. Compilation acquires
+package specification and Package Tree identity. Compilation acquires
 the whole tree from the configured package directory, cache, or Typst Universe,
 verifies it before invoking Typst, and exposes only the verified paths and bytes.
 Undeclared package locations and ambient caches cannot satisfy imports.
@@ -139,12 +139,13 @@ like any other scanned container. Mind font licenses when redistributing
 embedded containers; licensing and acquisition metadata do not change font
 selection.
 
-The Candidate Font Catalog creation selects from is one explicit ordered
-sequence: `CandidateFontCatalog` holds `CandidateFontContainer`s, each carrying
-its own embedded-or-external `FontDisposition`, so one pack can embed a
-redistributable container and reference a restrictively licensed one. Faces are
-expanded in container-local index order, catalog order decides which container
-wins a family, and nothing joins a catalog implicitly:
+The Font Catalog creation selects from is one explicit ordered sequence:
+`FontContainer` validates exact bytes before `FontCatalog` pairs each position
+with an embedded-or-external `FontDisposition`, so one pack can embed a
+redistributable container and reference a restrictively licensed one. Repeated
+container identities remain distinct positions. Faces are expanded in
+container-local index order, catalog order decides which container wins a
+family, and nothing joins a catalog implicitly:
 `typst_embedded_font_containers` yields Typst's own containers for a caller to
 splice in where it wants. `Packer` composes its catalog from system fonts,
 Typst's embedded fonts, and `--font-path` directories, in that order.
@@ -218,6 +219,13 @@ assert_eq!(artifact.source_page_number(), None);
 let pdf = artifact.bytes();
 ```
 
+Large immutable project, package, font, and compilation artifact payloads are
+shared across semantic clones and projections. Their public accessors expose
+borrowed byte slices without exposing the private sharing representation. Pack
+Archive bytes are the exception: `Pack::to_bytes()` returns the distinct,
+non-cloneable `PackArchiveBytes` value so exact retry material has explicit
+unique ownership.
+
 `PackOutcome::warnings` retains warnings from the representative creation
 compile. Inspect `PackOutcome::pack` for authoritative project files, package
 requirements and their embedding disposition, and the Pack Font Catalog; that
@@ -234,7 +242,8 @@ summary and canonical Compilation Access Trace.
 
 For PNG and SVG, `source_page_number()` identifies each artifact independently
 of its collection position. `bytes()` borrows the artifact bytes and
-`into_bytes()` extracts them without cloning.
+`into_bytes()` extracts an owned vector, reusing its buffer when the artifact is
+uniquely owned and materializing a copy when another semantic clone shares it.
 
 Packs can also be assembled fully in memory, with no file system involved, which
 is what a web editor wants:
@@ -253,25 +262,35 @@ Building a pack by hand gives up the representative compile that discovers
 dependencies. `create` keeps it and still needs no crate feature: it takes the
 bytes a caller already holds, runs one representative Typst request, and issues
 the pack it selected. It acquires nothing itself and consults no wall clock, so
-the creation timestamp fixing that request's Document Time is required:
+the creation timestamp fixing that request's Document Time is required. Project
+Snapshot assembly accepts entries already selected by the caller; source-specific
+ignore policy and resource limits belong to the gatherer that obtains them:
 
 ```rust,ignore
 use typst_pack::{
-    create, CandidateFontCatalog, CandidateFontContainer, CreationRequest,
-    ProjectIgnorePolicy, ProjectSnapshotAssembly, ResolvedPackageTree,
+    create, CreationRequest, FontCatalog, FontCatalogEntry, FontContainer,
+    FontDisposition, PackageCatalog, PackageDisposition, PackageTree,
+    ProjectSnapshotAssembly,
 };
 
-let policy = ProjectIgnorePolicy::from_ignore_file(ignore_file_bytes)?;
-let project = ProjectSnapshotAssembly::new("main.typ", &policy).assemble([
+let project = ProjectSnapshotAssembly::new("main.typ").assemble([
     ("main.typ", source_text.as_bytes().to_vec()),
     ("figure.png", image_bytes),
 ])?;
 
+let packages = PackageCatalog::from_entries([(
+    spec,
+    PackageTree::from_owned_entries(package_files)?,
+    PackageDisposition::Embedded,
+)])?;
 let request = CreationRequest::new(project, creation_timestamp)
-    .font_catalog(CandidateFontCatalog::from_iter([
-        CandidateFontContainer::embedded(font_bytes),
+    .font_catalog(FontCatalog::from_iter([
+        FontCatalogEntry::new(
+            FontContainer::new(font_bytes)?,
+            FontDisposition::Embedded,
+        ),
     ]))
-    .package_tree(ResolvedPackageTree::embedded(spec, package_files));
+    .package_catalog(packages);
 let issued = create(&request)?.into_issued().expect("no package is missing");
 let bytes = issued.pack.to_bytes()?;
 ```
@@ -283,8 +302,8 @@ Package Requirements and Font Requirements record. `IssuedPack::warnings`
 retains the representative compile's warnings, and a representative request that
 does not compile fails creation instead of issuing an incomplete pack. The
 request is an owned value the core retains nothing of, so it can be run again.
-Obtaining its inputs is Creation Preparation, which belongs to the caller;
-`Packer` is the reference filesystem Creation Adapter, implemented over
+Obtaining its inputs belongs to Pack Assembly;
+`Packer` is the reference filesystem Pack Assembler, implemented over
 `create` like any other adapter.
 
 Establishing that the acquired bytes represent one consistent source state is
@@ -313,19 +332,22 @@ failure. The caller resolves it however its host allows and invokes creation
 again with the same request values and the tree added:
 
 ```rust,ignore
-use typst_pack::{create, CreationOutcome, CreationRequest, ResolvedPackageTree};
+use typst_pack::{
+    create, CreationOutcome, CreationRequest, PackageCatalog, PackageDisposition,
+};
 
-let mut resolved: Vec<ResolvedPackageTree> = Vec::new();
+let mut catalog = PackageCatalog::new();
 let issued = loop {
     let request = CreationRequest::new(project.clone(), creation_timestamp)
-        .package_trees(resolved.iter().cloned());
+        .package_catalog(catalog.clone());
     match create(&request)? {
         CreationOutcome::Issued(issued) => break issued,
         // Acquire each reported specification however this host allows: from a
         // cache, over an asynchronous transport, or in a later request.
         CreationOutcome::MissingPackages(missing) => {
             for spec in missing {
-                resolved.push(acquire_tree(&spec)?);
+                let tree = acquire_tree(&spec)?;
+                catalog.insert(spec, tree, PackageDisposition::Embedded)?;
             }
         }
     }
@@ -338,10 +360,9 @@ import specification always does. Because a failed import ends module
 evaluation, one round reports what that round reached, and a project needing
 several packages completes over repeated invocation. Nothing is retained
 between invocations, so a resume step is valid across a host request boundary
-and nothing in the core is `async`. A tree that does not declare the
-specification it was supplied under is the distinct
-`CreationError::MismatchedPackageTree` failure, so a loop that would otherwise
-never progress gets a diagnosis instead.
+and nothing in the core is `async`. `PackageCatalog::insert` eagerly rejects a
+tree whose `typst.toml` does not declare the claimed name and version, so a loop
+that would otherwise never progress gets a diagnosis before creation runs.
 
 A specification the caller cannot resolve ends the loop through
 `CreationRequest::unresolvable_package`, which takes the caller's own
@@ -361,7 +382,7 @@ own transport — including one whose only network access is asynchronous:
 
 ```rust,ignore
 use typst_pack::{
-    expand_package_archive, package_archive_url, PackageDisposition, PackageExpansionCeiling,
+    expand_package_archive, package_archive_url, PackageExpansionCeiling,
 };
 
 let url = package_archive_url(&spec)?;
@@ -370,7 +391,6 @@ let archive = fetch(&url)?;
 let tree = expand_package_archive(
     spec,
     &archive,
-    PackageDisposition::Embedded,
     // Required, so that the bound is always a deliberate choice.
     PackageExpansionCeiling { max_bytes: 32 * 1024 * 1024 },
 )?;
@@ -424,7 +444,18 @@ fn arbitrary_world(world: &dyn typst::World) {
 }
 ```
 
-Typst 0.15.0 owns language evaluation, layout, official diagnostics, document
+Destinations remain adapter facts rather than semantic compilation request
+values:
+
+```compile_fail
+use typst_pack::PackCompilationRequest;
+
+fn add_destination(request: PackCompilationRequest) {
+    let _ = request.destination("output.pdf");
+}
+```
+
+Typst 0.15.1 owns language evaluation, layout, official diagnostics, document
 structures, and PDF, PNG, SVG, and HTML export behavior. typst-pack owns Pack
 creation and validity, the fixed set of contained project paths, exact package
 and font verification, Pack Overrides, request identities and reports, and later
@@ -462,12 +493,12 @@ compatibility aliases:
   `UnixTimestamp` replace the former date/timestamp fields and setters.
 - Read representative-compile warnings from `PackOutcome::warnings`; the
   one-field `PackReport` is removed.
-- Pack Manifest fields and `PackFont` fields are read-only. Use accessors such
-  as `manifest.project()`, `project.entrypoint()`, `font.manifest()`, and
-  `font.data()`. Package declarations are reached only through
-  `manifest.packages().vendored()` and `.unvendored()`.
-- Shared Pack consistency failures are available as `PackInvariantError`,
-  wrapped by `PackBuildError::Invariant` or `PackReadError::Invariant`.
+- Pack inspection exposes domain values rather than Pack Manifest records. Use
+  `pack.entrypoint()`, `pack.metadata()`, `pack.package_requirements()`,
+  `pack.font_catalog()`, and `font.identity()`/`font.data()`/`font.info()`.
+- Shared Pack consistency failures are aggregated in canonical domain order as
+  `PackInvariantIssue` values exposed by `PackInvariantError::issues()`. The
+  error is wrapped by `PackBuildError::Invariant` or `PackReadError::Invariant`.
 - Replace `OutputFormat` plus `CompileOptions` request construction with the
   corresponding `CompilationOutputSpecification` variant and format-specific
   structure. PDF creation time is configured through
@@ -505,11 +536,13 @@ featureless core and remain available on wasm targets.
 
 ## Pack format
 
-A pack is a Zip archive (Deflate), conventionally named `*.typk`, with this
+A pack is a Zip archive, conventionally named `*.typk`, with this semantic
+layout. The encoder uses Deflate and emits the manifest first; readers also
+accept interoperable ZIP encodings and member orderings that preserve the same
 layout:
 
 ```text
-typst-pack.toml                     manifest (always first)
+typst-pack.toml                     manifest
 project/<path>                      project files, root-relative
 packages/<ns>/<name>/<version>/<path>   vendored package files
 fonts/<file>                        embedded font files
@@ -550,10 +583,16 @@ name = "Quarterly report"
 authors = ["Jane Doe"]
 ```
 
-Readers ignore unknown top-level archive entries and reject manifests whose
-`format-version` is not the exact supported version. Paths inside the archive
-are validated, root-relative virtual paths. Extraction rejects existing
-symlinked entries within the selected destination before writing.
+Readers ignore safe unknown regular-file and directory entries and reject
+manifests whose `format-version` is not the exact supported version. Raw member
+names must be well-formed for their declared ZIP encoding, member paths must be
+safe root-relative virtual paths, and non-directory members must be regular
+files. Unknown entries are not Pack semantics and may disappear after decoding
+and re-encoding. Pack Archive compatibility is semantic; exact ZIP bytes,
+compression details, timestamps, and member ordering are not preserved.
+
+Extraction rejects existing symlinked entries within the selected destination
+before writing.
 
 The format version remains 1 and is explicitly unstable: readers reject old
 discovery, Resource Slot, `external-resources`, and `packages.external` fields

@@ -1,5 +1,5 @@
-//! The package half of Creation Preparation for the reference Creation
-//! Adapter, the filesystem one.
+//! The package acquisition half of Pack Assembly for the reference filesystem
+//! Pack Assembler.
 //!
 //! Acquisition is resume-driven: the core reports the exact specifications its
 //! representative request read and was not given, and the adapter obtains each
@@ -15,11 +15,11 @@ use typst::foundations::Bytes;
 use typst::syntax::package::PackageSpec;
 use typst_kit::packages::SystemPackages;
 
-use crate::creation::{PackageDisposition, ResolvedPackageTree};
+use crate::package_catalog::{PackageTree, PackageTreeError};
 use crate::packer::PackerError;
 use crate::world::read_complete_package_tree;
 
-/// The Complete Package Trees the adapter acquired for one creation, and the
+/// The Package Trees the adapter acquired for one creation, and the
 /// Package Authority it acquires them from.
 ///
 /// It is the adapter's own record of what it supplied: creation resumes over
@@ -40,7 +40,7 @@ impl AcquiredPackages {
         }
     }
 
-    /// Obtains the Complete Package Tree for one reported specification and
+    /// Obtains the Package Tree for one reported specification and
     /// records it as creation evidence.
     ///
     /// The whole tree is read, not only the files the representative request
@@ -49,16 +49,16 @@ impl AcquiredPackages {
     /// Failure keeps the Package Authority's own typed reason, because that
     /// reason is what creation carries back to the import that needed the
     /// package.
-    pub(crate) fn acquire(
-        &self,
-        spec: &PackageSpec,
-        disposition: PackageDisposition,
-    ) -> Result<ResolvedPackageTree, PackageError> {
-        let root = self.authority.obtain(spec)?;
+    pub(crate) fn acquire(&self, spec: &PackageSpec) -> Result<PackageTree, AcquirePackageError> {
+        let root = self
+            .authority
+            .obtain(spec)
+            .map_err(AcquirePackageError::Authority)?;
         // A tree the authority resolved but this adapter cannot read is its
         // own failure, not the authority's verdict on the specification.
-        let files = read_complete_package_tree(root.path())
-            .map_err(|message| PackageError::Other(Some(message.into())))?;
+        let files = read_complete_package_tree(root.path()).map_err(|message| {
+            AcquirePackageError::Authority(PackageError::Other(Some(message.into())))
+        })?;
 
         self.trees
             .lock()
@@ -68,11 +68,7 @@ impl AcquiredPackages {
                 root: root.path().to_owned(),
                 files: files.clone(),
             });
-        Ok(ResolvedPackageTree::from_entries(
-            spec.clone(),
-            files,
-            disposition,
-        ))
+        PackageTree::from_typst_entries(files).map_err(AcquirePackageError::InvalidTree)
     }
 
     /// The exact bytes acquired for one package file, which is all creation
@@ -109,7 +105,13 @@ impl AcquiredPackages {
     }
 }
 
-/// One Complete Package Tree the adapter read, and the root it read it from.
+/// A Package Authority failure or invalid bytes returned by that authority.
+pub(crate) enum AcquirePackageError {
+    Authority(PackageError),
+    InvalidTree(PackageTreeError),
+}
+
+/// One Package Tree the adapter read, and the root it read it from.
 struct AcquiredPackageTree {
     spec: PackageSpec,
     root: PathBuf,

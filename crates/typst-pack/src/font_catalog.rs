@@ -1,16 +1,18 @@
-//! The Candidate Font Catalog Pack Creation selects faces from.
+//! Validated Font Containers and the ordered Font Catalog.
 
+#[cfg(feature = "embedded-fonts")]
 use typst::foundations::Bytes;
-use typst::text::{Font, FontBook};
+use typst::text::{Font, FontBook, FontInfo};
 use typst::utils::LazyHash;
 use typst_kit::fonts::FontStore;
 
 use crate::pack::{FontContainerIdentity, FontFaceIdentity};
+use crate::payload::SharedBytes;
 
 /// Whether a Font Container's bytes travel inside the Pack or must be
 /// fulfilled externally when the Pack is compiled.
 ///
-/// A caller declares the disposition of every candidate container; it is never
+/// A caller declares the disposition of every catalog position; it is never
 /// inferred from container bytes, so identical inputs produce identical Packs
 /// across build configurations.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -38,132 +40,212 @@ impl FontDisposition {
     }
 }
 
-/// One candidate Font Container: the exact bytes of one standalone font file
-/// or multi-face collection, and the disposition it carries into the Pack.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CandidateFontContainer {
-    data: Bytes,
-    disposition: FontDisposition,
+/// A failure to construct a validated Font Container.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum FontContainerError {
+    /// The exact bytes contain no face the embedded Typst engine can read.
+    #[error("font container has no readable face")]
+    NoReadableFace,
 }
 
-impl CandidateFontContainer {
-    /// Offers the exact container bytes under the given disposition.
-    pub fn new(data: impl Into<Vec<u8>>, disposition: FontDisposition) -> Self {
-        Self::from_bytes(Bytes::new(data.into()), disposition)
+/// The exact validated bytes of one standalone font file or multi-face
+/// collection.
+#[derive(Clone, Debug)]
+pub struct FontContainer {
+    data: SharedBytes,
+    identity: FontContainerIdentity,
+    faces: Vec<FontContainerFace>,
+}
+
+impl FontContainer {
+    /// Validates exact owned container bytes.
+    pub fn new(data: impl Into<Vec<u8>>) -> Result<Self, FontContainerError> {
+        Self::from_shared(SharedBytes::new(data.into()))
     }
 
-    pub(crate) fn from_bytes(data: Bytes, disposition: FontDisposition) -> Self {
-        Self { data, disposition }
+    #[cfg(feature = "embedded-fonts")]
+    fn from_bytes(data: Bytes) -> Result<Self, FontContainerError> {
+        Self::from_shared(SharedBytes::from_typst(data))
     }
 
-    /// Offers a container whose bytes are stored in the Pack.
-    pub fn embedded(data: impl Into<Vec<u8>>) -> Self {
-        Self::new(data, FontDisposition::Embedded)
-    }
-
-    /// Offers a container that must be fulfilled externally.
-    ///
-    /// Mind font licenses: embedding redistributes the container bytes, while
-    /// an external requirement only declares them.
-    pub fn external(data: impl Into<Vec<u8>>) -> Self {
-        Self::new(data, FontDisposition::External)
+    pub(crate) fn from_shared(data: SharedBytes) -> Result<Self, FontContainerError> {
+        let identity = FontContainerIdentity::from_bytes(data.as_slice());
+        let faces = Font::iter(data.to_typst())
+            .map(|font| FontContainerFace {
+                identity: FontFaceIdentity::new(identity, font.index()),
+                font,
+            })
+            .collect::<Vec<_>>();
+        if faces.is_empty() {
+            return Err(FontContainerError::NoReadableFace);
+        }
+        Ok(Self {
+            data,
+            identity,
+            faces,
+        })
     }
 
     /// The exact container bytes.
-    pub fn data(&self) -> &Bytes {
-        &self.data
+    pub fn data(&self) -> &[u8] {
+        self.data.as_slice()
     }
 
     /// The Canonical Identity of the container bytes.
     pub fn identity(&self) -> FontContainerIdentity {
-        FontContainerIdentity::from_bytes(&self.data)
+        self.identity
     }
 
-    /// Whether the container travels inside the Pack.
+    /// The readable faces in container-local index order.
+    pub fn faces(&self) -> &[FontContainerFace] {
+        &self.faces
+    }
+}
+
+impl PartialEq for FontContainer {
+    fn eq(&self, other: &Self) -> bool {
+        self.data == other.data
+    }
+}
+
+impl Eq for FontContainer {}
+
+/// One readable face of a validated Font Container.
+#[derive(Clone, Debug)]
+pub struct FontContainerFace {
+    identity: FontFaceIdentity,
+    font: Font,
+}
+
+impl FontContainerFace {
+    /// The exact container and container-local face index.
+    pub fn identity(&self) -> FontFaceIdentity {
+        self.identity
+    }
+
+    /// The shared exact container bytes this face was parsed from.
+    pub fn data(&self) -> &[u8] {
+        self.font.data().as_slice()
+    }
+
+    /// Official selection metadata derived from the verified container bytes.
+    pub fn info(&self) -> &FontInfo {
+        self.font.info()
+    }
+}
+
+impl PartialEq for FontContainerFace {
+    fn eq(&self, other: &Self) -> bool {
+        self.identity == other.identity && self.data() == other.data()
+    }
+}
+
+impl Eq for FontContainerFace {}
+
+/// One position in a Font Catalog.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FontCatalogEntry {
+    container: FontContainer,
+    disposition: FontDisposition,
+}
+
+impl FontCatalogEntry {
+    /// Pairs one validated container with its explicit disposition.
+    pub fn new(container: FontContainer, disposition: FontDisposition) -> Self {
+        Self {
+            container,
+            disposition,
+        }
+    }
+
+    /// The validated Font Container at this position.
+    pub fn container(&self) -> &FontContainer {
+        &self.container
+    }
+
+    /// Whether this position embeds or externally fulfills its container.
     pub fn disposition(&self) -> FontDisposition {
         self.disposition
     }
 }
 
-/// The Candidate Font Catalog: exactly the Font Containers Pack Creation may
-/// select faces from, in the order the caller chose.
+/// Exactly the Font Containers Pack Creation may select faces from, in the
+/// order the caller chose.
 ///
 /// Face selection is attributable to that order alone. Faces are expanded in
 /// container-local index order, and nothing joins a supplied catalog
 /// implicitly, so Pack contents are not a function of which crate features a
 /// build enabled or which font sources a host offers.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
-pub struct CandidateFontCatalog {
-    containers: Vec<CandidateFontContainer>,
+pub struct FontCatalog {
+    entries: Vec<FontCatalogEntry>,
 }
 
-impl CandidateFontCatalog {
-    /// An empty catalog, offering no candidate face at all.
+impl FontCatalog {
+    /// An empty catalog, offering no face at all.
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// Appends one candidate container after every container already offered.
-    pub fn push(&mut self, container: CandidateFontContainer) {
-        self.containers.push(container);
+    /// Appends one explicitly disposed container after every existing entry.
+    pub fn push(&mut self, entry: FontCatalogEntry) {
+        self.entries.push(entry);
     }
 
-    /// The candidate containers, in catalog order.
-    pub fn containers(&self) -> &[CandidateFontContainer] {
-        &self.containers
+    /// The entries in insertion order.
+    pub fn entries(&self) -> &[FontCatalogEntry] {
+        &self.entries
     }
 
-    /// The candidate faces this catalog offers, in catalog order: every face
+    /// The faces this catalog offers, in catalog order: every face
     /// of the first container in container-local index order, then those of
     /// the second, and so on.
-    ///
-    /// Faces a container's bytes do not yield are not offered, and a container
-    /// that holds no readable face offers nothing.
-    pub fn faces(&self) -> Vec<CandidateFontFace> {
+    pub fn faces(&self) -> Vec<FontCatalogFace> {
         self.expand().faces
     }
 
     /// Expands the catalog into the faces creation compiles against.
-    pub(crate) fn expand(&self) -> CandidateFonts {
+    pub(crate) fn expand(&self) -> CatalogFonts {
         let mut store = FontStore::new();
         let mut faces = Vec::new();
-        for container in &self.containers {
-            let identity = container.identity();
-            for font in Font::iter(container.data.clone()) {
+        for entry in &self.entries {
+            for face in entry.container.faces() {
+                let font = face.font.clone();
                 let info = font.info().clone();
-                faces.push(CandidateFontFace {
-                    identity: FontFaceIdentity::new(identity, font.index()),
-                    disposition: container.disposition,
+                faces.push(FontCatalogFace {
+                    identity: face.identity(),
+                    disposition: entry.disposition,
                 });
                 store.push((font, info));
             }
         }
-        CandidateFonts { store, faces }
+        CatalogFonts { store, faces }
     }
 }
 
-impl Extend<CandidateFontContainer> for CandidateFontCatalog {
-    fn extend<T: IntoIterator<Item = CandidateFontContainer>>(&mut self, containers: T) {
-        self.containers.extend(containers);
+impl Extend<FontCatalogEntry> for FontCatalog {
+    fn extend<T: IntoIterator<Item = FontCatalogEntry>>(&mut self, entries: T) {
+        self.entries.extend(entries);
     }
 }
 
-impl FromIterator<CandidateFontContainer> for CandidateFontCatalog {
-    fn from_iter<T: IntoIterator<Item = CandidateFontContainer>>(containers: T) -> Self {
-        Self {
-            containers: containers.into_iter().collect(),
-        }
+impl FromIterator<FontCatalogEntry> for FontCatalog {
+    fn from_iter<T: IntoIterator<Item = FontCatalogEntry>>(entries: T) -> Self {
+        let mut catalog = Self::new();
+        catalog.extend(entries);
+        catalog
     }
 }
 
-/// One candidate face a catalog offers to Pack Creation.
+/// One face a catalog offers to Pack Creation at one explicit position.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct CandidateFontFace {
+pub struct FontCatalogFace {
     identity: FontFaceIdentity,
     disposition: FontDisposition,
 }
 
-impl CandidateFontFace {
+impl FontCatalogFace {
     /// The exact container and container-local face index.
     pub fn identity(&self) -> FontFaceIdentity {
         self.identity
@@ -175,16 +257,15 @@ impl CandidateFontFace {
     }
 }
 
-/// The compile-time projection of one Candidate Font Catalog: the candidate
-/// faces in catalog order, indexed exactly as the representative compile sees
-/// them.
-pub(crate) struct CandidateFonts {
+/// The compile-time projection of one Font Catalog, indexed exactly as the
+/// representative compile sees it.
+pub(crate) struct CatalogFonts {
     store: FontStore,
-    faces: Vec<CandidateFontFace>,
+    faces: Vec<FontCatalogFace>,
 }
 
-// Only creation compiles against candidate faces.
-impl CandidateFonts {
+// Only creation compiles against catalog faces.
+impl CatalogFonts {
     /// The selection metadata official Typst chooses faces from.
     pub(crate) fn book(&self) -> &LazyHash<FontBook> {
         self.store.book()
@@ -198,19 +279,17 @@ impl CandidateFonts {
     /// The disposition carried by the container of the face at the given
     /// catalog position.
     pub(crate) fn disposition(&self, index: usize) -> Option<FontDisposition> {
-        self.faces.get(index).map(CandidateFontFace::disposition)
+        self.faces.get(index).map(FontCatalogFace::disposition)
     }
 }
 
-/// Typst's embedded fonts as candidate containers, in Typst's own order.
+/// Typst's embedded fonts as validated containers, in Typst's own order.
 ///
 /// A caller splices them into its catalog at the position it wants; they never
 /// join a catalog implicitly. Their disposition is the caller's choice, like
 /// that of any other container.
 #[cfg(feature = "embedded-fonts")]
-pub fn typst_embedded_font_containers(
-    disposition: FontDisposition,
-) -> impl Iterator<Item = CandidateFontContainer> {
+pub fn typst_embedded_font_containers() -> impl Iterator<Item = FontContainer> {
     // Typst exposes its embedded fonts one face at a time. Every face of one
     // container carries that container's exact bytes, so first-seen order over
     // the faces recovers the containers Typst ships, in Typst's own order.
@@ -222,5 +301,5 @@ pub fn typst_embedded_font_containers(
     }
     containers
         .into_iter()
-        .map(move |data| CandidateFontContainer::from_bytes(data, disposition))
+        .map(|data| FontContainer::from_bytes(data).expect("embedded Font Container is readable"))
 }

@@ -381,18 +381,18 @@ impl FileLoader for PackLoader {
                 .project_overrides
                 .get(path)
                 .cloned()
-                .or_else(|| self.pack.file(path).cloned())
+                .or_else(|| self.pack.shared_file(path).map(|data| data.to_typst()))
                 .ok_or_else(|| FileError::NotFound(PathBuf::from(path))),
             VirtualRoot::Package(spec) => {
                 if self.pack.has_package(spec) {
                     self.pack
-                        .package_file(spec, path)
-                        .cloned()
+                        .shared_package_file(spec, path)
+                        .map(|data| data.to_typst())
                         .ok_or_else(|| FileError::NotFound(PathBuf::from(path)))
                 } else if let Some(package) = self.exact_packages.get(&spec.to_string()) {
                     package
                         .file(path)
-                        .cloned()
+                        .map(|data| data.to_typst())
                         .ok_or_else(|| FileError::NotFound(PathBuf::from(path)))
                 } else {
                     Err(FileError::Other(Some(

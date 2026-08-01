@@ -5,11 +5,9 @@
 //! needs from it. Each suite uses its own subset, hence the allowance below.
 #![allow(dead_code)]
 
-use typst_pack::FontDisposition;
-
 /// The exact bytes of the first Font Container Typst ships.
 pub fn typst_container() -> Vec<u8> {
-    typst_pack::typst_embedded_font_containers(FontDisposition::External)
+    typst_pack::typst_embedded_font_containers()
         .next()
         .expect("Typst ships an embedded font container")
         .data()

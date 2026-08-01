@@ -87,10 +87,10 @@ different source-specific means.
 One stabilized, source-selected set of project files with one entrypoint among
 them, represented by canonical root-relative path and exact bytes. Project
 Snapshot assembly rejects invalid or duplicate paths, excludes every `.typk`
-path by a non-overridable built-in rule, requires the entrypoint, and may bound
-the result by file count and total byte size. Source selection policy is not
-retained and does not contribute to Pack Identity except through the selected
-paths and bytes.
+path by a non-overridable built-in rule, and requires the entrypoint. A source
+gatherer may apply operational resource ceilings before assembly; those ceilings
+are not retained and do not contribute to Pack Identity. Source selection policy
+does not contribute to Pack Identity except through the selected paths and bytes.
 
 **Pack Identity**:
 The content identity of a Pack's canonical logical compilation state: fixed
@@ -445,3 +445,45 @@ identities, and exact dependency bytes are fixed, compilation does not consult
 ambient project files, package paths, fonts, environment variables, wall-clock
 time, or network. Availability of explicitly external dependencies may still
 produce a Compilation Operation Outcome before a result exists.
+
+## Lifecycle Failures and Publication Evidence
+
+**Lifecycle Error**:
+A typed failure of construction, transformation, or adapter operation for which
+no accepted semantic outcome exists. Each operation owns its error vocabulary;
+there is no lifecycle-wide error hierarchy.
+
+**Lifecycle Rejection**:
+The complete deterministic refusal of a request before semantic acceptance. A
+rejection retains every independently detectable Lifecycle Issue in canonical
+order and any safe request inventory needed to explain them.
+
+**Lifecycle Issue**:
+One independently detectable typed fact within a Lifecycle Error, Lifecycle
+Rejection, or accepted operational outcome. Issue order follows semantic role
+and canonical key rather than traversal or backend discovery order.
+
+**Lifecycle Outcome**:
+A normal domain state produced after an operation accepts its input, including a
+resumable state that does not yet contain the requested semantic value. An
+outcome is not a Lifecycle Error.
+
+**Lifecycle Report**:
+The immutable terminal evidence for an accepted operation, including its
+semantic result or operational outcome and the safe context needed to interpret
+it.
+
+**Publication Receipt**:
+Workflow-specific evidence that a destination adapter successfully completed one
+publication attempt. Receipts are operational evidence and do not contribute to
+Pack, Compilation, or Compilation Result identity.
+
+**Publication Progress**:
+Workflow-specific ordered evidence of destination effects completed before an
+adapter error. It states commit certainty and retry-relevant residue rather than
+requiring callers to infer effects by inspecting the destination.
+
+**Commit Certainty**:
+The adapter's knowledge that one attempted destination effect was Not Committed,
+Committed, or Indeterminate. Indeterminate means observation cannot prove either
+result; it never silently weakens a requested publication policy.

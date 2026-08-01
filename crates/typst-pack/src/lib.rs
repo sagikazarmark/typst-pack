@@ -22,7 +22,9 @@ mod manifest;
 mod pack;
 #[cfg(feature = "package-acquisition")]
 mod package_acquisition;
+mod package_catalog;
 mod packer;
+mod payload;
 mod project_snapshot;
 mod world;
 mod world_trace;
@@ -48,16 +50,14 @@ pub use compile::{
     RequestValueOrigin, SvgOutputSpecification, TracepointKind, TypstInputsInventory, TypstTarget,
     compile, parse_page_selection,
 };
-pub use creation::{
-    CreationError, CreationOutcome, CreationRequest, IssuedPack, PackageDisposition,
-    ResolvedPackageTree, create,
-};
+pub use creation::{CreationError, CreationOutcome, CreationRequest, IssuedPack, create};
 #[cfg(feature = "fs")]
 pub use extract::{ExtractError, ExtractOptions, ExtractReport, extract};
 #[cfg(feature = "embedded-fonts")]
 pub use font_catalog::typst_embedded_font_containers;
 pub use font_catalog::{
-    CandidateFontCatalog, CandidateFontContainer, CandidateFontFace, FontDisposition,
+    FontCatalog, FontCatalogEntry, FontCatalogFace, FontContainer, FontContainerError,
+    FontContainerFace, FontDisposition,
 };
 pub use ignore_policy::{IGNORE_FILE, ProjectIgnorePolicy, ProjectIgnorePolicyError};
 pub use manifest::{
@@ -67,19 +67,22 @@ pub use manifest::{
 pub use pack::{
     FILE_EXTENSION, FontCatalogError, FontContainerIdentity, FontFaceIdentity, FontRequirement,
     Pack, PackBuildError, PackBuilder, PackFont, PackFontCatalogFace, PackIdentity,
-    PackInvariantError, PackPathRole, PackReadError, PackWriteError, PackageRequirement,
-    PackageTreeError, PackageTreeIdentity,
+    PackInvariantError, PackInvariantIssue, PackPathRole, PackReadError, PackWriteError,
+    PackageRequirement, PackageTreeIdentity,
 };
 #[cfg(feature = "package-acquisition")]
 pub use package_acquisition::{
     PACKAGE_REGISTRY_NAMESPACE, PACKAGE_REGISTRY_URL, PackageAcquisitionError,
     PackageExpansionCeiling, expand_package_archive, package_archive_url,
 };
+pub use package_catalog::{
+    PackageCatalog, PackageCatalogEntry, PackageCatalogError, PackageCatalogIssue,
+    PackageDisposition, PackageTree, PackageTreeError, PackageTreeIssue,
+};
 #[cfg(feature = "fs")]
 pub use packer::{CreationDiagnosticContext, PackOutcome, Packer, PackerError};
-pub use project_snapshot::{
-    ProjectSnapshot, ProjectSnapshotAssembly, ProjectSnapshotBudget, ProjectSnapshotError,
-};
+pub use payload::PackArchiveBytes;
+pub use project_snapshot::{ProjectSnapshot, ProjectSnapshotAssembly, ProjectSnapshotError};
 #[cfg(feature = "fs")]
 pub use world::OfflineDownloader;
 

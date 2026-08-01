@@ -1,5 +1,6 @@
 mod support;
 
+use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 
 #[cfg(feature = "embedded-fonts")]
@@ -12,13 +13,13 @@ use support::official_typst::{
 use typst::foundations::Bytes;
 use typst::foundations::{Datetime, Dict, Smart, Value};
 use typst_pack::{
-    CompilationDiagnostic, CompilationOutputSpecification, CompilationRequestIssue,
-    CompilationRequestRejection, CompilationResult, CompilationStatus, CreationTimestamp,
-    DiagnosticPhase, DiagnosticProducer, DiagnosticSeverity as PackDiagnosticSeverity,
-    DocumentTime, HtmlOutputSpecification, OutputFormat, Pack, PackCompilationRequest,
-    PackOverrideSet, PackageTreeFulfillment, PdfOutputSpecification, PngOutputSpecification,
-    RequestValueOrigin, SvgOutputSpecification, TracepointKind, compile as compile_to_report,
-    parse_page_selection,
+    CompilationAccessKind, CompilationDiagnostic, CompilationOutputSpecification,
+    CompilationRequestIssue, CompilationRequestRejection, CompilationResult, CompilationStatus,
+    CreationTimestamp, DiagnosticPhase, DiagnosticProducer,
+    DiagnosticSeverity as PackDiagnosticSeverity, DocumentTime, HtmlOutputSpecification,
+    OutputFormat, Pack, PackCompilationRequest, PackOverrideSet, PackageTreeFulfillment,
+    PdfOutputSpecification, PngOutputSpecification, RequestValueOrigin, SvgOutputSpecification,
+    TracepointKind, compile as compile_to_report, parse_page_selection,
 };
 use typst_pdf::PdfStandard;
 
@@ -148,10 +149,7 @@ fn exact_pack_font_catalog_matches_the_independent_oracle_and_external_fulfillme
 
     let embedded_pack = stabilized_pack(&fixture);
     assert_eq!(embedded_pack.fonts()[0].info(), &expected.font_catalog[0].0);
-    assert_eq!(
-        embedded_pack.fonts()[0].data().as_slice(),
-        expected.font_catalog[0].1
-    );
+    assert_eq!(embedded_pack.fonts()[0].data(), expected.font_catalog[0].1);
     let embedded = compile(PackCompilationRequest::new(
         embedded_pack,
         output(OutputFormat::Svg),
@@ -420,6 +418,18 @@ fn stabilized_project_round_trips_and_matches_pack_svg_compilation() {
         assert_eq!(actual.source_page_number(), Some(source_page_number));
         assert_eq!(actual.bytes(), expected.bytes);
     }
+    let actual_dependencies = actual
+        .access_trace()
+        .observations()
+        .filter(|observation| {
+            matches!(
+                observation.kind(),
+                CompilationAccessKind::Source | CompilationAccessKind::File
+            )
+        })
+        .map(|observation| observation.logical_path().to_owned())
+        .collect::<BTreeSet<_>>();
+    assert_eq!(actual_dependencies, expected.dependencies);
     assert_eq!(actual.engine_identity().implementation(), "typst");
     assert_eq!(actual.engine_identity().version(), "0.15.1");
     assert!(!actual.engine_identity().source_checksum().is_empty());
@@ -541,6 +551,61 @@ fn shared_semantic_values_drive_the_same_official_source_behavior() {
         inventory.features()[0].origin(),
         RequestValueOrigin::CallerSupplied
     );
+}
+
+#[test]
+fn independent_oracle_and_pack_compilation_ignore_conflicting_ambient_environment() {
+    const CHILD_ENV: &str = "TYPST_PACK_AMBIENT_ORACLE_CHILD";
+    const TEST_NAME: &str =
+        "independent_oracle_and_pack_compilation_ignore_conflicting_ambient_environment";
+
+    if std::env::var_os(CHILD_ENV).is_none() {
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", TEST_NAME, "--nocapture"])
+            .env(CHILD_ENV, "1")
+            .env("SOURCE_DATE_EPOCH", "0")
+            .env("TYPST_FEATURES", "bundle")
+            .env("TYPST_ROOT", "/ambient/root")
+            .env("TYPST_PACKAGE_PATH", "/ambient/packages")
+            .env("TYPST_FONT_PATHS", "/ambient/fonts")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "ambient-environment child failed:\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let fixture = Fixture::semantic_request();
+    let document_time = Datetime::from_ymd(2024, 2, 3).unwrap();
+    let inputs = string_inputs([("width", "24")]);
+    let expected = observe(
+        &fixture,
+        &ReferenceRequest {
+            inputs: inputs.clone(),
+            features: vec![typst::Feature::A11yExtras],
+            document_time: Some(document_time),
+            output: OutputRequest::Svg {
+                source_pages: vec![],
+                render_bleed: false,
+                pretty: false,
+            },
+        },
+    );
+    let actual = compile(
+        PackCompilationRequest::new(stabilized_pack(&fixture), output(OutputFormat::Svg))
+            .inputs(inputs)
+            .feature(typst::Feature::A11yExtras)
+            .document_time(DocumentTime::Fixed(document_time)),
+    )
+    .unwrap();
+
+    assert_eq!(expected.status, ObservationStatus::Accepted);
+    assert_eq!(actual.status(), CompilationStatus::Succeeded);
+    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
+    assert_eq!(actual.artifacts()[0].bytes(), expected.artifacts[0].bytes);
 }
 
 #[test]

@@ -1,7 +1,7 @@
 //! The cross-adapter creation conformance corpus.
 //!
 //! One corpus of fixtures expressed as bytes — project files, ignore files,
-//! package trees, font containers — driven through two Creation Adapters: the
+//! package trees, font containers — driven through two Pack Assemblers: the
 //! reference filesystem one over a temporary directory, and an in-memory one
 //! that assembles a Project Snapshot directly and drives the resume protocol.
 //! Both must issue a Pack with the same Pack Identity, which is the property
@@ -28,10 +28,9 @@ use std::str::FromStr;
 
 use typst::syntax::package::PackageSpec;
 use typst_pack::{
-    CandidateFontCatalog, CandidateFontContainer, CreationError, CreationOutcome, CreationRequest,
-    FontContainerIdentity, FontDisposition, IGNORE_FILE, Pack, PackageDisposition,
-    ProjectIgnorePolicy, ProjectSnapshotAssembly, ProjectSnapshotError, ResolvedPackageTree,
-    create,
+    CreationError, CreationOutcome, CreationRequest, FontCatalog, FontCatalogEntry, FontContainer,
+    FontContainerIdentity, FontDisposition, IGNORE_FILE, Pack, PackageCatalog, PackageCatalogIssue,
+    PackageDisposition, PackageTree, ProjectIgnorePolicy, ProjectSnapshotAssembly, create,
 };
 
 /// 2023-11-14T22:13:20Z, the Document Time every representative request in the
@@ -58,7 +57,7 @@ struct Fixture {
     fonts: Vec<FontFixture>,
 }
 
-/// One Complete Package Tree an adapter may resolve for the fixture.
+/// One Package Tree an adapter may resolve for the fixture.
 struct PackageFixture {
     spec: PackageSpec,
     source: PackageSource,
@@ -81,14 +80,14 @@ enum PackageSource {
     },
 }
 
-/// One candidate Font Container the fixture offers, at the catalog position it
+/// One Font Container the fixture offers, at the catalog position it
 /// is declared in.
 struct FontFixture {
     source: FontSource,
     disposition: FontDisposition,
 }
 
-/// Where a fixture's candidate Font Container comes from.
+/// Where a fixture's Font Container comes from.
 enum FontSource {
     /// Exact container bytes, which the filesystem adapter offers by scanning a
     /// directory holding them and nothing else.
@@ -162,7 +161,7 @@ impl Fixture {
         self
     }
 
-    /// Offers one candidate Font Container at the end of the catalog.
+    /// Offers one Font Container at the end of the catalog.
     fn font(mut self, source: FontSource, disposition: FontDisposition) -> Self {
         self.fonts.push(FontFixture {
             source,
@@ -181,18 +180,23 @@ impl Fixture {
         }
     }
 
-    /// The Candidate Font Catalog the fixture's containers compose, in the
-    /// order they were declared.
-    fn candidate_catalog(&self) -> CandidateFontCatalog {
-        let mut catalog = CandidateFontCatalog::new();
+    /// The Font Catalog the fixture's containers compose, in declaration order.
+    fn font_catalog(&self) -> FontCatalog {
+        let mut catalog = FontCatalog::new();
         for font in &self.fonts {
             match &font.source {
                 FontSource::Scanned(data) => {
-                    catalog.push(CandidateFontContainer::new(data.clone(), font.disposition));
+                    catalog.push(FontCatalogEntry::new(
+                        FontContainer::new(data.clone()).unwrap(),
+                        font.disposition,
+                    ));
                 }
                 #[cfg(feature = "embedded-fonts")]
                 FontSource::TypstEmbedded => {
-                    catalog.extend(typst_pack::typst_embedded_font_containers(font.disposition));
+                    catalog.extend(
+                        typst_pack::typst_embedded_font_containers()
+                            .map(|container| FontCatalogEntry::new(container, font.disposition)),
+                    );
                 }
             }
         }
@@ -201,16 +205,22 @@ impl Fixture {
 
     /// The tree an in-memory host resolves for one reported specification,
     /// standing in for whatever acquisition that host allows.
-    fn resolve(&self, spec: &PackageSpec) -> Result<ResolvedPackageTree, Failure> {
+    fn resolve(
+        &self,
+        spec: &PackageSpec,
+    ) -> Result<(PackageSpec, PackageTree, PackageDisposition), Failure> {
         let package = self
             .packages
             .iter()
             .find(|package| &package.spec == spec)
             .unwrap_or_else(|| panic!("the fixture offers no tree for `{spec}`"));
         match &package.source {
-            PackageSource::Files(files) => Ok(ResolvedPackageTree::new(
+            PackageSource::Files(files) => Ok((
                 spec.clone(),
-                files.iter().map(|(path, data)| (*path, data.clone())),
+                PackageTree::from_owned_entries(
+                    files.iter().map(|(path, data)| (*path, data.clone())),
+                )
+                .unwrap(),
                 package.disposition,
             )),
             #[cfg(feature = "package-acquisition")]
@@ -223,18 +233,14 @@ impl Fixture {
                 let bytes = self
                     .serve(&url)
                     .expect("the stand-in registry serves that URL");
-                typst_pack::expand_package_archive(
-                    spec.clone(),
-                    bytes,
-                    package.disposition,
-                    *ceiling,
-                )
-                .map_err(|error| match error {
-                    typst_pack::PackageAcquisitionError::ExpansionCeilingExceeded { .. } => {
-                        Failure::ExpansionCeiling
-                    }
-                    error => panic!("the fixture archive failed to expand: {error}"),
-                })
+                typst_pack::expand_package_archive(spec.clone(), bytes, *ceiling)
+                    .map(|tree| (spec.clone(), tree, package.disposition))
+                    .map_err(|error| match error {
+                        typst_pack::PackageAcquisitionError::ExpansionCeilingExceeded {
+                            ..
+                        } => Failure::ExpansionCeiling,
+                        error => panic!("the fixture archive failed to expand: {error}"),
+                    })
             }
         }
     }
@@ -286,10 +292,7 @@ fn package_files(name: &str, body: &str) -> Vec<(&'static str, Vec<u8>)> {
             .into_bytes(),
         ),
         ("lib.typ", body.as_bytes().to_vec()),
-        (
-            "unread.txt",
-            b"the whole Complete Package Tree travels".to_vec(),
-        ),
+        ("unread.txt", b"the whole Package Tree travels".to_vec()),
     ]
 }
 
@@ -297,7 +300,7 @@ fn package_files(name: &str, body: &str) -> Vec<(&'static str, Vec<u8>)> {
 // Adapter results
 // ---------------------------------------------------------------------------
 
-/// What one Creation Adapter produced for a fixture.
+/// What one Pack Assembler produced for a fixture.
 struct Created {
     pack: Pack,
     warnings: Vec<String>,
@@ -322,34 +325,44 @@ enum Failure {
 }
 
 // ---------------------------------------------------------------------------
-// The in-memory Creation Adapter
+// The in-memory Pack Assembler
 // ---------------------------------------------------------------------------
 
-/// Creation Preparation for a host with no filesystem: the fixture's bytes are
+/// Pack Assembly for a host with no filesystem: the fixture's bytes are
 /// already held, so the adapter derives the policy from them, assembles the
 /// Project Snapshot, composes the catalog, and drives the resume protocol.
 fn create_in_memory(fixture: &Fixture) -> Result<Created, Failure> {
     let policy = fixture.policy();
-    let snapshot = ProjectSnapshotAssembly::new(fixture.entrypoint, &policy)
+    if policy.excludes_file(fixture.entrypoint) {
+        return Err(Failure::ExcludedEntrypoint);
+    }
+    let snapshot = ProjectSnapshotAssembly::new(fixture.entrypoint)
         .assemble(
             fixture
                 .project
                 .iter()
+                .filter(|(path, _)| !policy.excludes_file(path))
                 .map(|(path, data)| (*path, data.clone())),
         )
-        .map_err(|error| match error {
-            ProjectSnapshotError::ExcludedEntrypoint(_) => Failure::ExcludedEntrypoint,
-            error => panic!("in-memory snapshot assembly failed unexpectedly: {error}"),
-        })?;
-    let catalog = fixture.candidate_catalog();
+        .unwrap();
+    let catalog = fixture.font_catalog();
 
-    let mut resolved: Vec<ResolvedPackageTree> = Vec::new();
+    let mut resolved: Vec<(PackageSpec, PackageTree, PackageDisposition)> = Vec::new();
     for _ in 0..RESUME_BOUND {
         // Every round builds the request afresh from the same values, as a
         // caller resuming across a host request boundary must.
+        let packages =
+            PackageCatalog::from_entries(resolved.iter().cloned()).map_err(|error| {
+                if error.issues().iter().any(|issue| {
+                    matches!(issue, PackageCatalogIssue::DuplicateSpecification { .. })
+                }) {
+                    panic!("the adapter resolved one specification twice");
+                }
+                Failure::UnsatisfiedPackage
+            })?;
         let request = CreationRequest::new(snapshot.clone(), CREATION_TIMESTAMP)
             .font_catalog(catalog.clone())
-            .package_trees(resolved.iter().cloned());
+            .package_catalog(packages);
         match create(&request) {
             Ok(CreationOutcome::Issued(issued)) => {
                 return Ok(Created {
@@ -367,9 +380,6 @@ fn create_in_memory(fixture: &Fixture) -> Result<Created, Failure> {
                 }
             }
             Err(CreationError::Compile { .. }) => return Err(Failure::Compile),
-            Err(CreationError::MismatchedPackageTree { .. }) => {
-                return Err(Failure::UnsatisfiedPackage);
-            }
             Err(error) => panic!("in-memory creation failed unexpectedly: {error}"),
         }
     }
@@ -386,7 +396,7 @@ fn messages(warnings: &[typst::diag::SourceDiagnostic]) -> Vec<String> {
 }
 
 // ---------------------------------------------------------------------------
-// The reference filesystem Creation Adapter
+// The reference filesystem Pack Assembler
 // ---------------------------------------------------------------------------
 
 /// How the reference adapter is configured to offer one fixture, or `None`
@@ -487,7 +497,7 @@ impl Fixture {
     }
 }
 
-/// Creation Preparation over a real project directory: the fixture's bytes are
+/// Pack Assembly over a real project directory: the fixture's bytes are
 /// written out as a project tree, a package path, and one directory per scanned
 /// font container, and the reference adapter acquires them from there.
 #[cfg(feature = "fs")]
@@ -536,7 +546,11 @@ fn create_on_filesystem(fixture: &Fixture, plan: &FilesystemPlan) -> Result<Crea
             warnings: messages(&outcome.warnings),
         }),
         Err(PackerError::IgnoredEntrypoint(_)) => Err(Failure::ExcludedEntrypoint),
-        Err(PackerError::Package { .. }) => Err(Failure::UnsatisfiedPackage),
+        Err(
+            PackerError::Package { .. }
+            | PackerError::InvalidPackageTree { .. }
+            | PackerError::InvalidPackageCatalog(_),
+        ) => Err(Failure::UnsatisfiedPackage),
         Err(PackerError::Compile { .. }) => Err(Failure::Compile),
         Err(error) => panic!("filesystem creation failed unexpectedly: {error}"),
     }
@@ -846,7 +860,7 @@ fn a_project_requiring_several_packages_completes_over_repeated_invocation() {
             ("@local/outer:1.0.0".to_owned(), true),
         ]
     );
-    // The whole Complete Package Tree travels, not only what was read.
+    // The whole Package Tree travels, not only what was read.
     assert!(
         created
             .pack
@@ -967,23 +981,6 @@ fn representative_compile_warnings_are_returned_by_every_adapter() {
 // ---------------------------------------------------------------------------
 // Fonts
 // ---------------------------------------------------------------------------
-
-#[test]
-fn a_container_offering_no_face_contributes_nothing() {
-    // The reference adapter's font scan never indexes these bytes at all, while
-    // an in-memory adapter holds a container that expands to no face. The two
-    // reach an empty catalog by different routes and must still describe the
-    // same Pack.
-    let fixture = Fixture::document("#rect(width: 10pt, height: 10pt)").font(
-        FontSource::Scanned(b"not a font".to_vec()),
-        FontDisposition::Embedded,
-    );
-
-    let created = conform(&fixture);
-
-    assert!(font_requirements(&created.pack).is_empty());
-    assert!(font_catalog(&created.pack).is_empty());
-}
 
 /// Face selection out of catalogs holding real font bytes, which Typst only
 /// ships with the `embedded-fonts` feature.

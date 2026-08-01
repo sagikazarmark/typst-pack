@@ -16,7 +16,8 @@ use typst_layout::PagedDocument;
 use typst_pdf::{PdfOptions, PdfStandard, PdfStandards, Timestamp};
 
 use crate::embedded::EmbeddedTypst;
-use crate::pack::{CompilationDependencySnapshotError, FontCatalogError, PackageTreeError};
+use crate::pack::{CompilationDependencySnapshotError, FontCatalogError, PackageFulfillmentError};
+use crate::payload::SharedBytes;
 use crate::world::PackWorld;
 use crate::world_trace::{WorldTrace, logical_path};
 use crate::{FontContainerIdentity, Pack, PackageTreeIdentity};
@@ -860,7 +861,7 @@ pub fn parse_page_selection(text: &str) -> Result<PageSelection, String> {
 #[derive(Debug, Clone)]
 pub struct CompilationArtifact {
     format: OutputFormat,
-    bytes: Vec<u8>,
+    bytes: SharedBytes,
     source_page_number: Option<NonZeroUsize>,
 }
 
@@ -1324,12 +1325,12 @@ impl CompilationArtifact {
 
     /// Borrows the artifact bytes.
     pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+        self.bytes.as_slice()
     }
 
     /// Extracts the owned artifact bytes.
     pub fn into_bytes(self) -> Vec<u8> {
-        self.bytes
+        self.bytes.into_vec()
     }
 }
 
@@ -2040,7 +2041,7 @@ fn finalize_result(mut result: CompilationResult) -> CompilationResult {
                 artifact.format,
                 artifact.source_page_number,
                 artifact.bytes.len(),
-                typst::utils::hash128(&artifact.bytes),
+                typst::utils::hash128(artifact.bytes.as_slice()),
             )
         })
         .collect::<Vec<_>>();
@@ -2057,12 +2058,12 @@ fn finalize_result(mut result: CompilationResult) -> CompilationResult {
     result
 }
 
-pub(crate) fn package_tree_outcome(error: PackageTreeError) -> CompilationOperationOutcome {
+pub(crate) fn package_tree_outcome(error: PackageFulfillmentError) -> CompilationOperationOutcome {
     match error {
-        PackageTreeError::Missing { packages } => {
+        PackageFulfillmentError::Missing { packages } => {
             CompilationOperationOutcome::MissingExternalPackageFulfillment { packages }
         }
-        PackageTreeError::Mismatched {
+        PackageFulfillmentError::Mismatched {
             spec,
             expected,
             actual,
@@ -2079,7 +2080,7 @@ pub(crate) fn package_tree_outcome(error: PackageTreeError) -> CompilationOperat
             expected_byte_length,
             actual_byte_length,
         },
-        PackageTreeError::Malformed {
+        PackageFulfillmentError::Malformed {
             spec,
             path,
             message,
@@ -2268,7 +2269,7 @@ pub(crate) fn compile_with_default_pdf_timestamp(
         return Ok(CompilationOutput {
             artifacts: vec![CompilationArtifact {
                 format: OutputFormat::Html,
-                bytes,
+                bytes: SharedBytes::new(bytes),
                 source_page_number: None,
             }],
             warnings,
@@ -2335,7 +2336,7 @@ pub(crate) fn compile_with_default_pdf_timestamp(
                 })?;
                 vec![CompilationArtifact {
                     format: OutputFormat::Pdf,
-                    bytes: pdf,
+                    bytes: SharedBytes::new(pdf),
                     source_page_number: None,
                 }]
             }
@@ -2362,7 +2363,7 @@ pub(crate) fn compile_with_default_pdf_timestamp(
                         })?;
                     Ok::<_, CompileError>(CompilationArtifact {
                         format: OutputFormat::Png,
-                        bytes,
+                        bytes: SharedBytes::new(bytes),
                         source_page_number: Some(source_page_number),
                     })
                 };
@@ -2387,7 +2388,7 @@ pub(crate) fn compile_with_default_pdf_timestamp(
                     selected_pages(&document, &specification.page_selection).collect::<Vec<_>>();
                 let export = |(source_page_number, page)| CompilationArtifact {
                     format: OutputFormat::Svg,
-                    bytes: EmbeddedTypst::export_svg(page, &svg_options),
+                    bytes: SharedBytes::new(EmbeddedTypst::export_svg(page, &svg_options)),
                     source_page_number: Some(source_page_number),
                 };
                 #[cfg(feature = "parallel")]
@@ -2567,44 +2568,354 @@ mod result_identity_tests {
         let base = report.result().unwrap().clone();
         let identity = base.result_identity;
 
+        let mut compilation = base.clone();
+        compilation.compilation_identity = CompilationIdentity(base.compilation_identity.0 ^ 1);
+        assert_ne!(finalize_result(compilation).result_identity, identity);
+
         let mut status = base.clone();
         status.status = CompilationStatus::Rejected;
         assert_ne!(finalize_result(status).result_identity, identity);
+
+        let mut target = base.clone();
+        target.document.target = TypstTarget::Html;
+        assert_ne!(finalize_result(target).result_identity, identity);
 
         let mut document = base.clone();
         document.document.source_page_count = Some(2);
         assert_ne!(finalize_result(document).result_identity, identity);
 
-        let mut diagnostics = base.clone();
-        diagnostics.diagnostics.push(CompilationDiagnostic {
+        let diagnostic = CompilationDiagnostic {
             severity: DiagnosticSeverity::Warning,
             message: "identity warning".to_owned(),
             span: LogicalSpan {
-                logical_path: None,
-                byte_range: None,
+                logical_path: Some("project:main.typ".to_owned()),
+                byte_range: Some(1..2),
             },
-            hints: vec![],
-            trace: vec![],
+            hints: vec![DiagnosticHint {
+                message: "identity hint".to_owned(),
+                span: LogicalSpan {
+                    logical_path: Some("project:hint.typ".to_owned()),
+                    byte_range: Some(2..3),
+                },
+            }],
+            trace: vec![DiagnosticTracepoint {
+                kind: TracepointKind::Call,
+                value: Some("identity trace".to_owned()),
+                span: LogicalSpan {
+                    logical_path: Some("project:trace.typ".to_owned()),
+                    byte_range: Some(3..4),
+                },
+            }],
             phase: DiagnosticPhase::Compilation,
             producer: DiagnosticProducer::Engine(base.engine_identity),
-            source_page_number: None,
+            source_page_number: NonZeroUsize::new(1),
+        };
+        let mut diagnostics = base.clone();
+        diagnostics.diagnostics.push(diagnostic.clone());
+        let diagnostic_identity = finalize_result(diagnostics).result_identity;
+        assert_ne!(diagnostic_identity, identity);
+        let diagnostic_mutations = [
+            CompilationDiagnostic {
+                severity: DiagnosticSeverity::Error,
+                ..diagnostic.clone()
+            },
+            CompilationDiagnostic {
+                message: "changed warning".to_owned(),
+                ..diagnostic.clone()
+            },
+            CompilationDiagnostic {
+                span: LogicalSpan {
+                    logical_path: Some("project:changed.typ".to_owned()),
+                    ..diagnostic.span.clone()
+                },
+                ..diagnostic.clone()
+            },
+            CompilationDiagnostic {
+                span: LogicalSpan {
+                    byte_range: Some(4..5),
+                    ..diagnostic.span.clone()
+                },
+                ..diagnostic.clone()
+            },
+            CompilationDiagnostic {
+                hints: vec![DiagnosticHint {
+                    message: "changed hint".to_owned(),
+                    ..diagnostic.hints[0].clone()
+                }],
+                ..diagnostic.clone()
+            },
+            CompilationDiagnostic {
+                hints: vec![DiagnosticHint {
+                    span: LogicalSpan {
+                        logical_path: Some("project:changed-hint.typ".to_owned()),
+                        ..diagnostic.hints[0].span.clone()
+                    },
+                    ..diagnostic.hints[0].clone()
+                }],
+                ..diagnostic.clone()
+            },
+            CompilationDiagnostic {
+                hints: vec![DiagnosticHint {
+                    span: LogicalSpan {
+                        byte_range: Some(5..6),
+                        ..diagnostic.hints[0].span.clone()
+                    },
+                    ..diagnostic.hints[0].clone()
+                }],
+                ..diagnostic.clone()
+            },
+            CompilationDiagnostic {
+                trace: vec![DiagnosticTracepoint {
+                    kind: TracepointKind::Include,
+                    ..diagnostic.trace[0].clone()
+                }],
+                ..diagnostic.clone()
+            },
+            CompilationDiagnostic {
+                trace: vec![DiagnosticTracepoint {
+                    value: Some("changed trace".to_owned()),
+                    ..diagnostic.trace[0].clone()
+                }],
+                ..diagnostic.clone()
+            },
+            CompilationDiagnostic {
+                trace: vec![DiagnosticTracepoint {
+                    span: LogicalSpan {
+                        logical_path: Some("project:changed-trace.typ".to_owned()),
+                        ..diagnostic.trace[0].span.clone()
+                    },
+                    ..diagnostic.trace[0].clone()
+                }],
+                ..diagnostic.clone()
+            },
+            CompilationDiagnostic {
+                trace: vec![DiagnosticTracepoint {
+                    span: LogicalSpan {
+                        byte_range: Some(6..7),
+                        ..diagnostic.trace[0].span.clone()
+                    },
+                    ..diagnostic.trace[0].clone()
+                }],
+                ..diagnostic.clone()
+            },
+            CompilationDiagnostic {
+                phase: DiagnosticPhase::Export,
+                ..diagnostic.clone()
+            },
+            CompilationDiagnostic {
+                producer: DiagnosticProducer::Exporter(base.exporter_identity),
+                ..diagnostic.clone()
+            },
+            CompilationDiagnostic {
+                source_page_number: NonZeroUsize::new(2),
+                ..diagnostic
+            },
+        ];
+        for diagnostic in &diagnostic_mutations {
+            let mut result = base.clone();
+            result.diagnostics.push(diagnostic.clone());
+            assert_ne!(finalize_result(result).result_identity, diagnostic_identity);
+        }
+
+        let mut warning = base.clone();
+        warning.pack_warnings.push(PackCompilationWarning {
+            message: "identity warning".to_owned(),
+            hints: vec!["identity hint".to_owned()],
         });
-        assert_ne!(finalize_result(diagnostics).result_identity, identity);
+        let warning_identity = finalize_result(warning).result_identity;
+        assert_ne!(warning_identity, identity);
+        for warning in [
+            PackCompilationWarning {
+                message: "changed warning".to_owned(),
+                hints: vec!["identity hint".to_owned()],
+            },
+            PackCompilationWarning {
+                message: "identity warning".to_owned(),
+                hints: vec!["changed hint".to_owned()],
+            },
+        ] {
+            let mut result = base.clone();
+            result.pack_warnings.push(warning);
+            assert_ne!(finalize_result(result).result_identity, warning_identity);
+        }
 
+        let observation = CompilationAccessObservation {
+            kind: CompilationAccessKind::File,
+            logical_path: "project:identity.txt".to_owned(),
+            font_index: Some(1),
+            outcome: CompilationAccessOutcome::Read {
+                byte_length: 8,
+                digest: [1; 16],
+            },
+        };
         let mut access = base.clone();
-        access
-            .access_trace
-            .observations
-            .insert(CompilationAccessObservation {
-                kind: CompilationAccessKind::File,
-                logical_path: "project:missing.txt".to_owned(),
-                font_index: None,
+        access.access_trace.observations.insert(observation.clone());
+        let access_identity = finalize_result(access).result_identity;
+        assert_ne!(access_identity, identity);
+        let observation_mutations = [
+            CompilationAccessObservation {
+                kind: CompilationAccessKind::Source,
+                ..observation.clone()
+            },
+            CompilationAccessObservation {
+                logical_path: "project:changed.txt".to_owned(),
+                ..observation.clone()
+            },
+            CompilationAccessObservation {
+                font_index: Some(2),
+                ..observation.clone()
+            },
+            CompilationAccessObservation {
+                outcome: CompilationAccessOutcome::Read {
+                    byte_length: 9,
+                    digest: [1; 16],
+                },
+                ..observation.clone()
+            },
+            CompilationAccessObservation {
+                outcome: CompilationAccessOutcome::Read {
+                    byte_length: 8,
+                    digest: [2; 16],
+                },
+                ..observation.clone()
+            },
+            CompilationAccessObservation {
                 outcome: CompilationAccessOutcome::Missing,
-            });
-        assert_ne!(finalize_result(access).result_identity, identity);
+                ..observation.clone()
+            },
+            CompilationAccessObservation {
+                outcome: CompilationAccessOutcome::Failed,
+                ..observation
+            },
+        ];
+        for observation in observation_mutations {
+            let mut result = base.clone();
+            result.access_trace.observations.insert(observation);
+            assert_ne!(finalize_result(result).result_identity, access_identity);
+        }
 
-        let mut artifact = base;
-        artifact.artifacts[0].bytes.push(0);
+        let mut artifact_format = base.clone();
+        artifact_format.artifacts[0].format = OutputFormat::Png;
+        assert_ne!(finalize_result(artifact_format).result_identity, identity);
+
+        let mut artifact_page = base.clone();
+        artifact_page.artifacts[0].source_page_number = NonZeroUsize::new(2);
+        assert_ne!(finalize_result(artifact_page).result_identity, identity);
+
+        let mut artifact = base.clone();
+        let mut artifact_bytes = artifact.artifacts[0].bytes.as_slice().to_vec();
+        artifact_bytes.push(0);
+        artifact.artifacts[0].bytes = SharedBytes::new(artifact_bytes);
         assert_ne!(finalize_result(artifact).result_identity, identity);
+
+        let mut ordered = base.clone();
+        let mut second = ordered.artifacts[0].clone();
+        let mut second_bytes = second.bytes.as_slice().to_vec();
+        second_bytes.push(0);
+        second.bytes = SharedBytes::new(second_bytes);
+        ordered.artifacts.push(second);
+        let ordered_identity = finalize_result(ordered.clone()).result_identity;
+        ordered.artifacts.reverse();
+        assert_ne!(finalize_result(ordered).result_identity, ordered_identity);
+
+        let mut ordered_diagnostics = base.clone();
+        let mut first_diagnostic = diagnostic_mutations[0].clone();
+        first_diagnostic.message = "first diagnostic".to_owned();
+        let mut second_diagnostic = diagnostic_mutations[1].clone();
+        second_diagnostic.message = "second diagnostic".to_owned();
+        ordered_diagnostics.diagnostics = vec![first_diagnostic, second_diagnostic];
+        let ordered_diagnostics_identity =
+            finalize_result(ordered_diagnostics.clone()).result_identity;
+        ordered_diagnostics.diagnostics.reverse();
+        assert_ne!(
+            finalize_result(ordered_diagnostics).result_identity,
+            ordered_diagnostics_identity
+        );
+
+        let mut ordered_warnings = base;
+        ordered_warnings.pack_warnings = vec![
+            PackCompilationWarning {
+                message: "first warning".to_owned(),
+                hints: vec![],
+            },
+            PackCompilationWarning {
+                message: "second warning".to_owned(),
+                hints: vec![],
+            },
+        ];
+        let ordered_warnings_identity = finalize_result(ordered_warnings.clone()).result_identity;
+        ordered_warnings.pack_warnings.reverse();
+        assert_ne!(
+            finalize_result(ordered_warnings).result_identity,
+            ordered_warnings_identity
+        );
+    }
+
+    #[test]
+    fn compilation_identity_binds_every_implementation_identity_field() {
+        fn mutations(
+            identity: ImplementationIdentity,
+            implementation: &'static str,
+        ) -> [ImplementationIdentity; 7] {
+            [
+                ImplementationIdentity {
+                    implementation,
+                    ..identity
+                },
+                ImplementationIdentity {
+                    version: "changed-version",
+                    ..identity
+                },
+                ImplementationIdentity {
+                    source_checksum: "changed-checksum",
+                    ..identity
+                },
+                ImplementationIdentity {
+                    target: "changed-target",
+                    ..identity
+                },
+                ImplementationIdentity {
+                    target_features: "changed-target-features",
+                    ..identity
+                },
+                ImplementationIdentity {
+                    feature_set: "changed-feature-set",
+                    ..identity
+                },
+                ImplementationIdentity {
+                    debug_assertions: !identity.debug_assertions,
+                    ..identity
+                },
+            ]
+        }
+
+        let pack = Pack::builder("main.typ")
+            .file("main.typ", b"implementation identity".to_vec())
+            .unwrap()
+            .build()
+            .unwrap();
+        let report = compile(PackCompilationRequest::new(
+            pack.clone(),
+            CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
+        ))
+        .unwrap();
+        let result = report.result().unwrap();
+        let inventory = result.request_inventory();
+        let engine = result.engine_identity();
+        let exporter = result.exporter_identity();
+        let baseline = result.compilation_identity();
+        for engine in mutations(engine.0, "changed-engine").map(EngineIdentity) {
+            assert_ne!(
+                compilation_identity(&pack, inventory, engine, exporter),
+                baseline
+            );
+        }
+
+        for exporter in mutations(exporter.0, "changed-exporter").map(ExporterIdentity) {
+            assert_ne!(
+                compilation_identity(&pack, inventory, engine, exporter),
+                baseline
+            );
+        }
     }
 }

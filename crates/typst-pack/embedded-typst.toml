@@ -124,6 +124,18 @@ category = "diagnostics"
 classification = "upstream-behavior"
 
 [[matrix]]
+category = "compiler"
+classification = "upstream-behavior"
+
+[[matrix]]
+category = "world"
+classification = "pack-invariant"
+
+[[matrix]]
+category = "environment"
+classification = "pack-invariant"
+
+[[matrix]]
 category = "shared-requests"
 classification = "upstream-behavior"
 
@@ -172,7 +184,12 @@ coverage = ["crates/typst-pack-cli/tests/cli.rs", ".dagger/modules/tests/main.da
 [[semantic]]
 name = "compilation-report-and-access-trace"
 classification = "pack-invariant"
-coverage = ["crates/typst-pack/tests/compilation.rs"]
+coverage = ["crates/typst-pack/tests/official_typst_oracle.rs", "crates/typst-pack/tests/compilation.rs"]
+
+[[semantic]]
+name = "environment-independent-compilation"
+classification = "pack-invariant"
+coverage = ["crates/typst-pack/tests/official_typst_oracle.rs", "crates/typst-pack/tests/compilation.rs"]
 
 [[semantic]]
 name = "dagger-argument-translation"

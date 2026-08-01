@@ -1,0 +1,30 @@
+[package]
+name = "typst-pack-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+rust-version = "1.92"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+typst-pack = { path = "../crates/typst-pack" }
+
+[[bin]]
+name = "project_snapshot_assembly"
+path = "fuzz_targets/project_snapshot_assembly.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "font_container"
+path = "fuzz_targets/font_container.rs"
+test = false
+doc = false
+bench = false
+
+[workspace]
+members = ["."]

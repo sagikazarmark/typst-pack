@@ -4,7 +4,7 @@
 //! `package-acquisition` feature and no HTTP client: a caller obtains the
 //! registry URL for a reported package specification, fetches it with whatever
 //! primitive its host provides, and expands the resulting archive bytes into a
-//! Complete Package Tree the core accepts as a resolved tree.
+//! Package Tree the core accepts as a resolved tree.
 
 #![cfg(feature = "package-acquisition")]
 
@@ -12,9 +12,9 @@ use std::str::FromStr;
 
 use typst::syntax::package::PackageSpec;
 use typst_pack::{
-    CreationOutcome, CreationRequest, PackageAcquisitionError, PackageDisposition,
-    PackageExpansionCeiling, ProjectIgnorePolicy, ProjectSnapshotAssembly, ResolvedPackageTree,
-    create, expand_package_archive, package_archive_url,
+    CreationOutcome, CreationRequest, PackageAcquisitionError, PackageCatalog, PackageDisposition,
+    PackageExpansionCeiling, PackageTree, PackageTreeIssue, ProjectSnapshotAssembly, create,
+    expand_package_archive, package_archive_url,
 };
 
 fn spec(text: &str) -> PackageSpec {
@@ -29,7 +29,7 @@ const CREATION_TIMESTAMP: i64 = 1_700_000_000;
 const DECLARATION: &[u8] =
     b"[package]\nname = \"example\"\nversion = \"1.0.0\"\nentrypoint = \"lib.typ\"\n";
 
-/// The archive a registry serves for one package: its Complete Package Tree,
+/// The archive a registry serves for one package: its Package Tree,
 /// gzip-compressed tar with the package files at the archive root, exactly as
 /// Typst Universe serves it.
 fn archive(files: &[(&str, &[u8])]) -> Vec<u8> {
@@ -81,21 +81,11 @@ fn archive_bytes_expand_into_the_complete_package_tree_of_a_specification() {
         ("assets/logo.svg", b"<svg/>"),
     ]);
 
-    let tree = expand_package_archive(
-        example.clone(),
-        &bytes,
-        PackageDisposition::External,
-        GENEROUS_CEILING,
-    )
-    .unwrap();
+    let tree = expand_package_archive(example, &bytes, GENEROUS_CEILING).unwrap();
 
-    assert_eq!(tree.spec(), &example);
-    assert_eq!(tree.disposition(), PackageDisposition::External);
     // The whole tree travels, in canonical package-relative path order.
     assert_eq!(
-        tree.files()
-            .map(|(path, data)| (path, data.as_ref()))
-            .collect::<Vec<(&str, &[u8])>>(),
+        tree.files().collect::<Vec<(&str, &[u8])>>(),
         [
             ("assets/logo.svg", &b"<svg/>"[..]),
             ("lib.typ", &b"#let value = 1"[..]),
@@ -105,21 +95,72 @@ fn archive_bytes_expand_into_the_complete_package_tree_of_a_specification() {
 }
 
 #[test]
+fn archive_expansion_preserves_duplicate_entries_for_package_tree_rejection() {
+    let bytes = archive(&[
+        ("typst.toml", DECLARATION),
+        ("lib.typ", b"first"),
+        ("./lib.typ", b"second"),
+    ]);
+
+    let error = expand_package_archive(spec("@preview/example:1.0.0"), &bytes, GENEROUS_CEILING)
+        .unwrap_err();
+
+    let PackageAcquisitionError::InvalidPackageTree { source, .. } = &error else {
+        panic!("{error}");
+    };
+    assert!(source.issues().iter().any(
+        |issue| matches!(issue, PackageTreeIssue::DuplicatePath { path } if path == "lib.typ")
+    ));
+}
+
+#[test]
 fn a_tree_expanding_to_exactly_the_ceiling_is_accepted() {
     let bytes = archive(&[("typst.toml", DECLARATION), ("lib.typ", b"#let value = 1")]);
     let ceiling = PackageExpansionCeiling {
         max_bytes: (DECLARATION.len() + b"#let value = 1".len()) as u64,
     };
 
-    let tree = expand_package_archive(
-        spec("@preview/example:1.0.0"),
-        &bytes,
-        PackageDisposition::Embedded,
-        ceiling,
-    )
-    .unwrap();
+    let tree = expand_package_archive(spec("@preview/example:1.0.0"), &bytes, ceiling).unwrap();
 
     assert_eq!(tree.files().count(), 2);
+}
+
+#[test]
+fn package_expansion_ceiling_does_not_contribute_to_pack_identity() {
+    let example = spec("@preview/example:1.0.0");
+    let bytes = archive(&[("typst.toml", DECLARATION), ("lib.typ", b"#let value = 1")]);
+    let exact = PackageExpansionCeiling {
+        max_bytes: (DECLARATION.len() + b"#let value = 1".len()) as u64,
+    };
+    let exact_tree = expand_package_archive(example.clone(), &bytes, exact).unwrap();
+    let generous_tree = expand_package_archive(example.clone(), &bytes, GENEROUS_CEILING).unwrap();
+    let project = ProjectSnapshotAssembly::new("main.typ")
+        .assemble([(
+            "main.typ",
+            b"#import \"@preview/example:1.0.0\": value\n#rect(width: value * 1pt, height: 1pt)"
+                .to_vec(),
+        )])
+        .unwrap();
+    let issue = |tree| {
+        let catalog =
+            PackageCatalog::from_entries([(example.clone(), tree, PackageDisposition::Embedded)])
+                .unwrap();
+        match create(
+            &CreationRequest::new(project.clone(), CREATION_TIMESTAMP).package_catalog(catalog),
+        )
+        .unwrap()
+        {
+            CreationOutcome::Issued(issued) => issued.pack,
+            CreationOutcome::MissingPackages(missing) => {
+                panic!("the supplied tree did not cover {missing:?}")
+            }
+        }
+    };
+
+    assert_eq!(
+        issue(exact_tree).identity(),
+        issue(generous_tree).identity()
+    );
 }
 
 #[test]
@@ -147,13 +188,8 @@ fn an_archive_expanding_past_the_ceiling_is_not_expanded_at_all() {
     let bytes = builder.into_inner().unwrap().finish().unwrap();
     let ceiling = PackageExpansionCeiling { max_bytes: 4096 };
 
-    let error = expand_package_archive(
-        spec("@preview/example:1.0.0"),
-        &bytes,
-        PackageDisposition::Embedded,
-        ceiling,
-    )
-    .unwrap_err();
+    let error =
+        expand_package_archive(spec("@preview/example:1.0.0"), &bytes, ceiling).unwrap_err();
 
     assert!(
         matches!(
@@ -181,13 +217,8 @@ fn a_member_that_becomes_no_package_file_is_charged_against_the_ceiling_too() {
     builder.append(&directory, std::io::empty()).unwrap();
     let bytes = builder.into_inner().unwrap().finish().unwrap();
 
-    let error = expand_package_archive(
-        spec("@preview/example:1.0.0"),
-        &bytes,
-        PackageDisposition::Embedded,
-        GENEROUS_CEILING,
-    )
-    .unwrap_err();
+    let error = expand_package_archive(spec("@preview/example:1.0.0"), &bytes, GENEROUS_CEILING)
+        .unwrap_err();
 
     assert!(
         matches!(
@@ -203,7 +234,6 @@ fn bytes_that_are_not_the_archive_a_registry_serves_are_rejected() {
     let error = expand_package_archive(
         spec("@preview/example:1.0.0"),
         b"<!doctype html><title>404</title>",
-        PackageDisposition::Embedded,
         GENEROUS_CEILING,
     )
     .unwrap_err();
@@ -231,19 +261,15 @@ fn an_archive_entry_that_cannot_name_a_package_file_is_rejected() {
     builder.append(&header, &b"#let value = 1"[..]).unwrap();
     let bytes = builder.into_inner().unwrap().finish().unwrap();
 
-    let error = expand_package_archive(
-        spec("@preview/example:1.0.0"),
-        &bytes,
-        PackageDisposition::Embedded,
-        GENEROUS_CEILING,
-    )
-    .unwrap_err();
+    let error = expand_package_archive(spec("@preview/example:1.0.0"), &bytes, GENEROUS_CEILING)
+        .unwrap_err();
 
-    assert!(
-        matches!(&error, PackageAcquisitionError::InvalidPackagePath { path, .. }
-            if path == "../escape.typ"),
-        "{error}"
-    );
+    let PackageAcquisitionError::InvalidPackageTree { source, .. } = &error else {
+        panic!("{error}");
+    };
+    assert!(source.issues().iter().any(
+        |issue| matches!(issue, PackageTreeIssue::InvalidPath { path, .. } if path == "../escape.typ")
+    ));
 }
 
 #[test]
@@ -270,13 +296,8 @@ fn only_addressable_regular_files_become_package_files() {
         .unwrap();
     let bytes = builder.into_inner().unwrap().finish().unwrap();
 
-    let tree = expand_package_archive(
-        spec("@preview/example:1.0.0"),
-        &bytes,
-        PackageDisposition::Embedded,
-        GENEROUS_CEILING,
-    )
-    .unwrap();
+    let tree =
+        expand_package_archive(spec("@preview/example:1.0.0"), &bytes, GENEROUS_CEILING).unwrap();
 
     assert_eq!(
         tree.files().map(|(path, _)| path).collect::<Vec<_>>(),
@@ -312,7 +333,7 @@ fn fetch(url: &str) -> Option<Vec<u8>> {
 
 #[test]
 fn a_resume_loop_fetches_and_expands_what_creation_reported() {
-    let project = ProjectSnapshotAssembly::new("main.typ", &ProjectIgnorePolicy::built_in())
+    let project = ProjectSnapshotAssembly::new("main.typ")
         .assemble([(
             "main.typ",
             b"#import \"@preview/example:1.0.0\": value\n\
@@ -321,13 +342,14 @@ fn a_resume_loop_fetches_and_expands_what_creation_reported() {
         )])
         .unwrap();
 
-    let mut resolved: Vec<ResolvedPackageTree> = Vec::new();
+    let mut resolved: Vec<(PackageSpec, PackageTree, PackageDisposition)> = Vec::new();
     // Bounded so that a loop making no progress fails instead of hanging; the
     // number of rounds it actually takes is not asserted.
     let mut issued = None;
     for _ in 0..8 {
-        let request = CreationRequest::new(project.clone(), CREATION_TIMESTAMP)
-            .package_trees(resolved.iter().cloned());
+        let catalog = PackageCatalog::from_entries(resolved.iter().cloned()).unwrap();
+        let request =
+            CreationRequest::new(project.clone(), CREATION_TIMESTAMP).package_catalog(catalog);
         match create(&request).unwrap() {
             CreationOutcome::Issued(pack) => {
                 issued = Some(*pack);
@@ -337,15 +359,9 @@ fn a_resume_loop_fetches_and_expands_what_creation_reported() {
                 for spec in missing {
                     let url = package_archive_url(&spec).unwrap();
                     let bytes = fetch(&url).expect("the registry serves the reported package");
-                    resolved.push(
-                        expand_package_archive(
-                            spec,
-                            &bytes,
-                            PackageDisposition::Embedded,
-                            GENEROUS_CEILING,
-                        )
-                        .unwrap(),
-                    );
+                    let tree =
+                        expand_package_archive(spec.clone(), &bytes, GENEROUS_CEILING).unwrap();
+                    resolved.push((spec, tree, PackageDisposition::Embedded));
                 }
             }
         }

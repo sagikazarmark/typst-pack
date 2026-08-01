@@ -218,11 +218,8 @@ fn pack_overrides_replace_contained_bytes_without_mutating_the_pack() {
             .all(|entry| entry.byte_len() > 0 && entry.commitment() != [0; 16])
     );
     assert_eq!(pack.identity(), pack_identity);
-    assert_eq!(pack.file("main.typ").unwrap().as_slice(), baseline);
-    assert_eq!(
-        pack.file("unused.txt").unwrap().as_slice(),
-        b"unused baseline"
-    );
+    assert_eq!(pack.file("main.typ").unwrap(), baseline);
+    assert_eq!(pack.file("unused.txt").unwrap(), b"unused baseline");
 
     let unused_override = PackOverrideSet::new(&pack)
         .replace("unused.txt", b"another unused value".to_vec())
