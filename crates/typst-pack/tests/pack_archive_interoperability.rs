@@ -26,7 +26,7 @@ fn observe_pack(pack: &Pack) -> PackObservation {
         entrypoint: pack.entrypoint().to_owned(),
         files: pack
             .files()
-            .map(|(path, data)| (path.to_owned(), data.as_slice().to_vec()))
+            .map(|(path, data)| (path.to_owned(), data.to_vec()))
             .collect(),
         packages: pack
             .package_requirements()

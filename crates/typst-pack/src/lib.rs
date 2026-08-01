@@ -23,6 +23,7 @@ mod pack;
 #[cfg(feature = "package-acquisition")]
 mod package_acquisition;
 mod packer;
+mod payload;
 mod project_snapshot;
 mod world;
 mod world_trace;
@@ -77,6 +78,7 @@ pub use package_acquisition::{
 };
 #[cfg(feature = "fs")]
 pub use packer::{CreationDiagnosticContext, PackOutcome, Packer, PackerError};
+pub use payload::PackArchiveBytes;
 pub use project_snapshot::{
     ProjectSnapshot, ProjectSnapshotAssembly, ProjectSnapshotBudget, ProjectSnapshotError,
 };

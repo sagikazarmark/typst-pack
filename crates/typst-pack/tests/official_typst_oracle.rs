@@ -149,10 +149,7 @@ fn exact_pack_font_catalog_matches_the_independent_oracle_and_external_fulfillme
 
     let embedded_pack = stabilized_pack(&fixture);
     assert_eq!(embedded_pack.fonts()[0].info(), &expected.font_catalog[0].0);
-    assert_eq!(
-        embedded_pack.fonts()[0].data().as_slice(),
-        expected.font_catalog[0].1
-    );
+    assert_eq!(embedded_pack.fonts()[0].data(), expected.font_catalog[0].1);
     let embedded = compile(PackCompilationRequest::new(
         embedded_pack,
         output(OutputFormat::Svg),

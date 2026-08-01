@@ -218,6 +218,13 @@ assert_eq!(artifact.source_page_number(), None);
 let pdf = artifact.bytes();
 ```
 
+Large immutable project, package, font, and compilation artifact payloads are
+shared across semantic clones and projections. Their public accessors expose
+borrowed byte slices without exposing the private sharing representation. Pack
+Archive bytes are the exception: `Pack::to_bytes()` returns the distinct,
+non-cloneable `PackArchiveBytes` value so exact retry material has explicit
+unique ownership.
+
 `PackOutcome::warnings` retains warnings from the representative creation
 compile. Inspect `PackOutcome::pack` for authoritative project files, package
 requirements and their embedding disposition, and the Pack Font Catalog; that
@@ -234,7 +241,8 @@ summary and canonical Compilation Access Trace.
 
 For PNG and SVG, `source_page_number()` identifies each artifact independently
 of its collection position. `bytes()` borrows the artifact bytes and
-`into_bytes()` extracts them without cloning.
+`into_bytes()` extracts an owned vector, reusing its buffer when the artifact is
+uniquely owned and materializing a copy when another semantic clone shares it.
 
 Packs can also be assembled fully in memory, with no file system involved, which
 is what a web editor wants:

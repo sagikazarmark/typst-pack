@@ -67,7 +67,7 @@ pub fn extract(
             &mut plan,
             PathBuf::from(path),
             PackPathRole::ProjectFile,
-            Some(data.as_slice()),
+            Some(data),
         )?;
     }
 
@@ -82,7 +82,7 @@ pub fn extract(
                     &mut plan,
                     base.join(path),
                     PackPathRole::PackageFile,
-                    Some(data.as_slice()),
+                    Some(data),
                 )?;
             }
         }
@@ -94,7 +94,7 @@ pub fn extract(
                 &mut plan,
                 PathBuf::from(font.manifest().path()),
                 PackPathRole::FontData,
-                Some(font.data().as_slice()),
+                Some(font.data()),
             )?;
         }
     }

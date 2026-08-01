@@ -2,10 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use typst::foundations::Bytes;
-
 use crate::ignore_policy::ProjectIgnorePolicy;
 use crate::pack::Pack;
+use crate::payload::SharedBytes;
 
 /// One stabilized set of project files: canonical root-relative paths, exact
 /// bytes, and the entrypoint they were assembled around.
@@ -15,7 +14,7 @@ use crate::pack::Pack;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectSnapshot {
     entrypoint: String,
-    files: BTreeMap<String, Bytes>,
+    files: BTreeMap<String, SharedBytes>,
 }
 
 impl ProjectSnapshot {
@@ -25,12 +24,22 @@ impl ProjectSnapshot {
     }
 
     /// The contained project files in canonical path order.
-    pub fn files(&self) -> impl Iterator<Item = (&str, &Bytes)> {
-        self.files.iter().map(|(path, data)| (path.as_str(), data))
+    pub fn files(&self) -> impl Iterator<Item = (&str, &[u8])> {
+        self.files
+            .iter()
+            .map(|(path, data)| (path.as_str(), data.as_slice()))
     }
 
     /// Looks up a contained project file by canonical root-relative path.
-    pub fn file(&self, path: &str) -> Option<&Bytes> {
+    pub fn file(&self, path: &str) -> Option<&[u8]> {
+        self.files.get(path).map(SharedBytes::as_slice)
+    }
+
+    pub(crate) fn shared_files(&self) -> impl Iterator<Item = (&str, &SharedBytes)> {
+        self.files.iter().map(|(path, data)| (path.as_str(), data))
+    }
+
+    pub(crate) fn shared_file(&self, path: &str) -> Option<&SharedBytes> {
         self.files.get(path)
     }
 }
@@ -89,7 +98,7 @@ impl<'a> ProjectSnapshotAssembly<'a> {
             {
                 return Err(ProjectSnapshotError::ByteSizeExceeded { limit });
             }
-            if files.insert(path.clone(), Bytes::new(data)).is_some() {
+            if files.insert(path.clone(), SharedBytes::new(data)).is_some() {
                 return Err(ProjectSnapshotError::DuplicatePath { path });
             }
             if let Some(limit) = self.budget.max_files

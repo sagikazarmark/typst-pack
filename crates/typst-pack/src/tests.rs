@@ -1185,10 +1185,7 @@ fn pack_roundtrip_in_memory() {
 
     assert_eq!(reread.entrypoint(), "main.typ");
     assert_eq!(reread.files().count(), 3);
-    assert_eq!(
-        reread.file("note.typ").unwrap().as_slice(),
-        "Hello".as_bytes()
-    );
+    assert_eq!(reread.file("note.typ").unwrap(), "Hello".as_bytes());
 }
 
 #[cfg(feature = "embedded-fonts")]
@@ -1220,7 +1217,7 @@ fn full_unicode_pack_remains_semantically_equivalent_after_reencoding() {
     let reread = Pack::from_bytes(pack.to_bytes().unwrap()).unwrap();
 
     assert_eq!(reread.manifest(), pack.manifest());
-    assert_eq!(reread.file("资料/说明.txt").unwrap().as_slice(), b"Notes");
+    assert_eq!(reread.file("资料/说明.txt").unwrap(), b"Notes");
     assert!(reread.file("品牌/图.png").is_some());
     assert_eq!(reread.packages().count(), 1);
     assert_eq!(reread.fonts().len(), 1);
@@ -1250,12 +1247,9 @@ fn repeated_builder_calls_replace_data_within_the_same_role() {
         .build()
         .unwrap();
 
-    assert_eq!(pack.file("main.typ").unwrap().as_slice(), b"second");
-    assert_eq!(
-        pack.package_file(&spec, "lib.typ").unwrap().as_slice(),
-        b"second"
-    );
-    assert_eq!(pack.file("optional.bin").unwrap().as_slice(), b"second");
+    assert_eq!(pack.file("main.typ").unwrap(), b"second");
+    assert_eq!(pack.package_file(&spec, "lib.typ").unwrap(), b"second");
+    assert_eq!(pack.file("optional.bin").unwrap(), b"second");
 }
 
 #[test]
@@ -1288,7 +1282,7 @@ fn read_accepts_a_manifest_that_is_not_the_first_entry() {
     ]))
     .unwrap();
 
-    assert_eq!(pack.file("main.typ").unwrap().as_slice(), b"Hello");
+    assert_eq!(pack.file("main.typ").unwrap(), b"Hello");
 }
 
 #[test]
@@ -1434,7 +1428,7 @@ fn read_accepts_safe_directory_entries() {
     zip.finish().unwrap();
 
     let pack = Pack::from_bytes(buffer.into_inner()).unwrap();
-    assert_eq!(pack.file("main.typ").unwrap().as_slice(), b"Hello");
+    assert_eq!(pack.file("main.typ").unwrap(), b"Hello");
 }
 
 #[test]
@@ -1674,7 +1668,7 @@ fn read_classifies_safe_archive_prefix_aliases_by_their_canonical_role() {
     ]))
     .unwrap();
 
-    assert_eq!(pack.file("main.typ").unwrap().as_slice(), b"Hello");
+    assert_eq!(pack.file("main.typ").unwrap(), b"Hello");
     assert_eq!(
         pack.files().map(|(path, _)| path).collect::<Vec<_>>(),
         ["main.typ"]
@@ -1689,7 +1683,7 @@ fn read_accepts_safe_aliases_at_archive_role_boundaries() {
         ("project//main.typ", b"Hello"),
     ]))
     .unwrap();
-    assert_eq!(project.file("main.typ").unwrap().as_slice(), b"Hello");
+    assert_eq!(project.file("main.typ").unwrap(), b"Hello");
 
     let package_manifest = test_package_manifest(
         vec![test_package_declaration(&[("lib.typ", b"Package")])],
@@ -1704,20 +1698,14 @@ fn read_accepts_safe_aliases_at_archive_role_boundaries() {
     let spec = "@local/example:1.0.0"
         .parse::<typst::syntax::package::PackageSpec>()
         .unwrap();
-    assert_eq!(
-        package.package_file(&spec, "lib.typ").unwrap().as_slice(),
-        b"Package"
-    );
+    assert_eq!(package.package_file(&spec, "lib.typ").unwrap(), b"Package");
 
     let aliased_manifest = Pack::from_bytes(raw_stored_zip(&[
         ("alias/../typst-pack.toml", manifest),
         ("project/main.typ", b"Hello"),
     ]))
     .unwrap();
-    assert_eq!(
-        aliased_manifest.file("main.typ").unwrap().as_slice(),
-        b"Hello"
-    );
+    assert_eq!(aliased_manifest.file("main.typ").unwrap(), b"Hello");
 
     let colliding_manifest = raw_stored_zip(&[
         (MANIFEST_PATH, manifest),

@@ -1,11 +1,13 @@
 //! The Candidate Font Catalog Pack Creation selects faces from.
 
+#[cfg(feature = "embedded-fonts")]
 use typst::foundations::Bytes;
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst_kit::fonts::FontStore;
 
 use crate::pack::{FontContainerIdentity, FontFaceIdentity};
+use crate::payload::SharedBytes;
 
 /// Whether a Font Container's bytes travel inside the Pack or must be
 /// fulfilled externally when the Pack is compiled.
@@ -42,17 +44,22 @@ impl FontDisposition {
 /// or multi-face collection, and the disposition it carries into the Pack.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CandidateFontContainer {
-    data: Bytes,
+    data: SharedBytes,
     disposition: FontDisposition,
 }
 
 impl CandidateFontContainer {
     /// Offers the exact container bytes under the given disposition.
     pub fn new(data: impl Into<Vec<u8>>, disposition: FontDisposition) -> Self {
-        Self::from_bytes(Bytes::new(data.into()), disposition)
+        Self::from_shared(SharedBytes::new(data.into()), disposition)
     }
 
+    #[cfg(feature = "embedded-fonts")]
     pub(crate) fn from_bytes(data: Bytes, disposition: FontDisposition) -> Self {
+        Self::from_shared(SharedBytes::from_typst(data), disposition)
+    }
+
+    pub(crate) fn from_shared(data: SharedBytes, disposition: FontDisposition) -> Self {
         Self { data, disposition }
     }
 
@@ -70,8 +77,8 @@ impl CandidateFontContainer {
     }
 
     /// The exact container bytes.
-    pub fn data(&self) -> &Bytes {
-        &self.data
+    pub fn data(&self) -> &[u8] {
+        self.data.as_slice()
     }
 
     /// The Canonical Identity of the container bytes.
@@ -129,7 +136,7 @@ impl CandidateFontCatalog {
         let mut faces = Vec::new();
         for container in &self.containers {
             let identity = container.identity();
-            for font in Font::iter(container.data.clone()) {
+            for font in Font::iter(container.data.to_typst()) {
                 let info = font.info().clone();
                 faces.push(CandidateFontFace {
                     identity: FontFaceIdentity::new(identity, font.index()),

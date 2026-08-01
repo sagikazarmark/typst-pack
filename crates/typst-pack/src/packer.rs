@@ -743,7 +743,7 @@ impl FileLoader for AcquiredLoader {
     fn load(&self, id: FileId) -> FileResult<Bytes> {
         let path = id.vpath().get_without_slash();
         match id.root() {
-            VirtualRoot::Project => self.project.file(path).cloned(),
+            VirtualRoot::Project => self.project.shared_file(path).map(|data| data.to_typst()),
             VirtualRoot::Package(spec) => self.packages.file(spec, path),
         }
         .ok_or_else(|| FileError::NotFound(PathBuf::from(path)))

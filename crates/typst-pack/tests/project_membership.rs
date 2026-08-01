@@ -90,10 +90,7 @@ fn a_snapshot_is_assembled_from_path_and_bytes_entries() {
         snapshot.files().map(|(path, _)| path).collect::<Vec<_>>(),
         ["chapters/intro.typ", "main.typ"]
     );
-    assert_eq!(
-        snapshot.file("main.typ").map(|data| data.as_slice()),
-        Some(b"Hello".as_slice())
-    );
+    assert_eq!(snapshot.file("main.typ"), Some(b"Hello".as_slice()));
 }
 
 #[test]

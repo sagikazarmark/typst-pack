@@ -17,6 +17,7 @@ use typst_pdf::{PdfOptions, PdfStandard, PdfStandards, Timestamp};
 
 use crate::embedded::EmbeddedTypst;
 use crate::pack::{CompilationDependencySnapshotError, FontCatalogError, PackageTreeError};
+use crate::payload::SharedBytes;
 use crate::world::PackWorld;
 use crate::world_trace::{WorldTrace, logical_path};
 use crate::{FontContainerIdentity, Pack, PackageTreeIdentity};
@@ -860,7 +861,7 @@ pub fn parse_page_selection(text: &str) -> Result<PageSelection, String> {
 #[derive(Debug, Clone)]
 pub struct CompilationArtifact {
     format: OutputFormat,
-    bytes: Vec<u8>,
+    bytes: SharedBytes,
     source_page_number: Option<NonZeroUsize>,
 }
 
@@ -1324,12 +1325,12 @@ impl CompilationArtifact {
 
     /// Borrows the artifact bytes.
     pub fn bytes(&self) -> &[u8] {
-        &self.bytes
+        self.bytes.as_slice()
     }
 
     /// Extracts the owned artifact bytes.
     pub fn into_bytes(self) -> Vec<u8> {
-        self.bytes
+        self.bytes.into_vec()
     }
 }
 
@@ -2040,7 +2041,7 @@ fn finalize_result(mut result: CompilationResult) -> CompilationResult {
                 artifact.format,
                 artifact.source_page_number,
                 artifact.bytes.len(),
-                typst::utils::hash128(&artifact.bytes),
+                typst::utils::hash128(artifact.bytes.as_slice()),
             )
         })
         .collect::<Vec<_>>();
@@ -2268,7 +2269,7 @@ pub(crate) fn compile_with_default_pdf_timestamp(
         return Ok(CompilationOutput {
             artifacts: vec![CompilationArtifact {
                 format: OutputFormat::Html,
-                bytes,
+                bytes: SharedBytes::new(bytes),
                 source_page_number: None,
             }],
             warnings,
@@ -2335,7 +2336,7 @@ pub(crate) fn compile_with_default_pdf_timestamp(
                 })?;
                 vec![CompilationArtifact {
                     format: OutputFormat::Pdf,
-                    bytes: pdf,
+                    bytes: SharedBytes::new(pdf),
                     source_page_number: None,
                 }]
             }
@@ -2362,7 +2363,7 @@ pub(crate) fn compile_with_default_pdf_timestamp(
                         })?;
                     Ok::<_, CompileError>(CompilationArtifact {
                         format: OutputFormat::Png,
-                        bytes,
+                        bytes: SharedBytes::new(bytes),
                         source_page_number: Some(source_page_number),
                     })
                 };
@@ -2387,7 +2388,7 @@ pub(crate) fn compile_with_default_pdf_timestamp(
                     selected_pages(&document, &specification.page_selection).collect::<Vec<_>>();
                 let export = |(source_page_number, page)| CompilationArtifact {
                     format: OutputFormat::Svg,
-                    bytes: EmbeddedTypst::export_svg(page, &svg_options),
+                    bytes: SharedBytes::new(EmbeddedTypst::export_svg(page, &svg_options)),
                     source_page_number: Some(source_page_number),
                 };
                 #[cfg(feature = "parallel")]
@@ -2802,12 +2803,16 @@ mod result_identity_tests {
         assert_ne!(finalize_result(artifact_page).result_identity, identity);
 
         let mut artifact = base.clone();
-        artifact.artifacts[0].bytes.push(0);
+        let mut artifact_bytes = artifact.artifacts[0].bytes.as_slice().to_vec();
+        artifact_bytes.push(0);
+        artifact.artifacts[0].bytes = SharedBytes::new(artifact_bytes);
         assert_ne!(finalize_result(artifact).result_identity, identity);
 
         let mut ordered = base.clone();
         let mut second = ordered.artifacts[0].clone();
-        second.bytes.push(0);
+        let mut second_bytes = second.bytes.as_slice().to_vec();
+        second_bytes.push(0);
+        second.bytes = SharedBytes::new(second_bytes);
         ordered.artifacts.push(second);
         let ordered_identity = finalize_result(ordered.clone()).result_identity;
         ordered.artifacts.reverse();

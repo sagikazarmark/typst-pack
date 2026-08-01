@@ -15,6 +15,7 @@ use zip::{ZipArchive, ZipWriter};
 use crate::manifest::{
     FontManifest, MANIFEST_PATH, PackManifest, PackManifestError, PackMetadata, PackageManifest,
 };
+use crate::payload::{PackArchiveBytes, SharedBytes};
 
 /// The conventional file extension for packs.
 pub const FILE_EXTENSION: &str = "typk";
@@ -35,7 +36,7 @@ pub(crate) const PACKAGE_TREE_IDENTITY_ALGORITHM: &str = "typst-hash128-0.15";
 #[derive(Debug, Clone)]
 pub struct Pack {
     manifest: PackManifest,
-    files: BTreeMap<CanonicalPath, Bytes>,
+    files: BTreeMap<CanonicalPath, SharedBytes>,
     /// Vendored packages, keyed by spec string for deterministic order.
     packages: BTreeMap<String, PackageFiles>,
     package_requirements: Vec<PackageRequirement>,
@@ -69,11 +70,11 @@ impl PackIdentity {
 #[derive(Debug, Clone)]
 pub(crate) struct PackageFiles {
     pub(crate) spec: PackageSpec,
-    files: BTreeMap<CanonicalPath, Bytes>,
+    files: BTreeMap<CanonicalPath, SharedBytes>,
 }
 
 impl PackageFiles {
-    pub(crate) fn file(&self, path: &str) -> Option<&Bytes> {
+    pub(crate) fn file(&self, path: &str) -> Option<&SharedBytes> {
         self.files.get(path)
     }
 }
@@ -189,7 +190,7 @@ pub struct PackFont {
     /// The manifest entry describing this font.
     entry: FontManifest,
     /// The raw font file data.
-    data: Bytes,
+    data: SharedBytes,
     font: Font,
 }
 
@@ -306,8 +307,8 @@ impl PackFont {
     }
 
     /// The contained font bytes.
-    pub fn data(&self) -> &Bytes {
-        &self.data
+    pub fn data(&self) -> &[u8] {
+        self.data.as_slice()
     }
 
     /// Official selection metadata derived from the verified container bytes.
@@ -319,7 +320,7 @@ impl PackFont {
 #[derive(Debug, Clone)]
 struct PackFontInput {
     entry: FontManifest,
-    data: Bytes,
+    data: SharedBytes,
     embedded: bool,
 }
 
@@ -334,9 +335,9 @@ impl Pack {
 
     fn construct(
         manifest: PackManifest,
-        files: BTreeMap<CanonicalPath, Bytes>,
+        files: BTreeMap<CanonicalPath, SharedBytes>,
         packages: BTreeMap<String, PackageFiles>,
-        font_data: BTreeMap<CanonicalPath, Bytes>,
+        font_data: BTreeMap<CanonicalPath, SharedBytes>,
     ) -> Result<Self, PackInvariantError> {
         let entrypoint = canonical_path(PackPathRole::Entrypoint, manifest.project().entrypoint())?;
         let canonical_files = files;
@@ -528,7 +529,7 @@ impl Pack {
                     .get(&path)
                     .cloned()
                     .ok_or_else(|| PackInvariantError::MissingFontData(path.to_string()))?;
-                let parsed = Font::new(data.clone(), index).ok_or_else(|| {
+                let parsed = Font::new(data.to_typst(), index).ok_or_else(|| {
                     PackInvariantError::InvalidFontData {
                         path: path.to_string(),
                         index,
@@ -642,8 +643,9 @@ impl Pack {
     /// Derives the Pack's identity-bearing semantic projection.
     pub fn identity(&self) -> PackIdentity {
         let project_files = self
-            .files()
-            .map(|(path, data)| (path, typst::utils::hash128(data)))
+            .files
+            .iter()
+            .map(|(path, data)| (path.as_str(), typst::utils::hash128(data)))
             .collect::<Vec<_>>();
         let packages = self
             .package_requirements()
@@ -684,12 +686,18 @@ impl Pack {
     }
 
     /// The project files, keyed by root-relative path.
-    pub fn files(&self) -> impl Iterator<Item = (&str, &Bytes)> {
-        self.files.iter().map(|(path, data)| (path.as_str(), data))
+    pub fn files(&self) -> impl Iterator<Item = (&str, &[u8])> {
+        self.files
+            .iter()
+            .map(|(path, data)| (path.as_str(), data.as_slice()))
     }
 
     /// Looks up a project file by root-relative path.
-    pub fn file(&self, path: &str) -> Option<&Bytes> {
+    pub fn file(&self, path: &str) -> Option<&[u8]> {
+        self.files.get(path).map(SharedBytes::as_slice)
+    }
+
+    pub(crate) fn shared_file(&self, path: &str) -> Option<&SharedBytes> {
         self.files.get(path)
     }
 
@@ -718,20 +726,32 @@ impl Pack {
     /// The vendored packages and their files.
     pub fn packages(
         &self,
-    ) -> impl Iterator<Item = (&PackageSpec, impl Iterator<Item = (&str, &Bytes)>)> {
+    ) -> impl Iterator<Item = (&PackageSpec, impl Iterator<Item = (&str, &[u8])>)> {
         self.packages.values().map(|package| {
             (
                 &package.spec,
                 package
                     .files
                     .iter()
-                    .map(|(path, data)| (path.as_str(), data)),
+                    .map(|(path, data)| (path.as_str(), data.as_slice())),
             )
         })
     }
 
     /// Looks up a vendored package file.
-    pub fn package_file(&self, spec: &PackageSpec, path: &str) -> Option<&Bytes> {
+    pub fn package_file(&self, spec: &PackageSpec, path: &str) -> Option<&[u8]> {
+        self.packages
+            .get(&spec.to_string())?
+            .files
+            .get(path)
+            .map(SharedBytes::as_slice)
+    }
+
+    pub(crate) fn shared_package_file(
+        &self,
+        spec: &PackageSpec,
+        path: &str,
+    ) -> Option<&SharedBytes> {
         self.packages.get(&spec.to_string())?.files.get(path)
     }
 
@@ -777,7 +797,10 @@ impl Pack {
                             message: error.to_string(),
                         }
                     })?;
-                if files.insert(canonical, data.clone()).is_some() {
+                if files
+                    .insert(canonical, SharedBytes::from_typst(data.clone()))
+                    .is_some()
+                {
                     return Err(PackageTreeError::Malformed {
                         spec: requirement.spec.clone(),
                         path: path.clone(),
@@ -1091,7 +1114,7 @@ impl Pack {
         for project in project_entries {
             let mut data = Vec::new();
             archive.by_index(project.index)?.read_to_end(&mut data)?;
-            files.insert(project.path, Bytes::new(data));
+            files.insert(project.path, SharedBytes::new(data));
         }
         let mut packages: BTreeMap<String, PackageFiles> = BTreeMap::new();
         for package in package_entries {
@@ -1104,21 +1127,27 @@ impl Pack {
                     files: BTreeMap::new(),
                 })
                 .files
-                .insert(package.path, Bytes::new(data));
+                .insert(package.path, SharedBytes::new(data));
         }
         let mut fonts_by_path = BTreeMap::new();
         for (index, path) in font_entries {
             let mut data = Vec::new();
             archive.by_index(index)?.read_to_end(&mut data)?;
-            fonts_by_path.insert(path, Bytes::new(data));
+            fonts_by_path.insert(path, SharedBytes::new(data));
         }
 
         Ok(Self::construct(manifest, files, packages, fonts_by_path)?)
     }
 
     /// Reads a pack from a byte buffer.
-    pub fn from_bytes(bytes: impl Into<Vec<u8>>) -> Result<Self, PackReadError> {
-        Self::read(Cursor::new(bytes.into()))
+    pub fn from_bytes(bytes: impl Into<PackArchiveBytes>) -> Result<Self, PackReadError> {
+        let bytes = bytes.into();
+        Self::from_archive_bytes(&bytes)
+    }
+
+    /// Reads a Pack Archive without taking its exact retry bytes.
+    pub fn from_archive_bytes(bytes: &PackArchiveBytes) -> Result<Self, PackReadError> {
+        Self::read(Cursor::new(bytes.as_slice()))
     }
 
     /// Writes the pack archive to a seekable writer.
@@ -1164,10 +1193,10 @@ impl Pack {
     }
 
     /// Serializes the pack archive to a byte buffer.
-    pub fn to_bytes(&self) -> Result<Vec<u8>, PackWriteError> {
+    pub fn to_bytes(&self) -> Result<PackArchiveBytes, PackWriteError> {
         let mut buffer = Cursor::new(Vec::new());
         self.write(&mut buffer)?;
-        Ok(buffer.into_inner())
+        Ok(PackArchiveBytes::from(buffer.into_inner()))
     }
 }
 
@@ -1225,7 +1254,7 @@ pub(crate) enum CompilationDependencySnapshotError {
 }
 
 fn package_tree_identity(
-    files: &BTreeMap<CanonicalPath, Bytes>,
+    files: &BTreeMap<CanonicalPath, SharedBytes>,
 ) -> (PackageTreeIdentity, u64, u64) {
     let file_count = files.len() as u64;
     let byte_length = files.values().map(|data| data.len() as u64).sum();
@@ -1422,7 +1451,7 @@ pub enum PackWriteError {
 #[derive(Debug)]
 pub struct PackBuilder {
     entrypoint: String,
-    files: BTreeMap<CanonicalPath, Bytes>,
+    files: BTreeMap<CanonicalPath, SharedBytes>,
     packages: BTreeMap<String, PackageFiles>,
     external_packages: BTreeMap<String, PackageFiles>,
     fonts: Vec<PackFontInput>,
@@ -1444,21 +1473,38 @@ impl PackBuilder {
 
     /// Adds a project file under a root-relative path.
     pub fn file(
-        mut self,
+        self,
         path: impl AsRef<str>,
         data: impl Into<Vec<u8>>,
     ) -> Result<Self, PackBuildError> {
+        self.shared_file(path, SharedBytes::new(data.into()))
+    }
+
+    pub(crate) fn shared_file(
+        mut self,
+        path: impl AsRef<str>,
+        data: SharedBytes,
+    ) -> Result<Self, PackBuildError> {
         let path = canonical_path(PackPathRole::ProjectFile, path.as_ref())?;
-        self.files.insert(path, Bytes::new(data.into()));
+        self.files.insert(path, data);
         Ok(self)
     }
 
     /// Adds a file of a vendored package.
     pub fn package_file(
-        mut self,
+        self,
         spec: PackageSpec,
         path: impl AsRef<str>,
         data: impl Into<Vec<u8>>,
+    ) -> Result<Self, PackBuildError> {
+        self.shared_package_file(spec, path, SharedBytes::new(data.into()))
+    }
+
+    pub(crate) fn shared_package_file(
+        mut self,
+        spec: PackageSpec,
+        path: impl AsRef<str>,
+        data: SharedBytes,
     ) -> Result<Self, PackBuildError> {
         let path = canonical_path(PackPathRole::PackageFile, path.as_ref())?;
         self.packages
@@ -1468,16 +1514,25 @@ impl PackBuilder {
                 files: BTreeMap::new(),
             })
             .files
-            .insert(path, Bytes::new(data.into()));
+            .insert(path, data);
         Ok(self)
     }
 
     /// Adds a file to an exact Complete Package Tree fulfilled outside the Pack.
     pub fn external_package_file(
-        mut self,
+        self,
         spec: PackageSpec,
         path: impl AsRef<str>,
         data: impl Into<Vec<u8>>,
+    ) -> Result<Self, PackBuildError> {
+        self.shared_external_package_file(spec, path, SharedBytes::new(data.into()))
+    }
+
+    pub(crate) fn shared_external_package_file(
+        mut self,
+        spec: PackageSpec,
+        path: impl AsRef<str>,
+        data: SharedBytes,
     ) -> Result<Self, PackBuildError> {
         let path = canonical_path(PackPathRole::PackageFile, path.as_ref())?;
         self.external_packages
@@ -1487,7 +1542,7 @@ impl PackBuilder {
                 files: BTreeMap::new(),
             })
             .files
-            .insert(path, Bytes::new(data.into()));
+            .insert(path, data);
         Ok(self)
     }
 
@@ -1495,8 +1550,15 @@ impl PackBuilder {
     ///
     /// `index` is the face index for font collections and zero otherwise. The
     /// entry name and family list are derived from the font data.
-    pub fn font(mut self, data: impl Into<Vec<u8>>, index: u32) -> Result<Self, PackBuildError> {
-        let data = data.into();
+    pub fn font(self, data: impl Into<Vec<u8>>, index: u32) -> Result<Self, PackBuildError> {
+        self.shared_font(SharedBytes::new(data.into()), index)
+    }
+
+    pub(crate) fn shared_font(
+        mut self,
+        data: SharedBytes,
+        index: u32,
+    ) -> Result<Self, PackBuildError> {
         let info = FontInfo::new(&data, index).ok_or(PackBuildError::InvalidFontInput { index })?;
         let family = info.family.to_string();
         let path = self.font_path(&family, &data);
@@ -1509,7 +1571,7 @@ impl PackBuilder {
                 FontContainerIdentity::from_bytes(&data).encode(),
                 data.len() as u64,
             ),
-            data: Bytes::new(data),
+            data,
             embedded: true,
         });
         Ok(self)
@@ -1517,11 +1579,18 @@ impl PackBuilder {
 
     /// Records an exact font dependency without storing its container bytes.
     pub fn external_font(
-        mut self,
+        self,
         data: impl Into<Vec<u8>>,
         index: u32,
     ) -> Result<Self, PackBuildError> {
-        let data = data.into();
+        self.shared_external_font(SharedBytes::new(data.into()), index)
+    }
+
+    pub(crate) fn shared_external_font(
+        mut self,
+        data: SharedBytes,
+        index: u32,
+    ) -> Result<Self, PackBuildError> {
         let info = FontInfo::new(&data, index).ok_or(PackBuildError::InvalidFontInput { index })?;
         let family = info.family.to_string();
         let path = self.font_path(&family, &data);
@@ -1534,7 +1603,7 @@ impl PackBuilder {
                 FontContainerIdentity::from_bytes(&data).encode(),
                 data.len() as u64,
             ),
-            data: Bytes::new(data),
+            data,
             embedded: false,
         });
         Ok(self)

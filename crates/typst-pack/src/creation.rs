@@ -25,6 +25,7 @@ use crate::embedded::EmbeddedTypst;
 use crate::font_catalog::{CandidateFontCatalog, CandidateFonts, FontDisposition};
 use crate::manifest::PackMetadata;
 use crate::pack::{Pack, PackBuildError};
+use crate::payload::SharedBytes;
 use crate::project_snapshot::ProjectSnapshot;
 
 /// Whether a Complete Package Tree's bytes travel inside the Pack or must be
@@ -53,7 +54,7 @@ impl PackageDisposition {
 #[derive(Clone, Debug)]
 pub struct ResolvedPackageTree {
     spec: PackageSpec,
-    files: Vec<(String, Bytes)>,
+    files: Vec<(String, SharedBytes)>,
     disposition: PackageDisposition,
 }
 
@@ -73,7 +74,7 @@ impl ResolvedPackageTree {
             spec,
             files: files
                 .into_iter()
-                .map(|(path, data)| (path.into(), Bytes::new(data.into())))
+                .map(|(path, data)| (path.into(), SharedBytes::new(data.into())))
                 .collect(),
             disposition,
         }
@@ -92,7 +93,10 @@ impl ResolvedPackageTree {
     ) -> Self {
         Self {
             spec,
-            files,
+            files: files
+                .into_iter()
+                .map(|(path, data)| (path, SharedBytes::from_typst(data)))
+                .collect(),
             disposition,
         }
     }
@@ -123,8 +127,10 @@ impl ResolvedPackageTree {
     }
 
     /// The supplied files, as package-relative paths and exact bytes.
-    pub fn files(&self) -> impl Iterator<Item = (&str, &Bytes)> {
-        self.files.iter().map(|(path, data)| (path.as_str(), data))
+    pub fn files(&self) -> impl Iterator<Item = (&str, &[u8])> {
+        self.files
+            .iter()
+            .map(|(path, data)| (path.as_str(), data.as_slice()))
     }
 
     /// Whether the tree travels inside the Pack.
@@ -391,8 +397,8 @@ pub fn create(request: &CreationRequest) -> Result<CreationOutcome, CreationErro
     }
 
     let mut builder = Pack::builder(request.project.entrypoint());
-    for (path, data) in request.project.files() {
-        builder = builder.file(path, data.to_vec())?;
+    for (path, data) in request.project.shared_files() {
+        builder = builder.shared_file(path, data.clone())?;
     }
 
     // Packages, in canonical specification order. The whole Complete Package
@@ -405,9 +411,9 @@ pub fn create(request: &CreationRequest) -> Result<CreationOutcome, CreationErro
             .expect("observed package was partitioned as supplied");
         for (path, data) in &tree.files {
             builder = if tree.disposition.is_embedded() {
-                builder.package_file(spec.clone(), path, data.to_vec())?
+                builder.shared_package_file(spec.clone(), path, data.clone())?
             } else {
-                builder.external_package_file(spec.clone(), path, data.to_vec())?
+                builder.shared_external_package_file(spec.clone(), path, data.clone())?
             };
         }
     }
@@ -416,9 +422,10 @@ pub fn create(request: &CreationRequest) -> Result<CreationOutcome, CreationErro
     // its container carries.
     for (font, disposition) in world.used_fonts() {
         builder = if disposition.is_embedded() {
-            builder.font(font.data().to_vec(), font.index())?
+            builder.shared_font(SharedBytes::from_typst(font.data().clone()), font.index())?
         } else {
-            builder.external_font(font.data().to_vec(), font.index())?
+            builder
+                .shared_external_font(SharedBytes::from_typst(font.data().clone()), font.index())?
         };
     }
 
@@ -485,13 +492,12 @@ const PACKAGE_DECLARATION_PATH: &str = "typst.toml";
 /// compiler's to interpret and to reject.
 fn verify_package_declaration(
     spec: &PackageSpec,
-    files: &BTreeMap<String, Bytes>,
+    files: &BTreeMap<String, SharedBytes>,
 ) -> Result<(), String> {
     let Some(data) = files.get(PACKAGE_DECLARATION_PATH) else {
         return Err(format!("the tree holds no `{PACKAGE_DECLARATION_PATH}`"));
     };
-    let text = data
-        .as_str()
+    let text = std::str::from_utf8(data)
         .map_err(|error| format!("`{PACKAGE_DECLARATION_PATH}` is not valid UTF-8: {error}"))?;
     let declaration: SuppliedPackageDeclaration = toml::from_str(text).map_err(|error| {
         format!(
@@ -532,7 +538,7 @@ struct DeclaredPackage {
 /// One supplied Complete Package Tree, keyed by canonical package-relative
 /// path.
 struct CanonicalPackageTree {
-    files: BTreeMap<String, Bytes>,
+    files: BTreeMap<String, SharedBytes>,
     disposition: PackageDisposition,
 }
 
@@ -654,8 +660,8 @@ impl FileLoader for SuppliedLoader<'_> {
         match id.root() {
             VirtualRoot::Project => self
                 .project
-                .file(path)
-                .cloned()
+                .shared_file(path)
+                .map(|data| data.to_typst())
                 .ok_or_else(|| FileError::NotFound(path.into())),
             VirtualRoot::Package(spec) => {
                 let key = spec.to_string();
@@ -671,7 +677,7 @@ impl FileLoader for SuppliedLoader<'_> {
                 };
                 tree.files
                     .get(path)
-                    .cloned()
+                    .map(SharedBytes::to_typst)
                     .ok_or_else(|| FileError::NotFound(path.into()))
             }
         }
