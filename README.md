@@ -493,12 +493,12 @@ compatibility aliases:
   `UnixTimestamp` replace the former date/timestamp fields and setters.
 - Read representative-compile warnings from `PackOutcome::warnings`; the
   one-field `PackReport` is removed.
-- Pack Manifest fields and `PackFont` fields are read-only. Use accessors such
-  as `manifest.project()`, `project.entrypoint()`, `font.manifest()`, and
-  `font.data()`. Package declarations are reached only through
-  `manifest.packages().vendored()` and `.unvendored()`.
-- Shared Pack consistency failures are available as `PackInvariantError`,
-  wrapped by `PackBuildError::Invariant` or `PackReadError::Invariant`.
+- Pack inspection exposes domain values rather than Pack Manifest records. Use
+  `pack.entrypoint()`, `pack.metadata()`, `pack.package_requirements()`,
+  `pack.font_catalog()`, and `font.identity()`/`font.data()`/`font.info()`.
+- Shared Pack consistency failures are aggregated in canonical domain order as
+  `PackInvariantIssue` values exposed by `PackInvariantError::issues()`. The
+  error is wrapped by `PackBuildError::Invariant` or `PackReadError::Invariant`.
 - Replace `OutputFormat` plus `CompileOptions` request construction with the
   corresponding `CompilationOutputSpecification` variant and format-specific
   structure. PDF creation time is configured through

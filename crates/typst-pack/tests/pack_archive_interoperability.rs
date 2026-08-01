@@ -1,7 +1,7 @@
 use std::io::Read;
 
 use flate2::read::DeflateDecoder;
-use typst_pack::{Pack, PackInvariantError, PackManifestError, PackReadError};
+use typst_pack::{Pack, PackInvariantIssue, PackManifestError, PackReadError};
 
 const ACCEPTED: &[u8] = include_bytes!("fixtures/pack-archive-v1/accepted-python.typk");
 
@@ -47,7 +47,7 @@ fn observe_pack(pack: &Pack) -> PackObservation {
                 )
             })
             .collect(),
-        metadata: pack.manifest().metadata().map(|metadata| {
+        metadata: pack.metadata().map(|metadata| {
             (
                 metadata.name().unwrap_or_default().to_owned(),
                 metadata.authors().to_vec(),
@@ -107,7 +107,7 @@ fn safe_unknown_entries_may_disappear_without_changing_pack_semantics() {
 enum DecodeObservation {
     MissingManifest,
     DuplicateMember(Vec<u8>),
-    AmbiguousMember(String),
+    AmbiguousMember,
     MalformedRawName(Vec<u8>),
     UnsafePath(String),
     UnsupportedMemberKind(String),
@@ -121,10 +121,7 @@ fn observe_decode(bytes: &[u8]) -> DecodeObservation {
     match Pack::from_bytes(bytes.to_vec()).unwrap_err() {
         PackReadError::MissingManifest => DecodeObservation::MissingManifest,
         PackReadError::DuplicateArchiveEntry(name) => DecodeObservation::DuplicateMember(name),
-        PackReadError::Invariant(PackInvariantError::CanonicalArchiveEntryCollision {
-            canonical,
-            ..
-        }) => DecodeObservation::AmbiguousMember(canonical),
+        PackReadError::AmbiguousArchiveEntries => DecodeObservation::AmbiguousMember,
         PackReadError::InvalidUtf8EntryName(name) => DecodeObservation::MalformedRawName(name),
         PackReadError::UnsafeEntry(path) => DecodeObservation::UnsafePath(path),
         PackReadError::UnsupportedEntryType(path) => DecodeObservation::UnsupportedMemberKind(path),
@@ -135,9 +132,12 @@ fn observe_decode(bytes: &[u8]) -> DecodeObservation {
         PackReadError::Manifest(PackManifestError::UnsupportedVersion(version)) => {
             DecodeObservation::UnsupportedVersion(version)
         }
-        PackReadError::Invariant(PackInvariantError::MissingEntrypoint(path)) => {
-            DecodeObservation::InvalidPackMissingEntrypoint(path)
-        }
+        PackReadError::Invariant(error) => match error.issues() {
+            [PackInvariantIssue::MissingEntrypoint { path }] => {
+                DecodeObservation::InvalidPackMissingEntrypoint(path.clone())
+            }
+            issues => panic!("unexpected Pack invariant issues: {issues:?}"),
+        },
         error => panic!("unexpected public decode observation: {error:?}"),
     }
 }
@@ -158,7 +158,7 @@ fn malformed_external_fixtures_have_stable_public_observations() {
         (
             "canonical collision",
             include_bytes!("fixtures/pack-archive-v1/canonical-collision.typk"),
-            DecodeObservation::AmbiguousMember("project/main.typ".into()),
+            DecodeObservation::AmbiguousMember,
         ),
         (
             "malformed raw name",

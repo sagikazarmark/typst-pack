@@ -165,11 +165,7 @@ fn the_request_is_reusable_and_creation_retains_nothing() {
 
     assert_eq!(first.pack.identity(), second.pack.identity());
     assert_eq!(
-        second
-            .pack
-            .manifest()
-            .metadata()
-            .and_then(PackMetadata::name),
+        second.pack.metadata().and_then(PackMetadata::name),
         Some("Reused")
     );
 }

@@ -59,7 +59,39 @@ fn test_package_declaration(files: &[(&str, &[u8])]) -> PackageManifest {
             .package_file(spec.clone(), path, data.to_vec())
             .unwrap();
     }
-    builder.build().unwrap().manifest().packages().vendored()[0].clone()
+    let pack = builder.build().unwrap();
+    let requirement = &pack.package_requirements()[0];
+    PackageManifest::new(
+        requirement.spec().clone(),
+        requirement
+            .tree_identity()
+            .digest()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect(),
+        requirement.file_count(),
+        requirement.byte_length(),
+    )
+}
+
+fn only_build_issue(result: Result<Pack, PackBuildError>) -> PackInvariantIssue {
+    let PackBuildError::Invariant(error) = result.unwrap_err();
+    assert_eq!(error.issues().len(), 1, "{:#?}", error.issues());
+    error.issues()[0].clone()
+}
+
+fn only_read_issue(result: Result<Pack, PackReadError>) -> PackInvariantIssue {
+    let error = result.unwrap_err();
+    let PackReadError::Invariant(error) = error else {
+        panic!("expected a whole-Pack invariant error, got {error:?}");
+    };
+    assert_eq!(error.issues().len(), 1, "{:#?}", error.issues());
+    error.issues()[0].clone()
+}
+
+#[cfg(all(feature = "embedded-fonts", feature = "fs"))]
+fn pack_font_path(font: &PackFont) -> String {
+    crate::pack::font_archive_path(font.identity().container(), Some(font.data()))
 }
 
 fn test_package_manifest(
@@ -268,7 +300,7 @@ fn manifest_roundtrip() {
 }
 
 #[test]
-fn manifest_rejects_conflicting_package_requirements_for_one_spec() {
+fn manifest_preserves_duplicate_package_requirements_for_whole_pack_validation() {
     let manifest = r#"
         format-version = 1
         [project]
@@ -280,10 +312,108 @@ fn manifest_rejects_conflicting_package_requirements_for_one_spec() {
         ]
     "#;
 
+    let manifest = PackManifest::from_toml(manifest).unwrap();
+    assert_eq!(manifest.packages().unvendored().len(), 2);
+}
+
+#[test]
+fn whole_pack_validation_rejects_duplicate_manifest_requirements() {
+    let declaration = test_package_declaration(&[("lib.typ", b"Package")]);
+    let manifest = test_package_manifest(vec![], vec![declaration.clone(), declaration]);
+    let archive = raw_stored_zip(&[(MANIFEST_PATH, &manifest), ("project/main.typ", b"Hello")]);
+
     assert!(matches!(
-        PackManifest::from_toml(manifest),
-        Err(PackManifestError::ConflictingPackageRequirements { ref spec })
-            if spec == "@local/example:1.0.0"
+        only_read_issue(Pack::from_bytes(archive)),
+        PackInvariantIssue::DuplicatePackageRequirement {
+            ref spec,
+            embedded: false,
+        } if spec == "@local/example:1.0.0"
+    ));
+}
+
+#[test]
+fn duplicate_requirement_evidence_is_complete_and_permutation_invariant() {
+    let requirement = |digest: &str| {
+        format!(
+            "{{ spec = \"@local/example:1.0.0\", tree-digest = \"{digest}\", \
+             tree-identity-kind = \"complete-package-tree\", \
+             tree-identity-schema = \"typst-pack-complete-package-tree-v1\", \
+             tree-identity-algorithm = \"typst-hash128-0.15\", \
+             file-count = 1, byte-length = 1 }}"
+        )
+    };
+    let valid = requirement("00000000000000000000000000000001");
+    let malformed = requirement("not-a-digest");
+    let read = |reverse: bool| {
+        let declarations = if reverse {
+            format!("{valid}, {malformed}")
+        } else {
+            format!("{malformed}, {valid}")
+        };
+        let manifest = format!(
+            "format-version = 1\n[project]\nentrypoint = \"main.typ\"\n\
+             [packages]\nunvendored = [{declarations}]\n"
+        );
+        let PackReadError::Invariant(error) = Pack::from_bytes(raw_stored_zip(&[
+            (MANIFEST_PATH, manifest.as_bytes()),
+            ("project/main.typ", b"Hello"),
+        ]))
+        .unwrap_err() else {
+            panic!("expected whole-Pack invariant issues");
+        };
+        error.issues().to_vec()
+    };
+
+    let issues = read(false);
+    assert_eq!(issues, read(true));
+    assert!(matches!(
+        issues.as_slice(),
+        [
+            PackInvariantIssue::DuplicatePackageRequirement { .. },
+            PackInvariantIssue::InvalidPackageRequirement { .. },
+        ]
+    ));
+}
+
+#[test]
+fn duplicate_vendored_requirements_still_report_content_mismatch() {
+    let declaration = test_package_declaration(&[("lib.typ", b"declared")]);
+    let manifest = test_package_manifest(vec![declaration.clone(), declaration], vec![]);
+    let PackReadError::Invariant(error) = Pack::from_bytes(raw_stored_zip(&[
+        (MANIFEST_PATH, &manifest),
+        ("project/main.typ", b"Hello"),
+        ("packages/local/example/1.0.0/lib.typ", b"different"),
+    ]))
+    .unwrap_err() else {
+        panic!("expected whole-Pack invariant issues");
+    };
+
+    assert!(matches!(
+        error.issues(),
+        [
+            PackInvariantIssue::DuplicatePackageRequirement { .. },
+            PackInvariantIssue::MismatchedEmbeddedPackageIdentity { .. },
+        ]
+    ));
+}
+
+#[test]
+fn malformed_vendored_requirement_still_reports_missing_data() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[packages]\nvendored = [{ spec = \"@local/example:1.0.0\", tree-digest = \"not-a-digest\", tree-identity-kind = \"complete-package-tree\", tree-identity-schema = \"typst-pack-complete-package-tree-v1\", tree-identity-algorithm = \"typst-hash128-0.15\", file-count = 1, byte-length = 1 }]\n";
+    let PackReadError::Invariant(error) = Pack::from_bytes(raw_stored_zip(&[
+        (MANIFEST_PATH, manifest),
+        ("project/main.typ", b"Hello"),
+    ]))
+    .unwrap_err() else {
+        panic!("expected whole-Pack invariant issues");
+    };
+
+    assert!(matches!(
+        error.issues(),
+        [
+            PackInvariantIssue::InvalidPackageRequirement { .. },
+            PackInvariantIssue::MissingVendoredPackageData { .. },
+        ]
     ));
 }
 
@@ -385,10 +515,8 @@ fn manifest_dispatches_version_before_interpreting_version_specific_fields() {
 fn pack_construction_requires_a_contained_entrypoint() {
     let built = Pack::builder("main.typ").build();
     assert!(matches!(
-        built,
-        Err(PackBuildError::Invariant(
-            PackInvariantError::MissingEntrypoint(ref path)
-        )) if path == "main.typ"
+        only_build_issue(built),
+        PackInvariantIssue::MissingEntrypoint { ref path } if path == "main.typ"
     ));
 
     use std::io::Write;
@@ -402,51 +530,70 @@ fn pack_construction_requires_a_contained_entrypoint() {
 
     let read = Pack::from_bytes(buffer.into_inner());
     assert!(matches!(
-        read,
-        Err(PackReadError::Invariant(
-            PackInvariantError::MissingEntrypoint(ref path)
-        )) if path == "main.typ"
+        only_read_issue(read),
+        PackInvariantIssue::MissingEntrypoint { ref path } if path == "main.typ"
     ));
 }
 
 #[test]
 fn pack_builder_rejects_paths_that_cannot_name_root_relative_files() {
     assert!(matches!(
-        Pack::builder("").build(),
-        Err(PackBuildError::Invariant(PackInvariantError::InvalidPath {
+        only_build_issue(Pack::builder("").build()),
+        PackInvariantIssue::InvalidPath {
             role: PackPathRole::Entrypoint,
             ..
-        }))
+        }
     ));
     assert!(matches!(
-        Pack::builder("main.typ").file("/main.typ", Vec::new()),
-        Err(PackBuildError::Invariant(PackInvariantError::InvalidPath {
+        only_build_issue(
+            Pack::builder("main.typ")
+                .file("main.typ", Vec::new())
+                .unwrap()
+                .file("/main.typ", Vec::new())
+                .unwrap()
+                .build()
+        ),
+        PackInvariantIssue::InvalidPath {
             role: PackPathRole::ProjectFile,
             ..
-        }))
+        }
     ));
     for path in ["C:outside.txt", "./C:/outside.txt"] {
         assert!(matches!(
-            Pack::builder("main.typ").file(path, Vec::new()),
-            Err(PackBuildError::Invariant(PackInvariantError::InvalidPath {
+            only_build_issue(
+                Pack::builder("main.typ")
+                    .file("main.typ", Vec::new())
+                    .unwrap()
+                    .file(path, Vec::new())
+                    .unwrap()
+                    .build()
+            ),
+            PackInvariantIssue::InvalidPath {
                 role: PackPathRole::ProjectFile,
                 ..
-            }))
+            }
         ));
     }
     assert!(matches!(
-        Pack::builder("main\0.typ").build(),
-        Err(PackBuildError::Invariant(PackInvariantError::InvalidPath {
+        only_build_issue(Pack::builder("main\0.typ").build()),
+        PackInvariantIssue::InvalidPath {
             role: PackPathRole::Entrypoint,
             ..
-        }))
+        }
     ));
     assert!(matches!(
-        Pack::builder("main.typ").file("main\0.typ", Vec::new()),
-        Err(PackBuildError::Invariant(PackInvariantError::InvalidPath {
+        only_build_issue(
+            Pack::builder("main.typ")
+                .file("main.typ", Vec::new())
+                .unwrap()
+                .file("main\0.typ", Vec::new())
+                .unwrap()
+                .build()
+        ),
+        PackInvariantIssue::InvalidPath {
             role: PackPathRole::ProjectFile,
             ..
-        }))
+        }
     ));
 }
 
@@ -463,15 +610,14 @@ fn pack_construction_rejects_conflicting_project_tree_roles() {
         .unwrap()
         .build();
     assert!(matches!(
-        built,
-        Err(PackBuildError::Invariant(
-            PackInvariantError::PathTreeConflict {
+        only_build_issue(built),
+        PackInvariantIssue::PathTreeConflict {
                 ref ancestor,
                 ref descendant,
                 ancestor_role: PackPathRole::ProjectFile,
                 descendant_role: PackPathRole::ProjectFile,
             }
-        )) if ancestor == "assets" && descendant == "assets/logo.png"
+        if ancestor == "assets" && descendant == "assets/logo.png"
     ));
 
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
@@ -483,15 +629,14 @@ fn pack_construction_rejects_conflicting_project_tree_roles() {
         ("project/assets-foo", b"interleaved"),
     ]);
     assert!(matches!(
-        Pack::from_bytes(bytes),
-        Err(PackReadError::Invariant(
-            PackInvariantError::PathTreeConflict {
+        only_read_issue(Pack::from_bytes(bytes)),
+        PackInvariantIssue::PathTreeConflict {
                 ref ancestor,
                 ref descendant,
                 ancestor_role: PackPathRole::ProjectFile,
                 descendant_role: PackPathRole::ProjectFile,
             }
-        )) if ancestor == "assets" && descendant == "assets/logo.png"
+        if ancestor == "assets" && descendant == "assets/logo.png"
     ));
 }
 
@@ -509,10 +654,9 @@ fn pack_construction_rejects_conflicting_package_roles() {
         .unwrap()
         .build();
     assert!(matches!(
-        built,
-        Err(PackBuildError::Invariant(
-            PackInvariantError::PackageRoleConflict(ref spec)
-        )) if spec == "@local/example:1.0.0"
+        only_build_issue(built),
+        PackInvariantIssue::PackageRoleConflict { ref spec }
+            if spec == "@local/example:1.0.0"
     ));
 
     let declaration = test_package_declaration(&[("lib.typ", b"Hello")]);
@@ -523,10 +667,9 @@ fn pack_construction_rejects_conflicting_package_roles() {
         ("packages/local/example/1.0.0/lib.typ", b"Hello"),
     ]);
     assert!(matches!(
-        Pack::from_bytes(bytes),
-        Err(PackReadError::Invariant(
-            PackInvariantError::PackageRoleConflict(ref spec)
-        )) if spec == "@local/example:1.0.0"
+        only_read_issue(Pack::from_bytes(bytes)),
+        PackInvariantIssue::PackageRoleConflict { ref spec }
+            if spec == "@local/example:1.0.0"
     ));
 }
 
@@ -541,10 +684,9 @@ fn pack_construction_rejects_package_declaration_data_disagreement() {
         ("project/main.typ", b"Hello"),
     ]);
     assert!(matches!(
-        Pack::from_bytes(missing),
-        Err(PackReadError::Invariant(
-            PackInvariantError::MissingVendoredPackageData(ref spec)
-        )) if spec == "@local/example:1.0.0"
+        only_read_issue(Pack::from_bytes(missing)),
+        PackInvariantIssue::MissingVendoredPackageData { ref spec }
+            if spec == "@local/example:1.0.0"
     ));
 
     let undeclared_manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
@@ -554,10 +696,9 @@ fn pack_construction_rejects_package_declaration_data_disagreement() {
         ("packages/local/example/1.0.0/lib.typ", b"Hello"),
     ]);
     assert!(matches!(
-        Pack::from_bytes(undeclared),
-        Err(PackReadError::Invariant(
-            PackInvariantError::UndeclaredPackageData(ref spec)
-        )) if spec == "@local/example:1.0.0"
+        only_read_issue(Pack::from_bytes(undeclared)),
+        PackInvariantIssue::UndeclaredPackageData { ref spec }
+            if spec == "@local/example:1.0.0"
     ));
 }
 
@@ -614,21 +755,17 @@ fn pack_construction_rejects_package_specs_that_do_not_roundtrip() {
         .build();
 
     assert!(matches!(
-        vendored,
-        Err(PackBuildError::Invariant(
-            PackInvariantError::InvalidPackageSpec { .. }
-        ))
+        only_build_issue(vendored),
+        PackInvariantIssue::InvalidPackageSpec { .. }
     ));
     assert!(matches!(
-        unvendored,
-        Err(PackBuildError::Invariant(
-            PackInvariantError::InvalidPackageSpec { .. }
-        ))
+        only_build_issue(unvendored),
+        PackInvariantIssue::InvalidPackageSpec { .. }
     ));
 }
 
 #[test]
-fn pack_construction_rejects_archive_entry_names_too_long_for_zip() {
+fn pack_construction_is_independent_of_archive_entry_name_limits() {
     let maximum_path = "a".repeat(65_535 - "project/".len());
     let pack = Pack::builder(&maximum_path)
         .file(&maximum_path, b"Hello".to_vec())
@@ -641,16 +778,9 @@ fn pack_construction_rejects_archive_entry_names_too_long_for_zip() {
     let project = Pack::builder(&path)
         .file(&path, b"Hello".to_vec())
         .unwrap()
-        .build();
-    assert!(matches!(
-        project,
-        Err(PackBuildError::Invariant(
-            PackInvariantError::ArchiveEntryNameTooLong {
-                role: PackPathRole::ProjectFile,
-                ..
-            }
-        ))
-    ));
+        .build()
+        .unwrap();
+    assert!(project.to_bytes().is_err());
 
     let spec = "@local/example:1.0.0"
         .parse::<typst::syntax::package::PackageSpec>()
@@ -661,42 +791,59 @@ fn pack_construction_rejects_archive_entry_names_too_long_for_zip() {
         .unwrap()
         .package_file(spec, package_path, b"Package".to_vec())
         .unwrap()
-        .build();
-    assert!(matches!(
-        package,
-        Err(PackBuildError::Invariant(
-            PackInvariantError::ArchiveEntryNameTooLong {
-                role: PackPathRole::PackageFile,
-                ..
-            }
-        ))
-    ));
+        .build()
+        .unwrap();
+    assert!(package.to_bytes().is_err());
 }
 
 #[test]
-fn archive_path_failures_precede_package_role_failures() {
-    let path = "a".repeat(65_535 - "project/".len() + 1);
+fn independently_detectable_pack_issues_are_aggregated_in_domain_order() {
     let spec = "@local/example:1.0.0"
         .parse::<typst::syntax::package::PackageSpec>()
         .unwrap();
-    let pack = Pack::builder(&path)
-        .file(&path, b"Hello".to_vec())
+    let error = Pack::builder("missing.typ")
+        .file("main.typ", b"first".to_vec())
         .unwrap()
         .package_file(spec.clone(), "lib.typ", b"Package".to_vec())
         .unwrap()
         .external_package_file(spec, "lib.typ", b"Package".to_vec())
         .unwrap()
-        .build();
+        .build()
+        .unwrap_err();
+    let PackBuildError::Invariant(error) = error;
 
+    assert_eq!(error.issues().len(), 2);
     assert!(matches!(
-        pack,
-        Err(PackBuildError::Invariant(
-            PackInvariantError::ArchiveEntryNameTooLong {
-                role: PackPathRole::ProjectFile,
-                ..
-            }
-        ))
+        error.issues()[0],
+        PackInvariantIssue::PackageRoleConflict { .. }
     ));
+    assert!(matches!(
+        error.issues()[1],
+        PackInvariantIssue::MissingEntrypoint { .. }
+    ));
+}
+
+#[test]
+fn whole_pack_issue_order_is_input_permutation_invariant() {
+    let build = |reverse: bool| {
+        let entries = if reverse {
+            [("z.typ", b"second".to_vec()), ("a.typ", b"second".to_vec())]
+        } else {
+            [("a.typ", b"second".to_vec()), ("z.typ", b"second".to_vec())]
+        };
+        let mut builder = Pack::builder("missing.typ")
+            .file("a.typ", b"first".to_vec())
+            .unwrap()
+            .file("z.typ", b"first".to_vec())
+            .unwrap();
+        for (path, data) in entries {
+            builder = builder.file(path, data).unwrap();
+        }
+        let PackBuildError::Invariant(error) = builder.build().unwrap_err();
+        error.issues().to_vec()
+    };
+
+    assert_eq!(build(false), build(true));
 }
 
 #[test]
@@ -711,15 +858,14 @@ fn pack_construction_rejects_conflicting_package_file_tree_paths() {
     ]);
 
     assert!(matches!(
-        Pack::from_bytes(bytes),
-        Err(PackReadError::Invariant(
-            PackInvariantError::PackagePathTreeConflict {
+        only_read_issue(Pack::from_bytes(bytes)),
+        PackInvariantIssue::PackagePathTreeConflict {
                 ref package,
                 ref ancestor,
                 ref descendant,
                 ..
             }
-        )) if package == "@local/example:1.0.0"
+        if package == "@local/example:1.0.0"
             && ancestor == "lib"
             && descendant == "lib/child.typ"
     ));
@@ -735,11 +881,11 @@ fn pack_construction_rejects_invalid_contained_font_data() {
     ]);
 
     assert!(matches!(
-        Pack::from_bytes(bytes),
-        Err(PackReadError::Invariant(PackInvariantError::InvalidFontData {
+        only_read_issue(Pack::from_bytes(bytes)),
+        PackInvariantIssue::InvalidFontData {
             ref path,
             index: 3,
-        })) if path == "custom-font.bin"
+        } if path == "custom-font.bin"
     ));
 }
 
@@ -749,15 +895,15 @@ fn pack_construction_rejects_missing_font_data() {
     let bytes = raw_stored_zip(&[(MANIFEST_PATH, manifest), ("project/main.typ", b"Hello")]);
 
     assert!(matches!(
-        Pack::from_bytes(bytes),
-        Err(PackReadError::Invariant(PackInvariantError::MissingFontData(ref path)))
+        only_read_issue(Pack::from_bytes(bytes)),
+        PackInvariantIssue::MissingFontData { ref path }
             if path == "fonts/vendor/font.ttf"
     ));
 }
 
 #[cfg(feature = "embedded-fonts")]
 #[test]
-fn read_preserves_nested_portable_font_paths() {
+fn read_exposes_verified_font_domain_values() {
     let font = embedded_font_data();
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"fonts/vendor/font.ttf\"\n";
     let pack = Pack::from_bytes(raw_stored_zip(&[
@@ -767,7 +913,35 @@ fn read_preserves_nested_portable_font_paths() {
     ]))
     .unwrap();
 
-    assert_eq!(pack.fonts()[0].manifest().path(), "fonts/vendor/font.ttf");
+    assert_eq!(
+        pack.fonts()[0].identity(),
+        pack.font_catalog()[0].identity()
+    );
+}
+
+#[cfg(feature = "embedded-fonts")]
+#[test]
+fn pack_identity_excludes_font_archive_paths_and_informational_families() {
+    let font = embedded_font_data();
+    let read = |path: &str, family: &str| {
+        let manifest = format!(
+            "format-version = 1\n[project]\nentrypoint = \"main.typ\"\n\
+             [[fonts]]\npath = \"{path}\"\nfamilies = [\"{family}\"]\n"
+        );
+        Pack::from_bytes(raw_stored_zip(&[
+            (MANIFEST_PATH, manifest.as_bytes()),
+            ("project/main.typ", b"Hello"),
+            (path, &font),
+        ]))
+        .unwrap()
+    };
+
+    let first = read("fonts/first.ttf", "Declared First");
+    let second = read("assets/renamed.data", "Declared Second");
+
+    assert_eq!(first.identity(), second.identity());
+    assert_eq!(first.fonts()[0].identity(), second.fonts()[0].identity());
+    assert_eq!(first.fonts()[0].info(), second.fonts()[0].info());
 }
 
 #[cfg(feature = "embedded-fonts")]
@@ -782,19 +956,26 @@ fn pack_construction_rejects_a_missing_face_in_valid_font_data() {
     ]);
 
     assert!(matches!(
-        Pack::from_bytes(bytes),
-        Err(PackReadError::Invariant(PackInvariantError::InvalidFontData {
+        only_read_issue(Pack::from_bytes(bytes)),
+        PackInvariantIssue::InvalidFontData {
             ref path,
             index: 99,
-        })) if path == "fonts/vendor/font.ttf"
+        } if path == "fonts/vendor/font.ttf"
     ));
 }
 
 #[test]
-fn pack_builder_reports_invalid_font_data_as_an_ingestion_error() {
+fn pack_builder_defers_invalid_font_data_to_whole_pack_validation() {
     assert!(matches!(
-        Pack::builder("main.typ").font(b"not a font".to_vec(), 2),
-        Err(PackBuildError::InvalidFontInput { index: 2 })
+        only_build_issue(
+            Pack::builder("main.typ")
+                .file("main.typ", Vec::new())
+                .unwrap()
+                .font(b"not a font".to_vec(), 2)
+                .unwrap()
+                .build()
+        ),
+        PackInvariantIssue::InvalidFontData { index: 2, .. }
     ));
 }
 
@@ -811,15 +992,11 @@ fn pack_accepts_shared_multi_face_custom_font_data_and_informational_families() 
     .unwrap();
 
     assert_eq!(pack.fonts().len(), 2);
-    assert_eq!(pack.fonts()[0].manifest().path(), "custom-font.data");
-    assert_eq!(
-        pack.fonts()[0].manifest().families(),
-        ["Not the parsed family"]
-    );
-    assert_eq!(pack.fonts()[1].manifest().index(), 1);
-    assert_eq!(
-        pack.fonts()[1].manifest().families(),
-        ["Also informational"]
+    assert_eq!(pack.fonts()[0].identity().index(), 0);
+    assert_eq!(pack.fonts()[1].identity().index(), 1);
+    assert_ne!(
+        pack.fonts()[0].info().family.as_str(),
+        "Not the parsed family"
     );
 }
 
@@ -986,54 +1163,66 @@ fn pack_rejects_duplicate_font_faces() {
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"font.data\"\nfamilies = [\"A\"]\n[[fonts]]\npath = \"font.data\"\nfamilies = [\"B\"]\n";
 
     assert!(matches!(
-        Pack::from_bytes(raw_stored_zip(&[
+        only_read_issue(Pack::from_bytes(raw_stored_zip(&[
             (MANIFEST_PATH, manifest),
             ("project/main.typ", b"Hello"),
             ("font.data", &font),
-        ])),
-        Err(PackReadError::Invariant(
-            PackInvariantError::DuplicateFontFace {
+        ]))),
+        PackInvariantIssue::DuplicateFontFace {
                 ref path,
                 index: 0,
             }
-        )) if path == "font.data"
+        if path == "font.data"
     ));
 }
 
 #[test]
-fn pack_construction_rejects_font_paths_reserved_for_project_files() {
+fn font_issues_are_ordered_by_numeric_face_index() {
+    let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"font.data\"\nindex = 10\n[[fonts]]\npath = \"font.data\"\nindex = 2\n";
+    let PackReadError::Invariant(error) = Pack::from_bytes(raw_stored_zip(&[
+        (MANIFEST_PATH, manifest),
+        ("project/main.typ", b"Hello"),
+        ("font.data", b"not a font"),
+    ]))
+    .unwrap_err() else {
+        panic!("expected whole-Pack invariant issues");
+    };
+
+    assert!(matches!(
+        error.issues(),
+        [
+            PackInvariantIssue::InvalidFontData { index: 2, .. },
+            PackInvariantIssue::InvalidFontData { index: 10, .. },
+        ]
+    ));
+}
+
+#[test]
+fn archive_decoding_rejects_font_paths_reserved_for_project_files() {
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"project/main.typ\"\nfamilies = [\"Informational\"]\n";
     let bytes = raw_stored_zip(&[(MANIFEST_PATH, manifest), ("project/main.typ", b"Hello")]);
 
     assert!(matches!(
         Pack::from_bytes(bytes),
-        Err(PackReadError::Invariant(PackInvariantError::ReservedFontPath {
-            ref path,
-            conflicting_role: PackPathRole::ProjectFile,
-        })) if path == "project/main.typ"
+        Err(PackReadError::InvalidEntry { ref entry, .. })
+            if entry == "project/main.typ"
     ));
 }
 
 #[test]
-fn pack_construction_rejects_font_path_at_the_manifest() {
+fn archive_decoding_rejects_a_font_path_at_the_manifest() {
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"typst-pack.toml\"\nfamilies = [\"Informational\"]\n";
     let bytes = raw_stored_zip(&[(MANIFEST_PATH, manifest), ("project/main.typ", b"Hello")]);
 
     assert!(matches!(
         Pack::from_bytes(bytes),
-        Err(PackReadError::Invariant(PackInvariantError::ReservedFontPath {
-            ref path,
-            conflicting_role: PackPathRole::PackManifest,
-        })) if path == MANIFEST_PATH
+        Err(PackReadError::InvalidEntry { ref entry, .. }) if entry == MANIFEST_PATH
     ));
 }
 
 #[test]
-fn pack_construction_rejects_font_paths_at_reserved_namespace_roots() {
-    for (path, conflicting_role) in [
-        ("project", PackPathRole::ProjectFile),
-        ("packages", PackPathRole::PackageFile),
-    ] {
+fn archive_decoding_rejects_font_paths_at_reserved_namespace_roots() {
+    for path in ["project", "packages"] {
         let manifest = format!(
             "format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"{path}\"\nfamilies = [\"Informational\"]\n"
         );
@@ -1045,16 +1234,13 @@ fn pack_construction_rejects_font_paths_at_reserved_namespace_roots() {
 
         assert!(matches!(
             Pack::from_bytes(bytes),
-            Err(PackReadError::Invariant(PackInvariantError::ReservedFontPath {
-                path: ref actual,
-                conflicting_role: actual_role,
-            })) if actual == path && actual_role == conflicting_role
+            Err(PackReadError::InvalidEntry { ref entry, .. }) if entry == path
         ));
     }
 }
 
 #[test]
-fn pack_construction_rejects_conflicting_font_data_tree_paths() {
+fn archive_decoding_rejects_conflicting_font_data_tree_paths() {
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"fonts/a\"\nfamilies = [\"A\"]\n[[fonts]]\npath = \"fonts/a/face.ttf\"\nfamilies = [\"B\"]\n";
     let bytes = raw_stored_zip(&[
         (MANIFEST_PATH, manifest),
@@ -1065,33 +1251,24 @@ fn pack_construction_rejects_conflicting_font_data_tree_paths() {
 
     assert!(matches!(
         Pack::from_bytes(bytes),
-        Err(PackReadError::Invariant(
-            PackInvariantError::PathTreeConflict {
-                ref ancestor,
-                ancestor_role: PackPathRole::FontData,
-                ref descendant,
-                descendant_role: PackPathRole::FontData,
-            }
-        )) if ancestor == "fonts/a" && descendant == "fonts/a/face.ttf"
+        Err(PackReadError::InvalidEntry { ref entry, .. })
+            if entry == "fonts/a/face.ttf"
     ));
 }
 
 #[test]
-fn font_path_failures_precede_entrypoint_failures() {
+fn archive_font_path_failures_precede_pack_validation() {
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"missing.typ\"\n[[fonts]]\npath = \"../font.ttf\"\nfamilies = [\"Invalid\"]\n";
 
     assert!(matches!(
         Pack::from_bytes(raw_stored_zip(&[(MANIFEST_PATH, manifest)])),
-        Err(PackReadError::Invariant(PackInvariantError::InvalidPath {
-            role: PackPathRole::FontData,
-            ..
-        }))
+        Err(PackReadError::InvalidEntry { ref entry, .. }) if entry == "../font.ttf"
     ));
 }
 
 #[test]
 fn invariant_diagnostics_do_not_expose_optional_field_formatting() {
-    let tree = PackInvariantError::PathTreeConflict {
+    let tree = PackInvariantIssue::PathTreeConflict {
         ancestor: "assets".to_owned(),
         ancestor_role: PackPathRole::ProjectFile,
         descendant: "assets/logo.png".to_owned(),
@@ -1099,13 +1276,16 @@ fn invariant_diagnostics_do_not_expose_optional_field_formatting() {
     };
     assert_eq!(
         tree.to_string(),
-        "project file path `assets` conflicts with project file descendant `assets/logo.png`"
+        "project file path \"assets\" conflicts with project file descendant \"assets/logo.png\""
     );
 
-    let font = PackBuildError::InvalidFontInput { index: 2 };
+    let font = PackInvariantIssue::InvalidFontData {
+        path: "font input 0".to_owned(),
+        index: 2,
+    };
     assert_eq!(
         font.to_string(),
-        "font input does not contain a valid face at index 2"
+        "font data \"font input 0\" does not contain a valid face at index 2"
     );
 }
 
@@ -1216,22 +1396,24 @@ fn full_unicode_pack_remains_semantically_equivalent_after_reencoding() {
 
     let reread = Pack::from_bytes(pack.to_bytes().unwrap()).unwrap();
 
-    assert_eq!(reread.manifest(), pack.manifest());
+    assert_eq!(reread.metadata(), pack.metadata());
+    assert_eq!(reread.package_requirements(), pack.package_requirements());
+    assert_eq!(reread.font_catalog(), pack.font_catalog());
     assert_eq!(reread.file("资料/说明.txt").unwrap(), b"Notes");
     assert!(reread.file("品牌/图.png").is_some());
     assert_eq!(reread.packages().count(), 1);
     assert_eq!(reread.fonts().len(), 1);
     let reread_again = Pack::from_bytes(reread.to_bytes().unwrap()).unwrap();
     assert_eq!(reread_again.identity(), pack.identity());
-    assert_eq!(reread_again.manifest(), pack.manifest());
+    assert_eq!(reread_again.metadata(), pack.metadata());
 }
 
 #[test]
-fn repeated_builder_calls_replace_data_within_the_same_role() {
+fn repeated_builder_calls_are_rejected_by_whole_pack_validation() {
     let spec = "@local/example:1.0.0"
         .parse::<typst::syntax::package::PackageSpec>()
         .unwrap();
-    let pack = Pack::builder("main.typ")
+    let error = Pack::builder("main.typ")
         .file("main.typ", b"first".to_vec())
         .unwrap()
         .file("main.typ", b"second".to_vec())
@@ -1245,11 +1427,24 @@ fn repeated_builder_calls_replace_data_within_the_same_role() {
         .file("optional.bin", b"second".to_vec())
         .unwrap()
         .build()
-        .unwrap();
+        .unwrap_err();
+    let PackBuildError::Invariant(error) = error;
 
-    assert_eq!(pack.file("main.typ").unwrap(), b"second");
-    assert_eq!(pack.package_file(&spec, "lib.typ").unwrap(), b"second");
-    assert_eq!(pack.file("optional.bin").unwrap(), b"second");
+    assert_eq!(
+        error.issues(),
+        [
+            PackInvariantIssue::DuplicateProjectPath {
+                path: "main.typ".to_owned(),
+            },
+            PackInvariantIssue::DuplicateProjectPath {
+                path: "optional.bin".to_owned(),
+            },
+            PackInvariantIssue::DuplicatePackagePath {
+                package: spec,
+                path: "lib.typ".to_owned(),
+            },
+        ]
+    );
 }
 
 #[test]
@@ -1523,12 +1718,7 @@ fn read_rejects_distinct_archive_entries_with_one_canonical_identity() {
 
     assert!(matches!(
         Pack::from_bytes(bytes),
-        Err(PackReadError::Invariant(
-            PackInvariantError::CanonicalArchiveEntryCollision {
-                ref canonical,
-                ..
-            }
-        )) if canonical == "project/main.typ"
+        Err(PackReadError::AmbiguousArchiveEntries)
     ));
 }
 
@@ -1546,9 +1736,7 @@ fn read_rejects_canonical_collisions_for_package_and_font_entries() {
     ]);
     assert!(matches!(
         Pack::from_bytes(package),
-        Err(PackReadError::Invariant(
-            PackInvariantError::CanonicalArchiveEntryCollision { ref canonical, .. }
-        )) if canonical == "packages/local/example/1.0.0/lib.typ"
+        Err(PackReadError::AmbiguousArchiveEntries)
     ));
 
     let font_manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"fonts/vendor/font.ttf\"\n";
@@ -1560,9 +1748,7 @@ fn read_rejects_canonical_collisions_for_package_and_font_entries() {
     ]);
     assert!(matches!(
         Pack::from_bytes(font),
-        Err(PackReadError::Invariant(
-            PackInvariantError::CanonicalArchiveEntryCollision { ref canonical, .. }
-        )) if canonical == "fonts/vendor/font.ttf"
+        Err(PackReadError::AmbiguousArchiveEntries)
     ));
 }
 
@@ -1594,12 +1780,7 @@ fn read_rejects_distinct_raw_names_with_one_decoded_identity() {
 
     assert!(matches!(
         Pack::from_bytes(bytes),
-        Err(PackReadError::Invariant(
-            PackInvariantError::CanonicalArchiveEntryCollision {
-                ref canonical,
-                ..
-            }
-        )) if canonical == "project/é.txt"
+        Err(PackReadError::AmbiguousArchiveEntries)
     ));
 }
 
@@ -1630,12 +1811,7 @@ fn read_rejects_canonical_collisions_between_unknown_entries() {
 
     assert!(matches!(
         Pack::from_bytes(bytes),
-        Err(PackReadError::Invariant(
-            PackInvariantError::CanonicalArchiveEntryCollision {
-                ref canonical,
-                ..
-            }
-        )) if canonical == "future/data"
+        Err(PackReadError::AmbiguousArchiveEntries)
     ));
 }
 
@@ -1650,11 +1826,11 @@ fn read_does_not_normalize_a_known_role_into_an_ignored_archive_entry() {
         ]);
 
         assert!(matches!(
-            Pack::from_bytes(bytes),
-            Err(PackReadError::Invariant(PackInvariantError::InvalidPath {
+            only_read_issue(Pack::from_bytes(bytes)),
+            PackInvariantIssue::InvalidPath {
                 role: PackPathRole::ProjectFile,
                 ..
-            }))
+            }
         ));
     }
 }
@@ -1714,9 +1890,7 @@ fn read_accepts_safe_aliases_at_archive_role_boundaries() {
     ]);
     assert!(matches!(
         Pack::from_bytes(colliding_manifest),
-        Err(PackReadError::Invariant(
-            PackInvariantError::CanonicalArchiveEntryCollision { ref canonical, .. }
-        )) if canonical == MANIFEST_PATH
+        Err(PackReadError::AmbiguousArchiveEntries)
     ));
 }
 
@@ -2266,7 +2440,7 @@ Rows: #csv("data.csv").len()
             .unwrap()
             .build()
             .unwrap();
-        let font_path = font_pack.fonts()[0].manifest().path().to_owned();
+        let font_path = pack_font_path(&font_pack.fonts()[0]);
         let pack = Pack::builder("main.typ")
             .file("main.typ", Vec::new())
             .unwrap()
@@ -2311,8 +2485,8 @@ Rows: #csv("data.csv").len()
             .unwrap();
         assert_eq!(pack.fonts().len(), 2);
         assert_eq!(
-            pack.fonts()[0].manifest().path(),
-            pack.fonts()[1].manifest().path()
+            pack_font_path(&pack.fonts()[0]),
+            pack_font_path(&pack.fonts()[1])
         );
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("extracted");
@@ -2329,7 +2503,7 @@ Rows: #csv("data.csv").len()
         .unwrap();
 
         assert_eq!(report.written.len(), 2);
-        assert!(target.join(pack.fonts()[0].manifest().path()).is_file());
+        assert!(target.join(pack_font_path(&pack.fonts()[0])).is_file());
     }
 }
 

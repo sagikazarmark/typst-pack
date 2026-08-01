@@ -5,7 +5,7 @@
 use std::collections::{BTreeMap, btree_map::Entry};
 use std::path::{Path, PathBuf};
 
-use crate::pack::{Pack, PackPathRole};
+use crate::pack::{Pack, PackPathRole, font_archive_path};
 
 /// Options for [`extract`].
 #[derive(Debug, Clone, Default)]
@@ -92,7 +92,10 @@ pub fn extract(
         for font in pack.fonts() {
             add_to_plan(
                 &mut plan,
-                PathBuf::from(font.manifest().path()),
+                PathBuf::from(font_archive_path(
+                    font.identity().container(),
+                    Some(font.data()),
+                )),
                 PackPathRole::FontData,
                 Some(font.data()),
             )?;
@@ -144,7 +147,7 @@ fn add_to_plan<'a>(
 
 fn validate_plan(plan: &BTreeMap<PathBuf, PlannedPath<'_>>) -> Result<(), ExtractError> {
     let mut ancestors = Vec::<(&Path, PackPathRole)>::new();
-    let mut role_counts = [0usize; 5];
+    let mut role_counts = [0usize; 4];
 
     for (relative, planned) in plan {
         while ancestors
@@ -177,11 +180,10 @@ fn validate_plan(plan: &BTreeMap<PathBuf, PlannedPath<'_>>) -> Result<(), Extrac
 
 fn role_index(role: PackPathRole) -> usize {
     match role {
-        PackPathRole::PackManifest => 0,
-        PackPathRole::Entrypoint => 1,
-        PackPathRole::ProjectFile => 2,
-        PackPathRole::PackageFile => 3,
-        PackPathRole::FontData => 4,
+        PackPathRole::Entrypoint => 0,
+        PackPathRole::ProjectFile => 1,
+        PackPathRole::PackageFile => 2,
+        PackPathRole::FontData => 3,
     }
 }
 

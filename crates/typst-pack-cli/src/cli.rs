@@ -747,12 +747,11 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
 
 fn inspect(args: InspectArgs) -> CliResult {
     let pack = read_pack(&args.pack)?;
-    let manifest = pack.manifest();
 
     println!("pack: {}", args.pack.display());
-    println!("format version: {}", manifest.format_version());
+    println!("format version: {}", typst_pack::FORMAT_VERSION);
     println!("entrypoint: {}", pack.entrypoint());
-    if let Some(metadata) = manifest.metadata() {
+    if let Some(metadata) = pack.metadata() {
         if let Some(name) = metadata.name() {
             println!("name: {name}");
         }
@@ -779,25 +778,36 @@ fn inspect(args: InspectArgs) -> CliResult {
             println!("  {spec} ({count} files, {})", human_size(size));
         }
     }
-    if !manifest.packages().unvendored().is_empty() {
+    let unvendored = pack
+        .package_requirements()
+        .iter()
+        .filter(|requirement| !requirement.is_embedded())
+        .collect::<Vec<_>>();
+    if !unvendored.is_empty() {
         println!("\nunvendored packages:");
-        for spec in manifest.packages().unvendored() {
-            println!("  {spec}");
+        for requirement in unvendored {
+            println!("  {}", requirement.spec());
         }
     }
 
     if !pack.fonts().is_empty() {
         println!("\nembedded fonts:");
         for font in pack.fonts() {
+            let identity = font.identity();
+            let digest = identity
+                .container()
+                .digest()
+                .iter()
+                .map(|byte| format!("{byte:02x}"))
+                .collect::<String>();
             println!(
-                "  {} ({}){}",
-                font.manifest().path(),
+                "  {}:{}:{}:{digest} face {} ({}) - {}",
+                identity.container().kind(),
+                identity.container().schema(),
+                identity.container().algorithm(),
+                identity.index(),
                 human_size(font.data().len()),
-                if font.manifest().families().is_empty() {
-                    String::new()
-                } else {
-                    format!(" - {}", font.manifest().families().join(", "))
-                }
+                font.info().family,
             );
         }
     }

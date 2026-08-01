@@ -2314,10 +2314,7 @@ fn no_vendor_packages_records_dependency_and_compiles_with_package_path() {
     let pack = Pack::from_bytes(std::fs::read(&pack_path).unwrap()).unwrap();
     let spec = "@preview/unvendored:0.1.0".parse().unwrap();
     assert!(!pack.has_package(&spec));
-    assert_eq!(
-        pack.manifest().packages().unvendored()[0].spec().unwrap(),
-        spec
-    );
+    assert_eq!(pack.package_requirements()[0].spec(), &spec);
 
     let output = directory.path().join("project.svg");
     let compiled = Command::new(env!("CARGO_BIN_EXE_typst-pack"))

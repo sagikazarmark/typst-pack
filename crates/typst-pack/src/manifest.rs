@@ -1,6 +1,5 @@
 //! The pack manifest stored as `typst-pack.toml` inside the archive.
 
-use std::collections::BTreeMap;
 use std::str::FromStr;
 
 use serde::{Deserialize, Deserializer, Serialize};
@@ -106,8 +105,8 @@ impl TryFrom<Version1PackagesManifest> for PackagesManifest {
 
     fn try_from(packages: Version1PackagesManifest) -> Result<Self, Self::Error> {
         Ok(Self {
-            vendored: canonical_packages(packages.vendored)?,
-            unvendored: canonical_packages(packages.unvendored)?,
+            vendored: validate_packages(packages.vendored)?,
+            unvendored: validate_packages(packages.unvendored)?,
         })
     }
 }
@@ -376,8 +375,6 @@ pub enum PackManifestError {
     UnsupportedVersion(u32),
     #[error("invalid package spec `{spec}`: {message}")]
     InvalidPackageSpec { spec: String, message: String },
-    #[error("package requirement `{spec}` is declared more than once with conflicting values")]
-    ConflictingPackageRequirements { spec: String },
 }
 
 impl PackManifest {
@@ -463,17 +460,13 @@ fn parse_manifest_value(value: toml::Value) -> Result<PackManifest, PackManifest
     Ok(manifest)
 }
 
-fn canonical_packages(
+fn validate_packages(
     packages: Vec<PackageManifest>,
 ) -> Result<Vec<PackageManifest>, PackManifestError> {
-    let mut canonical = BTreeMap::new();
-    for package in packages {
-        let spec = package.spec()?.to_string();
-        if let Some(existing) = canonical.insert(spec.clone(), package.clone())
-            && existing != package
-        {
-            return Err(PackManifestError::ConflictingPackageRequirements { spec });
-        }
+    // Syntax is representation-owned, but whole-Pack construction owns
+    // semantic duplicate validation, so declaration order stays intact.
+    for package in &packages {
+        package.spec()?;
     }
-    Ok(canonical.into_values().collect())
+    Ok(packages)
 }

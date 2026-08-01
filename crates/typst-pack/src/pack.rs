@@ -45,7 +45,8 @@ pub(crate) const PACKAGE_TREE_IDENTITY_ALGORITHM: &str = "typst-hash128-0.15";
 /// manifest, conventionally named `*.typk`.
 #[derive(Debug, Clone)]
 pub struct Pack {
-    manifest: PackManifest,
+    entrypoint: CanonicalPath,
+    metadata: Option<PackMetadata>,
     files: BTreeMap<CanonicalPath, SharedBytes>,
     /// Vendored packages, keyed by spec string for deterministic order.
     packages: BTreeMap<String, PackageFiles>,
@@ -201,9 +202,7 @@ impl std::fmt::Display for CanonicalPath {
 /// A font embedded in a pack.
 #[derive(Debug, Clone)]
 pub struct PackFont {
-    /// The manifest entry describing this font.
-    entry: FontManifest,
-    /// The raw font file data.
+    identity: FontFaceIdentity,
     data: SharedBytes,
     font: Font,
 }
@@ -315,9 +314,9 @@ impl FontRequirement {
 }
 
 impl PackFont {
-    /// The declaration describing this font face.
-    pub fn manifest(&self) -> &FontManifest {
-        &self.entry
+    /// The exact container and container-local face index.
+    pub fn identity(&self) -> FontFaceIdentity {
+        self.identity
     }
 
     /// The contained font bytes.
@@ -333,9 +332,46 @@ impl PackFont {
 
 #[derive(Debug, Clone)]
 struct PackFontInput {
-    entry: FontManifest,
+    path: Option<String>,
+    index: u32,
+    declared_container_digest: Option<String>,
+    declared_container_identity_kind: Option<String>,
+    declared_container_identity_schema: Option<String>,
+    declared_container_identity_algorithm: Option<String>,
+    declared_container_length: Option<u64>,
+    data: Option<SharedBytes>,
+    embedded: bool,
+}
+
+#[derive(Debug)]
+struct ProjectFileInput {
+    path: String,
+    data: SharedBytes,
+}
+
+#[derive(Debug)]
+struct PackageFileInput {
+    spec: PackageSpec,
+    path: String,
     data: SharedBytes,
     embedded: bool,
+}
+
+#[derive(Debug)]
+struct PackageRequirementInput {
+    entry: PackageManifest,
+    embedded: bool,
+}
+
+#[derive(Debug)]
+struct PackConstructionInput {
+    entrypoint: String,
+    metadata: Option<PackMetadata>,
+    files: Vec<ProjectFileInput>,
+    package_files: Vec<PackageFileInput>,
+    package_requirements: Vec<PackageRequirementInput>,
+    package_requirements_are_declared: bool,
+    fonts: Vec<PackFontInput>,
 }
 
 impl Pack {
@@ -347,239 +383,299 @@ impl Pack {
         PackBuilder::new(entrypoint)
     }
 
-    fn construct(
-        manifest: PackManifest,
-        files: BTreeMap<CanonicalPath, SharedBytes>,
-        packages: BTreeMap<String, PackageFiles>,
-        font_data: BTreeMap<CanonicalPath, SharedBytes>,
-    ) -> Result<Self, PackInvariantError> {
-        let entrypoint = canonical_path(PackPathRole::Entrypoint, manifest.project().entrypoint())?;
-        let canonical_files = files;
-        let font_entries = manifest
-            .fonts()
-            .iter()
-            .cloned()
-            .map(|entry| Ok((canonical_path(PackPathRole::FontData, entry.path())?, entry)))
-            .collect::<Result<Vec<_>, PackInvariantError>>()?;
+    fn construct(input: PackConstructionInput) -> Result<Self, PackInvariantError> {
+        let mut issues = Vec::new();
 
-        let vendored_packages = manifest
-            .packages()
-            .vendored()
-            .iter()
-            .map(|entry| package_manifest_requirement(entry, true))
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
-        let unvendored_packages = manifest
-            .packages()
-            .unvendored()
-            .iter()
-            .map(|entry| package_manifest_requirement(entry, false))
-            .collect::<Result<BTreeMap<_, _>, _>>()?;
-        for path in canonical_files.keys() {
-            validate_archive_entry_name(
-                PackPathRole::ProjectFile,
-                path,
-                PROJECT_PREFIX.len() + path.as_str().len(),
-            )?;
-        }
-        for package in packages.values() {
-            let spec = &package.spec;
-            let version = spec.version.to_string();
-            let package_prefix_len =
-                PACKAGES_PREFIX.len() + spec.namespace.len() + spec.name.len() + version.len() + 3;
-            for path in package.files.keys() {
-                validate_archive_entry_name(
-                    PackPathRole::PackageFile,
-                    path,
-                    package_prefix_len + path.as_str().len(),
-                )?;
+        let entrypoint = match canonical_path(PackPathRole::Entrypoint, &input.entrypoint) {
+            Ok(path) => Some(path),
+            Err(issue) => {
+                issues.push(issue);
+                None
+            }
+        };
+
+        let mut canonical_files = BTreeMap::new();
+        let mut duplicate_project_paths = BTreeSet::new();
+        for file in input.files {
+            match canonical_path(PackPathRole::ProjectFile, &file.path) {
+                Ok(path) => {
+                    if canonical_files.insert(path.clone(), file.data).is_some() {
+                        duplicate_project_paths.insert(path);
+                    }
+                }
+                Err(issue) => issues.push(issue),
             }
         }
-        for (path, _) in &font_entries {
-            validate_archive_entry_name(PackPathRole::FontData, path, path.as_str().len())?;
+        issues.extend(duplicate_project_paths.into_iter().map(|path| {
+            PackInvariantIssue::DuplicateProjectPath {
+                path: path.into_string(),
+            }
+        }));
+        issues.extend(path_tree_conflicts(
+            canonical_files.keys().cloned(),
+            PackPathRole::ProjectFile,
+        ));
+
+        let mut package_groups = BTreeMap::<(String, bool), PackageFiles>::new();
+        let mut invalid_package_groups = BTreeSet::new();
+        let mut duplicate_package_paths = BTreeSet::new();
+        for file in input.package_files {
+            let key = file.spec.to_string();
+            if let Err(issue) = validate_package_spec(&file.spec) {
+                issues.push(issue);
+            }
+            let path = match canonical_path(PackPathRole::PackageFile, &file.path) {
+                Ok(path) => path,
+                Err(issue) => {
+                    issues.push(issue);
+                    continue;
+                }
+            };
+            let package = package_groups
+                .entry((key.clone(), file.embedded))
+                .or_insert_with(|| PackageFiles {
+                    spec: file.spec.clone(),
+                    files: BTreeMap::new(),
+                });
+            if package.files.insert(path.clone(), file.data).is_some() {
+                duplicate_package_paths.insert((key.clone(), file.embedded, path));
+                invalid_package_groups.insert((key, file.embedded));
+            }
         }
-
-        validate_project_declarations(canonical_files.keys().cloned())?;
-
-        for package in packages.values() {
-            let paths = package
-                .files
-                .keys()
-                .cloned()
-                .map(|path| (path, PackPathRole::PackageFile))
-                .collect();
-            if let Some(conflict) = find_path_tree_conflict(paths) {
-                return Err(PackInvariantError::PackagePathTreeConflict {
-                    package: package.spec.to_string(),
-                    ancestor: conflict.ancestor.to_string(),
+        for (package, _, path) in duplicate_package_paths {
+            if let Some(spec) = package_groups
+                .values()
+                .find(|entry| entry.spec.to_string() == package)
+                .map(|entry| entry.spec.clone())
+            {
+                issues.push(PackInvariantIssue::DuplicatePackagePath {
+                    package: spec,
+                    path: path.into_string(),
+                });
+            }
+        }
+        for ((package, embedded), files) in &package_groups {
+            let conflicts = find_path_tree_conflicts(
+                files
+                    .files
+                    .keys()
+                    .cloned()
+                    .map(|path| (path, PackPathRole::PackageFile))
+                    .collect(),
+            );
+            if !conflicts.is_empty() {
+                invalid_package_groups.insert((package.clone(), *embedded));
+            }
+            for conflict in conflicts {
+                issues.push(PackInvariantIssue::PackagePathTreeConflict {
+                    package: package.clone(),
+                    ancestor: conflict.ancestor.into_string(),
                     ancestor_role: conflict.ancestor_role,
-                    descendant: conflict.descendant.to_string(),
+                    descendant: conflict.descendant.into_string(),
                     descendant_role: conflict.descendant_role,
                 });
             }
         }
 
-        for (path, _) in &font_entries {
-            if let Some(conflicting_role) = reserved_font_path_role(path) {
-                return Err(PackInvariantError::ReservedFontPath {
-                    path: path.to_string(),
-                    conflicting_role,
-                });
+        let declarations_are_explicit = input.package_requirements_are_declared;
+        let mut declared_requirements = BTreeMap::<(String, bool), Vec<PackageRequirement>>::new();
+        let mut declared_requirement_roles = BTreeSet::new();
+        let mut duplicate_requirements = BTreeSet::new();
+        for declaration in input.package_requirements {
+            let role = match declaration.entry.spec() {
+                Ok(spec) => (spec.to_string(), declaration.embedded),
+                Err(PackManifestError::InvalidPackageSpec { spec, message }) => {
+                    issues.push(PackInvariantIssue::InvalidPackageSpec { spec, message });
+                    continue;
+                }
+                Err(error) => {
+                    issues.push(PackInvariantIssue::InvalidPackageRequirement {
+                        spec: error.to_string(),
+                    });
+                    continue;
+                }
+            };
+            if !declared_requirement_roles.insert(role.clone()) {
+                duplicate_requirements.insert(role.clone());
+            }
+            match package_manifest_requirement(&declaration.entry, declaration.embedded) {
+                Ok((key, requirement)) => {
+                    declared_requirements
+                        .entry((key, declaration.embedded))
+                        .or_default()
+                        .push(requirement);
+                }
+                Err(issue) => issues.push(issue),
             }
         }
-        let font_paths = font_entries
-            .iter()
-            .map(|(path, _)| path.clone())
-            .collect::<BTreeSet<_>>()
-            .into_iter()
-            .map(|path| (path, PackPathRole::FontData))
-            .collect();
-        if let Some(conflict) = find_path_tree_conflict(font_paths) {
-            return Err(PackInvariantError::PathTreeConflict {
-                ancestor: conflict.ancestor.to_string(),
-                ancestor_role: conflict.ancestor_role,
-                descendant: conflict.descendant.to_string(),
-                descendant_role: conflict.descendant_role,
-            });
-        }
-        if let Some(spec) = vendored_packages
+        issues.extend(duplicate_requirements.into_iter().map(|(spec, embedded)| {
+            PackInvariantIssue::DuplicatePackageRequirement { spec, embedded }
+        }));
+
+        let requirement_specs = package_groups
             .keys()
-            .find(|spec| unvendored_packages.contains_key(*spec))
-        {
-            return Err(PackInvariantError::PackageRoleConflict(spec.clone()));
-        }
-
-        if !canonical_files.contains_key(&entrypoint) {
-            return Err(PackInvariantError::MissingEntrypoint(
-                entrypoint.to_string(),
-            ));
-        }
-
-        for requirement in vendored_packages
-            .values()
-            .chain(unvendored_packages.values())
-        {
-            validate_package_spec(&requirement.spec)?;
-        }
-        for package in packages.values() {
-            validate_package_spec(&package.spec)?;
+            .map(|(spec, _)| spec.clone())
+            .chain(
+                declared_requirement_roles
+                    .iter()
+                    .map(|(spec, _)| spec.clone()),
+            )
+            .collect::<BTreeSet<_>>();
+        for spec in &requirement_specs {
+            let embedded = package_groups.contains_key(&(spec.clone(), true))
+                || declared_requirement_roles.contains(&(spec.clone(), true));
+            let external = package_groups.contains_key(&(spec.clone(), false))
+                || declared_requirement_roles.contains(&(spec.clone(), false));
+            if embedded && external {
+                issues.push(PackInvariantIssue::PackageRoleConflict { spec: spec.clone() });
+            }
         }
 
         let mut canonical_packages = BTreeMap::new();
         let mut package_requirements = Vec::new();
-        for (_, package) in packages {
-            let key = package.spec.to_string();
-            let Some(declared) = vendored_packages.get(&key) else {
-                return Err(PackInvariantError::UndeclaredPackageData(key));
-            };
-            let package_files = package.files;
-            let (tree, file_count, byte_length) = package_tree_identity(&package_files);
-            if declared.tree != tree
-                || declared.file_count != file_count
-                || declared.byte_length != byte_length
-            {
-                return Err(PackInvariantError::MismatchedEmbeddedPackageIdentity(key));
+        if declarations_are_explicit {
+            for ((spec, embedded), declarations) in &declared_requirements {
+                let declared = &declarations[0];
+                if *embedded {
+                    if let Some(package) = package_groups.get(&(spec.clone(), true)) {
+                        let (tree, file_count, byte_length) = package_tree_identity(&package.files);
+                        if !invalid_package_groups.contains(&(spec.clone(), true))
+                            && declarations.iter().any(|declared| {
+                                declared.tree != tree
+                                    || declared.file_count != file_count
+                                    || declared.byte_length != byte_length
+                            })
+                        {
+                            issues.push(PackInvariantIssue::MismatchedEmbeddedPackageIdentity {
+                                spec: spec.clone(),
+                            });
+                        }
+                    }
+                }
+                package_requirements.push(declared.clone());
             }
-            package_requirements.push(PackageRequirement {
-                spec: package.spec.clone(),
-                tree,
-                file_count,
-                byte_length,
-                embedded: true,
-            });
-            canonical_packages.insert(
-                key,
-                PackageFiles {
-                    spec: package.spec,
-                    files: package_files,
-                },
-            );
+            for (spec, embedded) in &declared_requirement_roles {
+                if *embedded && !package_groups.contains_key(&(spec.clone(), true)) {
+                    issues.push(PackInvariantIssue::MissingVendoredPackageData {
+                        spec: spec.clone(),
+                    });
+                }
+            }
+            for ((spec, embedded), package) in &package_groups {
+                if *embedded && !declared_requirement_roles.contains(&(spec.clone(), true)) {
+                    issues.push(PackInvariantIssue::UndeclaredPackageData { spec: spec.clone() });
+                }
+                if *embedded {
+                    canonical_packages.insert(spec.clone(), package.clone());
+                }
+            }
+        } else {
+            for ((spec, embedded), package) in &package_groups {
+                let (tree, file_count, byte_length) = package_tree_identity(&package.files);
+                package_requirements.push(PackageRequirement {
+                    spec: package.spec.clone(),
+                    tree,
+                    file_count,
+                    byte_length,
+                    embedded: *embedded,
+                });
+                if *embedded {
+                    canonical_packages.insert(spec.clone(), package.clone());
+                }
+            }
         }
-        if let Some(spec) = vendored_packages
-            .keys()
-            .find(|spec| !canonical_packages.contains_key(*spec))
-        {
-            return Err(PackInvariantError::MissingVendoredPackageData(spec.clone()));
-        }
-        package_requirements.extend(unvendored_packages.values().cloned());
         package_requirements.sort_by_key(|requirement| requirement.spec.to_string());
-
         let mut canonical_fonts = Vec::new();
-        let mut canonical_font_entries = Vec::new();
         let mut font_catalog = Vec::new();
         let mut font_requirements = Vec::<FontRequirement>::new();
         let mut font_faces = BTreeSet::new();
-        for (path, entry) in font_entries {
-            let index = entry.index();
-            let (data, parsed, container, length) = if entry.is_external() {
-                if font_data.contains_key(&path) {
-                    return Err(PackInvariantError::ExternalFontHasContainedData {
-                        path: path.to_string(),
+        for (position, entry) in input.fonts.into_iter().enumerate() {
+            let path = entry
+                .path
+                .clone()
+                .unwrap_or_else(|| format!("font input {position}"));
+            let index = entry.index;
+            let embedded = entry.embedded;
+            let parsed_data = entry.data.as_ref().and_then(|data| {
+                Font::new(data.to_typst(), index).map(|font| {
+                    let container = FontContainerIdentity::from_bytes(data.as_slice());
+                    (data.clone(), font, container, data.len() as u64)
+                })
+            });
+            let (data, parsed, container, length) = if embedded {
+                let Some((data, parsed, container, length)) = parsed_data else {
+                    issues.push(if entry.data.is_some() {
+                        PackInvariantIssue::InvalidFontData { path, index }
+                    } else {
+                        PackInvariantIssue::MissingFontData { path }
                     });
-                }
-                if entry.container_identity_kind() != Some("font-container")
-                    || entry.container_identity_schema()
-                        != Some("typst-pack-font-container-identity-v1")
-                    || entry.container_identity_algorithm() != Some("typst-hash128-0.15")
-                {
-                    return Err(PackInvariantError::InvalidExternalFontIdentity {
-                        path: path.to_string(),
-                    });
-                }
-                let container = entry
-                    .container_digest()
-                    .and_then(FontContainerIdentity::decode)
-                    .ok_or_else(|| PackInvariantError::InvalidExternalFontIdentity {
-                        path: path.to_string(),
-                    })?;
-                let length = entry
-                    .container_length()
-                    .filter(|length| *length > 0)
-                    .ok_or_else(|| PackInvariantError::InvalidExternalFontIdentity {
-                        path: path.to_string(),
-                    })?;
-                (None, None, container, length)
-            } else {
-                let data = font_data
-                    .get(&path)
-                    .cloned()
-                    .ok_or_else(|| PackInvariantError::MissingFontData(path.to_string()))?;
-                let parsed = Font::new(data.to_typst(), index).ok_or_else(|| {
-                    PackInvariantError::InvalidFontData {
-                        path: path.to_string(),
-                        index,
-                    }
-                })?;
-                let container = FontContainerIdentity::from_bytes(data.as_slice());
-                let length = data.len() as u64;
+                    continue;
+                };
                 if entry
-                    .container_digest()
+                    .declared_container_digest
+                    .as_deref()
                     .is_some_and(|digest| FontContainerIdentity::decode(digest) != Some(container))
                     || entry
-                        .container_length()
+                        .declared_container_length
                         .is_some_and(|declared| declared != length)
                     || entry
-                        .container_identity_kind()
+                        .declared_container_identity_kind
+                        .as_deref()
                         .is_some_and(|kind| kind != container.kind())
                     || entry
-                        .container_identity_schema()
+                        .declared_container_identity_schema
+                        .as_deref()
                         .is_some_and(|schema| schema != container.schema())
                     || entry
-                        .container_identity_algorithm()
+                        .declared_container_identity_algorithm
+                        .as_deref()
                         .is_some_and(|algorithm| algorithm != container.algorithm())
                 {
-                    return Err(PackInvariantError::MismatchedEmbeddedFontIdentity {
-                        path: path.to_string(),
+                    issues.push(PackInvariantIssue::MismatchedEmbeddedFontIdentity {
+                        path: path.clone(),
                     });
                 }
                 (Some(data), Some(parsed), container, length)
+            } else if entry.path.is_none() {
+                let Some((_, _, container, length)) = parsed_data else {
+                    issues.push(PackInvariantIssue::InvalidFontData { path, index });
+                    continue;
+                };
+                (None, None, container, length)
+            } else {
+                if entry.data.is_some() {
+                    issues.push(PackInvariantIssue::ExternalFontHasContainedData {
+                        path: path.clone(),
+                    });
+                }
+                let valid_identity = entry.declared_container_identity_kind.as_deref()
+                    == Some("font-container")
+                    && entry.declared_container_identity_schema.as_deref()
+                        == Some("typst-pack-font-container-identity-v1")
+                    && entry.declared_container_identity_algorithm.as_deref()
+                        == Some("typst-hash128-0.15");
+                let container = entry
+                    .declared_container_digest
+                    .as_deref()
+                    .and_then(FontContainerIdentity::decode);
+                let length = entry.declared_container_length.filter(|length| *length > 0);
+                let (Some(container), Some(length)) = (container, length) else {
+                    issues.push(PackInvariantIssue::InvalidExternalFontIdentity { path });
+                    continue;
+                };
+                if !valid_identity {
+                    issues.push(PackInvariantIssue::InvalidExternalFontIdentity { path });
+                    continue;
+                }
+                (None, None, container, length)
             };
+
             if !font_faces.insert((container, index)) {
-                return Err(PackInvariantError::DuplicateFontFace {
-                    path: path.to_string(),
+                issues.push(PackInvariantIssue::DuplicateFontFace {
+                    path: path.clone(),
                     index,
                 });
             }
-            let embedded = !entry.is_external();
             font_catalog.push(PackFontCatalogFace {
                 identity: FontFaceIdentity::new(container, index),
                 embedded,
@@ -591,9 +687,7 @@ impl Pack {
                 Some(requirement)
                     if requirement.length != length || requirement.embedded != embedded =>
                 {
-                    return Err(PackInvariantError::InconsistentFontContainer {
-                        path: path.to_string(),
-                    });
+                    issues.push(PackInvariantIssue::InconsistentFontContainer { path });
                 }
                 Some(requirement) => requirement.face_indices.push(index),
                 None => font_requirements.push(FontRequirement {
@@ -603,55 +697,37 @@ impl Pack {
                     embedded,
                 }),
             }
-            let canonical_entry = FontManifest::new(
-                path.into_string(),
-                index,
-                entry.families().to_vec(),
-                !embedded,
-                container.encode(),
-                length,
-            );
-            canonical_font_entries.push(canonical_entry.clone());
             if let (Some(data), Some(font)) = (data, parsed) {
                 canonical_fonts.push(PackFont {
-                    entry: canonical_entry,
+                    identity: FontFaceIdentity::new(container, index),
                     data,
                     font,
                 });
             }
         }
+        if let Some(entrypoint) = &entrypoint
+            && !canonical_files.contains_key(entrypoint)
+        {
+            issues.push(PackInvariantIssue::MissingEntrypoint {
+                path: entrypoint.to_string(),
+            });
+        }
 
-        let manifest = PackManifest::new(
-            entrypoint.into_string(),
-            package_requirements
-                .iter()
-                .filter(|requirement| requirement.embedded)
-                .map(package_requirement_manifest)
-                .collect(),
-            package_requirements
-                .iter()
-                .filter(|requirement| !requirement.embedded)
-                .map(package_requirement_manifest)
-                .collect(),
-            canonical_font_entries,
-            manifest.metadata().cloned(),
-        );
+        issues.sort_by_key(PackInvariantIssue::sort_key);
+        if !issues.is_empty() {
+            return Err(PackInvariantError { issues });
+        }
 
-        let pack = Self {
-            manifest,
+        Ok(Self {
+            entrypoint: entrypoint.expect("a valid Pack has a canonical entrypoint"),
+            metadata: input.metadata,
             files: canonical_files,
             packages: canonical_packages,
             package_requirements,
             fonts: canonical_fonts,
             font_catalog,
             font_requirements,
-        };
-        Ok(pack)
-    }
-
-    /// The pack manifest.
-    pub fn manifest(&self) -> &PackManifest {
-        &self.manifest
+        })
     }
 
     /// Derives the Pack's identity-bearing semantic projection.
@@ -696,7 +772,12 @@ impl Pack {
 
     /// The root-relative path of the entrypoint file.
     pub fn entrypoint(&self) -> &str {
-        self.manifest.project().entrypoint()
+        self.entrypoint.as_str()
+    }
+
+    /// Optional descriptive metadata, excluded from Pack Identity.
+    pub fn metadata(&self) -> Option<&PackMetadata> {
+        self.metadata.as_ref()
     }
 
     /// The project files, keyed by root-relative path.
@@ -819,7 +900,7 @@ impl Pack {
                 .cloned()
                 .map(|path| (path, PackPathRole::PackageFile))
                 .collect();
-            if let Some(conflict) = find_path_tree_conflict(paths) {
+            if let Some(conflict) = find_path_tree_conflicts(paths).into_iter().next() {
                 return Err(PackageFulfillmentError::Malformed {
                     spec: requirement.spec.clone(),
                     path: conflict.descendant.to_string(),
@@ -894,7 +975,7 @@ impl Pack {
                         .find(|font| {
                             FontContainerIdentity::from_bytes(font.data.as_slice())
                                 == identity.container
-                                && font.entry.index() == identity.index
+                                && font.identity.index() == identity.index
                         })
                         .expect("Pack Font Catalog embedded face invariant violated")
                         .font
@@ -1006,18 +1087,44 @@ impl Pack {
         }
         let manifest = PackManifest::from_toml_value(manifest_value)?;
 
+        let mut font_paths = BTreeSet::new();
+        let mut font_path_values = Vec::new();
+        for font in manifest.fonts() {
+            let path = canonical_path_without_membership(PackPathRole::FontData, font.path())
+                .map_err(|issue| PackReadError::InvalidEntry {
+                    entry: font.path().to_owned(),
+                    message: issue.to_string(),
+                })?;
+            if let Some(conflicting_role) = reserved_font_archive_role(&path) {
+                return Err(PackReadError::InvalidEntry {
+                    entry: font.path().to_owned(),
+                    message: format!("font data path conflicts with the {conflicting_role} role"),
+                });
+            }
+            font_paths.insert(path.to_string());
+            font_path_values.push((path, PackPathRole::FontData));
+        }
+        if let Some(conflict) = find_path_tree_conflicts(font_path_values)
+            .into_iter()
+            .next()
+        {
+            return Err(PackReadError::InvalidEntry {
+                entry: conflict.descendant.to_string(),
+                message: format!("font data path has file ancestor `{}`", conflict.ancestor),
+            });
+        }
+
         struct ProjectEntry {
             index: usize,
-            path: CanonicalPath,
+            path: String,
         }
         struct PackageEntry {
             index: usize,
             spec: PackageSpec,
-            path: CanonicalPath,
+            path: String,
         }
         struct UnknownEntry {
             index: usize,
-            raw_name: Vec<u8>,
             canonical_name: String,
         }
 
@@ -1057,35 +1164,18 @@ impl Pack {
             };
 
             if role_name == MANIFEST_PATH {
-                register_archive_identity(
-                    &mut canonical_archive_entries,
-                    MANIFEST_PATH.to_owned(),
-                    &raw_name,
-                )?;
+                continue;
             } else if let Some(path) = role_name.strip_prefix(PROJECT_PREFIX) {
                 if !regular_file {
                     return Err(PackReadError::UnsupportedEntryType(archive_name));
                 }
-                let path = canonical_path(PackPathRole::ProjectFile, path.trim_start_matches('/'))?;
-                register_archive_identity(
-                    &mut canonical_archive_entries,
-                    format!("{PROJECT_PREFIX}{path}"),
-                    &raw_name,
-                )?;
+                let path = path.trim_start_matches('/').to_owned();
                 project_entries.push(ProjectEntry { index, path });
             } else if let Some(rest) = role_name.strip_prefix(PACKAGES_PREFIX) {
                 if !regular_file {
                     return Err(PackReadError::UnsupportedEntryType(archive_name));
                 }
                 let (spec, path) = split_package_entry(rest, &archive_name)?;
-                register_archive_identity(
-                    &mut canonical_archive_entries,
-                    format!(
-                        "{PACKAGES_PREFIX}{}/{}/{}/{path}",
-                        spec.namespace, spec.name, spec.version
-                    ),
-                    &raw_name,
-                )?;
                 package_entries.push(PackageEntry { index, spec, path });
             } else {
                 if !regular_file {
@@ -1093,47 +1183,37 @@ impl Pack {
                 }
                 unknown_entries.push(UnknownEntry {
                     index,
-                    raw_name,
                     canonical_name,
                 });
             }
         }
 
-        let font_paths = manifest
-            .fonts()
-            .iter()
-            .filter_map(|font| canonical_path(PackPathRole::FontData, font.path()).ok())
-            .collect::<BTreeSet<_>>();
         let mut font_entries = Vec::new();
         for entry in unknown_entries {
             if let Some(path) = font_paths.get(entry.canonical_name.as_str()) {
-                register_archive_identity(
-                    &mut canonical_archive_entries,
-                    path.to_string(),
-                    &entry.raw_name,
-                )?;
                 font_entries.push((entry.index, path.clone()));
             }
         }
 
-        let mut files = BTreeMap::new();
+        let mut files = Vec::new();
         for project in project_entries {
             let mut data = Vec::new();
             archive.by_index(project.index)?.read_to_end(&mut data)?;
-            files.insert(project.path, SharedBytes::new(data));
+            files.push(ProjectFileInput {
+                path: project.path,
+                data: SharedBytes::new(data),
+            });
         }
-        let mut packages: BTreeMap<String, PackageFiles> = BTreeMap::new();
+        let mut package_files = Vec::new();
         for package in package_entries {
             let mut data = Vec::new();
             archive.by_index(package.index)?.read_to_end(&mut data)?;
-            packages
-                .entry(package.spec.to_string())
-                .or_insert_with(|| PackageFiles {
-                    spec: package.spec,
-                    files: BTreeMap::new(),
-                })
-                .files
-                .insert(package.path, SharedBytes::new(data));
+            package_files.push(PackageFileInput {
+                spec: package.spec,
+                path: package.path,
+                data: SharedBytes::new(data),
+                embedded: true,
+            });
         }
         let mut fonts_by_path = BTreeMap::new();
         for (index, path) in font_entries {
@@ -1142,7 +1222,60 @@ impl Pack {
             fonts_by_path.insert(path, SharedBytes::new(data));
         }
 
-        Ok(Self::construct(manifest, files, packages, fonts_by_path)?)
+        let package_requirements = manifest
+            .packages()
+            .vendored()
+            .iter()
+            .cloned()
+            .map(|entry| PackageRequirementInput {
+                entry,
+                embedded: true,
+            })
+            .chain(
+                manifest
+                    .packages()
+                    .unvendored()
+                    .iter()
+                    .cloned()
+                    .map(|entry| PackageRequirementInput {
+                        entry,
+                        embedded: false,
+                    }),
+            )
+            .collect();
+        let fonts = manifest
+            .fonts()
+            .iter()
+            .map(|entry| {
+                let canonical = canonical_archive_name(entry.path()).ok();
+                PackFontInput {
+                    path: Some(entry.path().to_owned()),
+                    index: entry.index(),
+                    declared_container_digest: entry.container_digest().map(str::to_owned),
+                    declared_container_identity_kind: entry
+                        .container_identity_kind()
+                        .map(str::to_owned),
+                    declared_container_identity_schema: entry
+                        .container_identity_schema()
+                        .map(str::to_owned),
+                    declared_container_identity_algorithm: entry
+                        .container_identity_algorithm()
+                        .map(str::to_owned),
+                    declared_container_length: entry.container_length(),
+                    data: canonical.and_then(|path| fonts_by_path.get(&path).cloned()),
+                    embedded: !entry.is_external(),
+                }
+            })
+            .collect();
+        Ok(Self::construct(PackConstructionInput {
+            entrypoint: manifest.project().entrypoint().to_owned(),
+            metadata: manifest.metadata().cloned(),
+            files,
+            package_files,
+            package_requirements,
+            package_requirements_are_declared: true,
+            fonts,
+        })?)
     }
 
     /// Reads a pack from a byte buffer.
@@ -1158,8 +1291,21 @@ impl Pack {
 
     /// Writes the pack archive to a seekable writer.
     pub fn write<W: Write + Seek>(&self, writer: W) -> Result<(), PackWriteError> {
+        for path in self.files.keys() {
+            validate_archive_entry_name(PROJECT_PREFIX.len() + path.as_str().len())?;
+        }
+        for package in self.packages.values() {
+            let spec = &package.spec;
+            let version = spec.version.to_string();
+            let package_prefix_len =
+                PACKAGES_PREFIX.len() + spec.namespace.len() + spec.name.len() + version.len() + 3;
+            for path in package.files.keys() {
+                validate_archive_entry_name(package_prefix_len + path.as_str().len())?;
+            }
+        }
+
         let mut zip = ZipWriter::new(writer);
-        let manifest = self.manifest.to_toml();
+        let manifest = self.archive_manifest().to_toml();
 
         zip.start_file(MANIFEST_PATH, zip_file_options(manifest.len()))?;
         zip.write_all(manifest.as_bytes())?;
@@ -1188,8 +1334,9 @@ impl Pack {
 
         let mut written = std::collections::BTreeSet::new();
         for font in &self.fonts {
-            if written.insert(font.manifest().path()) {
-                zip.start_file(font.manifest().path(), zip_file_options(font.data().len()))?;
+            let path = font_archive_path(font.identity.container(), Some(font.data()));
+            if written.insert(path.clone()) {
+                zip.start_file(&path, zip_file_options(font.data().len()))?;
                 zip.write_all(font.data())?;
             }
         }
@@ -1203,6 +1350,52 @@ impl Pack {
         let mut buffer = Cursor::new(Vec::new());
         self.write(&mut buffer)?;
         Ok(PackArchiveBytes::from(buffer.into_inner()))
+    }
+
+    fn archive_manifest(&self) -> PackManifest {
+        let fonts = self
+            .font_catalog
+            .iter()
+            .map(|face| {
+                let embedded = self
+                    .fonts
+                    .iter()
+                    .find(|font| font.identity == face.identity);
+                let requirement = self
+                    .font_requirements
+                    .iter()
+                    .find(|requirement| requirement.container == face.identity.container)
+                    .expect("Pack Font Catalog requirement invariant violated");
+                FontManifest::new(
+                    font_archive_path(
+                        face.identity.container,
+                        embedded.map(|font| font.data.as_slice()),
+                    ),
+                    face.identity.index,
+                    embedded
+                        .map(|font| vec![font.info().family.to_string()])
+                        .unwrap_or_default(),
+                    !face.embedded,
+                    face.identity.container.encode(),
+                    requirement.length,
+                )
+            })
+            .collect();
+        PackManifest::new(
+            self.entrypoint.to_string(),
+            self.package_requirements
+                .iter()
+                .filter(|requirement| requirement.embedded)
+                .map(package_requirement_manifest)
+                .collect(),
+            self.package_requirements
+                .iter()
+                .filter(|requirement| !requirement.embedded)
+                .map(package_requirement_manifest)
+                .collect(),
+            fonts,
+            self.metadata.clone(),
+        )
     }
 }
 
@@ -1270,12 +1463,12 @@ fn package_tree_identity(
 fn package_manifest_requirement(
     manifest: &PackageManifest,
     embedded: bool,
-) -> Result<(String, PackageRequirement), PackInvariantError> {
+) -> Result<(String, PackageRequirement), PackInvariantIssue> {
     let spec = manifest.spec().map_err(|error| match error {
         PackManifestError::InvalidPackageSpec { spec, message } => {
-            PackInvariantError::InvalidPackageSpec { spec, message }
+            PackInvariantIssue::InvalidPackageSpec { spec, message }
         }
-        error => PackInvariantError::InvalidPackageRequirement {
+        error => PackInvariantIssue::InvalidPackageRequirement {
             spec: error.to_string(),
         },
     })?;
@@ -1284,12 +1477,12 @@ fn package_manifest_requirement(
         || manifest.tree_identity_algorithm() != PACKAGE_TREE_IDENTITY_ALGORITHM
         || manifest.file_count() == 0
     {
-        return Err(PackInvariantError::InvalidPackageRequirement {
+        return Err(PackInvariantIssue::InvalidPackageRequirement {
             spec: spec.to_string(),
         });
     }
     let tree = PackageTreeIdentity::decode(manifest.tree_digest()).ok_or_else(|| {
-        PackInvariantError::InvalidPackageRequirement {
+        PackInvariantIssue::InvalidPackageRequirement {
             spec: spec.to_string(),
         }
     })?;
@@ -1323,6 +1516,16 @@ fn zip_file_options(size: usize) -> SimpleFileOptions {
     SimpleFileOptions::default()
         .compression_method(zip::CompressionMethod::Deflated)
         .large_file(compressed_bound > zip::ZIP64_BYTES_THR)
+}
+
+pub(crate) fn font_archive_path(identity: FontContainerIdentity, data: Option<&[u8]>) -> String {
+    let extension = match data.and_then(|data| data.get(..4)) {
+        Some(b"OTTO") => "otf",
+        Some(b"ttcf") => "ttc",
+        Some(_) => "ttf",
+        None => "font",
+    };
+    format!("fonts/{}.{extension}", identity.encode())
 }
 
 struct RawCentralEntry {
@@ -1363,10 +1566,7 @@ fn raw_central_entries<R: Read + Seek>(
 }
 
 /// Splits `namespace/name/version/rest...` into a package spec and file path.
-fn split_package_entry(
-    rest: &str,
-    entry: &str,
-) -> Result<(PackageSpec, CanonicalPath), PackReadError> {
+fn split_package_entry(rest: &str, entry: &str) -> Result<(PackageSpec, String), PackReadError> {
     let mut parts = rest.splitn(4, '/');
     let (Some(namespace), Some(name), Some(version), Some(path)) =
         (parts.next(), parts.next(), parts.next(), parts.next())
@@ -1382,8 +1582,7 @@ fn split_package_entry(
             message: err.to_string(),
         }
     })?;
-    let path = canonical_path(PackPathRole::PackageFile, path.trim_start_matches('/'))?;
-    Ok((spec, path))
+    Ok((spec, path.trim_start_matches('/').to_owned()))
 }
 
 /// A failure while reading a pack archive.
@@ -1413,7 +1612,7 @@ pub enum PackReadError {
     Manifest(#[from] PackManifestError),
     #[error("archive entry `{0}` has an unsafe path")]
     UnsafeEntry(String),
-    #[error("invalid archive entry `{entry}`: {message}")]
+    #[error("invalid archive entry {entry:?}: {message:?}")]
     InvalidEntry { entry: String, message: String },
     #[error("archive entry {0:?} is not a regular file")]
     UnsupportedEntryType(String),
@@ -1438,9 +1637,8 @@ pub enum PackWriteError {
 #[derive(Debug)]
 pub struct PackBuilder {
     entrypoint: String,
-    files: BTreeMap<CanonicalPath, SharedBytes>,
-    packages: BTreeMap<String, PackageFiles>,
-    external_packages: BTreeMap<String, PackageFiles>,
+    files: Vec<ProjectFileInput>,
+    package_files: Vec<PackageFileInput>,
     fonts: Vec<PackFontInput>,
     metadata: Option<PackMetadata>,
 }
@@ -1450,9 +1648,8 @@ impl PackBuilder {
     pub fn new(entrypoint: impl Into<String>) -> Self {
         Self {
             entrypoint: entrypoint.into(),
-            files: BTreeMap::new(),
-            packages: BTreeMap::new(),
-            external_packages: BTreeMap::new(),
+            files: Vec::new(),
+            package_files: Vec::new(),
             fonts: Vec::new(),
             metadata: None,
         }
@@ -1472,8 +1669,10 @@ impl PackBuilder {
         path: impl AsRef<str>,
         data: SharedBytes,
     ) -> Result<Self, PackBuildError> {
-        let path = canonical_path(PackPathRole::ProjectFile, path.as_ref())?;
-        self.files.insert(path, data);
+        self.files.push(ProjectFileInput {
+            path: path.as_ref().to_owned(),
+            data,
+        });
         Ok(self)
     }
 
@@ -1493,15 +1692,12 @@ impl PackBuilder {
         path: impl AsRef<str>,
         data: SharedBytes,
     ) -> Result<Self, PackBuildError> {
-        let path = canonical_path(PackPathRole::PackageFile, path.as_ref())?;
-        self.packages
-            .entry(spec.to_string())
-            .or_insert_with(|| PackageFiles {
-                spec,
-                files: BTreeMap::new(),
-            })
-            .files
-            .insert(path, data);
+        self.package_files.push(PackageFileInput {
+            spec,
+            path: path.as_ref().to_owned(),
+            data,
+            embedded: true,
+        });
         Ok(self)
     }
 
@@ -1521,15 +1717,12 @@ impl PackBuilder {
         path: impl AsRef<str>,
         data: SharedBytes,
     ) -> Result<Self, PackBuildError> {
-        let path = canonical_path(PackPathRole::PackageFile, path.as_ref())?;
-        self.external_packages
-            .entry(spec.to_string())
-            .or_insert_with(|| PackageFiles {
-                spec,
-                files: BTreeMap::new(),
-            })
-            .files
-            .insert(path, data);
+        self.package_files.push(PackageFileInput {
+            spec,
+            path: path.as_ref().to_owned(),
+            data,
+            embedded: false,
+        });
         Ok(self)
     }
 
@@ -1546,19 +1739,15 @@ impl PackBuilder {
         data: SharedBytes,
         index: u32,
     ) -> Result<Self, PackBuildError> {
-        let info = FontInfo::new(&data, index).ok_or(PackBuildError::InvalidFontInput { index })?;
-        let family = info.family.to_string();
-        let path = self.font_path(&family, &data);
         self.fonts.push(PackFontInput {
-            entry: FontManifest::new(
-                path,
-                index,
-                vec![family],
-                false,
-                FontContainerIdentity::from_bytes(&data).encode(),
-                data.len() as u64,
-            ),
-            data,
+            path: None,
+            index,
+            declared_container_digest: None,
+            declared_container_identity_kind: None,
+            declared_container_identity_schema: None,
+            declared_container_identity_algorithm: None,
+            declared_container_length: None,
+            data: Some(data),
             embedded: true,
         });
         Ok(self)
@@ -1578,19 +1767,15 @@ impl PackBuilder {
         data: SharedBytes,
         index: u32,
     ) -> Result<Self, PackBuildError> {
-        let info = FontInfo::new(&data, index).ok_or(PackBuildError::InvalidFontInput { index })?;
-        let family = info.family.to_string();
-        let path = self.font_path(&family, &data);
         self.fonts.push(PackFontInput {
-            entry: FontManifest::new(
-                path,
-                index,
-                vec![family],
-                true,
-                FontContainerIdentity::from_bytes(&data).encode(),
-                data.len() as u64,
-            ),
-            data,
+            path: None,
+            index,
+            declared_container_digest: None,
+            declared_container_identity_kind: None,
+            declared_container_identity_schema: None,
+            declared_container_identity_algorithm: None,
+            declared_container_length: None,
+            data: Some(data),
             embedded: false,
         });
         Ok(self)
@@ -1604,104 +1789,25 @@ impl PackBuilder {
 
     /// Finishes the pack.
     pub fn build(self) -> Result<Pack, PackBuildError> {
-        let entrypoint = canonical_path(PackPathRole::Entrypoint, &self.entrypoint)?;
-        let font_data = self
-            .fonts
-            .iter()
-            .filter(|font| font.embedded)
-            .map(|font| {
-                Ok((
-                    canonical_path(PackPathRole::FontData, font.entry.path())?,
-                    font.data.clone(),
-                ))
-            })
-            .collect::<Result<BTreeMap<_, _>, PackInvariantError>>()?;
-        let vendored_requirements = self
-            .packages
-            .values()
-            .map(|package| {
-                let (identity, file_count, byte_length) = package_tree_identity(&package.files);
-                PackageManifest::new(
-                    package.spec.clone(),
-                    identity.encode(),
-                    file_count,
-                    byte_length,
-                )
-            })
-            .collect();
-        let external_requirements = self
-            .external_packages
-            .values()
-            .map(|package| {
-                let (identity, file_count, byte_length) = package_tree_identity(&package.files);
-                PackageManifest::new(
-                    package.spec.clone(),
-                    identity.encode(),
-                    file_count,
-                    byte_length,
-                )
-            })
-            .collect();
-        let manifest = PackManifest::new(
-            entrypoint.into_string(),
-            vendored_requirements,
-            external_requirements,
-            self.fonts.iter().map(|font| font.entry.clone()).collect(),
-            self.metadata,
-        );
-
-        Ok(Pack::construct(
-            manifest,
-            self.files,
-            self.packages,
-            font_data,
-        )?)
-    }
-
-    /// Picks a unique archive path for a font file.
-    fn font_path(&self, family: &str, data: &[u8]) -> String {
-        if let Some(existing) = self.fonts.iter().find(|font| font.data.as_slice() == data) {
-            return existing.entry.path().to_owned();
-        }
-        let extension = match data.get(..4) {
-            Some(b"OTTO") => "otf",
-            Some(b"ttcf") => "ttc",
-            _ => "ttf",
-        };
-        let stem: String = family
-            .to_lowercase()
-            .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-            .collect();
-        let stem = stem.trim_matches('-');
-        let stem = if stem.is_empty() { "font" } else { stem };
-
-        let mut candidate = format!("fonts/{stem}.{extension}");
-        let mut counter = 1;
-        loop {
-            match self
-                .fonts
-                .iter()
-                .find(|font| font.entry.path() == candidate)
-            {
-                None => return candidate,
-                Some(existing) if existing.data.as_slice() == data => return candidate,
-                Some(_) => {
-                    counter += 1;
-                    candidate = format!("fonts/{stem}-{counter}.{extension}");
-                }
-            }
-        }
+        Ok(Pack::construct(PackConstructionInput {
+            entrypoint: self.entrypoint,
+            metadata: self.metadata,
+            files: self.files,
+            package_files: self.package_files,
+            package_requirements: Vec::new(),
+            package_requirements_are_declared: false,
+            fonts: self.fonts,
+        })?)
     }
 }
 
-fn canonical_path(role: PackPathRole, path: &str) -> Result<CanonicalPath, PackInvariantError> {
+fn canonical_path(role: PackPathRole, path: &str) -> Result<CanonicalPath, PackInvariantIssue> {
     let canonical = canonical_path_without_membership(role, path)?;
     // No route into a Pack can name a Pack as a project file.
     if matches!(role, PackPathRole::ProjectFile | PackPathRole::Entrypoint)
         && names_pack_path(canonical.as_str())
     {
-        return Err(PackInvariantError::InvalidPath {
+        return Err(PackInvariantIssue::InvalidPath {
             role,
             path: path.to_owned(),
             message: format!("`.{FILE_EXTENSION}` paths are excluded from project membership"),
@@ -1714,8 +1820,8 @@ fn canonical_path(role: PackPathRole, path: &str) -> Result<CanonicalPath, PackI
 fn canonical_path_without_membership(
     role: PackPathRole,
     path: &str,
-) -> Result<CanonicalPath, PackInvariantError> {
-    let invalid = |message: String| PackInvariantError::InvalidPath {
+) -> Result<CanonicalPath, PackInvariantIssue> {
+    let invalid = |message: String| PackInvariantIssue::InvalidPath {
         role,
         path: path.to_owned(),
         message,
@@ -1770,32 +1876,18 @@ fn canonical_archive_name(path: &str) -> Result<String, PackReadError> {
     Ok(canonical)
 }
 
-fn validate_package_spec(spec: &PackageSpec) -> Result<(), PackInvariantError> {
+fn validate_package_spec(spec: &PackageSpec) -> Result<(), PackInvariantIssue> {
     let serialized = spec.to_string();
     let parsed = PackageSpec::from_str(&serialized).map_err(|message| {
-        PackInvariantError::InvalidPackageSpec {
+        PackInvariantIssue::InvalidPackageSpec {
             spec: serialized.clone(),
             message: message.to_string(),
         }
     })?;
     if parsed != *spec {
-        return Err(PackInvariantError::InvalidPackageSpec {
+        return Err(PackInvariantIssue::InvalidPackageSpec {
             spec: serialized,
             message: "package specification does not round-trip canonically".to_owned(),
-        });
-    }
-    Ok(())
-}
-
-fn validate_archive_entry_name(
-    role: PackPathRole,
-    path: &CanonicalPath,
-    archive_name_len: usize,
-) -> Result<(), PackInvariantError> {
-    if archive_name_len > MAX_ZIP_ENTRY_NAME_LEN {
-        return Err(PackInvariantError::ArchiveEntryNameTooLong {
-            role,
-            path: path.to_string(),
         });
     }
     Ok(())
@@ -1806,6 +1898,15 @@ fn has_windows_drive_prefix(path: &str) -> bool {
     bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
 }
 
+fn validate_archive_entry_name(archive_name_len: usize) -> Result<(), PackWriteError> {
+    if archive_name_len > MAX_ZIP_ENTRY_NAME_LEN {
+        return Err(PackWriteError::Zip(zip::result::ZipError::InvalidArchive(
+            "entry name exceeds ZIP's limit".into(),
+        )));
+    }
+    Ok(())
+}
+
 fn strip_current_directory_prefix(mut path: &str) -> &str {
     while let Some(rest) = path.strip_prefix("./") {
         path = rest;
@@ -1813,17 +1914,19 @@ fn strip_current_directory_prefix(mut path: &str) -> &str {
     path
 }
 
-fn find_path_tree_conflict(
+fn find_path_tree_conflicts(
     mut paths: Vec<(CanonicalPath, PackPathRole)>,
-) -> Option<PathTreeConflict> {
+) -> Vec<PathTreeConflict> {
     paths.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let mut conflicts = Vec::new();
     for (ancestor, ancestor_role) in &paths {
         let prefix = format!("{ancestor}/");
-        let candidate = paths.partition_point(|(path, _)| path.as_str() < prefix.as_str());
-        if let Some((descendant, descendant_role)) = paths.get(candidate)
-            && descendant.as_str().starts_with(&prefix)
+        for (descendant, descendant_role) in paths
+            .iter()
+            .skip(paths.partition_point(|(path, _)| path.as_str() < prefix.as_str()))
+            .take_while(|(path, _)| path.as_str().starts_with(&prefix))
         {
-            return Some(PathTreeConflict {
+            conflicts.push(PathTreeConflict {
                 ancestor: ancestor.clone(),
                 ancestor_role: *ancestor_role,
                 descendant: descendant.clone(),
@@ -1831,34 +1934,31 @@ fn find_path_tree_conflict(
             });
         }
     }
-    None
+    conflicts
 }
 
-fn validate_project_declarations(
-    project_files: impl IntoIterator<Item = CanonicalPath>,
-) -> Result<(), PackInvariantError> {
-    let project_paths = project_files
+fn path_tree_conflicts(
+    paths: impl IntoIterator<Item = CanonicalPath>,
+    role: PackPathRole,
+) -> Vec<PackInvariantIssue> {
+    find_path_tree_conflicts(paths.into_iter().map(|path| (path, role)).collect())
         .into_iter()
-        .map(|path| (path, PackPathRole::ProjectFile))
-        .collect();
-    if let Some(conflict) = find_path_tree_conflict(project_paths) {
-        return Err(PackInvariantError::PathTreeConflict {
-            ancestor: conflict.ancestor.to_string(),
+        .map(|conflict| PackInvariantIssue::PathTreeConflict {
+            ancestor: conflict.ancestor.into_string(),
             ancestor_role: conflict.ancestor_role,
-            descendant: conflict.descendant.to_string(),
+            descendant: conflict.descendant.into_string(),
             descendant_role: conflict.descendant_role,
-        });
-    }
-    Ok(())
+        })
+        .collect()
 }
 
-fn reserved_font_path_role(path: &CanonicalPath) -> Option<PackPathRole> {
+fn reserved_font_archive_role(path: &CanonicalPath) -> Option<&'static str> {
     if is_same_or_descendant(path.as_str(), MANIFEST_PATH) {
-        Some(PackPathRole::PackManifest)
+        Some("Pack Manifest")
     } else if is_same_or_descendant(path.as_str(), PROJECT_PREFIX.trim_end_matches('/')) {
-        Some(PackPathRole::ProjectFile)
+        Some("project file")
     } else if is_same_or_descendant(path.as_str(), PACKAGES_PREFIX.trim_end_matches('/')) {
-        Some(PackPathRole::PackageFile)
+        Some("package file")
     } else {
         None
     }
@@ -1875,72 +1975,57 @@ fn register_archive_identity(
     entries: &mut BTreeMap<String, Vec<u8>>,
     canonical: String,
     raw_name: &[u8],
-) -> Result<(), PackInvariantError> {
+) -> Result<(), PackReadError> {
     if let Some(first_entry) = entries.get(&canonical) {
         if first_entry == raw_name {
             return Ok(());
         }
-        return Err(PackInvariantError::CanonicalArchiveEntryCollision {
-            canonical,
-            first_entry: display_archive_name(first_entry),
-            second_entry: display_archive_name(raw_name),
-        });
+        return Err(PackReadError::AmbiguousArchiveEntries);
     }
     entries.insert(canonical, raw_name.to_owned());
     Ok(())
 }
 
-fn display_archive_name(raw_name: &[u8]) -> String {
-    String::from_utf8(raw_name.to_owned()).unwrap_or_else(|_| {
-        raw_name
-            .iter()
-            .flat_map(|byte| std::ascii::escape_default(*byte).map(char::from))
-            .collect()
-    })
-}
-
 /// A failure while building a pack in memory.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
 pub enum PackBuildError {
-    /// Builder-provided font bytes do not contain the requested face.
-    #[error("font input does not contain a valid face at index {index}")]
-    InvalidFontInput { index: u32 },
     #[error(transparent)]
     Invariant(#[from] PackInvariantError),
 }
 
-/// A violation of the invariants shared by every [`Pack`] construction path.
+/// One independently detectable violation of a whole-Pack invariant.
 #[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
-pub enum PackInvariantError {
+#[non_exhaustive]
+pub enum PackInvariantIssue {
     /// A path cannot identify a canonical file for its declared role.
-    #[error("invalid {role} path `{path}`: {message}")]
+    #[error("invalid {role} path {path:?}: {message:?}")]
     InvalidPath {
         role: PackPathRole,
         path: String,
         message: String,
     },
     /// A package value cannot be represented as a canonical package specification.
-    #[error("invalid package spec `{spec}`: {message}")]
+    #[error("invalid package spec {spec:?}: {message:?}")]
     InvalidPackageSpec { spec: String, message: String },
     /// A Package Requirement has a malformed or unsupported tree identity.
-    #[error("package requirement `{spec}` has an invalid Package Tree identity")]
+    #[error("package requirement {spec:?} has an invalid Package Tree identity")]
     InvalidPackageRequirement { spec: String },
     /// Embedded package bytes disagree with their declared tree identity.
-    #[error("embedded package `{0}` does not match its declared Package Tree identity")]
-    MismatchedEmbeddedPackageIdentity(String),
-    /// A contained path cannot fit in ZIP's filename field after adding its role prefix.
-    #[error("the {role} path `{path}` exceeds ZIP's filename length limit")]
-    ArchiveEntryNameTooLong { role: PackPathRole, path: String },
-    /// Distinct archive entries identify one canonical contained file.
-    #[error("archive entries `{first_entry}` and `{second_entry}` both identify `{canonical}`")]
-    CanonicalArchiveEntryCollision {
-        canonical: String,
-        first_entry: String,
-        second_entry: String,
-    },
+    #[error("embedded package {spec:?} does not match its declared Package Tree identity")]
+    MismatchedEmbeddedPackageIdentity { spec: String },
+    /// Two project entries identify one canonical path.
+    #[error("project path {path:?} is supplied more than once")]
+    DuplicateProjectPath { path: String },
+    /// Two package entries identify one canonical path.
+    #[error("package {package} path {path:?} is supplied more than once")]
+    DuplicatePackagePath { package: PackageSpec, path: String },
+    /// One exact Package Requirement is declared more than once in one role.
+    #[error("package requirement {spec:?} is declared more than once")]
+    DuplicatePackageRequirement { spec: String, embedded: bool },
     /// One file path is an ancestor of another file path in the same tree.
     #[error(
-        "{ancestor_role} path `{ancestor}` conflicts with {descendant_role} descendant `{descendant}`"
+        "{ancestor_role} path {ancestor:?} conflicts with {descendant_role} descendant {descendant:?}"
     )]
     PathTreeConflict {
         ancestor: String,
@@ -1950,7 +2035,7 @@ pub enum PackInvariantError {
     },
     /// One package file path is an ancestor of another file path in that package.
     #[error(
-        "package `{package}` {ancestor_role} path `{ancestor}` conflicts with {descendant_role} descendant `{descendant}`"
+        "package {package:?} {ancestor_role} path {ancestor:?} conflicts with {descendant_role} descendant {descendant:?}"
     )]
     PackagePathTreeConflict {
         package: String,
@@ -1960,50 +2045,132 @@ pub enum PackInvariantError {
         descendant_role: PackPathRole,
     },
     /// A package was declared both vendored and unvendored.
-    #[error("package `{0}` cannot be both vendored and unvendored")]
-    PackageRoleConflict(String),
+    #[error("package {spec:?} cannot be both vendored and unvendored")]
+    PackageRoleConflict { spec: String },
     /// Package bytes exist without a matching vendored declaration.
-    #[error("package `{0}` has contained data but is not declared vendored")]
-    UndeclaredPackageData(String),
+    #[error("package {spec:?} has contained data but is not declared vendored")]
+    UndeclaredPackageData { spec: String },
     /// A vendored package declaration has no contained bytes.
-    #[error("vendored package `{0}` has no contained data")]
-    MissingVendoredPackageData(String),
-    /// A font declaration uses an archive path reserved for another role.
-    #[error("font data path `{path}` conflicts with the {conflicting_role} archive role")]
-    ReservedFontPath {
-        path: String,
-        conflicting_role: PackPathRole,
-    },
+    #[error("vendored package {spec:?} has no contained data")]
+    MissingVendoredPackageData { spec: String },
     /// A font declaration has no contained bytes.
-    #[error("font data `{0}` is missing")]
-    MissingFontData(String),
+    #[error("font data {path:?} is missing")]
+    MissingFontData { path: String },
     /// Contained font bytes do not contain the declared face.
-    #[error("font data `{path}` does not contain a valid face at index {index}")]
+    #[error("font data {path:?} does not contain a valid face at index {index}")]
     InvalidFontData { path: String, index: u32 },
     /// An external font declaration has no valid exact container identity.
-    #[error("external font `{path}` has an invalid container identity or length")]
+    #[error("external font {path:?} has an invalid container identity or length")]
     InvalidExternalFontIdentity { path: String },
     /// Embedded font bytes disagree with their declared exact identity.
-    #[error("embedded font `{path}` does not match its declared container identity")]
+    #[error("embedded font {path:?} does not match its declared container identity")]
     MismatchedEmbeddedFontIdentity { path: String },
     /// Faces from one exact container disagree about its length or fulfillment role.
-    #[error("font `{path}` conflicts with another declaration for the same container")]
+    #[error("font {path:?} conflicts with another declaration for the same container")]
     InconsistentFontContainer { path: String },
     /// An externally fulfilled declaration also has bytes in the Pack.
-    #[error("external font `{path}` cannot also have contained data")]
+    #[error("external font {path:?} cannot also have contained data")]
     ExternalFontHasContainedData { path: String },
     /// The same contained font face was declared more than once.
-    #[error("font `{path}` declares face index {index} more than once")]
+    #[error("font {path:?} declares face index {index} more than once")]
     DuplicateFontFace { path: String, index: u32 },
     /// The declared entrypoint is not present among the packed project files.
-    #[error("entrypoint `{0}` is not a contained project file")]
-    MissingEntrypoint(String),
+    #[error("entrypoint {path:?} is not a contained project file")]
+    MissingEntrypoint { path: String },
+}
+
+impl PackInvariantIssue {
+    fn sort_key(&self) -> (u8, String, u8, u64, String) {
+        match self {
+            Self::InvalidPath {
+                role: PackPathRole::Entrypoint,
+                path,
+                ..
+            } => (3, path.clone(), 0, 0, String::new()),
+            Self::InvalidPath { role, path, .. } => {
+                (role_sort_rank(*role), path.clone(), 0, 0, String::new())
+            }
+            Self::DuplicateProjectPath { path } => (0, path.clone(), 1, 0, String::new()),
+            Self::PathTreeConflict {
+                ancestor,
+                ancestor_role,
+                descendant,
+                ..
+            } => (
+                role_sort_rank(*ancestor_role),
+                ancestor.clone(),
+                2,
+                0,
+                descendant.clone(),
+            ),
+            Self::InvalidPackageSpec { spec, .. } => (1, spec.clone(), 0, 0, String::new()),
+            Self::DuplicatePackagePath { package, path } => {
+                (1, package.to_string(), 1, 0, path.clone())
+            }
+            Self::PackagePathTreeConflict {
+                package,
+                ancestor,
+                descendant,
+                ..
+            } => (
+                1,
+                package.clone(),
+                2,
+                0,
+                format!("{ancestor}\0{descendant}"),
+            ),
+            Self::DuplicatePackageRequirement { spec, embedded } => {
+                (1, spec.clone(), 3, u64::from(*embedded), String::new())
+            }
+            Self::InvalidPackageRequirement { spec } => (1, spec.clone(), 4, 0, String::new()),
+            Self::MismatchedEmbeddedPackageIdentity { spec } => {
+                (1, spec.clone(), 5, 0, String::new())
+            }
+            Self::PackageRoleConflict { spec } => (1, spec.clone(), 6, 0, String::new()),
+            Self::UndeclaredPackageData { spec } => (1, spec.clone(), 7, 0, String::new()),
+            Self::MissingVendoredPackageData { spec } => (1, spec.clone(), 8, 0, String::new()),
+            Self::MissingFontData { path } => (2, path.clone(), 0, 0, String::new()),
+            Self::InvalidFontData { path, index } => {
+                (2, path.clone(), 1, u64::from(*index), String::new())
+            }
+            Self::InvalidExternalFontIdentity { path } => (2, path.clone(), 2, 0, String::new()),
+            Self::MismatchedEmbeddedFontIdentity { path } => (2, path.clone(), 3, 0, String::new()),
+            Self::InconsistentFontContainer { path } => (2, path.clone(), 4, 0, String::new()),
+            Self::ExternalFontHasContainedData { path } => (2, path.clone(), 5, 0, String::new()),
+            Self::DuplicateFontFace { path, index } => {
+                (2, path.clone(), 6, u64::from(*index), String::new())
+            }
+            Self::MissingEntrypoint { path } => (3, path.clone(), 1, 0, String::new()),
+        }
+    }
+}
+
+fn role_sort_rank(role: PackPathRole) -> u8 {
+    match role {
+        PackPathRole::Entrypoint => 3,
+        PackPathRole::ProjectFile => 0,
+        PackPathRole::PackageFile => 1,
+        PackPathRole::FontData => 2,
+    }
+}
+
+/// A violation of the invariants shared by every [`Pack`] construction path.
+#[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
+#[error("Pack construction failed with {} issue(s)", .issues.len())]
+pub struct PackInvariantError {
+    issues: Vec<PackInvariantIssue>,
+}
+
+impl PackInvariantError {
+    /// Every independently detectable issue in canonical domain order.
+    pub fn issues(&self) -> &[PackInvariantIssue] {
+        &self.issues
+    }
 }
 
 /// The role a path plays in a Pack invariant.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum PackPathRole {
-    PackManifest,
     Entrypoint,
     ProjectFile,
     PackageFile,
@@ -2013,7 +2180,6 @@ pub enum PackPathRole {
 impl std::fmt::Display for PackPathRole {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(match self {
-            Self::PackManifest => "Pack Manifest",
             Self::Entrypoint => "entrypoint",
             Self::ProjectFile => "project file",
             Self::PackageFile => "package file",

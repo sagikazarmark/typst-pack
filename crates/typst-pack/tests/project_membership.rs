@@ -4,7 +4,7 @@
 
 use proptest::prelude::*;
 use typst_pack::{
-    IGNORE_FILE, Pack, PackBuildError, PackInvariantError, PackPathRole, ProjectIgnorePolicy,
+    IGNORE_FILE, Pack, PackBuildError, PackInvariantIssue, PackPathRole, ProjectIgnorePolicy,
     ProjectIgnorePolicyError, ProjectSnapshotAssembly, ProjectSnapshotError,
 };
 
@@ -266,14 +266,17 @@ fn canonical_project_path_validation_rejects_pack_paths() {
         .file("main.typ", b"Hello".to_vec())
         .unwrap()
         .file("nested/old.typk", b"drop".to_vec())
+        .unwrap()
+        .build()
         .unwrap_err();
     assert!(
         matches!(
             error,
-            PackBuildError::Invariant(PackInvariantError::InvalidPath {
-                role: PackPathRole::ProjectFile,
-                ..
-            })
+            PackBuildError::Invariant(ref error)
+                if matches!(error.issues(), [PackInvariantIssue::InvalidPath {
+                    role: PackPathRole::ProjectFile,
+                    ..
+                }])
         ),
         "{error}"
     );
@@ -286,10 +289,11 @@ fn canonical_project_path_validation_rejects_pack_paths() {
     assert!(
         matches!(
             error,
-            PackBuildError::Invariant(PackInvariantError::InvalidPath {
-                role: PackPathRole::Entrypoint,
-                ..
-            })
+            PackBuildError::Invariant(ref error)
+                if matches!(error.issues(), [PackInvariantIssue::InvalidPath {
+                    role: PackPathRole::Entrypoint,
+                    ..
+                }])
         ),
         "{error}"
     );
