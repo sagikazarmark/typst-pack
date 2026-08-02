@@ -395,7 +395,7 @@ own transport — including one whose only network access is asynchronous:
 
 ```rust,ignore
 use typst_pack::{
-    expand_package_archive, package_archive_url, PackageExpansionCeiling,
+    expand_package_archive, package_archive_url, PackageExpansionLimits,
 };
 
 let url = package_archive_url(&spec)?;
@@ -404,18 +404,18 @@ let archive = fetch(&url)?;
 let tree = expand_package_archive(
     spec,
     &archive,
-    // Required, so that the bound is always a deliberate choice.
-    PackageExpansionCeiling { max_bytes: 32 * 1024 * 1024 },
+    // Required, so every expansion bound is a deliberate choice.
+    PackageExpansionLimits::reference_v1(),
 )?;
 ```
 
-Expansion stops at the ceiling and fails with
-`PackageAcquisitionError::ExpansionCeilingExceeded` rather than materializing
-what lies past it, so a caller-named package cannot exhaust the process. Every
-archive member is charged against the ceiling, but only addressable regular
-files become tree entries, and a member whose path cannot name a package file is
-rejected. A specification in a namespace the registry does not serve has no URL
-there and is reported as such.
+Expansion bounds compressed bytes, raw members, member names, one expanded
+member, and total expanded bytes. It fails with
+`PackageAcquisitionError::ExpansionLimit` before materializing what lies past a
+ceiling, so a caller-named package cannot exhaust the process. Every archive
+member is charged, but only addressable regular files become tree entries, and a
+member whose path cannot name a package file is rejected. A specification in a
+namespace the registry does not serve has no URL there and is reported as such.
 
 Compilation-time Pack Overrides replace contained project-file bytes in memory:
 

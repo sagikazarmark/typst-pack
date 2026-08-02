@@ -70,7 +70,8 @@ pub use pack::{
 #[cfg(feature = "package-acquisition")]
 pub use package_acquisition::{
     PACKAGE_REGISTRY_NAMESPACE, PACKAGE_REGISTRY_URL, PackageAcquisitionError,
-    PackageExpansionCeiling, expand_package_archive, package_archive_url,
+    PackageExpansionLimitError, PackageExpansionLimits, PackageExpansionLimitsError,
+    PackageExpansionResource, expand_package_archive, package_archive_url,
 };
 pub use package_catalog::{
     PackageCatalog, PackageCatalogEntry, PackageCatalogError, PackageCatalogIssue,

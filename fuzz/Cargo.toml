@@ -9,8 +9,11 @@ rust-version = "1.92"
 cargo-fuzz = true
 
 [dependencies]
+flate2 = "1"
 libfuzzer-sys = "0.4"
-typst-pack = { path = "../crates/typst-pack" }
+tar = { version = "0.4", default-features = false }
+typst = "=0.15.1"
+typst-pack = { path = "../crates/typst-pack", features = ["package-acquisition"] }
 
 [[bin]]
 name = "project_snapshot_assembly"
@@ -29,6 +32,13 @@ bench = false
 [[bin]]
 name = "pack_archive_decoder"
 path = "fuzz_targets/pack_archive_decoder.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "package_archive_expansion"
+path = "fuzz_targets/package_archive_expansion.rs"
 test = false
 doc = false
 bench = false

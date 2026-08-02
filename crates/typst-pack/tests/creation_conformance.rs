@@ -76,7 +76,7 @@ enum PackageSource {
     #[cfg(feature = "package-acquisition")]
     Archive {
         bytes: Vec<u8>,
-        ceiling: typst_pack::PackageExpansionCeiling,
+        limits: typst_pack::PackageExpansionLimits,
     },
 }
 
@@ -151,11 +151,11 @@ impl Fixture {
         mut self,
         name: &'static str,
         bytes: Vec<u8>,
-        ceiling: typst_pack::PackageExpansionCeiling,
+        limits: typst_pack::PackageExpansionLimits,
     ) -> Self {
         self.packages.push(PackageFixture {
             spec: registry_spec(name),
-            source: PackageSource::Archive { bytes, ceiling },
+            source: PackageSource::Archive { bytes, limits },
             disposition: PackageDisposition::Embedded,
         });
         self
@@ -224,7 +224,7 @@ impl Fixture {
                 package.disposition,
             )),
             #[cfg(feature = "package-acquisition")]
-            PackageSource::Archive { ceiling, .. } => {
+            PackageSource::Archive { limits, .. } => {
                 // The core names where the registry serves the specification,
                 // the host fetches it with whatever primitive it has, and
                 // expansion needs no transport at all.
@@ -233,12 +233,12 @@ impl Fixture {
                 let bytes = self
                     .serve(&url)
                     .expect("the stand-in registry serves that URL");
-                typst_pack::expand_package_archive(spec.clone(), bytes, *ceiling)
+                typst_pack::expand_package_archive(spec.clone(), bytes, *limits)
                     .map(|tree| (spec.clone(), tree, package.disposition))
                     .map_err(|error| match error {
-                        typst_pack::PackageAcquisitionError::ExpansionCeilingExceeded {
-                            ..
-                        } => Failure::ExpansionCeiling,
+                        typst_pack::PackageAcquisitionError::ExpansionLimit { .. } => {
+                            Failure::ExpansionCeiling
+                        }
                         error => panic!("the fixture archive failed to expand: {error}"),
                     })
             }
@@ -921,7 +921,7 @@ fn an_archive_beyond_the_expansion_ceiling_fails_the_resume_loop() {
         .registry_archive(
             "oversized",
             archive(&[("lib.typ", 128 * 1024 * 1024, b"#let value = 1")]),
-            typst_pack::PackageExpansionCeiling { max_bytes: 4096 },
+            typst_pack::PackageExpansionLimits::new(1 << 20, 10, 1 << 20, 4096, 4096).unwrap(),
         );
 
     assert_eq!(
