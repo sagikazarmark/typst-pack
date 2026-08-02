@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs::File;
-use std::io::{BufReader, IsTerminal, Read, Write};
+use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -19,11 +19,13 @@ use typst_kit::diagnostics::termcolor::{
 use typst_kit::fonts::FontSource;
 use typst_pdf::{PdfStandard, Timestamp};
 
+use typst_pack::PackArchiveBytes;
 use typst_pack::cli_support::{
     CliCompilationExecution, CliCompilationPresentation, compile_with_timing,
     emit_creation_error_diagnostics, emit_creation_warnings, pdf_standard_requiring_tags,
     read_complete_package_tree, system_packages, validate_pdf_standards,
 };
+use typst_pack::pack_archive::{DecodeLimits, FORMAT_VERSION, decode};
 use typst_pack::{
     CompilationArtifact, CompilationOutputSpecification, CompilationStatus, CreationTimestamp,
     DocumentTime, FontContainerFulfillment, HtmlOutputSpecification, OutputFormat,
@@ -749,7 +751,7 @@ fn inspect(args: InspectArgs) -> CliResult {
     let pack = read_pack(&args.pack)?;
 
     println!("pack: {}", args.pack.display());
-    println!("format version: {}", typst_pack::FORMAT_VERSION);
+    println!("format version: {FORMAT_VERSION}");
     println!("entrypoint: {}", pack.entrypoint());
     if let Some(metadata) = pack.metadata() {
         if let Some(name) = metadata.name() {
@@ -1292,9 +1294,9 @@ fn normalize_output_path(path: &Path) -> PathBuf {
 }
 
 fn read_pack(path: &Path) -> Result<Pack, String> {
-    let file =
-        File::open(path).map_err(|err| format!("cannot open `{}`: {err}", path.display()))?;
-    Pack::read(BufReader::new(file)).map_err(|err| err.to_string())
+    let bytes =
+        std::fs::read(path).map_err(|err| format!("cannot open `{}`: {err}", path.display()))?;
+    decode_pack_bytes(bytes)
 }
 
 fn read_pack_input(path: &Path) -> Result<Pack, String> {
@@ -1304,9 +1306,14 @@ fn read_pack_input(path: &Path) -> Result<Pack, String> {
             .lock()
             .read_to_end(&mut bytes)
             .map_err(|err| format!("cannot read Pack from stdin: {err}"))?;
-        return Pack::from_bytes(bytes).map_err(|err| err.to_string());
+        return decode_pack_bytes(bytes);
     }
     read_pack(path)
+}
+
+fn decode_pack_bytes(bytes: Vec<u8>) -> Result<Pack, String> {
+    let archive = PackArchiveBytes::from_vec(bytes);
+    decode(&archive, DecodeLimits::reference_v1()).map_err(|error| error.to_string())
 }
 
 fn default_output_dir(pack: &Path) -> PathBuf {

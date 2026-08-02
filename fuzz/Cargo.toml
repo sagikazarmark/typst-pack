@@ -26,5 +26,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "pack_archive_decoder"
+path = "fuzz_targets/pack_archive_decoder.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

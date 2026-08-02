@@ -10,9 +10,13 @@
 
 #![cfg(feature = "fs")]
 
+#[path = "support/archive.rs"]
+mod archive_support;
+
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use archive_support::decode_reference;
 use typst_pack::{Pack, Packer, PackerError, TypstTarget};
 
 /// A project directory with an image, a data file, an included chapter, and an
@@ -99,7 +103,7 @@ fn structural_creation_packs_all_project_files_and_complete_packages() {
     // The whole Complete Package Tree travels, not only what was read.
     assert!(outcome.pack.package_file(spec, "unused.txt").is_some());
 
-    let reread = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
+    let reread = decode_reference(outcome.pack.to_bytes().unwrap()).unwrap();
     assert_eq!(reread.identity(), outcome.pack.identity());
 }
 
@@ -640,7 +644,7 @@ mod fonts {
             .unwrap();
         assert!(!full.pack.fonts().is_empty());
         // The embedded containers must load again from the pack.
-        Pack::from_bytes(full.pack.to_bytes().unwrap()).unwrap();
+        decode_reference(full.pack.to_bytes().unwrap()).unwrap();
     }
 
     #[test]
@@ -678,7 +682,7 @@ mod fonts {
             .unwrap();
 
         // Round-trip through bytes: nothing may depend on the filesystem.
-        let pack = Pack::from_bytes(outcome.pack.to_bytes().unwrap()).unwrap();
+        let pack = decode_reference(outcome.pack.to_bytes().unwrap()).unwrap();
         let mut request = PackCompilationRequest::new(
             pack.clone(),
             CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),

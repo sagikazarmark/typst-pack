@@ -18,7 +18,7 @@ pub const FORMAT_VERSION: u32 = 1;
 /// The parsed contents of `typst-pack.toml`.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case")]
-pub struct PackManifest {
+pub(crate) struct PackManifest {
     /// The pack format version. Readers must reject versions they don't know.
     format_version: u32,
     /// The packed Typst project.
@@ -74,7 +74,7 @@ impl<'de> Deserialize<'de> for PackManifest {
 /// The `[project]` section.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct ProjectManifest {
+pub(crate) struct ProjectManifest {
     /// The root-relative path of the entrypoint file, e.g. `main.typ`.
     entrypoint: String,
 }
@@ -82,7 +82,7 @@ pub struct ProjectManifest {
 /// The `[packages]` section.
 #[derive(Debug, Clone, Default, PartialEq, Serialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct PackagesManifest {
+pub(crate) struct PackagesManifest {
     /// Exact package trees whose files are stored inside the Pack.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     vendored: Vec<PackageManifest>,
@@ -105,8 +105,8 @@ impl TryFrom<Version1PackagesManifest> for PackagesManifest {
 
     fn try_from(packages: Version1PackagesManifest) -> Result<Self, Self::Error> {
         Ok(Self {
-            vendored: validate_packages(packages.vendored)?,
-            unvendored: validate_packages(packages.unvendored)?,
+            vendored: packages.vendored,
+            unvendored: packages.unvendored,
         })
     }
 }
@@ -125,7 +125,7 @@ impl<'de> Deserialize<'de> for PackagesManifest {
 /// One exact Complete Package Tree declaration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct PackageManifest {
+pub(crate) struct PackageManifest {
     spec: String,
     tree_digest: String,
     tree_identity_kind: String,
@@ -138,7 +138,7 @@ pub struct PackageManifest {
 /// One `[[fonts]]` entry.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct FontManifest {
+pub(crate) struct FontManifest {
     /// The archive entry holding the font data, e.g. `fonts/dejavu-sans.ttf`.
     path: String,
     /// The face index inside the font file (non-zero for collections).
@@ -228,8 +228,8 @@ impl PackageManifest {
         }
     }
 
-    pub fn spec(&self) -> Result<PackageSpec, PackManifestError> {
-        PackageSpec::from_str(&self.spec).map_err(|error| PackManifestError::InvalidPackageSpec {
+    pub(crate) fn spec(&self) -> Result<PackageSpec, InvalidPackageSpec> {
+        PackageSpec::from_str(&self.spec).map_err(|error| InvalidPackageSpec {
             spec: self.spec.clone(),
             message: error.to_string(),
         })
@@ -273,7 +273,8 @@ impl FontManifest {
     }
 
     /// Informational family names declared for this face.
-    pub fn families(&self) -> &[String] {
+    #[cfg(test)]
+    pub(crate) fn families(&self) -> &[String] {
         &self.families
     }
 
@@ -366,6 +367,7 @@ impl PackMetadata {
 
 /// A manifest that could not be accepted.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum PackManifestError {
     #[error("failed to parse manifest: {0}")]
     Parse(#[from] toml::de::Error),
@@ -373,8 +375,14 @@ pub enum PackManifestError {
     InvalidFormatVersion,
     #[error("unsupported pack format version {0} (this reader supports version {FORMAT_VERSION})")]
     UnsupportedVersion(u32),
-    #[error("invalid package spec `{spec}`: {message}")]
-    InvalidPackageSpec { spec: String, message: String },
+    #[error("the {MANIFEST_PATH} manifest is not valid UTF-8: {0}")]
+    NotUtf8(#[source] std::str::Utf8Error),
+}
+
+#[derive(Debug)]
+pub(crate) struct InvalidPackageSpec {
+    pub(crate) spec: String,
+    pub(crate) message: String,
 }
 
 impl PackManifest {
@@ -398,7 +406,8 @@ impl PackManifest {
     }
 
     /// The Pack format version.
-    pub fn format_version(&self) -> u32 {
+    #[cfg(test)]
+    pub(crate) fn format_version(&self) -> u32 {
         self.format_version
     }
 
@@ -458,15 +467,4 @@ fn parse_manifest_value(value: toml::Value) -> Result<PackManifest, PackManifest
     let manifest = PackManifest::try_from(wire)?;
     manifest.validate()?;
     Ok(manifest)
-}
-
-fn validate_packages(
-    packages: Vec<PackageManifest>,
-) -> Result<Vec<PackageManifest>, PackManifestError> {
-    // Syntax is representation-owned, but whole-Pack construction owns
-    // semantic duplicate validation, so declaration order stays intact.
-    for package in &packages {
-        package.spec()?;
-    }
-    Ok(packages)
 }

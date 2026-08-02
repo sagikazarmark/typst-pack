@@ -192,6 +192,7 @@ reach the network. Add the `egress` feature to let filesystem creation download
 the packages a project imports.
 
 ```rust,ignore
+use typst_pack::pack_archive::{DecodeLimits, decode};
 use typst_pack::{
     compile, CompilationOutputSpecification, OutputFormat, Pack,
     PackCompilationRequest, Packer, PdfOutputSpecification,
@@ -204,7 +205,7 @@ let outcome = Packer::new("path/to/project", "main.typ")
 let bytes = outcome.pack.to_bytes()?;
 
 // ... ship the bytes somewhere, then compile without a file system:
-let pack = Pack::from_bytes(bytes)?;
+let pack = decode(&bytes, DecodeLimits::reference_v1())?;
 let request = PackCompilationRequest::new(
     pack,
     CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
@@ -498,7 +499,8 @@ compatibility aliases:
   `pack.font_catalog()`, and `font.identity()`/`font.data()`/`font.info()`.
 - Shared Pack consistency failures are aggregated in canonical domain order as
   `PackInvariantIssue` values exposed by `PackInvariantError::issues()`. The
-  error is wrapped by `PackBuildError::Invariant` or `PackReadError::Invariant`.
+  error is wrapped by `PackBuildError::Invariant` or
+  `pack_archive::DecodeError::InvalidPack`.
 - Replace `OutputFormat` plus `CompileOptions` request construction with the
   corresponding `CompilationOutputSpecification` variant and format-specific
   structure. PDF creation time is configured through

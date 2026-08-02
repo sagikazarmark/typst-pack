@@ -1,3 +1,4 @@
+use typst_pack::pack_archive::{DecodeLimits, decode};
 use typst_pack::{
     CompilationOutputSpecification, CreationOutcome, CreationRequest, Pack, PackArchiveBytes,
     PackCompilationRequest, PackageCatalog, PackageDisposition, PackageTree,
@@ -43,7 +44,7 @@ fn failed_pack_archive_decode_preserves_retry_ownership() {
     let archive = PackArchiveBytes::from(b"not a Pack Archive".to_vec());
     let archive_pointer = archive.as_slice().as_ptr();
 
-    assert!(Pack::from_archive_bytes(&archive).is_err());
+    assert!(decode(&archive, DecodeLimits::reference_v1()).is_err());
     assert_eq!(archive.as_slice().as_ptr(), archive_pointer);
 }
 

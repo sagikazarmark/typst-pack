@@ -20,6 +20,7 @@ mod fs_project;
 mod ignore_policy;
 mod manifest;
 mod pack;
+pub mod pack_archive;
 #[cfg(feature = "package-acquisition")]
 mod package_acquisition;
 mod package_catalog;
@@ -60,15 +61,12 @@ pub use font_catalog::{
     FontContainerFace, FontDisposition,
 };
 pub use ignore_policy::{IGNORE_FILE, ProjectIgnorePolicy, ProjectIgnorePolicyError};
-pub use manifest::{
-    FORMAT_VERSION, FontManifest, MANIFEST_PATH, PackManifest, PackManifestError, PackMetadata,
-    PackageManifest, PackagesManifest, ProjectManifest,
-};
+pub use manifest::PackMetadata;
 pub use pack::{
     FILE_EXTENSION, FontCatalogError, FontContainerIdentity, FontFaceIdentity, FontRequirement,
     Pack, PackBuildError, PackBuilder, PackFont, PackFontCatalogFace, PackIdentity,
-    PackInvariantError, PackInvariantIssue, PackPathRole, PackReadError, PackWriteError,
-    PackageRequirement, PackageTreeIdentity,
+    PackInvariantError, PackInvariantIssue, PackPathRole, PackWriteError, PackageRequirement,
+    PackageTreeIdentity,
 };
 #[cfg(feature = "package-acquisition")]
 pub use package_acquisition::{

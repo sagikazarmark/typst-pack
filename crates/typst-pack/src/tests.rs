@@ -1,7 +1,9 @@
 //! Crate tests.
 
 use crate::compile::{CompileError, compile as compile_request, compile_world as compile};
+use crate::manifest::*;
 use crate::pack::{CompilationDependencySnapshotError, PackageFulfillmentError};
+use crate::pack_archive::{ArchiveError, DecodeError, DecodeLimits, ManifestError};
 use crate::world::{PackWorld, PackWorldConstructionError};
 use crate::*;
 
@@ -10,6 +12,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use typst::World;
 use typst::foundations::Bytes;
 use typst::syntax::{RootedPath, VirtualPath, VirtualRoot};
+
+fn decode_test_archive(bytes: impl Into<PackArchiveBytes>) -> Result<Pack, DecodeError> {
+    let archive = bytes.into();
+    crate::pack_archive::decode(&archive, DecodeLimits::reference_v1())
+}
 
 fn tiny_png() -> Vec<u8> {
     tiny_skia::Pixmap::new(4, 4).unwrap().encode_png().unwrap()
@@ -80,9 +87,9 @@ fn only_build_issue(result: Result<Pack, PackBuildError>) -> PackInvariantIssue 
     error.issues()[0].clone()
 }
 
-fn only_read_issue(result: Result<Pack, PackReadError>) -> PackInvariantIssue {
+fn only_read_issue(result: Result<Pack, DecodeError>) -> PackInvariantIssue {
     let error = result.unwrap_err();
-    let PackReadError::Invariant(error) = error else {
+    let DecodeError::InvalidPack(error) = error else {
         panic!("expected a whole-Pack invariant error, got {error:?}");
     };
     assert_eq!(error.issues().len(), 1, "{:#?}", error.issues());
@@ -323,7 +330,7 @@ fn whole_pack_validation_rejects_duplicate_manifest_requirements() {
     let archive = raw_stored_zip(&[(MANIFEST_PATH, &manifest), ("project/main.typ", b"Hello")]);
 
     assert!(matches!(
-        only_read_issue(Pack::from_bytes(archive)),
+        only_read_issue(decode_test_archive(archive)),
         PackInvariantIssue::DuplicatePackageRequirement {
             ref spec,
             embedded: false,
@@ -354,7 +361,7 @@ fn duplicate_requirement_evidence_is_complete_and_permutation_invariant() {
             "format-version = 1\n[project]\nentrypoint = \"main.typ\"\n\
              [packages]\nunvendored = [{declarations}]\n"
         );
-        let PackReadError::Invariant(error) = Pack::from_bytes(raw_stored_zip(&[
+        let DecodeError::InvalidPack(error) = decode_test_archive(raw_stored_zip(&[
             (MANIFEST_PATH, manifest.as_bytes()),
             ("project/main.typ", b"Hello"),
         ]))
@@ -379,7 +386,7 @@ fn duplicate_requirement_evidence_is_complete_and_permutation_invariant() {
 fn duplicate_vendored_requirements_still_report_content_mismatch() {
     let declaration = test_package_declaration(&[("lib.typ", b"declared")]);
     let manifest = test_package_manifest(vec![declaration.clone(), declaration], vec![]);
-    let PackReadError::Invariant(error) = Pack::from_bytes(raw_stored_zip(&[
+    let DecodeError::InvalidPack(error) = decode_test_archive(raw_stored_zip(&[
         (MANIFEST_PATH, &manifest),
         ("project/main.typ", b"Hello"),
         ("packages/local/example/1.0.0/lib.typ", b"different"),
@@ -400,7 +407,7 @@ fn duplicate_vendored_requirements_still_report_content_mismatch() {
 #[test]
 fn malformed_vendored_requirement_still_reports_missing_data() {
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[packages]\nvendored = [{ spec = \"@local/example:1.0.0\", tree-digest = \"not-a-digest\", tree-identity-kind = \"complete-package-tree\", tree-identity-schema = \"typst-pack-complete-package-tree-v1\", tree-identity-algorithm = \"typst-hash128-0.15\", file-count = 1, byte-length = 1 }]\n";
-    let PackReadError::Invariant(error) = Pack::from_bytes(raw_stored_zip(&[
+    let DecodeError::InvalidPack(error) = decode_test_archive(raw_stored_zip(&[
         (MANIFEST_PATH, manifest),
         ("project/main.typ", b"Hello"),
     ]))
@@ -528,7 +535,7 @@ fn pack_construction_requires_a_contained_entrypoint() {
         .unwrap();
     zip.finish().unwrap();
 
-    let read = Pack::from_bytes(buffer.into_inner());
+    let read = decode_test_archive(buffer.into_inner());
     assert!(matches!(
         only_read_issue(read),
         PackInvariantIssue::MissingEntrypoint { ref path } if path == "main.typ"
@@ -629,7 +636,7 @@ fn pack_construction_rejects_conflicting_project_tree_roles() {
         ("project/assets-foo", b"interleaved"),
     ]);
     assert!(matches!(
-        only_read_issue(Pack::from_bytes(bytes)),
+        only_read_issue(decode_test_archive(bytes)),
         PackInvariantIssue::PathTreeConflict {
                 ref ancestor,
                 ref descendant,
@@ -667,7 +674,7 @@ fn pack_construction_rejects_conflicting_package_roles() {
         ("packages/local/example/1.0.0/lib.typ", b"Hello"),
     ]);
     assert!(matches!(
-        only_read_issue(Pack::from_bytes(bytes)),
+        only_read_issue(decode_test_archive(bytes)),
         PackInvariantIssue::PackageRoleConflict { ref spec }
             if spec == "@local/example:1.0.0"
     ));
@@ -684,7 +691,7 @@ fn pack_construction_rejects_package_declaration_data_disagreement() {
         ("project/main.typ", b"Hello"),
     ]);
     assert!(matches!(
-        only_read_issue(Pack::from_bytes(missing)),
+        only_read_issue(decode_test_archive(missing)),
         PackInvariantIssue::MissingVendoredPackageData { ref spec }
             if spec == "@local/example:1.0.0"
     ));
@@ -696,7 +703,7 @@ fn pack_construction_rejects_package_declaration_data_disagreement() {
         ("packages/local/example/1.0.0/lib.typ", b"Hello"),
     ]);
     assert!(matches!(
-        only_read_issue(Pack::from_bytes(undeclared)),
+        only_read_issue(decode_test_archive(undeclared)),
         PackInvariantIssue::UndeclaredPackageData { ref spec }
             if spec == "@local/example:1.0.0"
     ));
@@ -858,7 +865,7 @@ fn pack_construction_rejects_conflicting_package_file_tree_paths() {
     ]);
 
     assert!(matches!(
-        only_read_issue(Pack::from_bytes(bytes)),
+        only_read_issue(decode_test_archive(bytes)),
         PackInvariantIssue::PackagePathTreeConflict {
                 ref package,
                 ref ancestor,
@@ -881,7 +888,7 @@ fn pack_construction_rejects_invalid_contained_font_data() {
     ]);
 
     assert!(matches!(
-        only_read_issue(Pack::from_bytes(bytes)),
+        only_read_issue(decode_test_archive(bytes)),
         PackInvariantIssue::InvalidFontData {
             ref path,
             index: 3,
@@ -895,7 +902,7 @@ fn pack_construction_rejects_missing_font_data() {
     let bytes = raw_stored_zip(&[(MANIFEST_PATH, manifest), ("project/main.typ", b"Hello")]);
 
     assert!(matches!(
-        only_read_issue(Pack::from_bytes(bytes)),
+        only_read_issue(decode_test_archive(bytes)),
         PackInvariantIssue::MissingFontData { ref path }
             if path == "fonts/vendor/font.ttf"
     ));
@@ -906,7 +913,7 @@ fn pack_construction_rejects_missing_font_data() {
 fn read_exposes_verified_font_domain_values() {
     let font = embedded_font_data();
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"fonts/vendor/font.ttf\"\n";
-    let pack = Pack::from_bytes(raw_stored_zip(&[
+    let pack = decode_test_archive(raw_stored_zip(&[
         (MANIFEST_PATH, manifest),
         ("project/main.typ", b"Hello"),
         ("fonts/vendor/font.ttf", &font),
@@ -928,7 +935,7 @@ fn pack_identity_excludes_font_archive_paths_and_informational_families() {
             "format-version = 1\n[project]\nentrypoint = \"main.typ\"\n\
              [[fonts]]\npath = \"{path}\"\nfamilies = [\"{family}\"]\n"
         );
-        Pack::from_bytes(raw_stored_zip(&[
+        decode_test_archive(raw_stored_zip(&[
             (MANIFEST_PATH, manifest.as_bytes()),
             ("project/main.typ", b"Hello"),
             (path, &font),
@@ -956,7 +963,7 @@ fn pack_construction_rejects_a_missing_face_in_valid_font_data() {
     ]);
 
     assert!(matches!(
-        only_read_issue(Pack::from_bytes(bytes)),
+        only_read_issue(decode_test_archive(bytes)),
         PackInvariantIssue::InvalidFontData {
             ref path,
             index: 99,
@@ -984,7 +991,7 @@ fn pack_builder_defers_invalid_font_data_to_whole_pack_validation() {
 fn pack_accepts_shared_multi_face_custom_font_data_and_informational_families() {
     let collection = two_face_collection(&embedded_font_data());
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"custom-font.data\"\nindex = 0\nfamilies = [\"Not the parsed family\"]\n[[fonts]]\npath = \"custom-font.data\"\nindex = 1\nfamilies = [\"Also informational\"]\n";
-    let pack = Pack::from_bytes(raw_stored_zip(&[
+    let pack = decode_test_archive(raw_stored_zip(&[
         (MANIFEST_PATH, manifest),
         ("project/main.typ", b"Hello"),
         ("custom-font.data", &collection),
@@ -1031,7 +1038,7 @@ fn pack_font_catalog_preserves_declared_faces_and_container_disposition() {
         .unwrap();
     assert_eq!(external.face_indices(), &[1]);
 
-    let reread = Pack::from_bytes(pack.to_bytes().unwrap()).unwrap();
+    let reread = decode_test_archive(pack.to_bytes().unwrap()).unwrap();
     assert_eq!(
         reread
             .font_catalog()
@@ -1134,7 +1141,7 @@ fn malformed_external_font_is_a_pack_owned_pre_compilation_outcome() {
         (MANIFEST_PATH, manifest.as_bytes()),
         ("project/main.typ", b"unreached"),
     ]);
-    let pack = Pack::from_bytes(archive).unwrap();
+    let pack = decode_test_archive(archive).unwrap();
 
     let result = compile_request(
         PackCompilationRequest::new(
@@ -1163,7 +1170,7 @@ fn pack_rejects_duplicate_font_faces() {
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"font.data\"\nfamilies = [\"A\"]\n[[fonts]]\npath = \"font.data\"\nfamilies = [\"B\"]\n";
 
     assert!(matches!(
-        only_read_issue(Pack::from_bytes(raw_stored_zip(&[
+        only_read_issue(decode_test_archive(raw_stored_zip(&[
             (MANIFEST_PATH, manifest),
             ("project/main.typ", b"Hello"),
             ("font.data", &font),
@@ -1179,7 +1186,7 @@ fn pack_rejects_duplicate_font_faces() {
 #[test]
 fn font_issues_are_ordered_by_numeric_face_index() {
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"font.data\"\nindex = 10\n[[fonts]]\npath = \"font.data\"\nindex = 2\n";
-    let PackReadError::Invariant(error) = Pack::from_bytes(raw_stored_zip(&[
+    let DecodeError::InvalidPack(error) = decode_test_archive(raw_stored_zip(&[
         (MANIFEST_PATH, manifest),
         ("project/main.typ", b"Hello"),
         ("font.data", b"not a font"),
@@ -1203,9 +1210,9 @@ fn archive_decoding_rejects_font_paths_reserved_for_project_files() {
     let bytes = raw_stored_zip(&[(MANIFEST_PATH, manifest), ("project/main.typ", b"Hello")]);
 
     assert!(matches!(
-        Pack::from_bytes(bytes),
-        Err(PackReadError::InvalidEntry { ref entry, .. })
-            if entry == "project/main.typ"
+        decode_test_archive(bytes),
+        Err(DecodeError::Archive(ArchiveError::FontPathRoleConflict { ref path, .. }))
+            if path == "project/main.typ"
     ));
 }
 
@@ -1215,8 +1222,9 @@ fn archive_decoding_rejects_a_font_path_at_the_manifest() {
     let bytes = raw_stored_zip(&[(MANIFEST_PATH, manifest), ("project/main.typ", b"Hello")]);
 
     assert!(matches!(
-        Pack::from_bytes(bytes),
-        Err(PackReadError::InvalidEntry { ref entry, .. }) if entry == MANIFEST_PATH
+        decode_test_archive(bytes),
+        Err(DecodeError::Archive(ArchiveError::FontPathRoleConflict { ref path, .. }))
+            if path == MANIFEST_PATH
     ));
 }
 
@@ -1233,8 +1241,11 @@ fn archive_decoding_rejects_font_paths_at_reserved_namespace_roots() {
         ]);
 
         assert!(matches!(
-            Pack::from_bytes(bytes),
-            Err(PackReadError::InvalidEntry { ref entry, .. }) if entry == path
+            decode_test_archive(bytes),
+            Err(DecodeError::Archive(ArchiveError::FontPathRoleConflict {
+                path: ref actual,
+                ..
+            })) if actual == path
         ));
     }
 }
@@ -1250,9 +1261,11 @@ fn archive_decoding_rejects_conflicting_font_data_tree_paths() {
     ]);
 
     assert!(matches!(
-        Pack::from_bytes(bytes),
-        Err(PackReadError::InvalidEntry { ref entry, .. })
-            if entry == "fonts/a/face.ttf"
+        decode_test_archive(bytes),
+        Err(DecodeError::Archive(ArchiveError::FontPathTreeConflict {
+            ref descendant,
+            ..
+        })) if descendant == "fonts/a/face.ttf"
     ));
 }
 
@@ -1261,8 +1274,9 @@ fn archive_font_path_failures_precede_pack_validation() {
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"missing.typ\"\n[[fonts]]\npath = \"../font.ttf\"\nfamilies = [\"Invalid\"]\n";
 
     assert!(matches!(
-        Pack::from_bytes(raw_stored_zip(&[(MANIFEST_PATH, manifest)])),
-        Err(PackReadError::InvalidEntry { ref entry, .. }) if entry == "../font.ttf"
+        decode_test_archive(raw_stored_zip(&[(MANIFEST_PATH, manifest)])),
+        Err(DecodeError::Archive(ArchiveError::InvalidFontPath(ref path)))
+            if path == "../font.ttf"
     ));
 }
 
@@ -1361,7 +1375,7 @@ fn pack_roundtrip_in_memory() {
         .unwrap();
 
     let bytes = pack.to_bytes().unwrap();
-    let reread = Pack::from_bytes(bytes).unwrap();
+    let reread = decode_test_archive(bytes).unwrap();
 
     assert_eq!(reread.entrypoint(), "main.typ");
     assert_eq!(reread.files().count(), 3);
@@ -1394,7 +1408,7 @@ fn full_unicode_pack_remains_semantically_equivalent_after_reencoding() {
         .build()
         .unwrap();
 
-    let reread = Pack::from_bytes(pack.to_bytes().unwrap()).unwrap();
+    let reread = decode_test_archive(pack.to_bytes().unwrap()).unwrap();
 
     assert_eq!(reread.metadata(), pack.metadata());
     assert_eq!(reread.package_requirements(), pack.package_requirements());
@@ -1403,7 +1417,7 @@ fn full_unicode_pack_remains_semantically_equivalent_after_reencoding() {
     assert!(reread.file("品牌/图.png").is_some());
     assert_eq!(reread.packages().count(), 1);
     assert_eq!(reread.fonts().len(), 1);
-    let reread_again = Pack::from_bytes(reread.to_bytes().unwrap()).unwrap();
+    let reread_again = decode_test_archive(reread.to_bytes().unwrap()).unwrap();
     assert_eq!(reread_again.identity(), pack.identity());
     assert_eq!(reread_again.metadata(), pack.metadata());
 }
@@ -1456,22 +1470,25 @@ fn read_rejects_archives_without_manifest() {
         .unwrap();
     zip.write_all(b"hi").unwrap();
     zip.finish().unwrap();
-    let result = Pack::from_bytes(buffer.into_inner());
-    assert!(matches!(result, Err(PackReadError::MissingManifest)));
+    let result = decode_test_archive(buffer.into_inner());
+    assert!(matches!(
+        result,
+        Err(DecodeError::Archive(ArchiveError::MissingManifest))
+    ));
 }
 
 #[test]
 fn read_reports_corrupt_zip_data_as_an_archive_error() {
     assert!(matches!(
-        Pack::from_bytes(b"not a zip archive".to_vec()),
-        Err(PackReadError::Zip(_))
+        decode_test_archive(b"not a zip archive".to_vec()),
+        Err(DecodeError::Archive(ArchiveError::Zip(_)))
     ));
 }
 
 #[test]
 fn read_accepts_a_manifest_that_is_not_the_first_entry() {
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
-    let pack = Pack::from_bytes(raw_stored_zip(&[
+    let pack = decode_test_archive(raw_stored_zip(&[
         ("project/main.typ", b"Hello"),
         (MANIFEST_PATH, manifest),
     ]))
@@ -1485,8 +1502,8 @@ fn read_reports_a_non_utf8_manifest_specifically() {
     let bytes = raw_stored_zip(&[(MANIFEST_PATH, &[0xff]), ("project/main.typ", b"Hello")]);
 
     assert!(matches!(
-        Pack::from_bytes(bytes),
-        Err(PackReadError::ManifestNotUtf8(_))
+        decode_test_archive(bytes),
+        Err(DecodeError::Manifest(ManifestError::NotUtf8(_)))
     ));
 }
 
@@ -1499,17 +1516,20 @@ fn read_reports_an_unreadable_manifest_payload_specifically() {
     ]));
 
     assert!(matches!(
-        Pack::from_bytes(bytes),
-        Err(PackReadError::ManifestUnreadable(_))
+        decode_test_archive(bytes),
+        Err(DecodeError::Archive(ArchiveError::MemberUnreadable {
+            ref member,
+            ..
+        })) if member == MANIFEST_PATH
     ));
 }
 
 #[test]
-fn manifest_decoding_failures_precede_archive_path_failures() {
+fn raw_archive_safety_precedes_manifest_but_semantic_paths_do_not() {
     let non_utf8 = raw_stored_zip(&[(MANIFEST_PATH, &[0xff]), ("project/../bad.typ", b"bad")]);
     assert!(matches!(
-        Pack::from_bytes(non_utf8),
-        Err(PackReadError::ManifestNotUtf8(_))
+        decode_test_archive(non_utf8),
+        Err(DecodeError::Manifest(ManifestError::NotUtf8(_)))
     ));
 
     let malformed = raw_stored_zip(&[
@@ -1517,8 +1537,8 @@ fn manifest_decoding_failures_precede_archive_path_failures() {
         ("project/../bad.typ", b"bad"),
     ]);
     assert!(matches!(
-        Pack::from_bytes(malformed),
-        Err(PackReadError::Manifest(_))
+        decode_test_archive(malformed),
+        Err(DecodeError::Manifest(_))
     ));
 
     let duplicate_with_non_utf8_manifest = raw_stored_zip(&[
@@ -1527,8 +1547,9 @@ fn manifest_decoding_failures_precede_archive_path_failures() {
         ("future/data", b"second"),
     ]);
     assert!(matches!(
-        Pack::from_bytes(duplicate_with_non_utf8_manifest),
-        Err(PackReadError::ManifestNotUtf8(_))
+        decode_test_archive(duplicate_with_non_utf8_manifest),
+        Err(DecodeError::Archive(ArchiveError::DuplicateMember(ref name)))
+            if name == b"future/data"
     ));
 
     let duplicate_with_malformed_manifest = raw_stored_zip(&[
@@ -1537,8 +1558,9 @@ fn manifest_decoding_failures_precede_archive_path_failures() {
         ("future/data", b"second"),
     ]);
     assert!(matches!(
-        Pack::from_bytes(duplicate_with_malformed_manifest),
-        Err(PackReadError::Manifest(_))
+        decode_test_archive(duplicate_with_malformed_manifest),
+        Err(DecodeError::Archive(ArchiveError::DuplicateMember(ref name)))
+            if name == b"future/data"
     ));
 
     let duplicate_with_unsupported_manifest = raw_stored_zip(&[
@@ -1550,8 +1572,9 @@ fn manifest_decoding_failures_precede_archive_path_failures() {
         ("future/data", b"second"),
     ]);
     assert!(matches!(
-        Pack::from_bytes(duplicate_with_unsupported_manifest),
-        Err(PackReadError::DuplicateArchiveEntry(ref name)) if name == b"future/data"
+        decode_test_archive(duplicate_with_unsupported_manifest),
+        Err(DecodeError::Archive(ArchiveError::DuplicateMember(ref name)))
+            if name == b"future/data"
     ));
 }
 
@@ -1564,8 +1587,8 @@ fn read_reports_a_non_file_manifest_specifically() {
     );
 
     assert!(matches!(
-        Pack::from_bytes(bytes),
-        Err(PackReadError::ManifestNotFile)
+        decode_test_archive(bytes),
+        Err(DecodeError::Archive(ArchiveError::ManifestNotFile))
     ));
 }
 
@@ -1585,15 +1608,15 @@ fn read_rejects_unsafe_unknown_directories_before_ignoring_them() {
     zip.finish().unwrap();
 
     assert!(matches!(
-        Pack::from_bytes(buffer.into_inner()),
-        Err(PackReadError::UnsafeEntry(_))
+        decode_test_archive(buffer.into_inner()),
+        Err(DecodeError::Archive(ArchiveError::UnsafeMemberName(_)))
     ));
 }
 
 #[test]
 fn read_accepts_safe_unknown_entries_and_rewrite_drops_them() {
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
-    let pack = Pack::from_bytes(raw_stored_zip(&[
+    let pack = decode_test_archive(raw_stored_zip(&[
         (MANIFEST_PATH, manifest),
         ("project/main.typ", b"Hello"),
         ("future/data.bin", b"ignored"),
@@ -1622,7 +1645,7 @@ fn read_accepts_safe_directory_entries() {
     zip.write_all(b"Hello").unwrap();
     zip.finish().unwrap();
 
-    let pack = Pack::from_bytes(buffer.into_inner()).unwrap();
+    let pack = decode_test_archive(buffer.into_inner()).unwrap();
     assert_eq!(pack.file("main.typ").unwrap(), b"Hello");
 }
 
@@ -1639,8 +1662,9 @@ fn read_rejects_safe_unknown_entries_that_are_not_regular_files() {
     );
 
     assert!(matches!(
-        Pack::from_bytes(bytes),
-        Err(PackReadError::UnsupportedEntryType(ref name)) if name == "future/link"
+        decode_test_archive(bytes),
+        Err(DecodeError::Archive(ArchiveError::UnsupportedMemberKind(ref name)))
+            if name == "future/link"
     ));
 }
 
@@ -1656,7 +1680,7 @@ fn unsupported_archive_member_names_are_escaped_when_rendered() {
         0o120777,
     );
 
-    let message = Pack::from_bytes(bytes).unwrap_err().to_string();
+    let message = decode_test_archive(bytes).unwrap_err().to_string();
     assert!(message.contains(r"line\nbreak"));
     assert!(!message.contains('\n'));
 }
@@ -1671,8 +1695,8 @@ fn read_rejects_a_windows_prefix_hidden_by_a_current_directory_alias() {
     ]);
 
     assert!(matches!(
-        Pack::from_bytes(bytes),
-        Err(PackReadError::UnsafeEntry(_))
+        decode_test_archive(bytes),
+        Err(DecodeError::Archive(ArchiveError::UnsafeMemberName(_)))
     ));
 }
 
@@ -1686,8 +1710,8 @@ fn read_rejects_duplicate_manifest_entries() {
     ]);
 
     assert!(matches!(
-        Pack::from_bytes(bytes),
-        Err(PackReadError::DuplicateManifest)
+        decode_test_archive(bytes),
+        Err(DecodeError::Archive(ArchiveError::DuplicateManifest))
     ));
 }
 
@@ -1702,8 +1726,9 @@ fn read_rejects_exact_duplicate_unknown_entries() {
     ]);
 
     assert!(matches!(
-        Pack::from_bytes(bytes),
-        Err(PackReadError::DuplicateArchiveEntry(ref name)) if name == b"future/data"
+        decode_test_archive(bytes),
+        Err(DecodeError::Archive(ArchiveError::DuplicateMember(ref name)))
+            if name == b"future/data"
     ));
 }
 
@@ -1717,8 +1742,8 @@ fn read_rejects_distinct_archive_entries_with_one_canonical_identity() {
     ]);
 
     assert!(matches!(
-        Pack::from_bytes(bytes),
-        Err(PackReadError::AmbiguousArchiveEntries)
+        decode_test_archive(bytes),
+        Err(DecodeError::Archive(ArchiveError::AmbiguousMemberNames))
     ));
 }
 
@@ -1735,8 +1760,8 @@ fn read_rejects_canonical_collisions_for_package_and_font_entries() {
         ("packages/local/example/1.0.0/./lib.typ", b"second"),
     ]);
     assert!(matches!(
-        Pack::from_bytes(package),
-        Err(PackReadError::AmbiguousArchiveEntries)
+        decode_test_archive(package),
+        Err(DecodeError::Archive(ArchiveError::AmbiguousMemberNames))
     ));
 
     let font_manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"fonts/vendor/font.ttf\"\n";
@@ -1747,8 +1772,8 @@ fn read_rejects_canonical_collisions_for_package_and_font_entries() {
         ("fonts/vendor/./font.ttf", b"second"),
     ]);
     assert!(matches!(
-        Pack::from_bytes(font),
-        Err(PackReadError::AmbiguousArchiveEntries)
+        decode_test_archive(font),
+        Err(DecodeError::Archive(ArchiveError::AmbiguousMemberNames))
     ));
 }
 
@@ -1762,9 +1787,9 @@ fn read_rejects_malformed_package_entry_layouts() {
     ]);
 
     assert!(matches!(
-        Pack::from_bytes(bytes),
-        Err(PackReadError::InvalidEntry { ref entry, .. })
-            if entry == "packages/local/example/1.0.0"
+        decode_test_archive(bytes),
+        Err(DecodeError::Archive(ArchiveError::MalformedPackageMember(ref member)))
+            if member == "packages/local/example/1.0.0"
     ));
 }
 
@@ -1779,8 +1804,8 @@ fn read_rejects_distinct_raw_names_with_one_decoded_identity() {
     ]);
 
     assert!(matches!(
-        Pack::from_bytes(bytes),
-        Err(PackReadError::AmbiguousArchiveEntries)
+        decode_test_archive(bytes),
+        Err(DecodeError::Archive(ArchiveError::AmbiguousMemberNames))
     ));
 }
 
@@ -1794,8 +1819,9 @@ fn read_rejects_invalid_utf8_raw_names_marked_as_utf8() {
     ]);
 
     assert!(matches!(
-        Pack::from_bytes(bytes),
-        Err(PackReadError::InvalidUtf8EntryName(ref name)) if name == b"future/\xff.bin"
+        decode_test_archive(bytes),
+        Err(DecodeError::Archive(ArchiveError::InvalidUtf8MemberName(ref name)))
+            if name == b"future/\xff.bin"
     ));
 }
 
@@ -1810,8 +1836,8 @@ fn read_rejects_canonical_collisions_between_unknown_entries() {
     ]);
 
     assert!(matches!(
-        Pack::from_bytes(bytes),
-        Err(PackReadError::AmbiguousArchiveEntries)
+        decode_test_archive(bytes),
+        Err(DecodeError::Archive(ArchiveError::AmbiguousMemberNames))
     ));
 }
 
@@ -1826,7 +1852,7 @@ fn read_does_not_normalize_a_known_role_into_an_ignored_archive_entry() {
         ]);
 
         assert!(matches!(
-            only_read_issue(Pack::from_bytes(bytes)),
+            only_read_issue(decode_test_archive(bytes)),
             PackInvariantIssue::InvalidPath {
                 role: PackPathRole::ProjectFile,
                 ..
@@ -1838,7 +1864,7 @@ fn read_does_not_normalize_a_known_role_into_an_ignored_archive_entry() {
 #[test]
 fn read_classifies_safe_archive_prefix_aliases_by_their_canonical_role() {
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
-    let pack = Pack::from_bytes(raw_stored_zip(&[
+    let pack = decode_test_archive(raw_stored_zip(&[
         (MANIFEST_PATH, manifest),
         ("./project/main.typ", b"Hello"),
     ]))
@@ -1854,7 +1880,7 @@ fn read_classifies_safe_archive_prefix_aliases_by_their_canonical_role() {
 #[test]
 fn read_accepts_safe_aliases_at_archive_role_boundaries() {
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n";
-    let project = Pack::from_bytes(raw_stored_zip(&[
+    let project = decode_test_archive(raw_stored_zip(&[
         (MANIFEST_PATH, manifest),
         ("project//main.typ", b"Hello"),
     ]))
@@ -1865,7 +1891,7 @@ fn read_accepts_safe_aliases_at_archive_role_boundaries() {
         vec![test_package_declaration(&[("lib.typ", b"Package")])],
         vec![],
     );
-    let package = Pack::from_bytes(raw_stored_zip(&[
+    let package = decode_test_archive(raw_stored_zip(&[
         (MANIFEST_PATH, &package_manifest),
         ("project/main.typ", b"Hello"),
         ("packages/local/example/1.0.0//lib.typ", b"Package"),
@@ -1876,7 +1902,7 @@ fn read_accepts_safe_aliases_at_archive_role_boundaries() {
         .unwrap();
     assert_eq!(package.package_file(&spec, "lib.typ").unwrap(), b"Package");
 
-    let aliased_manifest = Pack::from_bytes(raw_stored_zip(&[
+    let aliased_manifest = decode_test_archive(raw_stored_zip(&[
         ("alias/../typst-pack.toml", manifest),
         ("project/main.typ", b"Hello"),
     ]))
@@ -1889,8 +1915,8 @@ fn read_accepts_safe_aliases_at_archive_role_boundaries() {
         ("project/main.typ", b"Hello"),
     ]);
     assert!(matches!(
-        Pack::from_bytes(colliding_manifest),
-        Err(PackReadError::AmbiguousArchiveEntries)
+        decode_test_archive(colliding_manifest),
+        Err(DecodeError::Archive(ArchiveError::AmbiguousMemberNames))
     ));
 }
 

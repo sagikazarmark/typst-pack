@@ -2,19 +2,17 @@
 
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Cursor, Read, Seek, SeekFrom, Write};
+use std::io::{Cursor, Seek, Write};
 use std::str::FromStr;
 
 use typst::foundations::Bytes;
 use typst::syntax::VirtualPath;
 use typst::syntax::package::PackageSpec;
 use typst::text::{Font, FontInfo};
+use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
-use zip::{ZipArchive, ZipWriter};
 
-use crate::manifest::{
-    FontManifest, MANIFEST_PATH, PackManifest, PackManifestError, PackMetadata, PackageManifest,
-};
+use crate::manifest::{FontManifest, MANIFEST_PATH, PackManifest, PackMetadata, PackageManifest};
 use crate::payload::{PackArchiveBytes, SharedBytes};
 
 /// The conventional file extension for packs.
@@ -331,47 +329,47 @@ impl PackFont {
 }
 
 #[derive(Debug, Clone)]
-struct PackFontInput {
-    path: Option<String>,
-    index: u32,
-    declared_container_digest: Option<String>,
-    declared_container_identity_kind: Option<String>,
-    declared_container_identity_schema: Option<String>,
-    declared_container_identity_algorithm: Option<String>,
-    declared_container_length: Option<u64>,
-    data: Option<SharedBytes>,
-    embedded: bool,
+pub(crate) struct PackFontInput {
+    pub(crate) path: Option<String>,
+    pub(crate) index: u32,
+    pub(crate) declared_container_digest: Option<String>,
+    pub(crate) declared_container_identity_kind: Option<String>,
+    pub(crate) declared_container_identity_schema: Option<String>,
+    pub(crate) declared_container_identity_algorithm: Option<String>,
+    pub(crate) declared_container_length: Option<u64>,
+    pub(crate) data: Option<SharedBytes>,
+    pub(crate) embedded: bool,
 }
 
 #[derive(Debug)]
-struct ProjectFileInput {
-    path: String,
-    data: SharedBytes,
+pub(crate) struct ProjectFileInput {
+    pub(crate) path: String,
+    pub(crate) data: SharedBytes,
 }
 
 #[derive(Debug)]
-struct PackageFileInput {
-    spec: PackageSpec,
-    path: String,
-    data: SharedBytes,
-    embedded: bool,
+pub(crate) struct PackageFileInput {
+    pub(crate) spec: PackageSpec,
+    pub(crate) path: String,
+    pub(crate) data: SharedBytes,
+    pub(crate) embedded: bool,
 }
 
 #[derive(Debug)]
-struct PackageRequirementInput {
-    entry: PackageManifest,
-    embedded: bool,
+pub(crate) struct PackageRequirementInput {
+    pub(crate) entry: PackageManifest,
+    pub(crate) embedded: bool,
 }
 
 #[derive(Debug)]
-struct PackConstructionInput {
-    entrypoint: String,
-    metadata: Option<PackMetadata>,
-    files: Vec<ProjectFileInput>,
-    package_files: Vec<PackageFileInput>,
-    package_requirements: Vec<PackageRequirementInput>,
-    package_requirements_are_declared: bool,
-    fonts: Vec<PackFontInput>,
+pub(crate) struct PackConstructionInput {
+    pub(crate) entrypoint: String,
+    pub(crate) metadata: Option<PackMetadata>,
+    pub(crate) files: Vec<ProjectFileInput>,
+    pub(crate) package_files: Vec<PackageFileInput>,
+    pub(crate) package_requirements: Vec<PackageRequirementInput>,
+    pub(crate) package_requirements_are_declared: bool,
+    pub(crate) fonts: Vec<PackFontInput>,
 }
 
 impl Pack {
@@ -383,7 +381,7 @@ impl Pack {
         PackBuilder::new(entrypoint)
     }
 
-    fn construct(input: PackConstructionInput) -> Result<Self, PackInvariantError> {
+    pub(crate) fn construct(input: PackConstructionInput) -> Result<Self, PackInvariantError> {
         let mut issues = Vec::new();
 
         let entrypoint = match canonical_path(PackPathRole::Entrypoint, &input.entrypoint) {
@@ -484,13 +482,10 @@ impl Pack {
         for declaration in input.package_requirements {
             let role = match declaration.entry.spec() {
                 Ok(spec) => (spec.to_string(), declaration.embedded),
-                Err(PackManifestError::InvalidPackageSpec { spec, message }) => {
-                    issues.push(PackInvariantIssue::InvalidPackageSpec { spec, message });
-                    continue;
-                }
                 Err(error) => {
-                    issues.push(PackInvariantIssue::InvalidPackageRequirement {
-                        spec: error.to_string(),
+                    issues.push(PackInvariantIssue::InvalidPackageSpec {
+                        spec: error.spec,
+                        message: error.message,
                     });
                     continue;
                 }
@@ -1024,271 +1019,6 @@ impl Pack {
         })
     }
 
-    /// Reads a pack from a seekable reader.
-    pub fn read<R: Read + Seek>(reader: R) -> Result<Self, PackReadError> {
-        let archive = ZipArchive::new(reader)?;
-        let retained_entry_count = archive.len();
-        let central_directory_start = archive.central_directory_start();
-        let mut reader = archive.into_inner();
-        let raw_entries = raw_central_entries(&mut reader, central_directory_start)?;
-        if let Some(entry) = raw_entries
-            .iter()
-            .find(|entry| entry.utf8 && std::str::from_utf8(&entry.name).is_err())
-        {
-            return Err(PackReadError::InvalidUtf8EntryName(entry.name.clone()));
-        }
-        let mut archive = ZipArchive::new(reader)?;
-        const FILE_TYPE_MASK: u32 = 0o170000;
-        const REGULAR_FILE: u32 = 0o100000;
-        const DIRECTORY: u32 = 0o040000;
-
-        let mut manifest_entry = None;
-        for index in 0..archive.len() {
-            let entry = archive.by_index_raw(index)?;
-            let prefix_normalized_name = strip_current_directory_prefix(entry.name());
-            let canonical_manifest_alias = !prefix_normalized_name.starts_with(PROJECT_PREFIX)
-                && !prefix_normalized_name.starts_with(PACKAGES_PREFIX)
-                && canonical_archive_name(entry.name()).is_ok_and(|name| name == MANIFEST_PATH);
-            if prefix_normalized_name == MANIFEST_PATH || canonical_manifest_alias {
-                let regular_file = entry.is_file()
-                    && entry
-                        .unix_mode()
-                        .is_none_or(|mode| matches!(mode & FILE_TYPE_MASK, 0 | REGULAR_FILE));
-                manifest_entry = Some((index, regular_file));
-                break;
-            }
-        }
-        let (manifest_index, manifest_is_file) =
-            manifest_entry.ok_or(PackReadError::MissingManifest)?;
-        if !manifest_is_file {
-            return Err(PackReadError::ManifestNotFile);
-        }
-        let manifest_value = {
-            let mut entry = archive.by_index(manifest_index)?;
-            let mut bytes = Vec::new();
-            entry
-                .read_to_end(&mut bytes)
-                .map_err(PackReadError::ManifestUnreadable)?;
-            let text = std::str::from_utf8(&bytes).map_err(PackReadError::ManifestNotUtf8)?;
-            toml::from_str::<toml::Value>(text).map_err(PackManifestError::from)?
-        };
-
-        let mut raw_names = BTreeSet::new();
-        for entry in &raw_entries {
-            if !raw_names.insert(entry.name.clone()) {
-                if entry.name == MANIFEST_PATH.as_bytes() {
-                    return Err(PackReadError::DuplicateManifest);
-                }
-                return Err(PackReadError::DuplicateArchiveEntry(entry.name.clone()));
-            }
-        }
-        if raw_entries.len() != retained_entry_count {
-            return Err(PackReadError::AmbiguousArchiveEntries);
-        }
-        let manifest = PackManifest::from_toml_value(manifest_value)?;
-
-        let mut font_paths = BTreeSet::new();
-        let mut font_path_values = Vec::new();
-        for font in manifest.fonts() {
-            let path = canonical_path_without_membership(PackPathRole::FontData, font.path())
-                .map_err(|issue| PackReadError::InvalidEntry {
-                    entry: font.path().to_owned(),
-                    message: issue.to_string(),
-                })?;
-            if let Some(conflicting_role) = reserved_font_archive_role(&path) {
-                return Err(PackReadError::InvalidEntry {
-                    entry: font.path().to_owned(),
-                    message: format!("font data path conflicts with the {conflicting_role} role"),
-                });
-            }
-            font_paths.insert(path.to_string());
-            font_path_values.push((path, PackPathRole::FontData));
-        }
-        if let Some(conflict) = find_path_tree_conflicts(font_path_values)
-            .into_iter()
-            .next()
-        {
-            return Err(PackReadError::InvalidEntry {
-                entry: conflict.descendant.to_string(),
-                message: format!("font data path has file ancestor `{}`", conflict.ancestor),
-            });
-        }
-
-        struct ProjectEntry {
-            index: usize,
-            path: String,
-        }
-        struct PackageEntry {
-            index: usize,
-            spec: PackageSpec,
-            path: String,
-        }
-        struct UnknownEntry {
-            index: usize,
-            canonical_name: String,
-        }
-
-        let mut project_entries = Vec::new();
-        let mut package_entries = Vec::new();
-        let mut unknown_entries = Vec::new();
-        let mut canonical_archive_entries = BTreeMap::new();
-        for (index, raw_entry) in raw_entries.iter().enumerate() {
-            let entry = archive.by_index_raw(index)?;
-            let archive_name = entry.name().to_owned();
-            let raw_name = raw_entry.name.clone();
-            let prefix_normalized_name = strip_current_directory_prefix(&archive_name);
-            let canonical_name = canonical_archive_name(&archive_name)?;
-            register_archive_identity(
-                &mut canonical_archive_entries,
-                canonical_name.clone(),
-                &raw_name,
-            )?;
-            if entry.is_dir()
-                && entry
-                    .unix_mode()
-                    .is_none_or(|mode| matches!(mode & FILE_TYPE_MASK, 0 | DIRECTORY))
-            {
-                continue;
-            }
-            let regular_file = entry.is_file()
-                && entry
-                    .unix_mode()
-                    .is_none_or(|mode| matches!(mode & FILE_TYPE_MASK, 0 | REGULAR_FILE));
-            let role_name = if prefix_normalized_name == MANIFEST_PATH
-                || prefix_normalized_name.starts_with(PROJECT_PREFIX)
-                || prefix_normalized_name.starts_with(PACKAGES_PREFIX)
-            {
-                prefix_normalized_name
-            } else {
-                canonical_name.as_str()
-            };
-
-            if role_name == MANIFEST_PATH {
-                continue;
-            } else if let Some(path) = role_name.strip_prefix(PROJECT_PREFIX) {
-                if !regular_file {
-                    return Err(PackReadError::UnsupportedEntryType(archive_name));
-                }
-                let path = path.trim_start_matches('/').to_owned();
-                project_entries.push(ProjectEntry { index, path });
-            } else if let Some(rest) = role_name.strip_prefix(PACKAGES_PREFIX) {
-                if !regular_file {
-                    return Err(PackReadError::UnsupportedEntryType(archive_name));
-                }
-                let (spec, path) = split_package_entry(rest, &archive_name)?;
-                package_entries.push(PackageEntry { index, spec, path });
-            } else {
-                if !regular_file {
-                    return Err(PackReadError::UnsupportedEntryType(archive_name));
-                }
-                unknown_entries.push(UnknownEntry {
-                    index,
-                    canonical_name,
-                });
-            }
-        }
-
-        let mut font_entries = Vec::new();
-        for entry in unknown_entries {
-            if let Some(path) = font_paths.get(entry.canonical_name.as_str()) {
-                font_entries.push((entry.index, path.clone()));
-            }
-        }
-
-        let mut files = Vec::new();
-        for project in project_entries {
-            let mut data = Vec::new();
-            archive.by_index(project.index)?.read_to_end(&mut data)?;
-            files.push(ProjectFileInput {
-                path: project.path,
-                data: SharedBytes::new(data),
-            });
-        }
-        let mut package_files = Vec::new();
-        for package in package_entries {
-            let mut data = Vec::new();
-            archive.by_index(package.index)?.read_to_end(&mut data)?;
-            package_files.push(PackageFileInput {
-                spec: package.spec,
-                path: package.path,
-                data: SharedBytes::new(data),
-                embedded: true,
-            });
-        }
-        let mut fonts_by_path = BTreeMap::new();
-        for (index, path) in font_entries {
-            let mut data = Vec::new();
-            archive.by_index(index)?.read_to_end(&mut data)?;
-            fonts_by_path.insert(path, SharedBytes::new(data));
-        }
-
-        let package_requirements = manifest
-            .packages()
-            .vendored()
-            .iter()
-            .cloned()
-            .map(|entry| PackageRequirementInput {
-                entry,
-                embedded: true,
-            })
-            .chain(
-                manifest
-                    .packages()
-                    .unvendored()
-                    .iter()
-                    .cloned()
-                    .map(|entry| PackageRequirementInput {
-                        entry,
-                        embedded: false,
-                    }),
-            )
-            .collect();
-        let fonts = manifest
-            .fonts()
-            .iter()
-            .map(|entry| {
-                let canonical = canonical_archive_name(entry.path()).ok();
-                PackFontInput {
-                    path: Some(entry.path().to_owned()),
-                    index: entry.index(),
-                    declared_container_digest: entry.container_digest().map(str::to_owned),
-                    declared_container_identity_kind: entry
-                        .container_identity_kind()
-                        .map(str::to_owned),
-                    declared_container_identity_schema: entry
-                        .container_identity_schema()
-                        .map(str::to_owned),
-                    declared_container_identity_algorithm: entry
-                        .container_identity_algorithm()
-                        .map(str::to_owned),
-                    declared_container_length: entry.container_length(),
-                    data: canonical.and_then(|path| fonts_by_path.get(&path).cloned()),
-                    embedded: !entry.is_external(),
-                }
-            })
-            .collect();
-        Ok(Self::construct(PackConstructionInput {
-            entrypoint: manifest.project().entrypoint().to_owned(),
-            metadata: manifest.metadata().cloned(),
-            files,
-            package_files,
-            package_requirements,
-            package_requirements_are_declared: true,
-            fonts,
-        })?)
-    }
-
-    /// Reads a pack from a byte buffer.
-    pub fn from_bytes(bytes: impl Into<PackArchiveBytes>) -> Result<Self, PackReadError> {
-        let bytes = bytes.into();
-        Self::from_archive_bytes(&bytes)
-    }
-
-    /// Reads a Pack Archive without taking its exact retry bytes.
-    pub fn from_archive_bytes(bytes: &PackArchiveBytes) -> Result<Self, PackReadError> {
-        Self::read(Cursor::new(bytes.as_slice()))
-    }
-
     /// Writes the pack archive to a seekable writer.
     pub fn write<W: Write + Seek>(&self, writer: W) -> Result<(), PackWriteError> {
         for path in self.files.keys() {
@@ -1464,14 +1194,12 @@ fn package_manifest_requirement(
     manifest: &PackageManifest,
     embedded: bool,
 ) -> Result<(String, PackageRequirement), PackInvariantIssue> {
-    let spec = manifest.spec().map_err(|error| match error {
-        PackManifestError::InvalidPackageSpec { spec, message } => {
-            PackInvariantIssue::InvalidPackageSpec { spec, message }
-        }
-        error => PackInvariantIssue::InvalidPackageRequirement {
-            spec: error.to_string(),
-        },
-    })?;
+    let spec = manifest
+        .spec()
+        .map_err(|error| PackInvariantIssue::InvalidPackageSpec {
+            spec: error.spec,
+            message: error.message,
+        })?;
     if manifest.tree_identity_kind() != PACKAGE_TREE_IDENTITY_KIND
         || manifest.tree_identity_schema() != PACKAGE_TREE_IDENTITY_SCHEMA
         || manifest.tree_identity_algorithm() != PACKAGE_TREE_IDENTITY_ALGORITHM
@@ -1526,98 +1254,6 @@ pub(crate) fn font_archive_path(identity: FontContainerIdentity, data: Option<&[
         None => "font",
     };
     format!("fonts/{}.{extension}", identity.encode())
-}
-
-struct RawCentralEntry {
-    name: Vec<u8>,
-    utf8: bool,
-}
-
-fn raw_central_entries<R: Read + Seek>(
-    reader: &mut R,
-    central_directory_start: u64,
-) -> Result<Vec<RawCentralEntry>, PackReadError> {
-    reader.seek(SeekFrom::Start(central_directory_start))?;
-    let mut entries = Vec::new();
-    loop {
-        let header_start = reader.stream_position()?;
-        let mut signature = [0; 4];
-        reader.read_exact(&mut signature)?;
-        if signature != *b"PK\x01\x02" {
-            reader.seek(SeekFrom::Start(header_start))?;
-            break;
-        }
-
-        let mut fixed = [0; 42];
-        reader.read_exact(&mut fixed)?;
-        let flags = u16::from_le_bytes([fixed[4], fixed[5]]);
-        let name_len = u16::from_le_bytes([fixed[24], fixed[25]]) as usize;
-        let extra_len = u16::from_le_bytes([fixed[26], fixed[27]]) as i64;
-        let comment_len = u16::from_le_bytes([fixed[28], fixed[29]]) as i64;
-        let mut name = vec![0; name_len];
-        reader.read_exact(&mut name)?;
-        reader.seek(SeekFrom::Current(extra_len + comment_len))?;
-        entries.push(RawCentralEntry {
-            name,
-            utf8: flags & (1 << 11) != 0,
-        });
-    }
-    Ok(entries)
-}
-
-/// Splits `namespace/name/version/rest...` into a package spec and file path.
-fn split_package_entry(rest: &str, entry: &str) -> Result<(PackageSpec, String), PackReadError> {
-    let mut parts = rest.splitn(4, '/');
-    let (Some(namespace), Some(name), Some(version), Some(path)) =
-        (parts.next(), parts.next(), parts.next(), parts.next())
-    else {
-        return Err(PackReadError::InvalidEntry {
-            entry: entry.to_owned(),
-            message: "expected packages/<namespace>/<name>/<version>/<path>".into(),
-        });
-    };
-    let spec = PackageSpec::from_str(&format!("@{namespace}/{name}:{version}")).map_err(|err| {
-        PackReadError::InvalidEntry {
-            entry: entry.to_owned(),
-            message: err.to_string(),
-        }
-    })?;
-    Ok((spec, path.trim_start_matches('/').to_owned()))
-}
-
-/// A failure while reading a pack archive.
-#[derive(Debug, thiserror::Error)]
-pub enum PackReadError {
-    #[error("failed to read archive: {0}")]
-    Zip(#[from] zip::result::ZipError),
-    #[error("i/o error while reading archive: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("the archive contains no {MANIFEST_PATH} manifest (is this a Typst pack?)")]
-    MissingManifest,
-    #[error("the archive contains more than one {MANIFEST_PATH} manifest")]
-    DuplicateManifest,
-    #[error("the archive contains a duplicate entry named {0:?}")]
-    DuplicateArchiveEntry(Vec<u8>),
-    #[error("the archive contains entries with ambiguous effective names")]
-    AmbiguousArchiveEntries,
-    #[error("the archive contains a malformed UTF-8 entry name {0:?}")]
-    InvalidUtf8EntryName(Vec<u8>),
-    #[error("the {MANIFEST_PATH} manifest is not a regular file")]
-    ManifestNotFile,
-    #[error("the {MANIFEST_PATH} manifest could not be read: {0}")]
-    ManifestUnreadable(#[source] std::io::Error),
-    #[error("the {MANIFEST_PATH} manifest is not valid UTF-8: {0}")]
-    ManifestNotUtf8(#[source] std::str::Utf8Error),
-    #[error(transparent)]
-    Manifest(#[from] PackManifestError),
-    #[error("archive entry `{0}` has an unsafe path")]
-    UnsafeEntry(String),
-    #[error("invalid archive entry {entry:?}: {message:?}")]
-    InvalidEntry { entry: String, message: String },
-    #[error("archive entry {0:?} is not a regular file")]
-    UnsupportedEntryType(String),
-    #[error(transparent)]
-    Invariant(#[from] PackInvariantError),
 }
 
 /// A failure while writing a pack archive.
@@ -1855,27 +1491,6 @@ fn canonical_path_without_membership(
     Ok(CanonicalPath(canonical.to_owned()))
 }
 
-fn canonical_archive_name(path: &str) -> Result<String, PackReadError> {
-    let prefix_normalized_path = strip_current_directory_prefix(path);
-    if path.is_empty()
-        || path.starts_with('/')
-        || path.starts_with('\\')
-        || path.contains('\\')
-        || path.contains('\0')
-        || has_windows_drive_prefix(prefix_normalized_path)
-    {
-        return Err(PackReadError::UnsafeEntry(path.to_owned()));
-    }
-    let canonical = VirtualPath::new(path)
-        .map_err(|_| PackReadError::UnsafeEntry(path.to_owned()))?
-        .get_without_slash()
-        .to_owned();
-    if has_windows_drive_prefix(&canonical) {
-        return Err(PackReadError::UnsafeEntry(path.to_owned()));
-    }
-    Ok(canonical)
-}
-
 fn validate_package_spec(spec: &PackageSpec) -> Result<(), PackInvariantIssue> {
     let serialized = spec.to_string();
     let parsed = PackageSpec::from_str(&serialized).map_err(|message| {
@@ -1905,13 +1520,6 @@ fn validate_archive_entry_name(archive_name_len: usize) -> Result<(), PackWriteE
         )));
     }
     Ok(())
-}
-
-fn strip_current_directory_prefix(mut path: &str) -> &str {
-    while let Some(rest) = path.strip_prefix("./") {
-        path = rest;
-    }
-    path
 }
 
 fn find_path_tree_conflicts(
@@ -1950,40 +1558,6 @@ fn path_tree_conflicts(
             descendant_role: conflict.descendant_role,
         })
         .collect()
-}
-
-fn reserved_font_archive_role(path: &CanonicalPath) -> Option<&'static str> {
-    if is_same_or_descendant(path.as_str(), MANIFEST_PATH) {
-        Some("Pack Manifest")
-    } else if is_same_or_descendant(path.as_str(), PROJECT_PREFIX.trim_end_matches('/')) {
-        Some("project file")
-    } else if is_same_or_descendant(path.as_str(), PACKAGES_PREFIX.trim_end_matches('/')) {
-        Some("package file")
-    } else {
-        None
-    }
-}
-
-fn is_same_or_descendant(path: &str, ancestor: &str) -> bool {
-    path == ancestor
-        || path
-            .strip_prefix(ancestor)
-            .is_some_and(|suffix| suffix.starts_with('/'))
-}
-
-fn register_archive_identity(
-    entries: &mut BTreeMap<String, Vec<u8>>,
-    canonical: String,
-    raw_name: &[u8],
-) -> Result<(), PackReadError> {
-    if let Some(first_entry) = entries.get(&canonical) {
-        if first_entry == raw_name {
-            return Ok(());
-        }
-        return Err(PackReadError::AmbiguousArchiveEntries);
-    }
-    entries.insert(canonical, raw_name.to_owned());
-    Ok(())
 }
 
 /// A failure while building a pack in memory.

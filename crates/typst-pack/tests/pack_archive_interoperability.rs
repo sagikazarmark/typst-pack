@@ -1,7 +1,11 @@
 use std::io::Read;
 
 use flate2::read::DeflateDecoder;
-use typst_pack::{Pack, PackInvariantIssue, PackManifestError, PackReadError};
+#[path = "support/archive.rs"]
+mod archive_support;
+use archive_support::decode_reference;
+use typst_pack::pack_archive::{ArchiveError, DecodeError, ManifestError};
+use typst_pack::{Pack, PackInvariantIssue};
 
 const ACCEPTED: &[u8] = include_bytes!("fixtures/pack-archive-v1/accepted-python.typk");
 
@@ -58,7 +62,7 @@ fn observe_pack(pack: &Pack) -> PackObservation {
 
 #[test]
 fn independently_produced_version_one_archive_decodes_semantically() {
-    let pack = Pack::from_bytes(ACCEPTED.to_vec()).unwrap();
+    let pack = decode_reference(ACCEPTED.to_vec()).unwrap();
 
     assert_eq!(
         observe_pack(&pack),
@@ -87,7 +91,7 @@ fn independently_produced_version_one_archive_decodes_semantically() {
 
 #[test]
 fn safe_unknown_entries_may_disappear_without_changing_pack_semantics() {
-    let pack = Pack::from_bytes(ACCEPTED.to_vec()).unwrap();
+    let pack = decode_reference(ACCEPTED.to_vec()).unwrap();
     let original = consume_zip_independently(ACCEPTED);
     assert!(original.iter().any(|entry| entry.name == "future/data.bin"));
 
@@ -99,7 +103,7 @@ fn safe_unknown_entries_may_disappear_without_changing_pack_semantics() {
             .all(|entry| entry.name != "future/data.bin")
     );
 
-    let reread = Pack::from_bytes(rewritten).unwrap();
+    let reread = decode_reference(rewritten).unwrap();
     assert_eq!(observe_pack(&reread), observe_pack(&pack));
 }
 
@@ -118,21 +122,29 @@ enum DecodeObservation {
 }
 
 fn observe_decode(bytes: &[u8]) -> DecodeObservation {
-    match Pack::from_bytes(bytes.to_vec()).unwrap_err() {
-        PackReadError::MissingManifest => DecodeObservation::MissingManifest,
-        PackReadError::DuplicateArchiveEntry(name) => DecodeObservation::DuplicateMember(name),
-        PackReadError::AmbiguousArchiveEntries => DecodeObservation::AmbiguousMember,
-        PackReadError::InvalidUtf8EntryName(name) => DecodeObservation::MalformedRawName(name),
-        PackReadError::UnsafeEntry(path) => DecodeObservation::UnsafePath(path),
-        PackReadError::UnsupportedEntryType(path) => DecodeObservation::UnsupportedMemberKind(path),
-        PackReadError::ManifestNotUtf8(_) => DecodeObservation::ManifestNotUtf8,
-        PackReadError::Manifest(PackManifestError::Parse(_)) => {
-            DecodeObservation::MalformedManifest
+    match decode_reference(bytes.to_vec()).unwrap_err() {
+        DecodeError::Archive(ArchiveError::MissingManifest) => DecodeObservation::MissingManifest,
+        DecodeError::Archive(ArchiveError::DuplicateMember(name)) => {
+            DecodeObservation::DuplicateMember(name)
         }
-        PackReadError::Manifest(PackManifestError::UnsupportedVersion(version)) => {
+        DecodeError::Archive(ArchiveError::AmbiguousMemberNames) => {
+            DecodeObservation::AmbiguousMember
+        }
+        DecodeError::Archive(ArchiveError::InvalidUtf8MemberName(name)) => {
+            DecodeObservation::MalformedRawName(name)
+        }
+        DecodeError::Archive(ArchiveError::UnsafeMemberName(path)) => {
+            DecodeObservation::UnsafePath(path)
+        }
+        DecodeError::Archive(ArchiveError::UnsupportedMemberKind(path)) => {
+            DecodeObservation::UnsupportedMemberKind(path)
+        }
+        DecodeError::Manifest(ManifestError::NotUtf8(_)) => DecodeObservation::ManifestNotUtf8,
+        DecodeError::Manifest(ManifestError::Parse(_)) => DecodeObservation::MalformedManifest,
+        DecodeError::Manifest(ManifestError::UnsupportedVersion(version)) => {
             DecodeObservation::UnsupportedVersion(version)
         }
-        PackReadError::Invariant(error) => match error.issues() {
+        DecodeError::InvalidPack(error) => match error.issues() {
             [PackInvariantIssue::MissingEntrypoint { path }] => {
                 DecodeObservation::InvalidPackMissingEntrypoint(path.clone())
             }

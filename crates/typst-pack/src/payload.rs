@@ -69,6 +69,21 @@ impl fmt::Debug for SharedBytes {
 pub struct PackArchiveBytes(Vec<u8>);
 
 impl PackArchiveBytes {
+    /// Takes unique ownership of exact archive bytes without copying them.
+    pub fn from_vec(bytes: Vec<u8>) -> Self {
+        Self(bytes)
+    }
+
+    /// The exact archive byte length.
+    pub fn len(&self) -> u64 {
+        u64::try_from(self.0.len()).unwrap_or(u64::MAX)
+    }
+
+    /// Whether the archive contains no bytes.
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
     /// Borrows the exact archive bytes.
     pub fn as_slice(&self) -> &[u8] {
         &self.0
@@ -82,7 +97,7 @@ impl PackArchiveBytes {
 
 impl From<Vec<u8>> for PackArchiveBytes {
     fn from(bytes: Vec<u8>) -> Self {
-        Self(bytes)
+        Self::from_vec(bytes)
     }
 }
 

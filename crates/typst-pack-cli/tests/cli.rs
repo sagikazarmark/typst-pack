@@ -2,10 +2,16 @@ use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 use hayro_syntax::object::{DateTime, Dict, Name};
-use typst_pack::Pack;
+use typst_pack::pack_archive::{DecodeLimits, decode};
+use typst_pack::{Pack, PackArchiveBytes};
 
 #[cfg(all(feature = "_test-package-download-probe", debug_assertions))]
 const PACKAGE_DOWNLOAD_PROBE_ENV: &str = "TYPST_PACK_TEST_PACKAGE_DOWNLOAD_PROBE";
+
+fn decode_reference(bytes: impl Into<PackArchiveBytes>) -> Pack {
+    let archive = bytes.into();
+    decode(&archive, DecodeLimits::reference_v1()).unwrap()
+}
 
 fn write_minimal_project(directory: &std::path::Path) -> std::path::PathBuf {
     let project = directory.join("project");
@@ -132,7 +138,7 @@ fn create_uses_source_input_and_derives_default_output() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    let pack = Pack::from_bytes(std::fs::read(expected).unwrap()).unwrap();
+    let pack = decode_reference(std::fs::read(expected).unwrap());
     assert_eq!(pack.entrypoint(), "main.typ");
 }
 
@@ -158,7 +164,7 @@ fn create_writes_pack_to_stdout() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    let pack = Pack::from_bytes(result.stdout).unwrap();
+    let pack = decode_reference(result.stdout);
     assert_eq!(pack.entrypoint(), "main.typ");
 }
 
@@ -266,7 +272,7 @@ fn standalone_html_create_requires_and_accepts_the_html_feature() {
         "{}",
         String::from_utf8_lossy(&accepted.stderr)
     );
-    assert!(Pack::from_bytes(std::fs::read(accepted_output).unwrap()).is_ok());
+    let _ = decode_reference(std::fs::read(accepted_output).unwrap());
 }
 
 #[cfg(unix)]
@@ -407,7 +413,7 @@ fn create_root_and_typst_root_define_the_pack_project_tree() {
             "{}",
             String::from_utf8_lossy(&result.stderr)
         );
-        let pack = Pack::from_bytes(std::fs::read(output).unwrap()).unwrap();
+        let pack = decode_reference(std::fs::read(output).unwrap());
         assert_eq!(pack.entrypoint(), "src/main.typ");
         assert!(pack.file("shared.typ").is_some());
     }
@@ -456,7 +462,7 @@ fn create_packs_the_structural_project_closure_with_root_ignore_policy() {
         String::from_utf8_lossy(&result.stdout)
     );
 
-    let pack = Pack::from_bytes(std::fs::read(output).unwrap()).unwrap();
+    let pack = decode_reference(std::fs::read(output).unwrap());
     assert_eq!(
         pack.files().map(|(path, _)| path).collect::<Vec<_>>(),
         [
@@ -2260,7 +2266,7 @@ fn create_uses_shared_font_and_package_environment() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    let pack = Pack::from_bytes(std::fs::read(output).unwrap()).unwrap();
+    let pack = decode_reference(std::fs::read(output).unwrap());
     let spec = "@preview/create-cache:0.1.0".parse().unwrap();
     assert!(pack.package_file(&spec, "lib.typ").is_some());
     assert!(!pack.fonts().is_empty());
@@ -2311,7 +2317,7 @@ fn no_vendor_packages_records_dependency_and_compiles_with_package_path() {
         "{creation_summary}"
     );
 
-    let pack = Pack::from_bytes(std::fs::read(&pack_path).unwrap()).unwrap();
+    let pack = decode_reference(std::fs::read(&pack_path).unwrap());
     let spec = "@preview/unvendored:0.1.0".parse().unwrap();
     assert!(!pack.has_package(&spec));
     assert_eq!(pack.package_requirements()[0].spec(), &spec);
