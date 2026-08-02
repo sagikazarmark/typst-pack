@@ -6,7 +6,7 @@ mod archive_support;
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 
-use archive_support::decode_reference;
+use archive_support::{decode_reference, encode_reference};
 #[cfg(feature = "embedded-fonts")]
 use support::official_typst::select_font;
 use support::official_typst::{
@@ -61,7 +61,8 @@ fn stabilized_pack(fixture: &Fixture) -> Pack {
     for (data, index) in fixture.fonts() {
         builder = builder.font(data.clone(), *index).unwrap();
     }
-    decode_reference(builder.build().unwrap().to_bytes().unwrap()).unwrap()
+    let pack = builder.build().unwrap();
+    decode_reference(encode_reference(&pack).unwrap()).unwrap()
 }
 
 #[test]
@@ -381,7 +382,7 @@ fn stabilized_project_round_trips_and_matches_pack_svg_compilation() {
     let mut inputs = Dict::new();
     inputs.insert("width".into(), Value::Str("24".into()));
     let created = stabilized_pack(&fixture);
-    let pack = decode_reference(created.to_bytes().unwrap()).unwrap();
+    let pack = decode_reference(encode_reference(&created).unwrap()).unwrap();
     let output_specification = CompilationOutputSpecification::Svg(SvgOutputSpecification {
         page_selection: parse_page_selection("2,1").unwrap(),
         pretty: true,

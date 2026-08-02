@@ -2,7 +2,7 @@ use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 use hayro_syntax::object::{DateTime, Dict, Name};
-use typst_pack::pack_archive::{DecodeLimits, decode};
+use typst_pack::pack_archive::{DecodeLimits, EncodeLimits, decode, encode};
 use typst_pack::{Pack, PackArchiveBytes};
 
 #[cfg(all(feature = "_test-package-download-probe", debug_assertions))]
@@ -11,6 +11,10 @@ const PACKAGE_DOWNLOAD_PROBE_ENV: &str = "TYPST_PACK_TEST_PACKAGE_DOWNLOAD_PROBE
 fn decode_reference(bytes: impl Into<PackArchiveBytes>) -> Pack {
     let archive = bytes.into();
     decode(&archive, DecodeLimits::reference_v1()).unwrap()
+}
+
+fn encode_reference(pack: &Pack) -> PackArchiveBytes {
+    encode(pack, EncodeLimits::reference_v1()).unwrap()
 }
 
 fn write_minimal_project(directory: &std::path::Path) -> std::path::PathBuf {
@@ -807,7 +811,7 @@ fn write_five_page_pack(directory: &std::path::Path) -> std::path::PathBuf {
         .build()
         .unwrap();
     let path = directory.join("selection.typk");
-    std::fs::write(&path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&path, encode_reference(&pack)).unwrap();
 
     path
 }
@@ -958,7 +962,7 @@ fn every_output_format_can_write_one_artifact_to_stdout() {
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
 
     for (format, signature) in [
         ("pdf", b"%PDF".as_slice()),
@@ -1058,7 +1062,7 @@ fn compile_infers_typst_formats_case_insensitively_without_htm_alias() {
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
 
     for (filename, extra) in [
         ("document.PDF", vec![]),
@@ -1114,7 +1118,7 @@ fn explicit_format_overrides_a_conflicting_output_extension() {
         .unwrap();
     let pack_path = directory.path().join("project.typk");
     let output = directory.path().join("actually-svg.pdf");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
         .current_dir(directory.path())
@@ -1149,7 +1153,7 @@ fn compile_derives_default_output_next_to_the_pack() {
         .build()
         .unwrap();
     let pack_path = nested.join("project.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
         .current_dir(directory.path())
@@ -1209,7 +1213,7 @@ fn compile_requires_format_for_an_extensionless_output() {
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
     let output = directory.path().join("document");
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
@@ -1286,7 +1290,7 @@ fn compile_accepts_multiple_features_in_one_comma_delimited_value() {
         .unwrap();
     let pack_path = directory.path().join("features.typk");
     let output = directory.path().join("features.html");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
         .current_dir(directory.path())
@@ -1327,7 +1331,7 @@ fn compile_parses_typed_comma_delimited_pdf_controls() {
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
     let output = directory.path().join("document.pdf");
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
@@ -1392,7 +1396,7 @@ fn incompatible_pdf_standards_render_all_validation_hints() {
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
         .current_dir(directory.path())
@@ -1482,7 +1486,7 @@ fn cli_pdf_tags_are_present_by_default_and_absent_when_disabled() {
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
 
     for (name, no_tags, expected) in [("tagged.pdf", false, true), ("untagged.pdf", true, false)] {
         let output = directory.path().join(name);
@@ -1522,7 +1526,7 @@ fn cli_pretty_changes_html_svg_and_pdf_but_not_png() {
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
 
     for (format, differs) in [("html", true), ("svg", true), ("pdf", true), ("png", false)] {
         let compact = directory.path().join(format!("compact.{format}"));
@@ -1568,7 +1572,7 @@ fn source_diagnostics_have_no_redundant_compilation_failed_trailer() {
         .build()
         .unwrap();
     let pack_path = directory.path().join("invalid.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
         .current_dir(directory.path())
@@ -1627,7 +1631,7 @@ fn compile_short_diagnostics_use_pack_virtual_source_name() {
         .build()
         .unwrap();
     let pack_path = directory.path().join("invalid.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
         .current_dir(directory.path())
@@ -1665,7 +1669,7 @@ fn failed_pdf_compilation_retains_the_pages_warning() {
         .unwrap();
     let pack_path = directory.path().join("invalid.typk");
     let output = directory.path().join("invalid.pdf");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
         .current_dir(directory.path())
@@ -1705,7 +1709,7 @@ fn input_pairs_trim_values_and_reject_empty_keys() {
         .build()
         .unwrap();
     let pack_path = directory.path().join("input.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
 
     let accepted = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
         .current_dir(directory.path())
@@ -1780,7 +1784,7 @@ fn valid_source_date_epoch_is_available_to_typst_code() {
         .unwrap();
     let pack_path = directory.path().join("timestamp.typk");
     let output = directory.path().join("timestamp.svg");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
         .current_dir(directory.path())
@@ -1838,7 +1842,7 @@ fn creation_timestamp_preserves_typst_year_boundary_metadata_states() {
         .build()
         .unwrap();
     let pack_path = directory.path().join("timestamp.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
 
     for (name, timestamp, expected_year) in [
         ("year-9999.pdf", "253402300799", Some(9999)),
@@ -1906,7 +1910,7 @@ fn source_date_epoch_produces_deterministic_pdf_creation_metadata() {
         .build()
         .unwrap();
     let pack_path = directory.path().join("timestamp.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
     let outputs = [
         directory.path().join("first.pdf"),
         directory.path().join("second.pdf"),
@@ -1970,7 +1974,7 @@ fn creation_timestamp_respects_datetime_today_timezone_offsets() {
         .unwrap();
     let pack_path = directory.path().join("timestamp.typk");
     let output = directory.path().join("timestamp.svg");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
         .current_dir(directory.path())
@@ -2039,7 +2043,7 @@ fn typst_font_and_package_environment_variables_are_honored() {
         .build()
         .unwrap();
     let text_pack_path = directory.path().join("text.typk");
-    std::fs::write(&text_pack_path, text_pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&text_pack_path, encode_reference(&text_pack)).unwrap();
 
     let no_fonts = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
         .current_dir(directory.path())
@@ -2091,7 +2095,7 @@ fn typst_font_and_package_environment_variables_are_honored() {
         .build()
         .unwrap();
     let package_pack_path = directory.path().join("package.typk");
-    std::fs::write(&package_pack_path, package_pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&package_pack_path, encode_reference(&package_pack)).unwrap();
     let package_deps = directory.path().join("package-deps.json");
 
     let package_result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
@@ -2144,7 +2148,7 @@ fn platform_delimited_typst_font_paths_are_used_by_compile() {
     let pack = builder.build().unwrap();
     let pack_path = directory.path().join("fonts.typk");
     let output = directory.path().join("fonts.pdf");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
     let font_paths = std::env::join_paths(fonts.iter().map(|(path, _)| path)).unwrap();
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
@@ -2197,7 +2201,7 @@ fn typst_package_cache_path_resolves_unvendored_packages_during_compile() {
         .unwrap();
     let pack_path = directory.path().join("package.typk");
     let output = directory.path().join("package.svg");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
         .current_dir(directory.path())
@@ -2404,7 +2408,7 @@ fn compile_writes_valid_perfetto_timings_json() {
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
     let timings = directory.path().join("timings.json");
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
@@ -2451,7 +2455,7 @@ fn timing_export_errors_are_reported_after_compilation_errors() {
         .build()
         .unwrap();
     let pack_path = directory.path().join("invalid.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
         .current_dir(directory.path())
@@ -2515,7 +2519,7 @@ fn successful_export_warnings_precede_dependency_errors_when_timings_succeed() {
         .build()
         .unwrap();
     let pack_path = directory.path().join("warning.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
     let output = directory.path().join("output.pdf");
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
@@ -2581,7 +2585,7 @@ fn filesystem_export_error_and_warnings_precede_timing_while_saved_errors_are_su
         .build()
         .unwrap();
     let pack_path = directory.path().join("warning.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
     let output = directory.path().join("output.pdf");
     std::fs::create_dir(&output).unwrap();
 
@@ -2619,7 +2623,7 @@ fn dependency_formats_and_stdout_follow_typst_transport_rules() {
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
 
     let zero = directory.path().join("deps.zero");
     let zero_result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
@@ -2701,7 +2705,7 @@ fn json_dependencies_are_written_when_compilation_fails() {
         .build()
         .unwrap();
     let pack_path = directory.path().join("invalid.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
     let deps = directory.path().join("deps.json");
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
@@ -2882,7 +2886,7 @@ fn global_color_controls_owned_and_source_diagnostics() {
         .build()
         .unwrap();
     let pack_path = directory.path().join("invalid.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
     let source = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
         .current_dir(directory.path())
         .args([
@@ -3013,7 +3017,7 @@ fn compile_forwards_argument_and_environment_certificates_to_package_downloader(
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
     let packages = directory.path().join("packages");
     let cache = directory.path().join("cache");
     std::fs::create_dir(&packages).unwrap();
@@ -3123,7 +3127,7 @@ fn compile_offline_missing_package_does_not_activate_download_probe() {
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
     let packages = directory.path().join("packages");
     let cache = directory.path().join("cache");
     std::fs::create_dir(&packages).unwrap();
@@ -3803,7 +3807,7 @@ fn empty_page_format_output_succeeds_and_reports_retained_compilation_warnings()
         .build()
         .unwrap();
     let pack_path = directory.path().join("warning.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
         .current_dir(directory.path())
@@ -3989,7 +3993,7 @@ fn omitted_page_output_expands_inherited_templates_but_document_outputs_are_lite
         .build()
         .unwrap();
     let pack_path = directory.path().join("document-{p}-{0p}-{n}.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
     let deps = directory.path().join("deps.json");
     let expanded = directory.path().join("document-1-1-1.svg");
 
@@ -4116,7 +4120,7 @@ fn padded_page_placeholders_use_total_source_page_width() {
         .build()
         .unwrap();
     let pack_path = directory.path().join("padded.typk");
-    std::fs::write(&pack_path, pack.to_bytes().unwrap()).unwrap();
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
     let output = directory.path().join("page-{0p}-{n}.svg");
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))

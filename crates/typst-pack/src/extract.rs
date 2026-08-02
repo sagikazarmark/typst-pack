@@ -5,7 +5,8 @@
 use std::collections::{BTreeMap, btree_map::Entry};
 use std::path::{Path, PathBuf};
 
-use crate::pack::{Pack, PackPathRole, font_archive_path};
+use crate::pack::{Pack, PackPathRole};
+use crate::pack_archive::font_archive_path;
 
 /// Options for [`extract`].
 #[derive(Debug, Clone, Default)]

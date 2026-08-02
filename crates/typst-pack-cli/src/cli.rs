@@ -25,7 +25,7 @@ use typst_pack::cli_support::{
     emit_creation_error_diagnostics, emit_creation_warnings, pdf_standard_requiring_tags,
     read_complete_package_tree, system_packages, validate_pdf_standards,
 };
-use typst_pack::pack_archive::{DecodeLimits, FORMAT_VERSION, decode};
+use typst_pack::pack_archive::{DecodeLimits, EncodeLimits, FORMAT_VERSION, decode, encode};
 use typst_pack::{
     CompilationArtifact, CompilationOutputSpecification, CompilationStatus, CreationTimestamp,
     DocumentTime, FontContainerFulfillment, HtmlOutputSpecification, OutputFormat,
@@ -698,8 +698,9 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
         return Err(error.into());
     }
 
+    let bytes =
+        encode(&outcome.pack, EncodeLimits::reference_v1()).map_err(|error| error.to_string())?;
     if output == Path::new("-") {
-        let bytes = outcome.pack.to_bytes().map_err(|err| err.to_string())?;
         std::io::stdout()
             .lock()
             .write_all(&bytes)
@@ -709,9 +710,8 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
 
     let file = File::create(&output)
         .map_err(|err| format!("cannot create `{}`: {err}", output.display()))?;
-    outcome
-        .pack
-        .write(std::io::BufWriter::new(file))
+    std::io::BufWriter::new(file)
+        .write_all(&bytes)
         .map_err(|err| err.to_string())?;
 
     let project_file_count = outcome.pack.files().count();

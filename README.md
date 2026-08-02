@@ -192,7 +192,7 @@ reach the network. Add the `egress` feature to let filesystem creation download
 the packages a project imports.
 
 ```rust,ignore
-use typst_pack::pack_archive::{DecodeLimits, decode};
+use typst_pack::pack_archive::{DecodeLimits, EncodeLimits, decode, encode};
 use typst_pack::{
     compile, CompilationOutputSpecification, OutputFormat, Pack,
     PackCompilationRequest, Packer, PdfOutputSpecification,
@@ -202,7 +202,7 @@ use typst_pack::{
 let outcome = Packer::new("path/to/project", "main.typ")
     .embed_fonts(true)
     .pack()?;
-let bytes = outcome.pack.to_bytes()?;
+let bytes = encode(&outcome.pack, EncodeLimits::reference_v1())?;
 
 // ... ship the bytes somewhere, then compile without a file system:
 let pack = decode(&bytes, DecodeLimits::reference_v1())?;
@@ -223,7 +223,7 @@ let pdf = artifact.bytes();
 Large immutable project, package, font, and compilation artifact payloads are
 shared across semantic clones and projections. Their public accessors expose
 borrowed byte slices without exposing the private sharing representation. Pack
-Archive bytes are the exception: `Pack::to_bytes()` returns the distinct,
+Archive bytes are the exception: `pack_archive::encode` returns the distinct,
 non-cloneable `PackArchiveBytes` value so exact retry material has explicit
 unique ownership.
 
@@ -251,12 +251,13 @@ is what a web editor wants:
 
 ```rust,ignore
 use typst_pack::Pack;
+use typst_pack::pack_archive::{EncodeLimits, encode};
 
 let pack = Pack::builder("main.typ")
     .file("main.typ", source_text.as_bytes().to_vec())?
     .file("figure.png", image_bytes)?
     .build()?;
-let bytes = pack.to_bytes()?;
+let bytes = encode(&pack, EncodeLimits::reference_v1())?;
 ```
 
 Building a pack by hand gives up the representative compile that discovers
@@ -273,6 +274,7 @@ use typst_pack::{
     FontDisposition, PackageCatalog, PackageDisposition, PackageTree,
     ProjectSnapshotAssembly,
 };
+use typst_pack::pack_archive::{EncodeLimits, encode};
 
 let project = ProjectSnapshotAssembly::new("main.typ").assemble([
     ("main.typ", source_text.as_bytes().to_vec()),
@@ -293,7 +295,7 @@ let request = CreationRequest::new(project, creation_timestamp)
     ]))
     .package_catalog(packages);
 let issued = create(&request)?.into_issued().expect("no package is missing");
-let bytes = issued.pack.to_bytes()?;
+let bytes = encode(&issued.pack, EncodeLimits::reference_v1())?;
 ```
 
 Compiler observations select package and font requirements; project files come

@@ -5,6 +5,7 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize};
 use typst::syntax::package::PackageSpec;
 
+#[cfg(test)]
 use crate::pack::{
     PACKAGE_TREE_IDENTITY_ALGORITHM, PACKAGE_TREE_IDENTITY_KIND, PACKAGE_TREE_IDENTITY_SCHEMA,
 };
@@ -211,6 +212,7 @@ impl PackagesManifest {
 }
 
 impl PackageManifest {
+    #[cfg(test)]
     pub(crate) fn new(
         spec: PackageSpec,
         tree_digest: String,
@@ -302,27 +304,6 @@ impl FontManifest {
     pub(crate) fn container_identity_algorithm(&self) -> Option<&str> {
         self.container_identity_algorithm.as_deref()
     }
-
-    pub(crate) fn new(
-        path: String,
-        index: u32,
-        families: Vec<String>,
-        external: bool,
-        container_digest: String,
-        container_length: u64,
-    ) -> Self {
-        Self {
-            path,
-            index,
-            families,
-            external,
-            container_digest: Some(container_digest),
-            container_identity_kind: Some("font-container".to_owned()),
-            container_identity_schema: Some("typst-pack-font-container-identity-v1".to_owned()),
-            container_identity_algorithm: Some("typst-hash128-0.15".to_owned()),
-            container_length: Some(container_length),
-        }
-    }
 }
 
 impl PackMetadata {
@@ -386,6 +367,7 @@ pub(crate) struct InvalidPackageSpec {
 }
 
 impl PackManifest {
+    #[cfg(test)]
     pub(crate) fn new(
         entrypoint: String,
         vendored_packages: Vec<PackageManifest>,
@@ -441,6 +423,7 @@ impl PackManifest {
     }
 
     /// Serializes the manifest to TOML text.
+    #[cfg(test)]
     pub fn to_toml(&self) -> String {
         toml::to_string_pretty(self).expect("manifest is always serializable")
     }

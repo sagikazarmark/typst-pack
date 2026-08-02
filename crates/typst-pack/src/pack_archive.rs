@@ -1,11 +1,13 @@
 //! Versioned Pack Archive encoding and decoding.
 
-use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Cursor, Read, Seek, SeekFrom};
+use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
+use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::str::FromStr;
 
 use typst::syntax::VirtualPath;
 use typst::syntax::package::PackageSpec;
+use zip::ZipWriter;
+use zip::write::SimpleFileOptions;
 
 use crate::manifest::PackManifest;
 pub use crate::manifest::{FORMAT_VERSION, MANIFEST_PATH, PackManifestError as ManifestError};
@@ -15,6 +17,686 @@ use crate::pack::{
 };
 use crate::payload::SharedBytes;
 use crate::{Pack, PackArchiveBytes};
+
+/// A resource bounded during Pack Archive Encoding.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum EncodeResource {
+    ArchiveBytes,
+    Members,
+    GeneratedMemberNameBytes,
+    ManifestBytes,
+    MemberBytes,
+    TotalContentBytes,
+}
+
+/// A supplied encode ceiling that cannot support bounded accounting.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum EncodeLimitsError {
+    #[error("the {resource:?} ceiling must leave room for a plus-one probe")]
+    CannotProbe {
+        resource: EncodeResource,
+        ceiling: u64,
+    },
+}
+
+/// A Pack Archive exceeded a mandatory encode ceiling.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum EncodeLimitError {
+    #[error(
+        "Pack Archive Encode {resource:?} limit exceeded: ceiling {ceiling}, observed at least {observed_at_least}"
+    )]
+    Exceeded {
+        resource: EncodeResource,
+        ceiling: u64,
+        observed_at_least: u64,
+    },
+    #[error("Pack Archive Encode {resource:?} accounting overflowed")]
+    AccountingOverflow { resource: EncodeResource },
+}
+
+/// A valid Pack value that version 1 cannot represent.
+#[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum RepresentationError {
+    #[error(
+        "version 1 member name {member_name:?} is {observed} bytes, exceeding the {maximum}-byte ZIP limit"
+    )]
+    MemberNameTooLong {
+        member_name: String,
+        maximum: u64,
+        observed: u64,
+    },
+}
+
+/// Mandatory finite resource ceilings for Pack Archive Encoding.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct EncodeLimits {
+    archive_bytes: u64,
+    members: u64,
+    generated_member_name_bytes: u64,
+    manifest_bytes: u64,
+    member_bytes: u64,
+    total_content_bytes: u64,
+}
+
+impl EncodeLimits {
+    /// Constructs a validated set of mandatory finite encode ceilings.
+    pub fn new(
+        archive_bytes: u64,
+        members: u64,
+        generated_member_name_bytes: u64,
+        manifest_bytes: u64,
+        member_bytes: u64,
+        total_content_bytes: u64,
+    ) -> Result<Self, EncodeLimitsError> {
+        let ceilings = [
+            (EncodeResource::ArchiveBytes, archive_bytes),
+            (EncodeResource::Members, members),
+            (
+                EncodeResource::GeneratedMemberNameBytes,
+                generated_member_name_bytes,
+            ),
+            (EncodeResource::ManifestBytes, manifest_bytes),
+            (EncodeResource::MemberBytes, member_bytes),
+            (EncodeResource::TotalContentBytes, total_content_bytes),
+        ];
+        if let Some((resource, ceiling)) = ceilings
+            .into_iter()
+            .find(|(_, ceiling)| *ceiling == u64::MAX)
+        {
+            return Err(EncodeLimitsError::CannotProbe { resource, ceiling });
+        }
+        Ok(Self {
+            archive_bytes,
+            members,
+            generated_member_name_bytes,
+            manifest_bytes,
+            member_bytes,
+            total_content_bytes,
+        })
+    }
+
+    /// The first-party limits for version-1 Pack Archives.
+    pub const fn reference_v1() -> Self {
+        Self {
+            archive_bytes: 512 * 1024 * 1024,
+            members: 100_000,
+            generated_member_name_bytes: 16 * 1024 * 1024,
+            manifest_bytes: 4 * 1024 * 1024,
+            member_bytes: 256 * 1024 * 1024,
+            total_content_bytes: 2 * 1024 * 1024 * 1024,
+        }
+    }
+
+    pub const fn archive_bytes(&self) -> u64 {
+        self.archive_bytes
+    }
+
+    pub const fn members(&self) -> u64 {
+        self.members
+    }
+
+    pub const fn generated_member_name_bytes(&self) -> u64 {
+        self.generated_member_name_bytes
+    }
+
+    pub const fn manifest_bytes(&self) -> u64 {
+        self.manifest_bytes
+    }
+
+    pub const fn member_bytes(&self) -> u64 {
+        self.member_bytes
+    }
+
+    pub const fn total_content_bytes(&self) -> u64 {
+        self.total_content_bytes
+    }
+}
+
+/// A failure in one phase of Pack Archive Encoding.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum EncodeError {
+    #[error(transparent)]
+    Limit(#[from] EncodeLimitError),
+    #[error(transparent)]
+    Representation(#[from] RepresentationError),
+    #[error("failed to encode ZIP structure: {0}")]
+    Codec(#[source] zip::result::ZipError),
+}
+
+impl From<zip::result::ZipError> for EncodeError {
+    fn from(error: zip::result::ZipError) -> Self {
+        Self::Codec(error)
+    }
+}
+
+impl From<std::io::Error> for EncodeError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Codec(zip::result::ZipError::Io(error))
+    }
+}
+
+/// Encodes one borrowed validated [`Pack`] into uniquely owned exact archive bytes.
+pub fn encode(pack: &Pack, limits: EncodeLimits) -> Result<PackArchiveBytes, EncodeError> {
+    let mut members = 1;
+    check_encode_exceeded(EncodeResource::Members, limits.members, members)?;
+    for _ in pack.files() {
+        account_member(&mut members, limits.members)?;
+    }
+    for (_, files) in pack.packages() {
+        for _ in files {
+            account_member(&mut members, limits.members)?;
+        }
+    }
+    let mut font_members = BTreeMap::new();
+    for font in pack.fonts() {
+        if let Entry::Vacant(entry) = font_members.entry(font.identity().container()) {
+            account_member(&mut members, limits.members)?;
+            entry.insert(font.data());
+        }
+    }
+
+    let mut generated_name_bytes =
+        u64::try_from(MANIFEST_PATH.len()).map_err(|_| EncodeLimitError::AccountingOverflow {
+            resource: EncodeResource::GeneratedMemberNameBytes,
+        })?;
+    check_encode_exceeded(
+        EncodeResource::GeneratedMemberNameBytes,
+        limits.generated_member_name_bytes,
+        generated_name_bytes,
+    )?;
+    for (path, _) in pack.files() {
+        let observed = generated_name_length([PROJECT_PREFIX.len(), path.len()])?;
+        check_v1_member_name(observed, || format!("{PROJECT_PREFIX}{path}"))?;
+        add_generated_name_bytes(
+            &mut generated_name_bytes,
+            [PROJECT_PREFIX.len(), path.len()],
+        )?;
+        check_encode_exceeded(
+            EncodeResource::GeneratedMemberNameBytes,
+            limits.generated_member_name_bytes,
+            generated_name_bytes,
+        )?;
+    }
+    for (spec, files) in pack.packages() {
+        let version = spec.version.to_string();
+        for (path, _) in files {
+            let parts = [
+                PACKAGES_PREFIX.len(),
+                spec.namespace.len(),
+                1,
+                spec.name.len(),
+                1,
+                version.len(),
+                1,
+                path.len(),
+            ];
+            let observed = generated_name_length(parts)?;
+            check_v1_member_name(observed, || {
+                format!(
+                    "{PACKAGES_PREFIX}{}/{}/{}/{path}",
+                    spec.namespace, spec.name, spec.version
+                )
+            })?;
+            add_generated_name_bytes(&mut generated_name_bytes, parts)?;
+            check_encode_exceeded(
+                EncodeResource::GeneratedMemberNameBytes,
+                limits.generated_member_name_bytes,
+                generated_name_bytes,
+            )?;
+        }
+    }
+    for (identity, data) in &font_members {
+        let path = font_archive_path(*identity, Some(data));
+        add_generated_name_bytes(&mut generated_name_bytes, [path.len()])?;
+        check_encode_exceeded(
+            EncodeResource::GeneratedMemberNameBytes,
+            limits.generated_member_name_bytes,
+            generated_name_bytes,
+        )?;
+    }
+
+    let mut total_content_bytes = 0;
+    for (_, data) in pack.files() {
+        account_content(data, limits, &mut total_content_bytes)?;
+    }
+    for (_, files) in pack.packages() {
+        for (_, data) in files {
+            account_content(data, limits, &mut total_content_bytes)?;
+        }
+    }
+    for data in font_members.values() {
+        account_content(data, limits, &mut total_content_bytes)?;
+    }
+
+    let manifest = encode_manifest(pack, limits.manifest_bytes)?;
+
+    let mut output = BoundedArchiveWriter::new(limits.archive_bytes);
+    let result = (|| -> Result<(), EncodeError> {
+        let mut zip = ZipWriter::new(&mut output);
+        zip.start_file(MANIFEST_PATH, zip_file_options(manifest.len()))?;
+        zip.write_all(manifest.as_bytes())?;
+
+        for (path, data) in pack.files() {
+            zip.start_file(
+                format!("{PROJECT_PREFIX}{path}"),
+                zip_file_options(data.len()),
+            )?;
+            zip.write_all(data)?;
+        }
+
+        for (spec, files) in pack.packages() {
+            for (path, data) in files {
+                zip.start_file(
+                    format!(
+                        "{PACKAGES_PREFIX}{}/{}/{}/{path}",
+                        spec.namespace, spec.name, spec.version
+                    ),
+                    zip_file_options(data.len()),
+                )?;
+                zip.write_all(data)?;
+            }
+        }
+
+        for (identity, data) in &font_members {
+            let path = font_archive_path(*identity, Some(data));
+            zip.start_file(path, zip_file_options(data.len()))?;
+            zip.write_all(data)?;
+        }
+
+        zip.finish()?;
+        Ok(())
+    })();
+    if let Some(error) = output.limit_error {
+        return Err(error.into());
+    }
+    result?;
+    Ok(PackArchiveBytes::from_vec(output.bytes))
+}
+
+fn account_member(total: &mut u64, ceiling: u64) -> Result<(), EncodeLimitError> {
+    *total = total
+        .checked_add(1)
+        .ok_or(EncodeLimitError::AccountingOverflow {
+            resource: EncodeResource::Members,
+        })?;
+    check_encode_exceeded(EncodeResource::Members, ceiling, *total)
+}
+
+fn encode_manifest(pack: &Pack, ceiling: u64) -> Result<String, EncodeLimitError> {
+    let mut manifest = BoundedManifest::new(ceiling);
+    manifest.push("format-version = 1\n\n[project]\nentrypoint = ")?;
+    manifest.push_quoted(pack.entrypoint())?;
+    manifest.push("\n")?;
+
+    for embedded in [true, false] {
+        for requirement in pack
+            .package_requirements()
+            .iter()
+            .filter(|requirement| requirement.is_embedded() == embedded)
+        {
+            manifest.push(if embedded {
+                "\n[[packages.vendored]]\n"
+            } else {
+                "\n[[packages.unvendored]]\n"
+            })?;
+            manifest.push("spec = ")?;
+            let spec = requirement.spec();
+            manifest.push("\"@")?;
+            manifest.push_escaped(spec.namespace.as_str())?;
+            manifest.push("/")?;
+            manifest.push_escaped(spec.name.as_str())?;
+            manifest.push(":")?;
+            manifest.push_escaped(&spec.version.to_string())?;
+            manifest.push("\"")?;
+            manifest.push("\ntree-digest = ")?;
+            manifest.push_quoted(&requirement.tree_identity().encode())?;
+            manifest.push("\ntree-identity-kind = ")?;
+            manifest.push_quoted(requirement.tree_identity().kind())?;
+            manifest.push("\ntree-identity-schema = ")?;
+            manifest.push_quoted(requirement.tree_identity().schema())?;
+            manifest.push("\ntree-identity-algorithm = ")?;
+            manifest.push_quoted(requirement.tree_identity().algorithm())?;
+            manifest.push("\nfile-count = ")?;
+            manifest.push_u64(requirement.file_count())?;
+            manifest.push("\nbyte-length = ")?;
+            manifest.push_u64(requirement.byte_length())?;
+            manifest.push("\n")?;
+        }
+    }
+
+    for face in pack.font_catalog() {
+        let embedded = pack
+            .fonts()
+            .iter()
+            .find(|font| font.identity() == face.identity());
+        let requirement = pack
+            .font_requirements()
+            .iter()
+            .find(|requirement| requirement.container_identity() == face.identity().container())
+            .expect("Pack Font Catalog requirement invariant violated");
+        manifest.push("\n[[fonts]]\npath = ")?;
+        manifest.push_quoted(&font_archive_path(
+            face.identity().container(),
+            embedded.map(|font| font.data()),
+        ))?;
+        if face.identity().index() != 0 {
+            manifest.push("\nindex = ")?;
+            manifest.push_u64(u64::from(face.identity().index()))?;
+        }
+        if let Some(font) = embedded {
+            manifest.push("\nfamilies = [")?;
+            manifest.push_quoted(font.info().family.as_str())?;
+            manifest.push("]")?;
+        }
+        if !face.is_embedded() {
+            manifest.push("\nexternal = true")?;
+        }
+        let container = face.identity().container();
+        manifest.push("\ncontainer-digest = ")?;
+        manifest.push_quoted(&container.encode())?;
+        manifest.push("\ncontainer-identity-kind = ")?;
+        manifest.push_quoted(container.kind())?;
+        manifest.push("\ncontainer-identity-schema = ")?;
+        manifest.push_quoted(container.schema())?;
+        manifest.push("\ncontainer-identity-algorithm = ")?;
+        manifest.push_quoted(container.algorithm())?;
+        manifest.push("\ncontainer-length = ")?;
+        manifest.push_u64(requirement.container_length())?;
+        manifest.push("\n")?;
+    }
+
+    if let Some(metadata) = pack.metadata() {
+        manifest.push("\n[metadata]\n")?;
+        if let Some(name) = metadata.name() {
+            manifest.push("name = ")?;
+            manifest.push_quoted(name)?;
+            manifest.push("\n")?;
+        }
+        if let Some(description) = metadata.description() {
+            manifest.push("description = ")?;
+            manifest.push_quoted(description)?;
+            manifest.push("\n")?;
+        }
+        if !metadata.authors().is_empty() {
+            manifest.push("authors = [")?;
+            for (index, author) in metadata.authors().iter().enumerate() {
+                if index != 0 {
+                    manifest.push(", ")?;
+                }
+                manifest.push_quoted(author)?;
+            }
+            manifest.push("]\n")?;
+        }
+    }
+
+    Ok(manifest.output)
+}
+
+struct BoundedManifest {
+    output: String,
+    ceiling: u64,
+}
+
+impl BoundedManifest {
+    fn new(ceiling: u64) -> Self {
+        Self {
+            output: String::new(),
+            ceiling,
+        }
+    }
+
+    fn push(&mut self, value: &str) -> Result<(), EncodeLimitError> {
+        let bytes =
+            u64::try_from(value.len()).map_err(|_| EncodeLimitError::AccountingOverflow {
+                resource: EncodeResource::ManifestBytes,
+            })?;
+        let observed = u64::try_from(self.output.len())
+            .ok()
+            .and_then(|length| length.checked_add(bytes))
+            .ok_or(EncodeLimitError::AccountingOverflow {
+                resource: EncodeResource::ManifestBytes,
+            })?;
+        check_encode_exceeded(EncodeResource::ManifestBytes, self.ceiling, observed)?;
+        self.output.push_str(value);
+        Ok(())
+    }
+
+    fn push_u64(&mut self, value: u64) -> Result<(), EncodeLimitError> {
+        self.push(&value.to_string())
+    }
+
+    fn push_quoted(&mut self, value: &str) -> Result<(), EncodeLimitError> {
+        self.push("\"")?;
+        self.push_escaped(value)?;
+        self.push("\"")
+    }
+
+    fn push_escaped(&mut self, value: &str) -> Result<(), EncodeLimitError> {
+        let minimum_bytes =
+            u64::try_from(value.len()).map_err(|_| EncodeLimitError::AccountingOverflow {
+                resource: EncodeResource::ManifestBytes,
+            })?;
+        let observed_at_least = u64::try_from(self.output.len())
+            .ok()
+            .and_then(|length| length.checked_add(minimum_bytes))
+            .ok_or(EncodeLimitError::AccountingOverflow {
+                resource: EncodeResource::ManifestBytes,
+            })?;
+        check_encode_exceeded(
+            EncodeResource::ManifestBytes,
+            self.ceiling,
+            observed_at_least,
+        )?;
+        let mut unescaped_start = 0;
+        for (index, character) in value.char_indices() {
+            let escaped = match character {
+                '\u{08}' => Some("\\b"),
+                '\t' => Some("\\t"),
+                '\n' => Some("\\n"),
+                '\u{0c}' => Some("\\f"),
+                '\r' => Some("\\r"),
+                '"' => Some("\\\""),
+                '\\' => Some("\\\\"),
+                character if character.is_control() => {
+                    self.push(&value[unescaped_start..index])?;
+                    let escaped = format!("\\u{:04X}", u32::from(character));
+                    self.push(&escaped)?;
+                    unescaped_start = index + character.len_utf8();
+                    None
+                }
+                _ => None,
+            };
+            if let Some(escaped) = escaped {
+                self.push(&value[unescaped_start..index])?;
+                self.push(escaped)?;
+                unescaped_start = index + character.len_utf8();
+            }
+        }
+        self.push(&value[unescaped_start..])
+    }
+}
+
+pub(crate) fn font_archive_path(
+    identity: crate::FontContainerIdentity,
+    data: Option<&[u8]>,
+) -> String {
+    let extension = match data.and_then(|data| data.get(..4)) {
+        Some(b"OTTO") => "otf",
+        Some(b"ttcf") => "ttc",
+        Some(_) => "ttf",
+        None => "font",
+    };
+    format!("fonts/{}.{extension}", identity.encode())
+}
+
+fn zip_file_options(size: usize) -> SimpleFileOptions {
+    // Deflate may expand incompressible input. Nine bits per input byte plus
+    // framing is a conservative bound for the configured encoder.
+    let compressed_bound = size.saturating_add(size.div_ceil(8)).saturating_add(16);
+    let compressed_bound = u64::try_from(compressed_bound).unwrap_or(u64::MAX);
+    SimpleFileOptions::default()
+        .compression_method(zip::CompressionMethod::Deflated)
+        .large_file(compressed_bound > zip::ZIP64_BYTES_THR)
+}
+
+struct BoundedArchiveWriter {
+    bytes: Vec<u8>,
+    position: u64,
+    logical_len: u64,
+    ceiling: u64,
+    limit_error: Option<EncodeLimitError>,
+}
+
+impl BoundedArchiveWriter {
+    fn new(ceiling: u64) -> Self {
+        Self {
+            bytes: Vec::new(),
+            position: 0,
+            logical_len: 0,
+            ceiling,
+            limit_error: None,
+        }
+    }
+}
+
+impl Write for BoundedArchiveWriter {
+    fn write(&mut self, data: &[u8]) -> std::io::Result<usize> {
+        let bytes = u64::try_from(data.len()).map_err(|_| {
+            self.limit_error = Some(EncodeLimitError::AccountingOverflow {
+                resource: EncodeResource::ArchiveBytes,
+            });
+            std::io::Error::other("Pack Archive encode accounting overflowed")
+        })?;
+        let end = self.position.checked_add(bytes).ok_or_else(|| {
+            self.limit_error = Some(EncodeLimitError::AccountingOverflow {
+                resource: EncodeResource::ArchiveBytes,
+            });
+            std::io::Error::other("Pack Archive encode accounting overflowed")
+        })?;
+        self.logical_len = self.logical_len.max(end);
+        if self.limit_error.is_none() && self.logical_len > self.ceiling {
+            self.limit_error = Some(EncodeLimitError::Exceeded {
+                resource: EncodeResource::ArchiveBytes,
+                ceiling: self.ceiling,
+                observed_at_least: self.logical_len,
+            });
+            self.position = end;
+            return Err(std::io::Error::other("Pack Archive encode limit exceeded"));
+        }
+        if self.limit_error.is_none() {
+            let start = usize::try_from(self.position).map_err(|_| {
+                std::io::Error::other("Pack Archive encode position is not addressable")
+            })?;
+            let end = usize::try_from(end).map_err(|_| {
+                std::io::Error::other("Pack Archive encode position is not addressable")
+            })?;
+            if self.bytes.len() < end {
+                self.bytes.resize(end, 0);
+            }
+            self.bytes[start..end].copy_from_slice(data);
+        }
+        self.position = end;
+        Ok(data.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+impl Seek for BoundedArchiveWriter {
+    fn seek(&mut self, position: SeekFrom) -> std::io::Result<u64> {
+        let position = match position {
+            SeekFrom::Start(position) => i128::from(position),
+            SeekFrom::End(offset) => i128::from(self.logical_len) + i128::from(offset),
+            SeekFrom::Current(offset) => i128::from(self.position) + i128::from(offset),
+        };
+        self.position = u64::try_from(position)
+            .map_err(|_| std::io::Error::other("invalid Pack Archive encode seek"))?;
+        Ok(self.position)
+    }
+}
+
+fn check_v1_member_name(
+    observed: u64,
+    member_name: impl FnOnce() -> String,
+) -> Result<(), RepresentationError> {
+    const MAXIMUM: u64 = u16::MAX as u64;
+    if observed > MAXIMUM {
+        return Err(RepresentationError::MemberNameTooLong {
+            member_name: member_name(),
+            maximum: MAXIMUM,
+            observed,
+        });
+    }
+    Ok(())
+}
+
+fn generated_name_length<const N: usize>(parts: [usize; N]) -> Result<u64, EncodeLimitError> {
+    parts.into_iter().try_fold(0u64, |length, part| {
+        let part = u64::try_from(part).map_err(|_| EncodeLimitError::AccountingOverflow {
+            resource: EncodeResource::GeneratedMemberNameBytes,
+        })?;
+        length
+            .checked_add(part)
+            .ok_or(EncodeLimitError::AccountingOverflow {
+                resource: EncodeResource::GeneratedMemberNameBytes,
+            })
+    })
+}
+
+fn account_content(
+    data: &[u8],
+    limits: EncodeLimits,
+    total: &mut u64,
+) -> Result<(), EncodeLimitError> {
+    let bytes = u64::try_from(data.len()).map_err(|_| EncodeLimitError::AccountingOverflow {
+        resource: EncodeResource::MemberBytes,
+    })?;
+    check_encode_exceeded(EncodeResource::MemberBytes, limits.member_bytes, bytes)?;
+    *total = total
+        .checked_add(bytes)
+        .ok_or(EncodeLimitError::AccountingOverflow {
+            resource: EncodeResource::TotalContentBytes,
+        })?;
+    check_encode_exceeded(
+        EncodeResource::TotalContentBytes,
+        limits.total_content_bytes,
+        *total,
+    )
+}
+
+fn add_generated_name_bytes<const N: usize>(
+    total: &mut u64,
+    parts: [usize; N],
+) -> Result<(), EncodeLimitError> {
+    *total = total.checked_add(generated_name_length(parts)?).ok_or(
+        EncodeLimitError::AccountingOverflow {
+            resource: EncodeResource::GeneratedMemberNameBytes,
+        },
+    )?;
+    Ok(())
+}
+
+fn check_encode_exceeded(
+    resource: EncodeResource,
+    ceiling: u64,
+    observed: u64,
+) -> Result<(), EncodeLimitError> {
+    if observed > ceiling {
+        return Err(EncodeLimitError::Exceeded {
+            resource,
+            ceiling,
+            observed_at_least: observed,
+        });
+    }
+    Ok(())
+}
 
 /// A resource bounded during Pack Archive Decoding.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

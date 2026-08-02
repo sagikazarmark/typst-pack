@@ -3,7 +3,9 @@
 use crate::compile::{CompileError, compile as compile_request, compile_world as compile};
 use crate::manifest::*;
 use crate::pack::{CompilationDependencySnapshotError, PackageFulfillmentError};
-use crate::pack_archive::{ArchiveError, DecodeError, DecodeLimits, ManifestError};
+use crate::pack_archive::{
+    ArchiveError, DecodeError, DecodeLimits, EncodeError, EncodeLimits, ManifestError,
+};
 use crate::world::{PackWorld, PackWorldConstructionError};
 use crate::*;
 
@@ -16,6 +18,10 @@ use typst::syntax::{RootedPath, VirtualPath, VirtualRoot};
 fn decode_test_archive(bytes: impl Into<PackArchiveBytes>) -> Result<Pack, DecodeError> {
     let archive = bytes.into();
     crate::pack_archive::decode(&archive, DecodeLimits::reference_v1())
+}
+
+fn encode_test_archive(pack: &Pack) -> Result<PackArchiveBytes, EncodeError> {
+    crate::pack_archive::encode(pack, EncodeLimits::reference_v1())
 }
 
 fn tiny_png() -> Vec<u8> {
@@ -98,7 +104,7 @@ fn only_read_issue(result: Result<Pack, DecodeError>) -> PackInvariantIssue {
 
 #[cfg(all(feature = "embedded-fonts", feature = "fs"))]
 fn pack_font_path(font: &PackFont) -> String {
-    crate::pack::font_archive_path(font.identity().container(), Some(font.data()))
+    crate::pack_archive::font_archive_path(font.identity().container(), Some(font.data()))
 }
 
 fn test_package_manifest(
@@ -779,7 +785,7 @@ fn pack_construction_is_independent_of_archive_entry_name_limits() {
         .unwrap()
         .build()
         .unwrap();
-    assert!(pack.to_bytes().is_ok());
+    assert!(encode_test_archive(&pack).is_ok());
 
     let path = format!("{maximum_path}a");
     let project = Pack::builder(&path)
@@ -787,7 +793,7 @@ fn pack_construction_is_independent_of_archive_entry_name_limits() {
         .unwrap()
         .build()
         .unwrap();
-    assert!(project.to_bytes().is_err());
+    assert!(encode_test_archive(&project).is_err());
 
     let spec = "@local/example:1.0.0"
         .parse::<typst::syntax::package::PackageSpec>()
@@ -800,7 +806,7 @@ fn pack_construction_is_independent_of_archive_entry_name_limits() {
         .unwrap()
         .build()
         .unwrap();
-    assert!(package.to_bytes().is_err());
+    assert!(encode_test_archive(&package).is_err());
 }
 
 #[test]
@@ -1038,7 +1044,7 @@ fn pack_font_catalog_preserves_declared_faces_and_container_disposition() {
         .unwrap();
     assert_eq!(external.face_indices(), &[1]);
 
-    let reread = decode_test_archive(pack.to_bytes().unwrap()).unwrap();
+    let reread = decode_test_archive(encode_test_archive(&pack).unwrap()).unwrap();
     assert_eq!(
         reread
             .font_catalog()
@@ -1374,7 +1380,7 @@ fn pack_roundtrip_in_memory() {
         .build()
         .unwrap();
 
-    let bytes = pack.to_bytes().unwrap();
+    let bytes = encode_test_archive(&pack).unwrap();
     let reread = decode_test_archive(bytes).unwrap();
 
     assert_eq!(reread.entrypoint(), "main.typ");
@@ -1408,7 +1414,7 @@ fn full_unicode_pack_remains_semantically_equivalent_after_reencoding() {
         .build()
         .unwrap();
 
-    let reread = decode_test_archive(pack.to_bytes().unwrap()).unwrap();
+    let reread = decode_test_archive(encode_test_archive(&pack).unwrap()).unwrap();
 
     assert_eq!(reread.metadata(), pack.metadata());
     assert_eq!(reread.package_requirements(), pack.package_requirements());
@@ -1417,7 +1423,7 @@ fn full_unicode_pack_remains_semantically_equivalent_after_reencoding() {
     assert!(reread.file("品牌/图.png").is_some());
     assert_eq!(reread.packages().count(), 1);
     assert_eq!(reread.fonts().len(), 1);
-    let reread_again = decode_test_archive(reread.to_bytes().unwrap()).unwrap();
+    let reread_again = decode_test_archive(encode_test_archive(&reread).unwrap()).unwrap();
     assert_eq!(reread_again.identity(), pack.identity());
     assert_eq!(reread_again.metadata(), pack.metadata());
 }
@@ -1624,7 +1630,7 @@ fn read_accepts_safe_unknown_entries_and_rewrite_drops_them() {
     .unwrap();
 
     let mut rewritten =
-        zip::ZipArchive::new(std::io::Cursor::new(pack.to_bytes().unwrap())).unwrap();
+        zip::ZipArchive::new(std::io::Cursor::new(encode_test_archive(&pack).unwrap())).unwrap();
     assert!(rewritten.by_name("future/data.bin").is_err());
     assert_eq!(rewritten.by_name("project/main.typ").unwrap().size(), 5);
 }

@@ -1,19 +1,16 @@
-//! The in-memory pack model and its archive serialization.
+//! The validated in-memory Pack model.
 
 use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Cursor, Seek, Write};
 use std::str::FromStr;
 
 use typst::foundations::Bytes;
 use typst::syntax::VirtualPath;
 use typst::syntax::package::PackageSpec;
 use typst::text::{Font, FontInfo};
-use zip::ZipWriter;
-use zip::write::SimpleFileOptions;
 
-use crate::manifest::{FontManifest, MANIFEST_PATH, PackManifest, PackMetadata, PackageManifest};
-use crate::payload::{PackArchiveBytes, SharedBytes};
+use crate::manifest::{PackMetadata, PackageManifest};
+use crate::payload::SharedBytes;
 
 /// The conventional file extension for packs.
 pub const FILE_EXTENSION: &str = "typk";
@@ -28,9 +25,6 @@ pub(crate) fn names_pack_path(path: &str) -> bool {
     })
 }
 
-const PROJECT_PREFIX: &str = "project/";
-const PACKAGES_PREFIX: &str = "packages/";
-const MAX_ZIP_ENTRY_NAME_LEN: usize = u16::MAX as usize;
 pub(crate) const PACKAGE_TREE_IDENTITY_KIND: &str = "complete-package-tree";
 pub(crate) const PACKAGE_TREE_IDENTITY_SCHEMA: &str = "typst-pack-complete-package-tree-v1";
 pub(crate) const PACKAGE_TREE_IDENTITY_ALGORITHM: &str = "typst-hash128-0.15";
@@ -126,7 +120,7 @@ impl PackageTreeIdentity {
     pub fn algorithm(self) -> &'static str {
         PACKAGE_TREE_IDENTITY_ALGORITHM
     }
-    fn encode(self) -> String {
+    pub(crate) fn encode(self) -> String {
         format!("{:032x}", self.0)
     }
     fn decode(value: &str) -> Option<Self> {
@@ -232,7 +226,7 @@ impl FontContainerIdentity {
         "typst-hash128-0.15"
     }
 
-    fn encode(self) -> String {
+    pub(crate) fn encode(self) -> String {
         format!("{:032x}", self.0)
     }
 
@@ -1018,115 +1012,6 @@ impl Pack {
             font_catalog,
         })
     }
-
-    /// Writes the pack archive to a seekable writer.
-    pub fn write<W: Write + Seek>(&self, writer: W) -> Result<(), PackWriteError> {
-        for path in self.files.keys() {
-            validate_archive_entry_name(PROJECT_PREFIX.len() + path.as_str().len())?;
-        }
-        for package in self.packages.values() {
-            let spec = &package.spec;
-            let version = spec.version.to_string();
-            let package_prefix_len =
-                PACKAGES_PREFIX.len() + spec.namespace.len() + spec.name.len() + version.len() + 3;
-            for path in package.files.keys() {
-                validate_archive_entry_name(package_prefix_len + path.as_str().len())?;
-            }
-        }
-
-        let mut zip = ZipWriter::new(writer);
-        let manifest = self.archive_manifest().to_toml();
-
-        zip.start_file(MANIFEST_PATH, zip_file_options(manifest.len()))?;
-        zip.write_all(manifest.as_bytes())?;
-
-        for (path, data) in &self.files {
-            zip.start_file(
-                format!("{PROJECT_PREFIX}{path}"),
-                zip_file_options(data.len()),
-            )?;
-            zip.write_all(data)?;
-        }
-
-        for package in self.packages.values() {
-            let spec = &package.spec;
-            for (path, data) in &package.files {
-                zip.start_file(
-                    format!(
-                        "{PACKAGES_PREFIX}{}/{}/{}/{path}",
-                        spec.namespace, spec.name, spec.version
-                    ),
-                    zip_file_options(data.len()),
-                )?;
-                zip.write_all(data)?;
-            }
-        }
-
-        let mut written = std::collections::BTreeSet::new();
-        for font in &self.fonts {
-            let path = font_archive_path(font.identity.container(), Some(font.data()));
-            if written.insert(path.clone()) {
-                zip.start_file(&path, zip_file_options(font.data().len()))?;
-                zip.write_all(font.data())?;
-            }
-        }
-
-        zip.finish()?;
-        Ok(())
-    }
-
-    /// Serializes the pack archive to a byte buffer.
-    pub fn to_bytes(&self) -> Result<PackArchiveBytes, PackWriteError> {
-        let mut buffer = Cursor::new(Vec::new());
-        self.write(&mut buffer)?;
-        Ok(PackArchiveBytes::from(buffer.into_inner()))
-    }
-
-    fn archive_manifest(&self) -> PackManifest {
-        let fonts = self
-            .font_catalog
-            .iter()
-            .map(|face| {
-                let embedded = self
-                    .fonts
-                    .iter()
-                    .find(|font| font.identity == face.identity);
-                let requirement = self
-                    .font_requirements
-                    .iter()
-                    .find(|requirement| requirement.container == face.identity.container)
-                    .expect("Pack Font Catalog requirement invariant violated");
-                FontManifest::new(
-                    font_archive_path(
-                        face.identity.container,
-                        embedded.map(|font| font.data.as_slice()),
-                    ),
-                    face.identity.index,
-                    embedded
-                        .map(|font| vec![font.info().family.to_string()])
-                        .unwrap_or_default(),
-                    !face.embedded,
-                    face.identity.container.encode(),
-                    requirement.length,
-                )
-            })
-            .collect();
-        PackManifest::new(
-            self.entrypoint.to_string(),
-            self.package_requirements
-                .iter()
-                .filter(|requirement| requirement.embedded)
-                .map(package_requirement_manifest)
-                .collect(),
-            self.package_requirements
-                .iter()
-                .filter(|requirement| !requirement.embedded)
-                .map(package_requirement_manifest)
-                .collect(),
-            fonts,
-            self.metadata.clone(),
-        )
-    }
 }
 
 /// A Pack-owned failure to materialize its exact Font Catalog.
@@ -1225,44 +1110,6 @@ fn package_manifest_requirement(
             embedded,
         },
     ))
-}
-
-fn package_requirement_manifest(requirement: &PackageRequirement) -> PackageManifest {
-    PackageManifest::new(
-        requirement.spec.clone(),
-        requirement.tree.encode(),
-        requirement.file_count,
-        requirement.byte_length,
-    )
-}
-
-fn zip_file_options(size: usize) -> SimpleFileOptions {
-    // Deflate may expand incompressible input. Nine bits per input byte plus
-    // framing is a conservative bound for the configured encoder.
-    let compressed_bound = size.saturating_add(size.div_ceil(8)).saturating_add(16);
-    let compressed_bound = u64::try_from(compressed_bound).unwrap_or(u64::MAX);
-    SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .large_file(compressed_bound > zip::ZIP64_BYTES_THR)
-}
-
-pub(crate) fn font_archive_path(identity: FontContainerIdentity, data: Option<&[u8]>) -> String {
-    let extension = match data.and_then(|data| data.get(..4)) {
-        Some(b"OTTO") => "otf",
-        Some(b"ttcf") => "ttc",
-        Some(_) => "ttf",
-        None => "font",
-    };
-    format!("fonts/{}.{extension}", identity.encode())
-}
-
-/// A failure while writing a pack archive.
-#[derive(Debug, thiserror::Error)]
-pub enum PackWriteError {
-    #[error("failed to write archive: {0}")]
-    Zip(#[from] zip::result::ZipError),
-    #[error("i/o error while writing archive: {0}")]
-    Io(#[from] std::io::Error),
 }
 
 /// Builds a [`Pack`] from in-memory data.
@@ -1511,15 +1358,6 @@ fn validate_package_spec(spec: &PackageSpec) -> Result<(), PackInvariantIssue> {
 fn has_windows_drive_prefix(path: &str) -> bool {
     let bytes = path.as_bytes();
     bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
-}
-
-fn validate_archive_entry_name(archive_name_len: usize) -> Result<(), PackWriteError> {
-    if archive_name_len > MAX_ZIP_ENTRY_NAME_LEN {
-        return Err(PackWriteError::Zip(zip::result::ZipError::InvalidArchive(
-            "entry name exceeds ZIP's limit".into(),
-        )));
-    }
-    Ok(())
 }
 
 fn find_path_tree_conflicts(

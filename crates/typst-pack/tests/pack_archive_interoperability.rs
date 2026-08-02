@@ -3,7 +3,7 @@ use std::io::Read;
 use flate2::read::DeflateDecoder;
 #[path = "support/archive.rs"]
 mod archive_support;
-use archive_support::decode_reference;
+use archive_support::{decode_reference, encode_reference};
 use typst_pack::pack_archive::{ArchiveError, DecodeError, ManifestError};
 use typst_pack::{Pack, PackInvariantIssue};
 
@@ -95,7 +95,7 @@ fn safe_unknown_entries_may_disappear_without_changing_pack_semantics() {
     let original = consume_zip_independently(ACCEPTED);
     assert!(original.iter().any(|entry| entry.name == "future/data.bin"));
 
-    let rewritten = pack.to_bytes().unwrap();
+    let rewritten = encode_reference(&pack).unwrap();
     let rewritten_entries = consume_zip_independently(&rewritten);
     assert!(
         rewritten_entries
@@ -232,7 +232,8 @@ fn independent_zip_consumer_accepts_version_one_encoder_layout() {
         .build()
         .unwrap();
 
-    let entries = consume_zip_independently(&pack.to_bytes().unwrap());
+    let encoded = encode_reference(&pack).unwrap();
+    let entries = consume_zip_independently(&encoded);
     assert_eq!(entries[0].name, "typst-pack.toml");
     assert!(entries.iter().all(|entry| entry.compression == 8));
     assert_eq!(

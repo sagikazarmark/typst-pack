@@ -65,8 +65,7 @@ pub use manifest::PackMetadata;
 pub use pack::{
     FILE_EXTENSION, FontCatalogError, FontContainerIdentity, FontFaceIdentity, FontRequirement,
     Pack, PackBuildError, PackBuilder, PackFont, PackFontCatalogFace, PackIdentity,
-    PackInvariantError, PackInvariantIssue, PackPathRole, PackWriteError, PackageRequirement,
-    PackageTreeIdentity,
+    PackInvariantError, PackInvariantIssue, PackPathRole, PackageRequirement, PackageTreeIdentity,
 };
 #[cfg(feature = "package-acquisition")]
 pub use package_acquisition::{
