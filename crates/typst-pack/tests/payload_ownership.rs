@@ -40,6 +40,16 @@ fn pack_archive_bytes_keep_unique_vector_ownership() {
 }
 
 #[test]
+fn pack_archive_debug_evidence_excludes_payload_bytes() {
+    let archive = PackArchiveBytes::from(b"secret exact archive bytes".to_vec());
+
+    let debug = format!("{archive:?}");
+
+    assert_eq!(debug, "PackArchiveBytes(26)");
+    assert!(!debug.contains("secret"));
+}
+
+#[test]
 fn failed_pack_archive_decode_preserves_retry_ownership() {
     let archive = PackArchiveBytes::from(b"not a Pack Archive".to_vec());
     let archive_pointer = archive.as_slice().as_ptr();

@@ -1,4 +1,10 @@
-//! Versioned Pack Archive encoding and decoding.
+//! Versioned Pack Archive encoding, decoding, acquisition, and publication.
+
+mod acquisition;
+mod publication;
+
+pub use acquisition::*;
+pub use publication::*;
 
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};

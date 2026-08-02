@@ -65,7 +65,7 @@ impl fmt::Debug for SharedBytes {
 /// let archive = PackArchiveBytes::from(Vec::new());
 /// let duplicate = archive.clone();
 /// ```
-#[derive(Debug, PartialEq, Eq)]
+#[derive(PartialEq, Eq)]
 pub struct PackArchiveBytes(Vec<u8>);
 
 impl PackArchiveBytes {
@@ -112,5 +112,14 @@ impl Deref for PackArchiveBytes {
 
     fn deref(&self) -> &Self::Target {
         self.as_slice()
+    }
+}
+
+impl fmt::Debug for PackArchiveBytes {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_tuple("PackArchiveBytes")
+            .field(&self.0.len())
+            .finish()
     }
 }

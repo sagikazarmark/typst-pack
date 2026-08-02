@@ -525,20 +525,18 @@ impl Pack {
         if declarations_are_explicit {
             for ((spec, embedded), declarations) in &declared_requirements {
                 let declared = &declarations[0];
-                if *embedded {
-                    if let Some(package) = package_groups.get(&(spec.clone(), true)) {
-                        let (tree, file_count, byte_length) = package_tree_identity(&package.files);
-                        if !invalid_package_groups.contains(&(spec.clone(), true))
-                            && declarations.iter().any(|declared| {
-                                declared.tree != tree
-                                    || declared.file_count != file_count
-                                    || declared.byte_length != byte_length
-                            })
-                        {
-                            issues.push(PackInvariantIssue::MismatchedEmbeddedPackageIdentity {
-                                spec: spec.clone(),
-                            });
-                        }
+                if *embedded && let Some(package) = package_groups.get(&(spec.clone(), true)) {
+                    let (tree, file_count, byte_length) = package_tree_identity(&package.files);
+                    if !invalid_package_groups.contains(&(spec.clone(), true))
+                        && declarations.iter().any(|declared| {
+                            declared.tree != tree
+                                || declared.file_count != file_count
+                                || declared.byte_length != byte_length
+                        })
+                    {
+                        issues.push(PackInvariantIssue::MismatchedEmbeddedPackageIdentity {
+                            spec: spec.clone(),
+                        });
                     }
                 }
                 package_requirements.push(declared.clone());

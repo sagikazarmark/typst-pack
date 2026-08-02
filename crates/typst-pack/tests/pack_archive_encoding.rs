@@ -324,12 +324,14 @@ struct PackProjection {
     entrypoint: String,
     files: Vec<(String, Vec<u8>)>,
     package_requirements: Vec<PackageRequirement>,
-    packages: Vec<(String, Vec<(String, Vec<u8>)>)>,
+    packages: Vec<(String, OwnedFiles)>,
     font_catalog: Vec<PackFontCatalogFace>,
     font_requirements: Vec<FontRequirement>,
     fonts: Vec<(FontFaceIdentity, Vec<u8>)>,
     metadata: Option<(Option<String>, Option<String>, Vec<String>)>,
 }
+
+type OwnedFiles = Vec<(String, Vec<u8>)>;
 
 fn semantic_projection(pack: &Pack) -> PackProjection {
     PackProjection {

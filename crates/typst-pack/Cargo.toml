@@ -32,6 +32,7 @@ parallel = ["dep:rayon"]
 # with this feature alone cannot download under any runtime configuration. Not
 # available on wasm targets.
 fs = [
+    "dep:libc",
     "dep:walkdir",
     "typst-kit/scan-fonts",
     "typst-kit/system-files",
@@ -75,6 +76,9 @@ walkdir = { version = "2", optional = true }
 ureq = { version = "2", default-features = false, features = ["tls"], optional = true }
 webpki-roots = { version = "1", optional = true }
 zip = { version = "8", default-features = false, features = ["deflate"] }
+
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
 
 [dev-dependencies]
 # The acquisition suite writes the archives the helpers expand.

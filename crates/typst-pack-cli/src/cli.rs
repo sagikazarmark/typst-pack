@@ -2,8 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
-use std::fs::File;
-use std::io::{IsTerminal, Read, Write};
+use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::{Arc, Mutex};
@@ -19,13 +18,16 @@ use typst_kit::diagnostics::termcolor::{
 use typst_kit::fonts::FontSource;
 use typst_pdf::{PdfStandard, Timestamp};
 
-use typst_pack::PackArchiveBytes;
 use typst_pack::cli_support::{
     CliCompilationExecution, CliCompilationPresentation, compile_with_timing,
     emit_creation_error_diagnostics, emit_creation_warnings, pdf_standard_requiring_tags,
     read_complete_package_tree, system_packages, validate_pdf_standards,
 };
-use typst_pack::pack_archive::{DecodeLimits, EncodeLimits, FORMAT_VERSION, decode, encode};
+use typst_pack::pack_archive::{
+    AcquisitionLimits, DecodeLimits, EncodeLimits, FORMAT_VERSION, FileAcquisitionError,
+    FilePublicationPolicy, OpenPackError, open_pack as open_pack_archive,
+    read_pack as read_pack_archive, save_pack, write_pack,
+};
 use typst_pack::{
     CompilationArtifact, CompilationOutputSpecification, CompilationStatus, CreationTimestamp,
     DocumentTime, FontContainerFulfillment, HtmlOutputSpecification, OutputFormat,
@@ -698,21 +700,26 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
         return Err(error.into());
     }
 
-    let bytes =
-        encode(&outcome.pack, EncodeLimits::reference_v1()).map_err(|error| error.to_string())?;
     if output == Path::new("-") {
-        std::io::stdout()
-            .lock()
-            .write_all(&bytes)
-            .map_err(|err| format!("cannot write Pack to stdout: {err}"))?;
+        write_pack(
+            std::io::stdout().lock(),
+            &outcome.pack,
+            EncodeLimits::reference_v1(),
+        )
+        .map_err(|err| format!("cannot write Pack to stdout: {err}"))?;
         return Ok(());
     }
 
-    let file = File::create(&output)
-        .map_err(|err| format!("cannot create `{}`: {err}", output.display()))?;
-    std::io::BufWriter::new(file)
-        .write_all(&bytes)
-        .map_err(|err| err.to_string())?;
+    let policy = if output
+        .try_exists()
+        .map_err(|error| format!("cannot inspect `{}`: {error}", output.display()))?
+    {
+        FilePublicationPolicy::ReplaceExisting
+    } else {
+        FilePublicationPolicy::CreateNew
+    };
+    save_pack(&output, &outcome.pack, EncodeLimits::reference_v1(), policy)
+        .map_err(|error| error.to_string())?;
 
     let project_file_count = outcome.pack.files().count();
     let vendored_package_count = outcome
@@ -1294,26 +1301,29 @@ fn normalize_output_path(path: &Path) -> PathBuf {
 }
 
 fn read_pack(path: &Path) -> Result<Pack, String> {
-    let bytes =
-        std::fs::read(path).map_err(|err| format!("cannot open `{}`: {err}", path.display()))?;
-    decode_pack_bytes(bytes)
+    open_pack_archive(
+        path,
+        AcquisitionLimits::reference_v1(),
+        DecodeLimits::reference_v1(),
+    )
+    .map_err(|error| match error {
+        OpenPackError::Acquire(FileAcquisitionError::Open { source, .. }) => {
+            format!("cannot open `{}`: {source}", path.display())
+        }
+        error => error.to_string(),
+    })
 }
 
 fn read_pack_input(path: &Path) -> Result<Pack, String> {
     if path == Path::new("-") {
-        let mut bytes = Vec::new();
-        std::io::stdin()
-            .lock()
-            .read_to_end(&mut bytes)
-            .map_err(|err| format!("cannot read Pack from stdin: {err}"))?;
-        return decode_pack_bytes(bytes);
+        return read_pack_archive(
+            std::io::stdin().lock(),
+            AcquisitionLimits::reference_v1(),
+            DecodeLimits::reference_v1(),
+        )
+        .map_err(|error| format!("cannot read Pack from stdin: {error}"));
     }
     read_pack(path)
-}
-
-fn decode_pack_bytes(bytes: Vec<u8>) -> Result<Pack, String> {
-    let archive = PackArchiveBytes::from_vec(bytes);
-    decode(&archive, DecodeLimits::reference_v1()).map_err(|error| error.to_string())
 }
 
 fn default_output_dir(pack: &Path) -> PathBuf {

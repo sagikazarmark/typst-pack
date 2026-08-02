@@ -3045,6 +3045,7 @@ dependencies = [
  "flate2",
  "hayro-syntax",
  "ignore",
+ "libc",
  "proptest",
  "rayon",
  "rustls-pemfile",

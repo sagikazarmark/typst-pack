@@ -227,6 +227,16 @@ Archive bytes are the exception: `pack_archive::encode` returns the distinct,
 non-cloneable `PackArchiveBytes` value so exact retry material has explicit
 unique ownership.
 
+`pack_archive::read_pack` and `write_pack` compose bounded stream acquisition
+and exact stream publication with decoding and encoding. With the `fs` feature,
+`open_pack` performs known-size preflight plus incrementally metered reads, while
+`save_pack` uses same-directory staging with an explicit `CreateNew` or
+`ReplaceExisting` atomic publication policy. Decode failures return the acquired
+bytes, publication failures return the encoded bytes, and publication evidence
+reports the completed phase, visible prefix or staging residue, and Commit
+Certainty. A strict filesystem policy is rejected before staging on platforms
+where the adapter cannot guarantee it.
+
 `PackOutcome::warnings` retains warnings from the representative creation
 compile. Inspect `PackOutcome::pack` for authoritative project files, package
 requirements and their embedding disposition, and the Pack Font Catalog; that
