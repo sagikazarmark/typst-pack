@@ -668,6 +668,13 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
     let timing_error = timing_error.map(|error| error.to_string());
     let outcome = match outcome {
         Ok(outcome) => outcome,
+        Err(PackerError::ProjectGather(typst_pack::FilesystemProjectGatherError::Snapshot(
+            typst_pack::ProjectSnapshotError::MissingEntrypoint(path),
+        ))) => {
+            return Err(
+                format!("entrypoint `{path}` is excluded by the Project Ignore Policy").into(),
+            );
+        }
         Err(PackerError::Compile {
             world,
             errors,

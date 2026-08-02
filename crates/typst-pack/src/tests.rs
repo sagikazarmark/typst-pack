@@ -2177,60 +2177,41 @@ Rows: #csv("data.csv").len()
     }
 
     #[test]
-    fn changed_project_evidence_prevents_pack_issuance() {
+    fn a_project_change_after_gathering_does_not_replace_acquired_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
         fs::create_dir_all(&project).unwrap();
         let main = project.join("main.typ");
         fs::write(&main, "original").unwrap();
-        let expected = project
-            .canonicalize()
-            .unwrap()
-            .join("main.typ")
-            .display()
-            .to_string();
-
-        let result = Packer::new(&project, "main.typ")
+        let outcome = Packer::new(&project, "main.typ")
             .system_fonts(false)
             .after_creation_hook({
                 let main = main.clone();
                 move || fs::write(&main, "changed").unwrap()
             })
-            .pack();
+            .pack()
+            .unwrap();
 
-        assert!(matches!(
-            result,
-            Err(PackerError::CreationEvidenceChanged { ref path }) if path == &expected
-        ));
+        assert_eq!(outcome.pack.file("main.typ"), Some(&b"original"[..]));
     }
 
     #[test]
-    fn changed_project_membership_prevents_pack_issuance() {
+    fn a_project_file_added_after_gathering_is_not_added_to_the_pack() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
         fs::create_dir_all(&project).unwrap();
         fs::write(project.join("main.typ"), "original").unwrap();
         let added = project.join("added.txt");
-        let expected = project
-            .canonicalize()
-            .unwrap()
-            .join("added.txt")
-            .display()
-            .to_string();
-
-        let result = Packer::new(&project, "main.typ")
+        let outcome = Packer::new(&project, "main.typ")
             .system_fonts(false)
             .after_creation_hook({
                 let added = added.clone();
                 move || fs::write(&added, "added").unwrap()
             })
-            .pack();
+            .pack()
+            .unwrap();
 
-        assert!(matches!(
-            result,
-            Err(PackerError::CreationEvidenceChanged { ref path })
-                if path == &expected
-        ));
+        assert!(outcome.pack.file("added.txt").is_none());
     }
 
     #[test]

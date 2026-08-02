@@ -17,7 +17,6 @@ mod font_catalog;
 mod fs_packages;
 #[cfg(feature = "fs")]
 mod fs_project;
-mod ignore_policy;
 mod manifest;
 mod pack;
 pub mod pack_archive;
@@ -60,7 +59,13 @@ pub use font_catalog::{
     FontCatalog, FontCatalogEntry, FontCatalogFace, FontContainer, FontContainerError,
     FontContainerFace, FontDisposition,
 };
-pub use ignore_policy::{IGNORE_FILE, ProjectIgnorePolicy, ProjectIgnorePolicyError};
+#[cfg(feature = "fs")]
+pub use fs_project::{
+    FilesystemProjectEntryKind, FilesystemProjectGatherError, FilesystemProjectIssue,
+    FilesystemProjectLimitError, FilesystemProjectLimits, FilesystemProjectLimitsError,
+    FilesystemProjectOperation, FilesystemProjectPolicyError, FilesystemProjectResource,
+    FilesystemProjectSurveyError, IGNORE_FILE, gather_filesystem_project,
+};
 pub use manifest::PackMetadata;
 pub use pack::{
     FILE_EXTENSION, FontCatalogError, FontContainerIdentity, FontFaceIdentity, FontRequirement,

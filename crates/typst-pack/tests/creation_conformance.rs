@@ -29,9 +29,11 @@ use std::str::FromStr;
 use typst::syntax::package::PackageSpec;
 use typst_pack::{
     CreationError, CreationOutcome, CreationRequest, FontCatalog, FontCatalogEntry, FontContainer,
-    FontContainerIdentity, FontDisposition, IGNORE_FILE, Pack, PackageCatalog, PackageCatalogIssue,
-    PackageDisposition, PackageTree, ProjectIgnorePolicy, ProjectSnapshotAssembly, create,
+    FontContainerIdentity, FontDisposition, Pack, PackageCatalog, PackageCatalogIssue,
+    PackageDisposition, PackageTree, ProjectSnapshotAssembly, create,
 };
+
+const IGNORE_FILE: &str = ".typkignore";
 
 /// 2023-11-14T22:13:20Z, the Document Time every representative request in the
 /// corpus is fixed to, so that no adapter's host clock reaches a Pack.
@@ -172,12 +174,13 @@ impl Fixture {
 
     /// The Project Ignore Policy an adapter derives from the fixture's listing,
     /// which is the root ignore file's bytes and nothing else.
-    fn policy(&self) -> ProjectIgnorePolicy {
-        match self.project.iter().find(|(path, _)| *path == IGNORE_FILE) {
-            Some((_, rules)) => ProjectIgnorePolicy::from_ignore_file(rules)
-                .expect("the fixture's ignore file parses"),
-            None => ProjectIgnorePolicy::built_in(),
-        }
+    fn policy(&self) -> FixturePolicy {
+        FixturePolicy::new(
+            self.project
+                .iter()
+                .find(|(path, _)| *path == IGNORE_FILE)
+                .map_or(&[][..], |(_, rules)| rules.as_slice()),
+        )
     }
 
     /// The Font Catalog the fixture's containers compose, in declaration order.
@@ -261,6 +264,43 @@ impl Fixture {
                 }
                 _ => None,
             })
+    }
+}
+
+/// The expected filesystem selection used by this test-only scenario runner.
+struct FixturePolicy(ignore::gitignore::Gitignore);
+
+impl FixturePolicy {
+    fn new(bytes: &[u8]) -> Self {
+        let contents = std::str::from_utf8(bytes).expect("the fixture's ignore file is UTF-8");
+        let mut builder = ignore::gitignore::GitignoreBuilder::new(".");
+        for line in contents.lines() {
+            builder
+                .add_line(None, line)
+                .expect("the fixture's ignore rule parses");
+        }
+        Self(builder.build().expect("the fixture policy builds"))
+    }
+
+    fn excludes_file(&self, path: &str) -> bool {
+        if path == IGNORE_FILE {
+            return false;
+        }
+        if path
+            .split('/')
+            .any(|component| component.ends_with(".typk"))
+        {
+            return true;
+        }
+        let mut ancestor_end = 0;
+        while let Some(offset) = path[ancestor_end..].find('/') {
+            ancestor_end += offset;
+            if self.0.matched(&path[..ancestor_end], true).is_ignore() {
+                return true;
+            }
+            ancestor_end += 1;
+        }
+        self.0.matched(path, false).is_ignore()
     }
 }
 
@@ -545,7 +585,9 @@ fn create_on_filesystem(fixture: &Fixture, plan: &FilesystemPlan) -> Result<Crea
             pack: outcome.pack,
             warnings: messages(&outcome.warnings),
         }),
-        Err(PackerError::IgnoredEntrypoint(_)) => Err(Failure::ExcludedEntrypoint),
+        Err(PackerError::ProjectGather(typst_pack::FilesystemProjectGatherError::Snapshot(
+            typst_pack::ProjectSnapshotError::MissingEntrypoint(_),
+        ))) => Err(Failure::ExcludedEntrypoint),
         Err(
             PackerError::Package { .. }
             | PackerError::InvalidPackageTree { .. }

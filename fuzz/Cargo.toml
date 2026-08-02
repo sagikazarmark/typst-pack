@@ -12,8 +12,9 @@ cargo-fuzz = true
 flate2 = "1"
 libfuzzer-sys = "0.4"
 tar = { version = "0.4", default-features = false }
+tempfile = "3"
 typst = "=0.15.1"
-typst-pack = { path = "../crates/typst-pack", features = ["package-acquisition"] }
+typst-pack = { path = "../crates/typst-pack", features = ["fs", "package-acquisition"] }
 
 [[bin]]
 name = "project_snapshot_assembly"
@@ -39,6 +40,13 @@ bench = false
 [[bin]]
 name = "package_archive_expansion"
 path = "fuzz_targets/package_archive_expansion.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "filesystem_project_gathering"
+path = "fuzz_targets/filesystem_project_gathering.rs"
 test = false
 doc = false
 bench = false

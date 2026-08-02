@@ -7,10 +7,9 @@
 //! missing, and resolves the creation timestamp; Pack Creation itself runs in
 //! the core over those bytes.
 //!
-//! Because the bytes it acquires come from mutable storage, this adapter also
-//! revalidates them before the Pack is returned, which is the Creation
-//! Evidence Fence. See [`Packer`] for the advisory obligation it discharges by
-//! doing so.
+//! Each acquired value records the exact bytes observed by its source adapter;
+//! the project gatherer does not reread the source solely to establish that all
+//! values coexisted at one instant.
 
 #![cfg(feature = "fs")]
 
@@ -39,13 +38,12 @@ use crate::font_catalog::typst_embedded_font_containers;
 use crate::font_catalog::{FontCatalog, FontCatalogEntry, FontContainer, FontDisposition};
 use crate::fs_packages::{AcquirePackageError, AcquiredPackages};
 use crate::fs_project;
-use crate::ignore_policy::ProjectIgnorePolicyError;
 use crate::manifest::PackMetadata;
 use crate::pack::{Pack, PackBuildError};
 use crate::package_catalog::{
     PackageCatalog, PackageCatalogError, PackageDisposition, PackageTreeError,
 };
-use crate::project_snapshot::{ProjectSnapshot, ProjectSnapshotError};
+use crate::project_snapshot::ProjectSnapshot;
 #[cfg(not(feature = "egress"))]
 use crate::world::local_packages;
 #[cfg(feature = "egress")]
@@ -65,11 +63,8 @@ use crate::world::system_packages;
 /// host's package cache, and with `egress` it downloads the rest unless
 /// creation is [offline](Self::offline).
 ///
-/// As an adapter over mutable storage, it also discharges the advisory
-/// obligation to establish that its acquired bytes represent one consistent
-/// source state: everything it acquired is revalidated before the Pack is
-/// returned, and creation fails with
-/// [`PackerError::CreationEvidenceChanged`] when any of it changed meanwhile.
+/// The returned Pack represents the exact values acquired. Project files
+/// are not reread solely to detect concurrent source mutation.
 pub struct Packer {
     root: PathBuf,
     entrypoint: PathBuf,
@@ -311,9 +306,10 @@ impl Packer {
             .map_err(|err| PackerError::io("failed to resolve entrypoint", err))?;
         let entrypoint = VirtualPath::virtualize(&root, &entrypoint_abs)
             .map_err(|_| PackerError::OutsideRoot(entrypoint_abs.clone()))?;
-        let snapshot = Arc::new(fs_project::acquire_snapshot(
+        let snapshot = Arc::new(fs_project::gather_filesystem_project(
             &root,
             entrypoint.get_without_slash(),
+            fs_project::FilesystemProjectLimits::reference_v1(),
         )?);
 
         let packages = Arc::new(AcquiredPackages::new(self.package_authority()));
@@ -392,10 +388,6 @@ impl Packer {
             hook();
         }
 
-        // The Creation Evidence Fence: the Pack the core issued describes the
-        // bytes this adapter acquired, so it is withheld unless those bytes
-        // still agree with the filesystem they came from.
-        fs_project::revalidate(&snapshot, &root)?;
         packages.revalidate()?;
         font_sources.revalidate(&font_catalog)?;
 
@@ -560,22 +552,8 @@ pub enum PackerError {
     /// The acquired Package Trees do not form a valid Package Catalog.
     #[error(transparent)]
     InvalidPackageCatalog(PackageCatalogError),
-    #[error("failed to walk directory: {0}")]
-    Walk(String),
     #[error(transparent)]
-    InvalidIgnorePolicy(#[from] ProjectIgnorePolicyError),
-    #[error("project path `{path}` cannot be represented: {message}")]
-    InvalidProjectPath { path: String, message: String },
-    #[error("entrypoint `{0}` is excluded by the Project Ignore Policy")]
-    IgnoredEntrypoint(String),
-    /// A Project Snapshot assembly failure with no filesystem vocabulary of
-    /// its own.
-    #[error(transparent)]
-    Snapshot(ProjectSnapshotError),
-    #[error("project path `{}` is not valid UTF-8", path.display())]
-    UnrepresentablePath { path: PathBuf },
-    #[error("unsupported filesystem entry `{}` in the project", path.display())]
-    UnsupportedProjectEntry { path: PathBuf },
+    ProjectGather(#[from] fs_project::FilesystemProjectGatherError),
     #[error("creation evidence changed before Pack issuance: `{path}`")]
     CreationEvidenceChanged { path: String },
     #[error(transparent)]
@@ -587,21 +565,6 @@ impl PackerError {
         Self::Io {
             message: message.to_owned(),
             source,
-        }
-    }
-}
-
-impl From<ProjectSnapshotError> for PackerError {
-    /// Reports snapshot assembly in the filesystem adapter's own vocabulary.
-    fn from(error: ProjectSnapshotError) -> Self {
-        match error {
-            ProjectSnapshotError::InvalidPath { path, message } => {
-                Self::InvalidProjectPath { path, message }
-            }
-            // A selected entrypoint absent after the structural walk was either
-            // excluded by policy or was not an eligible regular file.
-            ProjectSnapshotError::MissingEntrypoint(path) => Self::IgnoredEntrypoint(path),
-            error @ ProjectSnapshotError::DuplicatePath { .. } => Self::Snapshot(error),
         }
     }
 }

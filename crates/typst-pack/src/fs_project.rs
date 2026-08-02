@@ -1,135 +1,994 @@
-//! Project gathering for the reference filesystem Pack Assembler.
-//!
-//! Acquisition is list, filter, then read: the walker lists the entries beneath
-//! the project root, the Project Ignore Policy decides which of them are
-//! project files, and only the survivors are read.
+//! Project gathering for the reference filesystem source.
 
+use std::fs::File;
+#[cfg(not(unix))]
+use std::fs::OpenOptions;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
-use crate::ignore_policy::{IGNORE_FILE, ProjectIgnorePolicy};
-use crate::packer::PackerError;
-use crate::project_snapshot::{ProjectSnapshot, ProjectSnapshotAssembly};
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
-/// Acquires the structural project closure beneath `root` as a Project
-/// Snapshot.
-pub(crate) fn acquire_snapshot(
-    root: &Path,
-    entrypoint: &str,
-) -> Result<ProjectSnapshot, PackerError> {
-    let policy = read_policy(root)?;
-    let mut entries = Vec::new();
-    for (path, source) in list_project_files(root, &policy)? {
-        let data = std::fs::read(&source).map_err(|error| {
-            PackerError::io(
-                &format!("failed to read project file `{}`", source.display()),
-                error,
-            )
-        })?;
-        entries.push((path, data));
-    }
-    Ok(ProjectSnapshotAssembly::new(entrypoint).assemble(entries)?)
+use crate::pack::names_pack_path;
+use crate::project_snapshot::{ProjectSnapshot, ProjectSnapshotAssembly, ProjectSnapshotError};
+
+/// The root-relative path of the filesystem Project Ignore Policy file.
+pub const IGNORE_FILE: &str = ".typkignore";
+
+/// A resource bounded during filesystem project gathering.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum FilesystemProjectResource {
+    VisitedEntries,
+    SelectedFiles,
+    RootPolicyBytes,
+    SelectedFileBytes,
+    TotalSelectedBytes,
 }
 
-/// Fails when the project files backing `snapshot` no longer agree with the
-/// filesystem, which is the project half of the Creation Evidence Fence.
-pub(crate) fn revalidate(snapshot: &ProjectSnapshot, root: &Path) -> Result<(), PackerError> {
-    let current = match acquire_snapshot(root, snapshot.entrypoint()) {
-        Ok(current) => current,
-        Err(PackerError::IgnoredEntrypoint(path)) => {
-            return Err(PackerError::CreationEvidenceChanged {
-                path: root.join(path).display().to_string(),
-            });
+/// A supplied gathering ceiling that cannot support bounded accounting.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum FilesystemProjectLimitsError {
+    #[error("the {resource:?} ceiling must leave room for a plus-one probe")]
+    CannotProbe {
+        resource: FilesystemProjectResource,
+        ceiling: u64,
+    },
+}
+
+/// A filesystem project exceeded a mandatory gathering ceiling.
+#[derive(Debug, Clone, Copy, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum FilesystemProjectLimitError {
+    #[error(
+        "filesystem project gathering {resource:?} limit exceeded: ceiling {ceiling}, observed at least {observed_at_least}"
+    )]
+    Exceeded {
+        resource: FilesystemProjectResource,
+        ceiling: u64,
+        observed_at_least: u64,
+    },
+    #[error("filesystem project gathering {resource:?} accounting overflowed")]
+    AccountingOverflow { resource: FilesystemProjectResource },
+}
+
+/// Mandatory finite resource ceilings for filesystem project gathering.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct FilesystemProjectLimits {
+    visited_entries: u64,
+    selected_files: u64,
+    root_policy_bytes: u64,
+    selected_file_bytes: u64,
+    total_selected_bytes: u64,
+}
+
+impl FilesystemProjectLimits {
+    /// Constructs validated mandatory finite gathering ceilings.
+    pub fn new(
+        visited_entries: u64,
+        selected_files: u64,
+        root_policy_bytes: u64,
+        selected_file_bytes: u64,
+        total_selected_bytes: u64,
+    ) -> Result<Self, FilesystemProjectLimitsError> {
+        let ceilings = [
+            (FilesystemProjectResource::VisitedEntries, visited_entries),
+            (FilesystemProjectResource::SelectedFiles, selected_files),
+            (
+                FilesystemProjectResource::RootPolicyBytes,
+                root_policy_bytes,
+            ),
+            (
+                FilesystemProjectResource::SelectedFileBytes,
+                selected_file_bytes,
+            ),
+            (
+                FilesystemProjectResource::TotalSelectedBytes,
+                total_selected_bytes,
+            ),
+        ];
+        if let Some((resource, ceiling)) = ceilings
+            .into_iter()
+            .find(|(_, ceiling)| *ceiling == u64::MAX)
+        {
+            return Err(FilesystemProjectLimitsError::CannotProbe { resource, ceiling });
         }
-        Err(error) => return Err(error),
-    };
-    let Some(changed) = first_difference(snapshot, &current) else {
-        return Ok(());
-    };
-    Err(PackerError::CreationEvidenceChanged {
-        path: root.join(changed).display().to_string(),
-    })
-}
-
-/// The first path on which two snapshots disagree, in canonical path order.
-fn first_difference<'a>(
-    snapshot: &'a ProjectSnapshot,
-    current: &'a ProjectSnapshot,
-) -> Option<&'a str> {
-    snapshot
-        .files()
-        .find(|(path, data)| current.file(path) != Some(*data))
-        .or_else(|| {
-            current
-                .files()
-                .find(|(path, _)| snapshot.file(path).is_none())
+        Ok(Self {
+            visited_entries,
+            selected_files,
+            root_policy_bytes,
+            selected_file_bytes,
+            total_selected_bytes,
         })
-        .map(|(path, _)| path)
+    }
+
+    /// The first-party limits for filesystem projects.
+    pub const fn reference_v1() -> Self {
+        Self {
+            visited_entries: 1_000_000,
+            selected_files: 100_000,
+            root_policy_bytes: 1024 * 1024,
+            selected_file_bytes: 256 * 1024 * 1024,
+            total_selected_bytes: 2 * 1024 * 1024 * 1024,
+        }
+    }
+
+    pub const fn visited_entries(&self) -> u64 {
+        self.visited_entries
+    }
+
+    pub const fn selected_files(&self) -> u64 {
+        self.selected_files
+    }
+
+    pub const fn root_policy_bytes(&self) -> u64 {
+        self.root_policy_bytes
+    }
+
+    pub const fn selected_file_bytes(&self) -> u64 {
+        self.selected_file_bytes
+    }
+
+    pub const fn total_selected_bytes(&self) -> u64 {
+        self.total_selected_bytes
+    }
 }
 
-/// Lists the project files beneath `root` that the policy does not exclude,
-/// pruning excluded directories instead of descending into them.
-fn list_project_files(
-    root: &Path,
-    policy: &ProjectIgnorePolicy,
-) -> Result<Vec<(String, PathBuf)>, PackerError> {
-    let mut listing = Vec::new();
-    let mut walk = walkdir::WalkDir::new(root)
-        .follow_links(false)
-        .sort_by_file_name()
-        .into_iter();
+/// The kind of an eligible filesystem entry that cannot become a project file.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum FilesystemProjectEntryKind {
+    Socket,
+    Fifo,
+    BlockDevice,
+    CharacterDevice,
+    Unknown,
+}
+
+/// The filesystem operation that produced an I/O error while gathering.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum FilesystemProjectOperation {
+    InspectRootPolicy,
+    ReadRootPolicy,
+    SurveyEntry,
+    InspectSelectedFile,
+    ReadSelectedFile,
+}
+
+impl std::fmt::Display for FilesystemProjectOperation {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(match self {
+            Self::InspectRootPolicy => "inspect root Project Ignore Policy",
+            Self::ReadRootPolicy => "read root Project Ignore Policy",
+            Self::SurveyEntry => "survey project entry",
+            Self::InspectSelectedFile => "inspect selected project file",
+            Self::ReadSelectedFile => "read selected project file",
+        })
+    }
+}
+
+/// One independently detectable filesystem project survey issue.
+#[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum FilesystemProjectIssue {
+    #[error("unsupported filesystem entry `{}`: aliases cannot become project files", path.display())]
+    Alias { path: PathBuf },
+    #[error("unsupported filesystem entry `{}` in the project", path.display())]
+    UnsupportedEntry {
+        path: PathBuf,
+        kind: FilesystemProjectEntryKind,
+    },
+    #[error("project path `{}` is not valid UTF-8", path.display())]
+    UnrepresentablePath { path: PathBuf },
+}
+
+impl FilesystemProjectIssue {
+    fn path(&self) -> &Path {
+        match self {
+            Self::Alias { path }
+            | Self::UnsupportedEntry { path, .. }
+            | Self::UnrepresentablePath { path } => path,
+        }
+    }
+
+    fn rank(&self) -> u8 {
+        match self {
+            Self::Alias { .. } => 0,
+            Self::UnsupportedEntry { .. } => 1,
+            Self::UnrepresentablePath { .. } => 2,
+        }
+    }
+}
+
+/// All safely detectable issues found by one filesystem structural survey.
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct FilesystemProjectSurveyError {
+    issues: Vec<FilesystemProjectIssue>,
+}
+
+impl FilesystemProjectSurveyError {
+    pub fn issues(&self) -> &[FilesystemProjectIssue] {
+        &self.issues
+    }
+}
+
+impl std::fmt::Display for FilesystemProjectSurveyError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "filesystem project survey found {} issue(s)",
+            self.issues.len()
+        )?;
+        for issue in &self.issues {
+            write!(formatter, ": {issue}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for FilesystemProjectSurveyError {}
+
+/// A failure while parsing the root filesystem Project Ignore Policy.
+#[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum FilesystemProjectPolicyError {
+    #[error("the policy file is not valid UTF-8")]
+    NotUtf8,
+    #[error("line {line}: {message}")]
+    InvalidRule { line: usize, message: String },
+    #[error("{0}")]
+    Invalid(String),
+}
+
+/// A failure while gathering a Project Snapshot from the filesystem.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum FilesystemProjectGatherError {
+    #[error("failed to {operation} `{}`: {source}", path.display())]
+    Io {
+        operation: FilesystemProjectOperation,
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("invalid Project Ignore Policy at `{}`: {source}", path.display())]
+    InvalidPolicy {
+        path: PathBuf,
+        source: FilesystemProjectPolicyError,
+    },
+    #[error(transparent)]
+    Survey(FilesystemProjectSurveyError),
+    #[error("filesystem project resource limit at {path:?}: {source}")]
+    Limit {
+        path: PathBuf,
+        source: FilesystemProjectLimitError,
+    },
+    #[error("selected filesystem entries do not form a Project Snapshot: {0}")]
+    Snapshot(#[source] ProjectSnapshotError),
+}
+
+impl FilesystemProjectGatherError {
+    fn io(
+        operation: FilesystemProjectOperation,
+        path: impl Into<PathBuf>,
+        source: std::io::Error,
+    ) -> Self {
+        Self::Io {
+            operation,
+            path: path.into(),
+            source,
+        }
+    }
+
+    fn limit(path: impl Into<PathBuf>, source: FilesystemProjectLimitError) -> Self {
+        Self::Limit {
+            path: path.into(),
+            source,
+        }
+    }
+}
+
+/// Gathers one Project Snapshot from the reference filesystem source.
+///
+/// The root policy is acquired and parsed once. Gathering then surveys and
+/// filters the complete eligible structure before reading ordinary selected
+/// files, and submits only the selected exact bytes to Project Snapshot
+/// Assembly.
+pub fn gather_filesystem_project(
+    root: impl AsRef<Path>,
+    entrypoint: impl Into<String>,
+    limits: FilesystemProjectLimits,
+) -> Result<ProjectSnapshot, FilesystemProjectGatherError> {
+    let root = root.as_ref();
+    let policy_path = root.join(IGNORE_FILE);
+    let policy_file = acquire_policy(&policy_path, limits)?;
+    let policy = &policy_file.policy;
+
+    let mut visited_entries = 0u64;
+    let mut selected_files = u64::from(policy_file.bytes.is_some());
+    check_limit(
+        FilesystemProjectResource::SelectedFiles,
+        limits.selected_files,
+        selected_files,
+    )
+    .map_err(|source| FilesystemProjectGatherError::limit(&policy_path, source))?;
+    let mut declared_total = policy_file
+        .bytes
+        .as_ref()
+        .map_or(0, |bytes| bytes.len() as u64);
+    let mut selected = Vec::new();
+    let mut issues = Vec::new();
+    let mut deferred_limit = None;
+    let mut walk = walkdir::WalkDir::new(root).follow_links(false).into_iter();
+
     while let Some(entry) = walk.next() {
-        let entry = entry.map_err(|error| PackerError::Walk(error.to_string()))?;
+        let entry = entry.map_err(|error| {
+            let path = error.path().unwrap_or(root).to_owned();
+            let source = error
+                .into_io_error()
+                .unwrap_or_else(|| std::io::Error::other("filesystem traversal failed"));
+            FilesystemProjectGatherError::io(FilesystemProjectOperation::SurveyEntry, path, source)
+        })?;
         if entry.depth() == 0 {
             continue;
         }
+
+        visited_entries = checked_add(
+            visited_entries,
+            1,
+            FilesystemProjectResource::VisitedEntries,
+        )
+        .map_err(|source| FilesystemProjectGatherError::limit(entry.path(), source))?;
+        check_limit(
+            FilesystemProjectResource::VisitedEntries,
+            limits.visited_entries,
+            visited_entries,
+        )
+        .map_err(|source| FilesystemProjectGatherError::limit(entry.path(), source))?;
+
         let relative = entry
             .path()
             .strip_prefix(root)
             .expect("walk remains beneath root");
-        let path = relative
-            .to_str()
-            .ok_or_else(|| PackerError::UnrepresentablePath {
+        let Some(path) = slash_path(relative) else {
+            issues.push(FilesystemProjectIssue::UnrepresentablePath {
                 path: entry.path().to_owned(),
-            })?;
-        let file_type = entry.file_type();
+            });
+            if entry.file_type().is_dir() {
+                walk.skip_current_dir();
+            }
+            continue;
+        };
 
-        if file_type.is_dir() {
-            if policy.excludes_directory(path) {
+        if path == IGNORE_FILE {
+            if entry.file_type().is_dir() {
                 walk.skip_current_dir();
             }
             continue;
         }
-        if policy.excludes_file(path) {
+
+        let file_type = entry.file_type();
+        if file_type.is_dir() {
+            if policy.excludes_directory(&path) {
+                walk.skip_current_dir();
+            }
+            continue;
+        }
+        if policy.excludes_file(&path) {
+            continue;
+        }
+        if file_type.is_symlink() {
+            issues.push(FilesystemProjectIssue::Alias {
+                path: entry.path().to_owned(),
+            });
             continue;
         }
         if !file_type.is_file() {
-            return Err(PackerError::UnsupportedProjectEntry {
+            issues.push(FilesystemProjectIssue::UnsupportedEntry {
                 path: entry.path().to_owned(),
+                kind: unsupported_kind(&file_type),
             });
+            continue;
         }
-        listing.push((path.to_owned(), entry.path().to_owned()));
+
+        selected_files =
+            checked_add(selected_files, 1, FilesystemProjectResource::SelectedFiles)
+                .map_err(|source| FilesystemProjectGatherError::limit(entry.path(), source))?;
+        if let Err(source) = check_limit(
+            FilesystemProjectResource::SelectedFiles,
+            limits.selected_files,
+            selected_files,
+        ) {
+            deferred_limit
+                .get_or_insert_with(|| FilesystemProjectGatherError::limit(entry.path(), source));
+            continue;
+        }
+
+        let metadata = entry.metadata().map_err(|error| {
+            let path = error.path().unwrap_or(entry.path()).to_owned();
+            let source = error.into_io_error().unwrap_or_else(|| {
+                std::io::Error::other("failed to inspect selected project file")
+            });
+            FilesystemProjectGatherError::io(
+                FilesystemProjectOperation::InspectSelectedFile,
+                path,
+                source,
+            )
+        })?;
+        let declared = metadata.len();
+        if let Err(source) = check_limit(
+            FilesystemProjectResource::SelectedFileBytes,
+            limits.selected_file_bytes,
+            declared,
+        ) {
+            deferred_limit
+                .get_or_insert_with(|| FilesystemProjectGatherError::limit(entry.path(), source));
+            continue;
+        }
+        declared_total = checked_add(
+            declared_total,
+            declared,
+            FilesystemProjectResource::TotalSelectedBytes,
+        )
+        .map_err(|source| FilesystemProjectGatherError::limit(entry.path(), source))?;
+        if let Err(source) = check_limit(
+            FilesystemProjectResource::TotalSelectedBytes,
+            limits.total_selected_bytes,
+            declared_total,
+        ) {
+            deferred_limit
+                .get_or_insert_with(|| FilesystemProjectGatherError::limit(entry.path(), source));
+            continue;
+        }
+        selected.push((path, entry.path().to_owned()));
     }
-    Ok(listing)
+
+    if !issues.is_empty() {
+        issues.sort_by(|left, right| {
+            left.path()
+                .cmp(right.path())
+                .then_with(|| left.rank().cmp(&right.rank()))
+        });
+        return Err(FilesystemProjectGatherError::Survey(
+            FilesystemProjectSurveyError { issues },
+        ));
+    }
+    if let Some(error) = deferred_limit {
+        return Err(error);
+    }
+
+    selected.sort_by(|(left, _), (right, _)| left.cmp(right));
+    let mut entries = Vec::with_capacity(selected.len() + usize::from(policy_file.bytes.is_some()));
+    let mut actual_total = 0u64;
+    if let Some(bytes) = policy_file.bytes {
+        actual_total = bytes.len() as u64;
+        entries.push((IGNORE_FILE.to_owned(), bytes));
+    }
+    for (path, source) in selected {
+        let remaining = limits.total_selected_bytes - actual_total;
+        let bytes = read_bounded(
+            root,
+            &source,
+            &[
+                (
+                    FilesystemProjectResource::SelectedFileBytes,
+                    limits.selected_file_bytes,
+                    limits.selected_file_bytes,
+                    0,
+                ),
+                (
+                    FilesystemProjectResource::TotalSelectedBytes,
+                    remaining,
+                    limits.total_selected_bytes,
+                    actual_total,
+                ),
+            ],
+            FilesystemProjectOperation::ReadSelectedFile,
+        )?;
+        actual_total = checked_add(
+            actual_total,
+            bytes.len() as u64,
+            FilesystemProjectResource::TotalSelectedBytes,
+        )
+        .map_err(|source_error| FilesystemProjectGatherError::limit(&source, source_error))?;
+        entries.push((path, bytes));
+    }
+
+    ProjectSnapshotAssembly::new(entrypoint)
+        .assemble(entries)
+        .map_err(FilesystemProjectGatherError::Snapshot)
 }
 
-/// Reads the root Project Ignore Policy file, if the project has one.
-fn read_policy(root: &Path) -> Result<ProjectIgnorePolicy, PackerError> {
-    let path = root.join(IGNORE_FILE);
-    match std::fs::symlink_metadata(&path) {
-        Ok(metadata) => {
-            if !metadata.file_type().is_file() {
-                return Err(PackerError::UnsupportedProjectEntry { path });
-            }
-            let bytes = std::fs::read(&path)
-                .map_err(|error| PackerError::io("failed to read root `.typkignore`", error))?;
-            Ok(ProjectIgnorePolicy::from_ignore_file(&bytes)?)
-        }
+struct AcquiredPolicy {
+    policy: ProjectIgnorePolicy,
+    bytes: Option<Vec<u8>>,
+}
+
+fn acquire_policy(
+    path: &Path,
+    limits: FilesystemProjectLimits,
+) -> Result<AcquiredPolicy, FilesystemProjectGatherError> {
+    let metadata = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            Ok(ProjectIgnorePolicy::built_in())
+            return Ok(AcquiredPolicy {
+                policy: ProjectIgnorePolicy::built_in(),
+                bytes: None,
+            });
         }
-        Err(error) => Err(PackerError::io(
-            "failed to inspect root `.typkignore`",
+        Err(error) => {
+            return Err(FilesystemProjectGatherError::io(
+                FilesystemProjectOperation::InspectRootPolicy,
+                path,
+                error,
+            ));
+        }
+    };
+    let file_type = metadata.file_type();
+    if file_type.is_symlink() {
+        return Err(FilesystemProjectGatherError::Survey(
+            FilesystemProjectSurveyError {
+                issues: vec![FilesystemProjectIssue::Alias {
+                    path: path.to_owned(),
+                }],
+            },
+        ));
+    }
+    if !file_type.is_file() {
+        return Err(FilesystemProjectGatherError::Survey(
+            FilesystemProjectSurveyError {
+                issues: vec![FilesystemProjectIssue::UnsupportedEntry {
+                    path: path.to_owned(),
+                    kind: unsupported_kind(&file_type),
+                }],
+            },
+        ));
+    }
+
+    check_limit(
+        FilesystemProjectResource::VisitedEntries,
+        limits.visited_entries,
+        1,
+    )
+    .and_then(|_| {
+        check_limit(
+            FilesystemProjectResource::SelectedFiles,
+            limits.selected_files,
+            1,
+        )
+    })
+    .map_err(|source| FilesystemProjectGatherError::limit(path, source))?;
+    check_limit(
+        FilesystemProjectResource::RootPolicyBytes,
+        limits.root_policy_bytes,
+        metadata.len(),
+    )
+    .and_then(|_| {
+        check_limit(
+            FilesystemProjectResource::SelectedFileBytes,
+            limits.selected_file_bytes,
+            metadata.len(),
+        )
+    })
+    .and_then(|_| {
+        check_limit(
+            FilesystemProjectResource::TotalSelectedBytes,
+            limits.total_selected_bytes,
+            metadata.len(),
+        )
+    })
+    .map_err(|source| FilesystemProjectGatherError::limit(path, source))?;
+    let bytes = read_bounded(
+        path.parent().expect("the policy path is beneath a root"),
+        path,
+        &[
+            (
+                FilesystemProjectResource::RootPolicyBytes,
+                limits.root_policy_bytes,
+                limits.root_policy_bytes,
+                0,
+            ),
+            (
+                FilesystemProjectResource::SelectedFileBytes,
+                limits.selected_file_bytes,
+                limits.selected_file_bytes,
+                0,
+            ),
+            (
+                FilesystemProjectResource::TotalSelectedBytes,
+                limits.total_selected_bytes,
+                limits.total_selected_bytes,
+                0,
+            ),
+        ],
+        FilesystemProjectOperation::ReadRootPolicy,
+    )?;
+    let policy = ProjectIgnorePolicy::from_bytes(&bytes).map_err(|source| {
+        FilesystemProjectGatherError::InvalidPolicy {
+            path: path.to_owned(),
+            source,
+        }
+    })?;
+    Ok(AcquiredPolicy {
+        policy,
+        bytes: Some(bytes),
+    })
+}
+
+fn read_bounded(
+    root: &Path,
+    path: &Path,
+    ceilings: &[(FilesystemProjectResource, u64, u64, u64)],
+    operation: FilesystemProjectOperation,
+) -> Result<Vec<u8>, FilesystemProjectGatherError> {
+    let probe_ceiling = ceilings
+        .iter()
+        .map(|(_, allowance, _, _)| *allowance)
+        .min()
+        .expect("a bounded read has at least one ceiling");
+    let mut file = open_without_following(root, path, operation)?;
+    let mut bytes = Vec::new();
+    file.by_ref()
+        .take(probe_ceiling + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| FilesystemProjectGatherError::io(operation, path, error))?;
+    let observed = u64::try_from(bytes.len()).map_err(|_| {
+        FilesystemProjectGatherError::limit(
+            path,
+            FilesystemProjectLimitError::AccountingOverflow {
+                resource: ceilings[0].0,
+            },
+        )
+    })?;
+    for (resource, _, ceiling, base) in ceilings {
+        let cumulative = checked_add(*base, observed, *resource)
+            .map_err(|source| FilesystemProjectGatherError::limit(path, source))?;
+        check_limit(*resource, *ceiling, cumulative)
+            .map_err(|source| FilesystemProjectGatherError::limit(path, source))?;
+    }
+    Ok(bytes)
+}
+
+#[cfg(unix)]
+fn open_without_following(
+    root: &Path,
+    path: &Path,
+    operation: FilesystemProjectOperation,
+) -> Result<File, FilesystemProjectGatherError> {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::ffi::OsStrExt;
+
+    let relative = path
+        .strip_prefix(root)
+        .expect("a selected path remains beneath its project root");
+    let mut components = relative.components().peekable();
+    let mut current = root.to_owned();
+    let mut directory = File::open(root)
+        .map_err(|error| FilesystemProjectGatherError::io(operation, root, error))?;
+    while let Some(component) = components.next() {
+        current.push(component.as_os_str());
+        let name = CString::new(component.as_os_str().as_bytes())
+            .expect("filesystem path components contain no NUL bytes");
+        let final_component = components.peek().is_none();
+        let flags = libc::O_RDONLY
+            | libc::O_CLOEXEC
+            | libc::O_NONBLOCK
+            | libc::O_NOFOLLOW
+            | if final_component {
+                0
+            } else {
+                libc::O_DIRECTORY
+            };
+        // SAFETY: the directory descriptor and NUL-terminated component remain
+        // valid for the call, and a successful descriptor is immediately owned.
+        let descriptor = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
+        if descriptor < 0 {
+            if std::fs::symlink_metadata(&current)
+                .is_ok_and(|metadata| metadata.file_type().is_symlink())
+            {
+                return Err(alias_error(&current));
+            }
+            return Err(FilesystemProjectGatherError::io(
+                operation,
+                &current,
+                std::io::Error::last_os_error(),
+            ));
+        }
+        // SAFETY: `openat` returned a new owned descriptor.
+        let opened = unsafe { File::from_raw_fd(descriptor) };
+        if final_component {
+            return validate_opened_file(opened, &current, operation);
+        }
+        directory = opened;
+    }
+    unreachable!("a selected project file has a path beneath the root")
+}
+
+#[cfg(not(unix))]
+fn open_without_following(
+    root: &Path,
+    path: &Path,
+    operation: FilesystemProjectOperation,
+) -> Result<File, FilesystemProjectGatherError> {
+    if let Some(alias) = first_alias(root, path) {
+        return Err(alias_error(&alias));
+    }
+
+    let mut options = OpenOptions::new();
+    options.read(true);
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::OpenOptionsExt;
+        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    }
+
+    let file = match options.open(path) {
+        Ok(file) => file,
+        Err(error) => {
+            if let Some(alias) = first_alias(root, path) {
+                return Err(alias_error(&alias));
+            }
+            return Err(FilesystemProjectGatherError::io(operation, path, error));
+        }
+    };
+    if let Some(alias) = first_alias(root, path) {
+        return Err(alias_error(&alias));
+    }
+    validate_opened_file(file, path, operation)
+}
+
+fn validate_opened_file(
+    file: File,
+    path: &Path,
+    operation: FilesystemProjectOperation,
+) -> Result<File, FilesystemProjectGatherError> {
+    let metadata = file
+        .metadata()
+        .map_err(|error| FilesystemProjectGatherError::io(operation, path, error))?;
+    if metadata.file_type().is_symlink() {
+        return Err(alias_error(path));
+    }
+    if !metadata.file_type().is_file() {
+        return Err(FilesystemProjectGatherError::Survey(
+            FilesystemProjectSurveyError {
+                issues: vec![FilesystemProjectIssue::UnsupportedEntry {
+                    path: path.to_owned(),
+                    kind: unsupported_kind(&metadata.file_type()),
+                }],
+            },
+        ));
+    }
+    Ok(file)
+}
+
+#[cfg(not(unix))]
+fn first_alias(root: &Path, path: &Path) -> Option<PathBuf> {
+    let relative = path
+        .strip_prefix(root)
+        .expect("a selected path remains beneath its project root");
+    let mut current = root.to_owned();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        if std::fs::symlink_metadata(&current)
+            .is_ok_and(|metadata| metadata.file_type().is_symlink())
+        {
+            return Some(current);
+        }
+    }
+    None
+}
+
+fn alias_error(path: &Path) -> FilesystemProjectGatherError {
+    FilesystemProjectGatherError::Survey(FilesystemProjectSurveyError {
+        issues: vec![FilesystemProjectIssue::Alias {
+            path: path.to_owned(),
+        }],
+    })
+}
+
+fn slash_path(path: &Path) -> Option<String> {
+    path.components()
+        .map(|component| component.as_os_str().to_str())
+        .collect::<Option<Vec<_>>>()
+        .map(|components| components.join("/"))
+}
+
+fn unsupported_kind(file_type: &std::fs::FileType) -> FilesystemProjectEntryKind {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::FileTypeExt;
+
+        if file_type.is_socket() {
+            return FilesystemProjectEntryKind::Socket;
+        }
+        if file_type.is_fifo() {
+            return FilesystemProjectEntryKind::Fifo;
+        }
+        if file_type.is_block_device() {
+            return FilesystemProjectEntryKind::BlockDevice;
+        }
+        if file_type.is_char_device() {
+            return FilesystemProjectEntryKind::CharacterDevice;
+        }
+    }
+    FilesystemProjectEntryKind::Unknown
+}
+
+fn checked_add(
+    total: u64,
+    value: u64,
+    resource: FilesystemProjectResource,
+) -> Result<u64, FilesystemProjectLimitError> {
+    total
+        .checked_add(value)
+        .ok_or(FilesystemProjectLimitError::AccountingOverflow { resource })
+}
+
+fn check_limit(
+    resource: FilesystemProjectResource,
+    ceiling: u64,
+    observed: u64,
+) -> Result<(), FilesystemProjectLimitError> {
+    if observed > ceiling {
+        return Err(FilesystemProjectLimitError::Exceeded {
+            resource,
+            ceiling,
+            observed_at_least: observed,
+        });
+    }
+    Ok(())
+}
+
+struct ProjectIgnorePolicy {
+    rules: Gitignore,
+}
+
+impl ProjectIgnorePolicy {
+    fn built_in() -> Self {
+        Self {
+            rules: Gitignore::empty(),
+        }
+    }
+
+    fn from_bytes(bytes: &[u8]) -> Result<Self, FilesystemProjectPolicyError> {
+        let contents =
+            std::str::from_utf8(bytes).map_err(|_| FilesystemProjectPolicyError::NotUtf8)?;
+        let mut builder = GitignoreBuilder::new(".");
+        for (index, line) in contents.lines().enumerate() {
+            let line = if index == 0 {
+                line.trim_start_matches('\u{feff}')
+            } else {
+                line
+            };
+            builder.add_line(None, line).map_err(|error| {
+                FilesystemProjectPolicyError::InvalidRule {
+                    line: index + 1,
+                    message: error.to_string(),
+                }
+            })?;
+        }
+        let rules = builder
+            .build()
+            .map_err(|error| FilesystemProjectPolicyError::Invalid(error.to_string()))?;
+        Ok(Self { rules })
+    }
+
+    fn excludes_file(&self, path: &str) -> bool {
+        self.excludes(path, false)
+    }
+
+    fn excludes_directory(&self, path: &str) -> bool {
+        self.excludes(path, true)
+    }
+
+    fn excludes(&self, path: &str, is_directory: bool) -> bool {
+        if path == IGNORE_FILE {
+            return false;
+        }
+        if names_pack_path(path) {
+            return true;
+        }
+        let mut ancestor_end = 0;
+        while let Some(offset) = path[ancestor_end..].find('/') {
+            ancestor_end += offset;
+            if self.rules.matched(&path[..ancestor_end], true).is_ignore() {
+                return true;
+            }
+            ancestor_end += 1;
+        }
+        self.rules.matched(path, is_directory).is_ignore()
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use std::os::unix::fs::symlink;
+
+    use super::*;
+
+    #[test]
+    fn bounded_reads_do_not_follow_an_alias_created_after_survey() {
+        let directory = tempfile::tempdir().unwrap();
+        let outside = directory.path().join("outside");
+        let selected = directory.path().join("selected");
+        std::fs::write(&outside, b"outside").unwrap();
+        symlink(&outside, &selected).unwrap();
+
+        let error = read_bounded(
+            directory.path(),
+            &selected,
+            &[(FilesystemProjectResource::SelectedFileBytes, 16, 16, 0)],
+            FilesystemProjectOperation::ReadSelectedFile,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
             error,
-        )),
+            FilesystemProjectGatherError::Survey(ref survey)
+                if matches!(survey.issues(), [FilesystemProjectIssue::Alias { path }] if path == &selected)
+        ));
+    }
+
+    #[test]
+    fn bounded_reads_do_not_follow_an_ancestor_alias_created_after_survey() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path().join("project");
+        let ancestor = root.join("nested");
+        let selected = ancestor.join("selected");
+        let outside = directory.path().join("outside");
+        std::fs::create_dir_all(&ancestor).unwrap();
+        std::fs::create_dir_all(&outside).unwrap();
+        std::fs::write(&selected, b"surveyed").unwrap();
+        std::fs::write(outside.join("selected"), b"outside").unwrap();
+        std::fs::remove_dir_all(&ancestor).unwrap();
+        symlink(&outside, &ancestor).unwrap();
+
+        let error = read_bounded(
+            &root,
+            &selected,
+            &[(FilesystemProjectResource::SelectedFileBytes, 16, 16, 0)],
+            FilesystemProjectOperation::ReadSelectedFile,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            FilesystemProjectGatherError::Survey(ref survey)
+                if matches!(survey.issues(), [FilesystemProjectIssue::Alias { path }] if path == &ancestor)
+        ));
+    }
+
+    #[test]
+    fn bounded_reads_do_not_block_on_a_fifo_created_after_survey() {
+        use std::ffi::CString;
+        use std::os::unix::ffi::OsStrExt;
+
+        let directory = tempfile::tempdir().unwrap();
+        let selected = directory.path().join("selected");
+        std::fs::write(&selected, b"surveyed").unwrap();
+        std::fs::remove_file(&selected).unwrap();
+        let path = CString::new(selected.as_os_str().as_bytes()).unwrap();
+        // SAFETY: `path` is a valid NUL-terminated filesystem path.
+        assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+
+        let error = read_bounded(
+            directory.path(),
+            &selected,
+            &[(FilesystemProjectResource::SelectedFileBytes, 16, 16, 0)],
+            FilesystemProjectOperation::ReadSelectedFile,
+        )
+        .unwrap_err();
+
+        assert!(matches!(
+            error,
+            FilesystemProjectGatherError::Survey(ref survey)
+                if matches!(survey.issues(), [FilesystemProjectIssue::UnsupportedEntry {
+                    path,
+                    kind: FilesystemProjectEntryKind::Fifo,
+                }] if path == &selected)
+        ));
     }
 }

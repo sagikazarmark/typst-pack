@@ -17,7 +17,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use archive_support::{decode_reference, encode_reference};
-use typst_pack::{Pack, Packer, PackerError, TypstTarget};
+use typst_pack::{
+    FilesystemProjectGatherError, FilesystemProjectIssue, Pack, Packer, PackerError, TypstTarget,
+};
 
 /// A project directory with an image, a data file, an included chapter, and an
 /// import from a local package, plus the package itself in a separate
@@ -259,7 +261,8 @@ fn structural_creation_rejects_a_symlinked_root_ignore_policy() {
 
     assert!(matches!(
         result,
-        Err(PackerError::UnsupportedProjectEntry { ref path }) if path == &policy
+        Err(PackerError::ProjectGather(FilesystemProjectGatherError::Survey(ref survey)))
+            if matches!(survey.issues(), [FilesystemProjectIssue::Alias { path }] if path == &policy)
     ));
 }
 

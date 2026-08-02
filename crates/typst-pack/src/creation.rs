@@ -211,17 +211,9 @@ pub enum CreationError {
 /// [`CreationRequest::unresolvable_package`], which fails the next round's
 /// representative request at the import that needed it.
 ///
-/// # Adapter obligation
-///
-/// Establishing that the acquired bytes represent one consistent source state
-/// is the obligation of whoever performed Pack Assembly, and it is
-/// advisory: creation holds owned bytes and has nothing to re-read, so an
-/// adapter acquiring from mutable storage without revalidating still conforms,
-/// and may issue a Pack describing a source state that never existed
-/// simultaneously. [`Packer`](crate::Packer), the reference filesystem
-/// adapter, discharges it by revalidating the project, the trees it acquired,
-/// and the font catalog before returning the Pack, and fails creation when any
-/// of them changed.
+/// Creation holds owned bytes and has nothing to re-read. A Pack represents the
+/// exact values its source adapters acquired, without guaranteeing that values
+/// from mutable sources all coexisted at one instant.
 pub fn create(request: &CreationRequest) -> Result<CreationOutcome, CreationError> {
     let time = Time::fixed_timestamp(request.creation_timestamp)
         .map_err(|error| CreationError::InvalidTimestamp(error.to_string()))?;
