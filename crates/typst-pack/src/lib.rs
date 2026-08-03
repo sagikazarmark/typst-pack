@@ -40,14 +40,16 @@ pub mod cli_support;
 pub use compile::{
     CompilationAccessKind, CompilationAccessObservation, CompilationAccessOutcome,
     CompilationAccessTrace, CompilationArtifact, CompilationDiagnostic, CompilationDocumentSummary,
-    CompilationFulfillmentReport, CompilationIdentity, CompilationOperationOutcome,
-    CompilationOutputOrigins, CompilationOutputSpecification, CompilationReport,
-    CompilationReportOutcome, CompilationRequestInventory, CompilationRequestIssue,
-    CompilationRequestRejection, CompilationResult, CompilationResultIdentity, CompilationStatus,
-    CreationTimestamp, DiagnosticHint, DiagnosticPhase, DiagnosticProducer, DiagnosticSeverity,
-    DiagnosticTracepoint, DocumentTime, EffectiveEngineFeature, EffectiveRequestValue,
-    EngineIdentity, ExporterIdentity, FontContainerFulfillment, FontFulfillmentReport,
-    HtmlOutputSpecification, LogicalSpan, OutputFormat, PackCompilationRequest,
+    CompilationFulfillmentIssue, CompilationFulfillmentReport, CompilationFulfillmentSet,
+    CompilationFulfillmentSetError, CompilationFulfillmentSetIssue, CompilationIdentity,
+    CompilationOperationOutcome, CompilationOutputOrigins, CompilationOutputSpecification,
+    CompilationReport, CompilationReportOutcome, CompilationRequestInventory,
+    CompilationRequestIssue, CompilationRequestRejection, CompilationResult,
+    CompilationResultIdentity, CompilationStatus, CreationTimestamp, DiagnosticHint,
+    DiagnosticPhase, DiagnosticProducer, DiagnosticSeverity, DiagnosticTracepoint, DocumentTime,
+    EffectiveEngineFeature, EffectiveRequestValue, EngineIdentity, ExporterIdentity,
+    FontContainerFulfillment, FontFulfillmentReport, HtmlOutputSpecification,
+    InvalidCompilationFulfillmentSet, LogicalSpan, OutputFormat, PackCompilationRequest,
     PackCompilationWarning, PackOverrideInventoryEntry, PackOverrideSet, PackOverrideSetError,
     PackOverridesInventory, PackageFulfillmentReport, PackageTreeFulfillment, PageRange,
     PageSelection, PdfOutputSpecification, PdfStandardsValidationError, PngOutputSpecification,
@@ -97,9 +99,9 @@ pub use fs_project::{
 };
 pub use manifest::PackMetadata;
 pub use pack::{
-    FILE_EXTENSION, FontCatalogError, FontContainerIdentity, FontFaceIdentity, FontRequirement,
-    Pack, PackBuildError, PackBuilder, PackFont, PackFontCatalogFace, PackIdentity,
-    PackInvariantError, PackInvariantIssue, PackPathRole, PackageRequirement, PackageTreeIdentity,
+    FILE_EXTENSION, FontContainerIdentity, FontFaceIdentity, FontRequirement, Pack, PackBuildError,
+    PackBuilder, PackFont, PackFontCatalogFace, PackIdentity, PackInvariantError,
+    PackInvariantIssue, PackPathRole, PackageRequirement, PackageTreeIdentity,
 };
 #[cfg(feature = "package-acquisition")]
 pub use package_acquisition::{

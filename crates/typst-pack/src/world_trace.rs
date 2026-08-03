@@ -166,12 +166,10 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        let dependencies = pack
-            .materialize_compilation_dependency_snapshot(
-                std::collections::BTreeMap::new(),
-                &std::collections::BTreeMap::new(),
-            )
-            .unwrap();
+        let dependencies = pack.materialize_compilation_dependency_snapshot(
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+        );
         let world = PackWorld::new(
             pack,
             dependencies,

@@ -4,13 +4,13 @@ use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
-use typst::foundations::Bytes;
 use typst::syntax::VirtualPath;
 use typst::syntax::package::PackageSpec;
 use typst::text::{Font, FontInfo};
 
 use crate::manifest::{PackMetadata, PackageManifest};
 use crate::payload::SharedBytes;
+use crate::{FontContainer, PackageTree};
 
 /// The conventional file extension for packs.
 pub const FILE_EXTENSION: &str = "typk";
@@ -79,6 +79,17 @@ pub(crate) struct PackageFiles {
 impl PackageFiles {
     pub(crate) fn file(&self, path: &str) -> Option<&SharedBytes> {
         self.files.get(path)
+    }
+
+    fn from_validated_tree(spec: PackageSpec, tree: PackageTree) -> Self {
+        Self {
+            spec,
+            files: tree
+                .into_shared_files()
+                .into_iter()
+                .map(|(path, data)| (CanonicalPath(path), data))
+                .collect(),
+        }
     }
 }
 
@@ -839,87 +850,6 @@ impl Pack {
         &self.package_requirements
     }
 
-    pub(crate) fn materialize_package_trees(
-        &self,
-        fulfillments: BTreeMap<String, Vec<(String, Bytes)>>,
-    ) -> Result<BTreeMap<String, PackageFiles>, PackageFulfillmentError> {
-        let missing = self
-            .package_requirements
-            .iter()
-            .filter(|requirement| !requirement.embedded)
-            .filter(|requirement| !fulfillments.contains_key(&requirement.spec.to_string()))
-            .map(|requirement| requirement.spec.clone())
-            .collect::<Vec<_>>();
-        if !missing.is_empty() {
-            return Err(PackageFulfillmentError::Missing { packages: missing });
-        }
-
-        let mut materialized = self.packages.clone();
-        for requirement in self
-            .package_requirements
-            .iter()
-            .filter(|requirement| !requirement.embedded)
-        {
-            let key = requirement.spec.to_string();
-            let mut files = BTreeMap::new();
-            for (path, data) in &fulfillments[&key] {
-                let canonical =
-                    canonical_path(PackPathRole::PackageFile, path).map_err(|error| {
-                        PackageFulfillmentError::Malformed {
-                            spec: requirement.spec.clone(),
-                            path: path.clone(),
-                            message: error.to_string(),
-                        }
-                    })?;
-                if files
-                    .insert(canonical, SharedBytes::from_typst(data.clone()))
-                    .is_some()
-                {
-                    return Err(PackageFulfillmentError::Malformed {
-                        spec: requirement.spec.clone(),
-                        path: path.clone(),
-                        message: "duplicate package file path".to_owned(),
-                    });
-                }
-            }
-            let paths = files
-                .keys()
-                .cloned()
-                .map(|path| (path, PackPathRole::PackageFile))
-                .collect();
-            if let Some(conflict) = find_path_tree_conflicts(paths).into_iter().next() {
-                return Err(PackageFulfillmentError::Malformed {
-                    spec: requirement.spec.clone(),
-                    path: conflict.descendant.to_string(),
-                    message: format!("file path has file ancestor `{}`", conflict.ancestor),
-                });
-            }
-            let (actual, actual_file_count, actual_byte_length) = package_tree_identity(&files);
-            if actual != requirement.tree
-                || actual_file_count != requirement.file_count
-                || actual_byte_length != requirement.byte_length
-            {
-                return Err(PackageFulfillmentError::Mismatched {
-                    spec: requirement.spec.clone(),
-                    expected: requirement.tree,
-                    actual,
-                    expected_file_count: requirement.file_count,
-                    actual_file_count,
-                    expected_byte_length: requirement.byte_length,
-                    actual_byte_length,
-                });
-            }
-            materialized.insert(
-                key,
-                PackageFiles {
-                    spec: requirement.spec.clone(),
-                    files,
-                },
-            );
-        }
-        Ok(materialized)
-    }
-
     /// The fonts embedded in the pack.
     pub fn fonts(&self) -> &[PackFont] {
         &self.fonts
@@ -935,134 +865,51 @@ impl Pack {
         &self.font_requirements
     }
 
-    pub(crate) fn materialize_font_catalog(
+    pub(crate) fn materialize_compilation_dependency_snapshot(
         &self,
-        fulfillments: &BTreeMap<FontContainerIdentity, Bytes>,
-    ) -> Result<Vec<Font>, FontCatalogError> {
-        let missing = self
-            .font_requirements
+        mut package_fulfillments: BTreeMap<String, PackageTree>,
+        font_fulfillments: BTreeMap<FontContainerIdentity, FontContainer>,
+    ) -> CompilationDependencySnapshot {
+        let mut packages = self.packages.clone();
+        for requirement in self
+            .package_requirements
             .iter()
             .filter(|requirement| !requirement.embedded)
-            .map(|requirement| requirement.container)
-            .filter(|container| !fulfillments.contains_key(container))
-            .collect::<Vec<_>>();
-        if !missing.is_empty() {
-            return Err(FontCatalogError::Missing {
-                containers: missing,
-            });
+        {
+            let key = requirement.spec.to_string();
+            let tree = package_fulfillments
+                .remove(&key)
+                .expect("exact fulfillment verification supplies every external Package Tree");
+            packages.insert(
+                key,
+                PackageFiles::from_validated_tree(requirement.spec.clone(), tree),
+            );
         }
-        self.font_catalog
+        let font_catalog = self
+            .font_catalog
             .iter()
             .map(|face| {
                 let identity = face.identity;
                 if face.embedded {
-                    return Ok(self
-                        .fonts
+                    self.fonts
                         .iter()
-                        .find(|font| {
-                            FontContainerIdentity::from_bytes(font.data.as_slice())
-                                == identity.container
-                                && font.identity.index() == identity.index
-                        })
+                        .find(|font| font.identity == identity)
                         .expect("Pack Font Catalog embedded face invariant violated")
                         .font
-                        .clone());
+                        .clone()
+                } else {
+                    font_fulfillments[&identity.container]
+                        .font(identity.index)
+                        .expect("exact validated Font Container holds every required face")
                 }
-                let data = &fulfillments[&identity.container];
-                let actual = FontContainerIdentity::from_bytes(data.as_slice());
-                let actual_length = data.len() as u64;
-                let expected_length = self
-                    .font_requirements
-                    .iter()
-                    .find(|requirement| requirement.container == identity.container)
-                    .expect("Pack Font Catalog requirement invariant violated")
-                    .length;
-                if actual != identity.container || actual_length != expected_length {
-                    return Err(FontCatalogError::Mismatched {
-                        expected: identity.container,
-                        actual,
-                        expected_length,
-                        actual_length,
-                    });
-                }
-                Font::new(data.clone(), identity.index).ok_or(FontCatalogError::Malformed {
-                    container: identity.container,
-                    index: identity.index,
-                })
             })
-            .collect()
-    }
-
-    pub(crate) fn materialize_compilation_dependency_snapshot(
-        &self,
-        package_fulfillments: BTreeMap<String, Vec<(String, Bytes)>>,
-        font_fulfillments: &BTreeMap<FontContainerIdentity, Bytes>,
-    ) -> Result<CompilationDependencySnapshot, CompilationDependencySnapshotError> {
-        let packages = self
-            .materialize_package_trees(package_fulfillments)
-            .map_err(|error| CompilationDependencySnapshotError::Package(Box::new(error)))?;
-        let font_catalog = self
-            .materialize_font_catalog(font_fulfillments)
-            .map_err(CompilationDependencySnapshotError::Font)?;
-        Ok(CompilationDependencySnapshot {
+            .collect();
+        CompilationDependencySnapshot {
             pack_identity: self.identity(),
             packages,
             font_catalog,
-        })
+        }
     }
-}
-
-/// A Pack-owned failure to materialize its exact Font Catalog.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum FontCatalogError {
-    #[error("exact font containers {containers:?} are unavailable")]
-    Missing {
-        containers: Vec<FontContainerIdentity>,
-    },
-    #[error("font container fulfillment does not match {expected:?}")]
-    Mismatched {
-        expected: FontContainerIdentity,
-        actual: FontContainerIdentity,
-        expected_length: u64,
-        actual_length: u64,
-    },
-    #[error("font container {container:?} has no valid face at index {index}")]
-    Malformed {
-        container: FontContainerIdentity,
-        index: u32,
-    },
-}
-
-/// A Pack-owned failure to materialize exact Package Trees.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum PackageFulfillmentError {
-    #[error("exact package trees {packages:?} are unavailable")]
-    Missing { packages: Vec<PackageSpec> },
-    #[error("package fulfillment for {spec} does not match its Package Tree identity")]
-    Mismatched {
-        spec: PackageSpec,
-        expected: PackageTreeIdentity,
-        actual: PackageTreeIdentity,
-        expected_file_count: u64,
-        actual_file_count: u64,
-        expected_byte_length: u64,
-        actual_byte_length: u64,
-    },
-    #[error("package fulfillment for {spec} has malformed path `{path}`: {message}")]
-    Malformed {
-        spec: PackageSpec,
-        path: String,
-        message: String,
-    },
-}
-
-/// A Pack-owned failure to construct a complete Compilation Dependency Snapshot.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub(crate) enum CompilationDependencySnapshotError {
-    #[error(transparent)]
-    Package(Box<PackageFulfillmentError>),
-    #[error(transparent)]
-    Font(FontCatalogError),
 }
 
 fn package_tree_identity(

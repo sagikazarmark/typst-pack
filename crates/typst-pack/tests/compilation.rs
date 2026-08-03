@@ -1,14 +1,16 @@
-#[cfg(feature = "embedded-fonts")]
-use typst_pack::FontContainerFulfillment;
+use proptest::prelude::*;
 use typst_pack::{
-    CompilationAccessKind, CompilationOperationOutcome, CompilationOutputOrigins,
+    CompilationAccessKind, CompilationFulfillmentIssue, CompilationFulfillmentSet,
+    CompilationFulfillmentSetIssue, CompilationOperationOutcome, CompilationOutputOrigins,
     CompilationOutputSpecification, CompilationReportOutcome, CompilationRequestIssue,
     CompilationRequestRejection, CompilationResult, CompilationStatus, CreationTimestamp,
     DiagnosticPhase, DiagnosticProducer, DocumentTime, HtmlOutputSpecification, OutputFormat, Pack,
-    PackCompilationRequest, PackMetadata, PackOverrideSet, PackOverrideSetError,
+    PackCompilationRequest, PackMetadata, PackOverrideSet, PackOverrideSetError, PackageTree,
     PackageTreeFulfillment, PdfOutputSpecification, PngOutputSpecification, RequestValueOrigin,
     SvgOutputSpecification, compile as compile_to_report,
 };
+#[cfg(feature = "embedded-fonts")]
+use typst_pack::{FontContainer, FontContainerFulfillment};
 
 fn compile(
     request: PackCompilationRequest,
@@ -66,6 +68,432 @@ fn five_page_pack() -> Pack {
         .unwrap()
         .build()
         .unwrap()
+}
+
+#[test]
+fn compilation_fulfillment_set_rejects_duplicate_package_specifications() {
+    let spec: typst::syntax::package::PackageSpec = "@local/example:1.0.0".parse().unwrap();
+    let first = PackageTreeFulfillment::new(
+        spec.clone(),
+        PackageTree::from_owned_entries([("lib.typ", b"first".to_vec())]).unwrap(),
+    );
+    let second = PackageTreeFulfillment::new(
+        spec.clone(),
+        PackageTree::from_owned_entries([("lib.typ", b"second".to_vec())]).unwrap(),
+    );
+
+    let error = CompilationFulfillmentSet::new([second, first], []).unwrap_err();
+
+    assert!(matches!(
+        error.issues(),
+        [CompilationFulfillmentSetIssue::DuplicatePackageSpecification { spec: duplicate }]
+            if duplicate == &spec
+    ));
+}
+
+#[test]
+fn package_fulfillment_verification_aggregates_every_exact_set_deviation() {
+    let missing: typst::syntax::package::PackageSpec = "@local/a:1.0.0".parse().unwrap();
+    let undeclared: typst::syntax::package::PackageSpec = "@local/b:1.0.0".parse().unwrap();
+    let embedded: typst::syntax::package::PackageSpec = "@local/c:1.0.0".parse().unwrap();
+    let mismatched: typst::syntax::package::PackageSpec = "@local/d:1.0.0".parse().unwrap();
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"unreached".to_vec())
+        .unwrap()
+        .external_package_file(missing.clone(), "lib.typ", b"missing".to_vec())
+        .unwrap()
+        .package_file(embedded.clone(), "lib.typ", b"embedded".to_vec())
+        .unwrap()
+        .external_package_file(mismatched.clone(), "lib.typ", b"expected".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let fulfillments = CompilationFulfillmentSet::new(
+        [
+            PackageTreeFulfillment::new(
+                mismatched.clone(),
+                PackageTree::from_owned_entries([("lib.typ", b"actual".to_vec())]).unwrap(),
+            ),
+            PackageTreeFulfillment::new(
+                undeclared.clone(),
+                PackageTree::from_owned_entries([("lib.typ", b"undeclared".to_vec())]).unwrap(),
+            )
+            .provenance("undeclared:package")
+            .cache_hit(true),
+            PackageTreeFulfillment::new(
+                embedded.clone(),
+                PackageTree::from_owned_entries([("lib.typ", b"wrong embedded".to_vec())]).unwrap(),
+            ),
+        ],
+        [],
+    )
+    .unwrap();
+
+    let report = compile_to_report(
+        PackCompilationRequest::new(pack, output(OutputFormat::Svg)).fulfillments(fulfillments),
+    )
+    .unwrap();
+    let CompilationReportOutcome::Operation {
+        outcome: CompilationOperationOutcome::InvalidFulfillmentSet(invalid),
+        compilation_identity,
+        ..
+    } = report.outcome()
+    else {
+        panic!("expected an invalid Compilation Fulfillment Set outcome");
+    };
+
+    assert_ne!(compilation_identity.digest(), [0; 16]);
+    assert!(matches!(
+        invalid.issues(),
+        [
+            CompilationFulfillmentIssue::MissingExternalPackage { spec: first },
+            CompilationFulfillmentIssue::UndeclaredPackage { spec: second, .. },
+            CompilationFulfillmentIssue::UnexpectedEmbeddedPackage { spec: third },
+            CompilationFulfillmentIssue::MismatchedPackageTree { spec: fourth, .. },
+            CompilationFulfillmentIssue::MismatchedPackageTree { spec: fifth, .. },
+        ] if first == &missing
+            && second == &undeclared
+            && third == &embedded
+            && fourth == &embedded
+            && fifth == &mismatched
+    ));
+    assert!(report.result().is_none());
+    let undeclared_report = report
+        .fulfillments()
+        .packages()
+        .iter()
+        .find(|fulfillment| fulfillment.spec() == &undeclared)
+        .unwrap();
+    assert!(!undeclared_report.declared());
+    assert_eq!(undeclared_report.provenance(), Some("undeclared:package"));
+    assert!(undeclared_report.cache_hit());
+}
+
+#[cfg(feature = "embedded-fonts")]
+#[test]
+fn compilation_fulfillment_set_rejects_duplicate_font_container_identities() {
+    let data = typst_kit::fonts::embedded()
+        .next()
+        .unwrap()
+        .0
+        .data()
+        .to_vec();
+    let container = FontContainer::new(data).unwrap();
+    let identity = container.identity();
+    let first = FontContainerFulfillment::new(identity, container.clone());
+    let second = FontContainerFulfillment::new(identity, container);
+
+    let error = CompilationFulfillmentSet::new([], [second, first]).unwrap_err();
+
+    assert!(matches!(
+        error.issues(),
+        [CompilationFulfillmentSetIssue::DuplicateFontContainerIdentity { identity: duplicate }]
+            if *duplicate == identity
+    ));
+}
+
+#[cfg(feature = "embedded-fonts")]
+#[test]
+fn font_fulfillment_issues_follow_packages_and_canonical_identity_kind_order() {
+    let package: typst::syntax::package::PackageSpec = "@local/a:1.0.0".parse().unwrap();
+    let base = typst_kit::fonts::embedded().next().unwrap().0;
+    let variant = |tag| {
+        let mut data = base.data().to_vec();
+        data.push(tag);
+        data
+    };
+    let missing = variant(1);
+    let embedded = variant(2);
+    let mismatched = variant(3);
+    let mismatched_identity = typst_pack::FontContainerIdentity::from_bytes(&mismatched);
+    let embedded_actual = FontContainer::new(variant(4)).unwrap();
+    let mismatched_actual = FontContainer::new(variant(5)).unwrap();
+    let undeclared = FontContainer::new(variant(6)).unwrap();
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"unreached".to_vec())
+        .unwrap()
+        .external_package_file(package.clone(), "lib.typ", b"missing".to_vec())
+        .unwrap()
+        .external_font(missing, base.index())
+        .unwrap()
+        .font(embedded, base.index())
+        .unwrap()
+        .external_font(mismatched, base.index())
+        .unwrap()
+        .build()
+        .unwrap();
+    let embedded_identity = pack
+        .font_requirements()
+        .iter()
+        .find(|requirement| requirement.is_embedded())
+        .unwrap()
+        .container_identity();
+    let fulfillments = CompilationFulfillmentSet::new(
+        [],
+        [
+            FontContainerFulfillment::new(undeclared.identity(), undeclared)
+                .provenance("undeclared:font")
+                .licensing("advisory:undeclared"),
+            FontContainerFulfillment::new(embedded_identity, embedded_actual),
+            FontContainerFulfillment::new(mismatched_identity, mismatched_actual),
+        ],
+    )
+    .unwrap();
+
+    let report = compile_to_report(
+        PackCompilationRequest::new(pack, output(OutputFormat::Svg)).fulfillments(fulfillments),
+    )
+    .unwrap();
+    let CompilationReportOutcome::Operation {
+        outcome: CompilationOperationOutcome::InvalidFulfillmentSet(invalid),
+        ..
+    } = report.outcome()
+    else {
+        panic!("expected an invalid Compilation Fulfillment Set outcome");
+    };
+    let issues = invalid.issues();
+
+    assert!(matches!(
+        issues[0],
+        CompilationFulfillmentIssue::MissingExternalPackage { ref spec } if spec == &package
+    ));
+    let font_order = issues[1..]
+        .iter()
+        .map(|issue| match issue {
+            CompilationFulfillmentIssue::MissingExternalFont { identity } => (*identity, 0),
+            CompilationFulfillmentIssue::UndeclaredFont { identity, .. } => (*identity, 1),
+            CompilationFulfillmentIssue::UnexpectedEmbeddedFont { identity } => (*identity, 2),
+            CompilationFulfillmentIssue::MismatchedFontContainer { expected, .. } => (*expected, 3),
+            other => panic!("unexpected non-font issue: {other:?}"),
+        })
+        .collect::<Vec<_>>();
+    assert!(font_order.windows(2).all(|pair| pair[0] <= pair[1]));
+    assert_eq!(
+        issues
+            .iter()
+            .filter(|issue| matches!(
+                issue,
+                CompilationFulfillmentIssue::MissingExternalFont { .. }
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        issues
+            .iter()
+            .filter(|issue| matches!(issue, CompilationFulfillmentIssue::UndeclaredFont { .. }))
+            .count(),
+        1
+    );
+    assert_eq!(
+        issues
+            .iter()
+            .filter(|issue| matches!(
+                issue,
+                CompilationFulfillmentIssue::UnexpectedEmbeddedFont { .. }
+            ))
+            .count(),
+        1
+    );
+    assert_eq!(
+        issues
+            .iter()
+            .filter(|issue| matches!(
+                issue,
+                CompilationFulfillmentIssue::MismatchedFontContainer { .. }
+            ))
+            .count(),
+        2
+    );
+    let undeclared_report = report
+        .fulfillments()
+        .fonts()
+        .iter()
+        .find(|fulfillment| !fulfillment.declared())
+        .unwrap();
+    assert_eq!(undeclared_report.provenance(), Some("undeclared:font"));
+    assert_eq!(undeclared_report.licensing(), Some("advisory:undeclared"));
+}
+
+#[cfg(feature = "embedded-fonts")]
+#[test]
+fn missing_declared_font_face_is_reported_before_world_materialization() {
+    use std::io::Write;
+
+    let data = typst_kit::fonts::embedded()
+        .next()
+        .unwrap()
+        .0
+        .data()
+        .to_vec();
+    let container = FontContainer::new(data).unwrap();
+    let identity = container.identity();
+    let digest = identity
+        .digest()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    let missing_index = u32::MAX;
+    let manifest = format!(
+        "format-version = 1\n[project]\nentrypoint = \"main.typ\"\n\
+         [[fonts]]\npath = \"fonts/external.ttf\"\nexternal = true\nindex = {missing_index}\n\
+         container-digest = \"{digest}\"\n\
+         container-identity-kind = \"font-container\"\n\
+         container-identity-schema = \"typst-pack-font-container-identity-v1\"\n\
+         container-identity-algorithm = \"typst-hash128-0.15\"\n\
+         container-length = {}\n",
+        container.data().len()
+    );
+    let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    let options =
+        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+    archive.start_file("typst-pack.toml", options).unwrap();
+    archive.write_all(manifest.as_bytes()).unwrap();
+    archive.start_file("project/main.typ", options).unwrap();
+    archive.write_all(b"unreached").unwrap();
+    let archive = typst_pack::PackArchiveBytes::from(archive.finish().unwrap().into_inner());
+    let pack = typst_pack::pack_archive::decode(
+        &archive,
+        typst_pack::pack_archive::DecodeLimits::reference_v1(),
+    )
+    .unwrap();
+    let fulfillments =
+        CompilationFulfillmentSet::new([], [FontContainerFulfillment::new(identity, container)])
+            .unwrap();
+
+    let report = compile_to_report(
+        PackCompilationRequest::new(pack, output(OutputFormat::Svg)).fulfillments(fulfillments),
+    )
+    .unwrap();
+
+    assert!(matches!(
+        report.outcome(),
+        CompilationReportOutcome::Operation {
+            outcome: CompilationOperationOutcome::InvalidFulfillmentSet(invalid),
+            ..
+        } if matches!(
+            invalid.issues(),
+            [CompilationFulfillmentIssue::MissingFontFace { identity: issue_identity, index }]
+                if *issue_identity == identity && *index == missing_index
+        )
+    ));
+}
+
+proptest! {
+    #[test]
+    fn equivalent_fulfillment_permutations_have_identical_inventories_and_issue_order(
+        order in prop::collection::vec(any::<u8>(), 3),
+    ) {
+        let external: typst::syntax::package::PackageSpec = "@local/a:1.0.0".parse().unwrap();
+        let embedded: typst::syntax::package::PackageSpec = "@local/b:1.0.0".parse().unwrap();
+        let undeclared: typst::syntax::package::PackageSpec = "@local/c:1.0.0".parse().unwrap();
+        let pack = Pack::builder("main.typ")
+            .file("main.typ", b"unreached".to_vec()).unwrap()
+            .external_package_file(external.clone(), "lib.typ", b"expected".to_vec()).unwrap()
+            .package_file(embedded.clone(), "lib.typ", b"embedded".to_vec()).unwrap()
+            .build().unwrap();
+        let entries = vec![
+            PackageTreeFulfillment::new(
+                undeclared,
+                PackageTree::from_owned_entries([("lib.typ", b"extra".to_vec())]).unwrap(),
+            ),
+            PackageTreeFulfillment::new(
+                embedded,
+                PackageTree::from_owned_entries([("lib.typ", b"embedded".to_vec())]).unwrap(),
+            ),
+            PackageTreeFulfillment::new(
+                external,
+                PackageTree::from_owned_entries([("lib.typ", b"wrong".to_vec())]).unwrap(),
+            ),
+        ];
+        let baseline = CompilationFulfillmentSet::new(entries.clone(), []).unwrap();
+        let mut permuted = entries.into_iter().enumerate().collect::<Vec<_>>();
+        permuted.sort_by_key(|(index, _)| (order[*index], *index));
+        let permuted = CompilationFulfillmentSet::new(
+            permuted.into_iter().map(|(_, fulfillment)| fulfillment),
+            [],
+        ).unwrap();
+        let inventory = |set: &CompilationFulfillmentSet| {
+            set.packages()
+                .map(|fulfillment| (
+                    fulfillment.spec().to_string(),
+                    fulfillment.tree().identity(),
+                ))
+                .collect::<Vec<_>>()
+        };
+        prop_assert_eq!(inventory(&baseline), inventory(&permuted));
+
+        let issues = |set| {
+            let report = compile_to_report(
+                PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg))
+                    .fulfillments(set),
+            ).unwrap();
+            let CompilationReportOutcome::Operation {
+                outcome: CompilationOperationOutcome::InvalidFulfillmentSet(invalid),
+                ..
+            } = report.outcome() else {
+                panic!("expected invalid fulfillments");
+            };
+            invalid.issues().to_vec()
+        };
+        prop_assert_eq!(issues(baseline), issues(permuted));
+    }
+}
+
+#[cfg(feature = "embedded-fonts")]
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(32))]
+
+    #[test]
+    fn equivalent_font_fulfillment_permutations_have_identical_reports_and_issue_order(
+        order in prop::collection::vec(any::<u8>(), 3),
+    ) {
+        let base = typst_kit::fonts::embedded().next().unwrap().0;
+        let entries = (1..=3)
+            .map(|tag| {
+                let mut data = base.data().to_vec();
+                data.push(tag);
+                let container = FontContainer::new(data).unwrap();
+                FontContainerFulfillment::new(container.identity(), container)
+                    .provenance(format!("font:{tag}"))
+                    .licensing(format!("license:{tag}"))
+            })
+            .collect::<Vec<_>>();
+        let baseline = CompilationFulfillmentSet::new([], entries.clone()).unwrap();
+        let mut permuted = entries.into_iter().enumerate().collect::<Vec<_>>();
+        permuted.sort_by_key(|(index, _)| (order[*index], *index));
+        let permuted = CompilationFulfillmentSet::new(
+            [],
+            permuted.into_iter().map(|(_, fulfillment)| fulfillment),
+        ).unwrap();
+        let inventory = |set: &CompilationFulfillmentSet| {
+            set.fonts()
+                .map(|fulfillment| (
+                    fulfillment.expected_identity(),
+                    fulfillment.container().identity(),
+                ))
+                .collect::<Vec<_>>()
+        };
+        prop_assert_eq!(inventory(&baseline), inventory(&permuted));
+
+        let pack = Pack::builder("main.typ")
+            .file("main.typ", b"unreached".to_vec()).unwrap()
+            .build().unwrap();
+        let observe = |set| {
+            let report = compile_to_report(
+                PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg))
+                    .fulfillments(set),
+            ).unwrap();
+            let CompilationReportOutcome::Operation {
+                outcome: CompilationOperationOutcome::InvalidFulfillmentSet(invalid),
+                ..
+            } = report.outcome() else {
+                panic!("expected invalid fulfillments");
+            };
+            (report.fulfillments().clone(), invalid.issues().to_vec())
+        };
+        prop_assert_eq!(observe(baseline), observe(permuted));
+    }
 }
 
 #[test]
@@ -627,16 +1055,19 @@ fn pack_bound_compilation_does_not_use_package_caches_or_network() {
     assert!(matches!(
         report.outcome(),
         CompilationReportOutcome::Operation {
-            outcome: CompilationOperationOutcome::MissingExternalPackageFulfillment { packages },
+            outcome: CompilationOperationOutcome::InvalidFulfillmentSet(invalid),
             ..
-        } if packages.len() == 1
+        } if matches!(
+            invalid.issues(),
+            [CompilationFulfillmentIssue::MissingExternalPackage { .. }]
+        )
     ));
     let report =
         compile_to_report(PackCompilationRequest::new(pack, output(OutputFormat::Svg))).unwrap();
     assert!(matches!(
         report.outcome(),
         CompilationReportOutcome::Operation {
-            outcome: CompilationOperationOutcome::MissingExternalPackageFulfillment { .. },
+            outcome: CompilationOperationOutcome::InvalidFulfillmentSet(_),
             ..
         }
     ));
@@ -663,53 +1094,67 @@ fn external_package_fulfillment_is_verified_before_official_compilation() {
         .build()
         .unwrap();
 
-    let malformed = compile_to_report(
-        PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)).package_fulfillment(
-            package.clone(),
-            PackageTreeFulfillment::new([("../lib.typ", source.clone())]),
-        ),
-    );
-    assert!(matches!(
-        malformed.unwrap().outcome(),
-        CompilationReportOutcome::Operation {
-            outcome: CompilationOperationOutcome::MalformedExternalPackageTree { spec, .. },
-            ..
-        } if spec == &package
-    ));
-
     let mismatched = compile_to_report(
-        PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)).package_fulfillment(
-            package.clone(),
-            PackageTreeFulfillment::new([
-                ("lib.typ", b"#let value = 7".to_vec()),
-                ("typst.toml", manifest.clone()),
-            ]),
+        PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)).fulfillments(
+            CompilationFulfillmentSet::new(
+                [PackageTreeFulfillment::new(
+                    package.clone(),
+                    PackageTree::from_owned_entries([
+                        ("lib.typ", b"#let value = 7".to_vec()),
+                        ("typst.toml", manifest.clone()),
+                    ])
+                    .unwrap(),
+                )],
+                [],
+            )
+            .unwrap(),
         ),
     );
     assert!(matches!(
         mismatched.unwrap().outcome(),
         CompilationReportOutcome::Operation {
-            outcome: CompilationOperationOutcome::MismatchedExternalPackageTree { spec, .. },
+            outcome: CompilationOperationOutcome::InvalidFulfillmentSet(invalid),
             ..
-        } if spec == &package
+        } if matches!(
+            invalid.issues(),
+            [CompilationFulfillmentIssue::MismatchedPackageTree { spec, .. }]
+                if spec == &package
+        )
     ));
 
     let baseline = compile(
-        PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)).package_fulfillment(
-            package.clone(),
-            PackageTreeFulfillment::new([
-                ("lib.typ", source.clone()),
-                ("typst.toml", manifest.clone()),
-            ]),
+        PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)).fulfillments(
+            CompilationFulfillmentSet::new(
+                [PackageTreeFulfillment::new(
+                    package.clone(),
+                    PackageTree::from_owned_entries([
+                        ("lib.typ", source.clone()),
+                        ("typst.toml", manifest.clone()),
+                    ])
+                    .unwrap(),
+                )],
+                [],
+            )
+            .unwrap(),
         ),
     )
     .unwrap();
     let with_telemetry = compile_to_report(
-        PackCompilationRequest::new(pack, output(OutputFormat::Svg)).package_fulfillment(
-            package,
-            PackageTreeFulfillment::new([("lib.typ", source), ("typst.toml", manifest)])
+        PackCompilationRequest::new(pack, output(OutputFormat::Svg)).fulfillments(
+            CompilationFulfillmentSet::new(
+                [PackageTreeFulfillment::new(
+                    package,
+                    PackageTree::from_owned_entries([
+                        ("lib.typ", source),
+                        ("typst.toml", manifest),
+                    ])
+                    .unwrap(),
+                )
                 .provenance("memory:test")
-                .cache_hit(true),
+                .cache_hit(true)],
+                [],
+            )
+            .unwrap(),
         ),
     )
     .unwrap();
@@ -766,40 +1211,66 @@ fn external_font_fulfillment_is_verified_before_official_compilation() {
     assert!(matches!(
         missing.outcome(),
         CompilationReportOutcome::Operation {
-            outcome: CompilationOperationOutcome::MissingExternalFontFulfillment { containers },
+            outcome: CompilationOperationOutcome::InvalidFulfillmentSet(invalid),
             ..
-        } if containers == &vec![requirement.container_identity()]
+        } if matches!(
+            invalid.issues(),
+            [CompilationFulfillmentIssue::MissingExternalFont { identity }]
+                if *identity == requirement.container_identity()
+        )
     ));
 
     let mut wrong = data.clone();
     wrong.push(0);
     let mismatched = compile_to_report(
-        PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)).font_fulfillment(
-            requirement.container_identity(),
-            FontContainerFulfillment::new(wrong),
+        PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)).fulfillments(
+            CompilationFulfillmentSet::new(
+                [],
+                [FontContainerFulfillment::new(
+                    requirement.container_identity(),
+                    FontContainer::new(wrong).unwrap(),
+                )],
+            )
+            .unwrap(),
         ),
     );
     assert!(matches!(
         mismatched.unwrap().outcome(),
         CompilationReportOutcome::Operation {
-            outcome: CompilationOperationOutcome::MismatchedExternalFontContainer { expected, .. },
+            outcome: CompilationOperationOutcome::InvalidFulfillmentSet(invalid),
             ..
-        } if *expected == requirement.container_identity()
+        } if matches!(
+            invalid.issues(),
+            [CompilationFulfillmentIssue::MismatchedFontContainer { expected, .. }]
+                if *expected == requirement.container_identity()
+        )
     ));
 
     let baseline = compile(
-        PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)).font_fulfillment(
-            requirement.container_identity(),
-            FontContainerFulfillment::new(data.clone()),
+        PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)).fulfillments(
+            CompilationFulfillmentSet::new(
+                [],
+                [FontContainerFulfillment::new(
+                    requirement.container_identity(),
+                    FontContainer::new(data.clone()).unwrap(),
+                )],
+            )
+            .unwrap(),
         ),
     )
     .unwrap();
     let with_metadata = compile_to_report(
-        PackCompilationRequest::new(pack, output(OutputFormat::Svg)).font_fulfillment(
-            requirement.container_identity(),
-            FontContainerFulfillment::new(data)
+        PackCompilationRequest::new(pack, output(OutputFormat::Svg)).fulfillments(
+            CompilationFulfillmentSet::new(
+                [],
+                [FontContainerFulfillment::new(
+                    requirement.container_identity(),
+                    FontContainer::new(data).unwrap(),
+                )
                 .provenance("memory:test")
-                .licensing("advisory:test"),
+                .licensing("advisory:test")],
+            )
+            .unwrap(),
         ),
     )
     .unwrap();

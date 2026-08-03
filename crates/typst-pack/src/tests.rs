@@ -1,8 +1,7 @@
 //! Crate tests.
 
-use crate::compile::{CompileError, compile as compile_request, compile_world as compile};
+use crate::compile::{CompileError, compile_world as compile};
 use crate::manifest::*;
-use crate::pack::{CompilationDependencySnapshotError, PackageFulfillmentError};
 use crate::pack_archive::{
     ArchiveError, DecodeError, DecodeLimits, EncodeError, EncodeLimits, ManifestError,
 };
@@ -29,24 +28,10 @@ fn tiny_png() -> Vec<u8> {
 }
 
 fn pack_world_with_features(pack: Pack, features: Vec<typst::Feature>) -> PackWorld {
-    #[cfg(feature = "embedded-fonts")]
-    let font_fulfillments = typst_kit::fonts::embedded().fold(
+    let dependencies = pack.materialize_compilation_dependency_snapshot(
         std::collections::BTreeMap::new(),
-        |mut fulfillments, (font, _)| {
-            fulfillments
-                .entry(FontContainerIdentity::from_bytes(font.data().as_slice()))
-                .or_insert_with(|| font.data().clone());
-            fulfillments
-        },
+        std::collections::BTreeMap::new(),
     );
-    #[cfg(not(feature = "embedded-fonts"))]
-    let font_fulfillments = std::collections::BTreeMap::new();
-    let dependencies = pack
-        .materialize_compilation_dependency_snapshot(
-            std::collections::BTreeMap::new(),
-            &font_fulfillments,
-        )
-        .unwrap();
     PackWorld::new(
         pack,
         dependencies,
@@ -1125,47 +1110,10 @@ fn pack_identity_binds_font_container_face_disposition_and_catalog_order() {
 }
 
 #[test]
-fn malformed_external_font_is_a_pack_owned_pre_compilation_outcome() {
-    let data = b"not a font";
-    let identity = FontContainerIdentity::from_bytes(data);
-    let digest = identity
-        .digest()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    let manifest = format!(
-        "format-version = 1\n[project]\nentrypoint = \"main.typ\"\n\
-         [[fonts]]\npath = \"fonts/external.ttf\"\nexternal = true\n\
-         container-digest = \"{digest}\"\n\
-         container-identity-kind = \"font-container\"\n\
-         container-identity-schema = \"typst-pack-font-container-identity-v1\"\n\
-         container-identity-algorithm = \"typst-hash128-0.15\"\n\
-         container-length = {}\n",
-        data.len()
-    );
-    let archive = raw_stored_zip(&[
-        (MANIFEST_PATH, manifest.as_bytes()),
-        ("project/main.typ", b"unreached"),
-    ]);
-    let pack = decode_test_archive(archive).unwrap();
-
-    let result = compile_request(
-        PackCompilationRequest::new(
-            pack,
-            CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
-        )
-        .font_fulfillment(identity, FontContainerFulfillment::new(data.to_vec())),
-    );
-
+fn malformed_external_font_is_rejected_before_fulfillment_set_construction() {
     assert!(matches!(
-        result.unwrap().outcome(),
-        CompilationReportOutcome::Operation {
-            outcome: CompilationOperationOutcome::MalformedExternalFontContainer {
-                container,
-                index: 0,
-            },
-            ..
-        } if *container == identity
+        FontContainer::new(b"not a font".to_vec()),
+        Err(FontContainerError::NoReadableFace)
     ));
 }
 
@@ -1321,35 +1269,16 @@ fn a_constructed_pack_builds_a_world_without_revalidation() {
 }
 
 #[test]
-fn pack_world_construction_rejects_incomplete_dependencies_and_invalid_overrides() {
-    let spec = "@local/example:1.0.0".parse().unwrap();
-    let dependent = Pack::builder("main.typ")
-        .file("main.typ", Vec::new())
-        .unwrap()
-        .external_package_file(spec, "lib.typ", b"package".to_vec())
-        .unwrap()
-        .build()
-        .unwrap();
-    assert!(matches!(
-        dependent.materialize_compilation_dependency_snapshot(
-            std::collections::BTreeMap::new(),
-            &std::collections::BTreeMap::new(),
-        ),
-        Err(CompilationDependencySnapshotError::Package(error))
-            if matches!(*error, PackageFulfillmentError::Missing { .. })
-    ));
-
+fn pack_world_construction_rejects_invalid_overrides() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", Vec::new())
         .unwrap()
         .build()
         .unwrap();
-    let dependencies = pack
-        .materialize_compilation_dependency_snapshot(
-            std::collections::BTreeMap::new(),
-            &std::collections::BTreeMap::new(),
-        )
-        .unwrap();
+    let dependencies = pack.materialize_compilation_dependency_snapshot(
+        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
+    );
     let overrides = std::collections::BTreeMap::from([(
         "missing.typ".to_owned(),
         Bytes::new(b"replacement".to_vec()),
@@ -2594,16 +2523,10 @@ fn exact_font_catalog_is_authoritative() {
         .build()
         .unwrap();
 
-    let font_fulfillments = std::collections::BTreeMap::from([(
-        FontContainerIdentity::from_bytes(pack_data.as_slice()),
-        Bytes::new(pack_data.clone()),
-    )]);
-    let dependencies = pack
-        .materialize_compilation_dependency_snapshot(
-            std::collections::BTreeMap::new(),
-            &font_fulfillments,
-        )
-        .unwrap();
+    let dependencies = pack.materialize_compilation_dependency_snapshot(
+        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
+    );
     let world = PackWorld::new(
         pack,
         dependencies,

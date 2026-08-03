@@ -17,13 +17,13 @@ use support::official_typst::{
 use typst::foundations::Bytes;
 use typst::foundations::{Datetime, Dict, Smart, Value};
 use typst_pack::{
-    CompilationAccessKind, CompilationDiagnostic, CompilationOutputSpecification,
-    CompilationRequestIssue, CompilationRequestRejection, CompilationResult, CompilationStatus,
-    CreationTimestamp, DiagnosticPhase, DiagnosticProducer,
+    CompilationAccessKind, CompilationDiagnostic, CompilationFulfillmentSet,
+    CompilationOutputSpecification, CompilationRequestIssue, CompilationRequestRejection,
+    CompilationResult, CompilationStatus, CreationTimestamp, DiagnosticPhase, DiagnosticProducer,
     DiagnosticSeverity as PackDiagnosticSeverity, DocumentTime, HtmlOutputSpecification,
-    OutputFormat, Pack, PackCompilationRequest, PackOverrideSet, PackageTreeFulfillment,
-    PdfOutputSpecification, PngOutputSpecification, RequestValueOrigin, SvgOutputSpecification,
-    TracepointKind, compile as compile_to_report, parse_page_selection,
+    OutputFormat, Pack, PackCompilationRequest, PackOverrideSet, PackageTree,
+    PackageTreeFulfillment, PdfOutputSpecification, PngOutputSpecification, RequestValueOrigin,
+    SvgOutputSpecification, TracepointKind, compile as compile_to_report, parse_page_selection,
 };
 use typst_pdf::PdfStandard;
 
@@ -101,14 +101,21 @@ fn embedded_and_external_complete_package_trees_match_the_independent_oracle() {
         PackCompilationRequest::new(external_pack, output(OutputFormat::Svg))
             .inputs(string_inputs([("width", "24")]))
             .document_time(DocumentTime::Fixed(Datetime::from_ymd(2024, 2, 3).unwrap()))
-            .package_fulfillment(
-                spec,
-                PackageTreeFulfillment::new(
-                    fixture
-                        .packages()
-                        .iter()
-                        .map(|&(_, path, text)| (path, text.as_bytes().to_vec())),
-                ),
+            .fulfillments(
+                CompilationFulfillmentSet::new(
+                    [PackageTreeFulfillment::new(
+                        spec,
+                        PackageTree::from_owned_entries(
+                            fixture
+                                .packages()
+                                .iter()
+                                .map(|&(_, path, text)| (path, text.as_bytes().to_vec())),
+                        )
+                        .unwrap(),
+                    )],
+                    [],
+                )
+                .unwrap(),
             ),
     )
     .unwrap();
@@ -171,8 +178,16 @@ fn exact_pack_font_catalog_matches_the_independent_oracle_and_external_fulfillme
         .unwrap();
     let identity = external_pack.font_requirements()[0].container_identity();
     let external = compile(
-        PackCompilationRequest::new(external_pack, output(OutputFormat::Svg))
-            .font_fulfillment(identity, typst_pack::FontContainerFulfillment::new(data)),
+        PackCompilationRequest::new(external_pack, output(OutputFormat::Svg)).fulfillments(
+            CompilationFulfillmentSet::new(
+                [],
+                [typst_pack::FontContainerFulfillment::new(
+                    identity,
+                    typst_pack::FontContainer::new(data).unwrap(),
+                )],
+            )
+            .unwrap(),
+        ),
     )
     .unwrap();
     assert_eq!(external.artifacts()[0].bytes(), expected.artifacts[0].bytes);
@@ -239,13 +254,15 @@ fn catalog_order_drives_the_same_official_font_selection_on_every_path() {
             .font_requirements()
             .iter()
             .zip(ordered)
-            .map(|(requirement, data)| (requirement.container_identity(), data))
+            .map(|(requirement, data)| {
+                typst_pack::FontContainerFulfillment::new(
+                    requirement.container_identity(),
+                    typst_pack::FontContainer::new(data).unwrap(),
+                )
+            })
             .collect::<Vec<_>>();
-        let mut request = PackCompilationRequest::new(external_pack, output(OutputFormat::Svg));
-        for (identity, data) in fulfillments {
-            request =
-                request.font_fulfillment(identity, typst_pack::FontContainerFulfillment::new(data));
-        }
+        let request = PackCompilationRequest::new(external_pack, output(OutputFormat::Svg))
+            .fulfillments(CompilationFulfillmentSet::new([], fulfillments).unwrap());
         let external = compile(request).unwrap();
         assert_eq!(
             external.artifacts()[0].bytes(),

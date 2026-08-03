@@ -155,6 +155,10 @@ impl PackageTree {
     pub(crate) fn shared_file(&self, path: &str) -> Option<&SharedBytes> {
         self.files.get(path)
     }
+
+    pub(crate) fn into_shared_files(self) -> BTreeMap<String, SharedBytes> {
+        self.files
+    }
 }
 
 pub(crate) fn derive_package_tree_identity<'a>(

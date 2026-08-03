@@ -1,9 +1,10 @@
 use typst_pack::pack_archive::{DecodeLimits, decode};
 use typst_pack::{
-    CompilationOutputSpecification, DiscoverySpecification, DocumentTime, FontCatalog, Pack,
-    PackArchiveBytes, PackCompilationRequest, PackCreationInput, PackCreationOutcome,
-    PackageAcquisitionFailures, PackageCatalog, PackageDisposition, PackageTree,
-    ProjectSnapshotAssembly, SvgOutputSpecification, TypstTarget, compile, create,
+    CompilationFulfillmentSet, CompilationOutputSpecification, DiscoverySpecification,
+    DocumentTime, FontCatalog, Pack, PackArchiveBytes, PackCompilationRequest, PackCreationInput,
+    PackCreationOutcome, PackageAcquisitionFailures, PackageCatalog, PackageDisposition,
+    PackageTree, PackageTreeFulfillment, ProjectSnapshotAssembly, SvgOutputSpecification,
+    TypstTarget, compile, create,
 };
 
 #[cfg(feature = "embedded-fonts")]
@@ -144,6 +145,99 @@ fn compilation_artifact_clones_share_payload_bytes() {
             .as_ptr(),
         artifact_pointer
     );
+}
+
+#[test]
+fn package_fulfillment_sets_reuse_validated_tree_payloads() {
+    let spec: typst::syntax::package::PackageSpec = "@local/example:1.0.0".parse().unwrap();
+    let data = b"#let value = 42".to_vec();
+    let pointer = data.as_ptr();
+    let tree = PackageTree::from_owned_entries([("lib.typ", data)]).unwrap();
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"No package access needed".to_vec())
+        .unwrap()
+        .external_package_file(spec.clone(), "lib.typ", b"#let value = 42".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let set =
+        CompilationFulfillmentSet::new([PackageTreeFulfillment::new(spec, tree)], []).unwrap();
+
+    assert_eq!(
+        set.packages()
+            .next()
+            .unwrap()
+            .tree()
+            .file("lib.typ")
+            .unwrap()
+            .as_ptr(),
+        pointer
+    );
+    let cloned = set.clone();
+    assert_eq!(
+        cloned
+            .packages()
+            .next()
+            .unwrap()
+            .tree()
+            .file("lib.typ")
+            .unwrap()
+            .as_ptr(),
+        pointer
+    );
+
+    let report = compile(
+        PackCompilationRequest::new(
+            pack,
+            CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
+        )
+        .fulfillments(cloned),
+    )
+    .unwrap();
+    assert!(report.result().is_some());
+}
+
+#[cfg(feature = "embedded-fonts")]
+#[test]
+fn font_fulfillment_sets_reuse_validated_container_payloads() {
+    use typst_pack::{FontContainer, FontContainerFulfillment};
+
+    let font = fonts::typst_container();
+    let container = FontContainer::new(font).unwrap();
+    let pointer = container.data().as_ptr();
+    let identity = container.identity();
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"No font access needed".to_vec())
+        .unwrap()
+        .external_font(
+            container.data().to_vec(),
+            container.faces()[0].identity().index(),
+        )
+        .unwrap()
+        .build()
+        .unwrap();
+    let set =
+        CompilationFulfillmentSet::new([], [FontContainerFulfillment::new(identity, container)])
+            .unwrap();
+
+    assert_eq!(
+        set.fonts().next().unwrap().container().data().as_ptr(),
+        pointer
+    );
+    let cloned = set.clone();
+    assert_eq!(
+        cloned.fonts().next().unwrap().container().data().as_ptr(),
+        pointer
+    );
+    let report = compile(
+        PackCompilationRequest::new(
+            pack,
+            CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
+        )
+        .fulfillments(cloned),
+    )
+    .unwrap();
+    assert!(report.result().is_some());
 }
 
 #[test]

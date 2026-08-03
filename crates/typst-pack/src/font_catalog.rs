@@ -101,6 +101,13 @@ impl FontContainer {
     pub fn faces(&self) -> &[FontContainerFace] {
         &self.faces
     }
+
+    pub(crate) fn font(&self, index: u32) -> Option<Font> {
+        self.faces
+            .iter()
+            .find(|face| face.identity.index() == index)
+            .map(|face| face.font.clone())
+    }
 }
 
 impl PartialEq for FontContainer {

@@ -709,8 +709,8 @@ mod fonts {
     #[test]
     fn a_created_pack_compiles_with_no_filesystem() {
         use typst_pack::{
-            CompilationOutputSpecification, FontContainerFulfillment, PackCompilationRequest,
-            PdfOutputSpecification, compile,
+            CompilationFulfillmentSet, CompilationOutputSpecification, FontContainer,
+            FontContainerFulfillment, PackCompilationRequest, PdfOutputSpecification, compile,
         };
 
         let dir = tempfile::tempdir().unwrap();
@@ -724,10 +724,7 @@ mod fonts {
 
         // Round-trip through bytes: nothing may depend on the filesystem.
         let pack = decode_reference(encode_reference(report.pack()).unwrap()).unwrap();
-        let mut request = PackCompilationRequest::new(
-            pack.clone(),
-            CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
-        );
+        let mut font_fulfillments = Vec::new();
         // The fonts the adapter offered were Typst's own, declared externally.
         for requirement in pack.font_requirements() {
             let identity = requirement.container_identity();
@@ -737,8 +734,16 @@ mod fonts {
                     typst_pack::FontContainerIdentity::from_bytes(data.as_slice()) == identity
                 })
                 .expect("a Typst embedded container fulfills the requirement");
-            request = request.font_fulfillment(identity, FontContainerFulfillment::new(data));
+            font_fulfillments.push(FontContainerFulfillment::new(
+                identity,
+                FontContainer::new(data).unwrap(),
+            ));
         }
+        let request = PackCompilationRequest::new(
+            pack,
+            CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
+        )
+        .fulfillments(CompilationFulfillmentSet::new([], font_fulfillments).unwrap());
 
         let report = compile(request).unwrap();
         let result = report.result().expect("semantic Compilation Result");

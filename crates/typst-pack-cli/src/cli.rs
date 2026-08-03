@@ -29,11 +29,11 @@ use typst_pack::pack_archive::{
     read_pack as read_pack_archive, save_pack, write_pack,
 };
 use typst_pack::{
-    CompilationArtifact, CompilationOutputSpecification, CompilationStatus, CreationTimestamp,
-    DocumentTime, FontContainerFulfillment, HtmlOutputSpecification, OutputFormat,
-    PackCompilationRequest, PackOverrideSet, PackageTreeFulfillment, PageRange, PageSelection,
-    PdfOutputSpecification, PngOutputSpecification, SvgOutputSpecification, TypstTarget,
-    parse_page_selection,
+    CompilationArtifact, CompilationFulfillmentSet, CompilationOutputSpecification,
+    CompilationStatus, CreationTimestamp, DocumentTime, FontContainer, FontContainerFulfillment,
+    HtmlOutputSpecification, OutputFormat, PackCompilationRequest, PackOverrideSet,
+    PackageTreeFulfillment, PageRange, PageSelection, PdfOutputSpecification,
+    PngOutputSpecification, SvgOutputSpecification, TypstTarget, parse_page_selection,
 };
 use typst_pack::{
     ExtractOptions, FILE_EXTENSION, FilesystemPackAssembler, FilesystemPackAssemblerConfig,
@@ -1073,6 +1073,12 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
             .with_timezone(&chrono::Utc)
             .timestamp()
     });
+    let external_font_identities = pack
+        .font_requirements()
+        .iter()
+        .filter(|requirement| !requirement.is_embedded())
+        .map(|requirement| requirement.container_identity())
+        .collect::<BTreeSet<_>>();
     let mut request = PackCompilationRequest::new(pack, output_specification)
         .adapter_resolved_output()
         .adapter_resolved_inputs(parse_inputs(&args.compilation.inputs))
@@ -1083,18 +1089,22 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     for feature in &args.compilation.features {
         request = request.adapter_resolved_feature((*feature).into());
     }
-    for (identity, data) in supplied_fonts {
-        request = request.font_fulfillment(identity, FontContainerFulfillment::new(data.to_vec()));
-    }
-    for (spec, tree) in package_fulfillments {
-        request = request.package_fulfillment(
-            spec,
-            PackageTreeFulfillment::new(
-                tree.files()
-                    .map(|(path, data)| (path.to_owned(), data.to_vec())),
-            ),
-        );
-    }
+    let font_fulfillments = supplied_fonts
+        .into_iter()
+        .filter(|(identity, _)| external_font_identities.contains(identity))
+        .map(|(identity, data)| {
+            FontContainer::new(data.to_vec())
+                .map(|container| FontContainerFulfillment::new(identity, container))
+                .map_err(|error| CliError::Message(error.to_string()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    let package_fulfillments = package_fulfillments
+        .into_iter()
+        .map(|(spec, tree)| PackageTreeFulfillment::new(spec, tree))
+        .collect::<Vec<_>>();
+    let fulfillments = CompilationFulfillmentSet::new(package_fulfillments, font_fulfillments)
+        .expect("filesystem acquisition supplies each exact dependency at most once");
+    request = request.fulfillments(fulfillments);
     let timed = compile_with_timing(request, args.automation.timings.clone())
         .map_err(|error| CliError::Message(error.to_string()))?;
     let (execution, timing_error) = timed.into_parts();

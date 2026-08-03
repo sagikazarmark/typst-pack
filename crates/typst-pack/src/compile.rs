@@ -16,11 +16,10 @@ use typst_layout::PagedDocument;
 use typst_pdf::{PdfOptions, PdfStandard, PdfStandards, Timestamp};
 
 use crate::embedded::EmbeddedTypst;
-use crate::pack::{CompilationDependencySnapshotError, FontCatalogError, PackageFulfillmentError};
 use crate::payload::SharedBytes;
 use crate::world::PackWorld;
 use crate::world_trace::{WorldTrace, logical_path};
-use crate::{FontContainerIdentity, Pack, PackageTreeIdentity};
+use crate::{FontContainer, FontContainerIdentity, Pack, PackageTree, PackageTreeIdentity};
 
 /// The exact embedded Typst compiler implementation that produced a result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -597,33 +596,37 @@ pub struct PackCompilationRequest {
     overrides: EffectiveRequestValue<PackOverrideSet>,
     features: Vec<EffectiveEngineFeature>,
     document_time: EffectiveRequestValue<DocumentTime>,
-    package_fulfillments: BTreeMap<String, PackageTreeFulfillment>,
-    font_fulfillments: BTreeMap<FontContainerIdentity, FontContainerFulfillment>,
+    fulfillments: CompilationFulfillmentSet,
 }
 
-/// One externally acquired Complete Package Tree and operational metadata.
+/// One externally acquired Package Tree and operational metadata.
 #[derive(Debug, Clone)]
 pub struct PackageTreeFulfillment {
-    files: Vec<(String, Bytes)>,
+    spec: PackageSpec,
+    tree: PackageTree,
     provenance: Option<String>,
     cache_hit: bool,
 }
 
 impl PackageTreeFulfillment {
-    pub fn new<I, P, D>(files: I) -> Self
-    where
-        I: IntoIterator<Item = (P, D)>,
-        P: Into<String>,
-        D: Into<Vec<u8>>,
-    {
+    /// Pairs one exact package specification with its validated tree.
+    pub fn new(spec: PackageSpec, tree: PackageTree) -> Self {
         Self {
-            files: files
-                .into_iter()
-                .map(|(path, data)| (path.into(), Bytes::new(data.into())))
-                .collect(),
+            spec,
+            tree,
             provenance: None,
             cache_hit: false,
         }
+    }
+
+    /// The exact package specification this fulfillment claims to satisfy.
+    pub fn spec(&self) -> &PackageSpec {
+        &self.spec
+    }
+
+    /// The already validated Package Tree.
+    pub fn tree(&self) -> &PackageTree {
+        &self.tree
     }
 
     pub fn provenance(mut self, provenance: impl Into<String>) -> Self {
@@ -637,21 +640,34 @@ impl PackageTreeFulfillment {
     }
 }
 
-/// Exact externally supplied Font Container bytes and non-semantic metadata.
+/// One externally acquired Font Container and operational metadata.
 #[derive(Debug, Clone)]
 pub struct FontContainerFulfillment {
-    data: Bytes,
+    expected_identity: FontContainerIdentity,
+    container: FontContainer,
     provenance: Option<String>,
     licensing: Option<String>,
 }
 
 impl FontContainerFulfillment {
-    pub fn new(data: impl Into<Vec<u8>>) -> Self {
+    /// Pairs one required Font Container Identity with a validated container.
+    pub fn new(expected_identity: FontContainerIdentity, container: FontContainer) -> Self {
         Self {
-            data: Bytes::new(data.into()),
+            expected_identity,
+            container,
             provenance: None,
             licensing: None,
         }
+    }
+
+    /// The Font Container Identity this fulfillment claims to satisfy.
+    pub fn expected_identity(&self) -> FontContainerIdentity {
+        self.expected_identity
+    }
+
+    /// The already validated Font Container.
+    pub fn container(&self) -> &FontContainer {
+        &self.container
     }
 
     pub fn provenance(mut self, provenance: impl Into<String>) -> Self {
@@ -662,6 +678,108 @@ impl FontContainerFulfillment {
     pub fn licensing(mut self, licensing: impl Into<String>) -> Self {
         self.licensing = Some(licensing.into());
         self
+    }
+}
+
+/// One construction issue in a Compilation Fulfillment Set.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum CompilationFulfillmentSetIssue {
+    /// An exact package specification was supplied more than once.
+    #[error("package specification {spec} is fulfilled more than once")]
+    DuplicatePackageSpecification { spec: PackageSpec },
+    /// A required Font Container Identity was supplied more than once.
+    #[error("Font Container Identity {identity:?} is fulfilled more than once")]
+    DuplicateFontContainerIdentity { identity: FontContainerIdentity },
+}
+
+/// A failure to construct a duplicate-free Compilation Fulfillment Set.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("Compilation Fulfillment Set construction failed with {} issue(s)", .issues.len())]
+pub struct CompilationFulfillmentSetError {
+    issues: Vec<CompilationFulfillmentSetIssue>,
+}
+
+impl CompilationFulfillmentSetError {
+    /// Every duplicate in canonical package-then-font key order.
+    pub fn issues(&self) -> &[CompilationFulfillmentSetIssue] {
+        &self.issues
+    }
+}
+
+/// The duplicate-free external dependencies supplied for one compilation.
+#[derive(Debug, Clone, Default)]
+pub struct CompilationFulfillmentSet {
+    packages: BTreeMap<String, PackageTreeFulfillment>,
+    fonts: BTreeMap<FontContainerIdentity, FontContainerFulfillment>,
+}
+
+impl CompilationFulfillmentSet {
+    /// Constructs one canonical duplicate-free fulfillment set.
+    pub fn new(
+        packages: impl IntoIterator<Item = PackageTreeFulfillment>,
+        fonts: impl IntoIterator<Item = FontContainerFulfillment>,
+    ) -> Result<Self, CompilationFulfillmentSetError> {
+        let packages = packages.into_iter().collect::<Vec<_>>();
+        let fonts = fonts.into_iter().collect::<Vec<_>>();
+        let mut package_keys = BTreeSet::new();
+        let mut duplicate_packages = BTreeSet::new();
+        for fulfillment in &packages {
+            let key = fulfillment.spec.to_string();
+            if !package_keys.insert(key.clone()) {
+                duplicate_packages.insert(key);
+            }
+        }
+        let mut font_keys = BTreeSet::new();
+        let mut duplicate_fonts = BTreeSet::new();
+        for fulfillment in &fonts {
+            if !font_keys.insert(fulfillment.expected_identity) {
+                duplicate_fonts.insert(fulfillment.expected_identity);
+            }
+        }
+        let mut issues = duplicate_packages
+            .into_iter()
+            .map(|key| {
+                let spec = packages
+                    .iter()
+                    .find(|fulfillment| fulfillment.spec.to_string() == key)
+                    .expect("duplicate key came from a package fulfillment")
+                    .spec
+                    .clone();
+                CompilationFulfillmentSetIssue::DuplicatePackageSpecification { spec }
+            })
+            .collect::<Vec<_>>();
+        issues.extend(duplicate_fonts.into_iter().map(|identity| {
+            CompilationFulfillmentSetIssue::DuplicateFontContainerIdentity { identity }
+        }));
+        if !issues.is_empty() {
+            return Err(CompilationFulfillmentSetError { issues });
+        }
+        Ok(Self {
+            packages: packages
+                .into_iter()
+                .map(|fulfillment| (fulfillment.spec.to_string(), fulfillment))
+                .collect(),
+            fonts: fonts
+                .into_iter()
+                .map(|fulfillment| (fulfillment.expected_identity, fulfillment))
+                .collect(),
+        })
+    }
+
+    /// An empty fulfillment set for a self-contained Pack.
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    /// Package Tree fulfillments in canonical exact-specification order.
+    pub fn packages(&self) -> impl ExactSizeIterator<Item = &PackageTreeFulfillment> {
+        self.packages.values()
+    }
+
+    /// Font Container fulfillments in canonical identity order.
+    pub fn fonts(&self) -> impl ExactSizeIterator<Item = &FontContainerFulfillment> {
+        self.fonts.values()
     }
 }
 
@@ -682,8 +800,7 @@ impl PackCompilationRequest {
                 DocumentTime::Absent,
                 RequestValueOrigin::CoreDefaulted,
             ),
-            package_fulfillments: BTreeMap::new(),
-            font_fulfillments: BTreeMap::new(),
+            fulfillments: CompilationFulfillmentSet::empty(),
         }
     }
 
@@ -744,24 +861,9 @@ impl PackCompilationRequest {
         self
     }
 
-    /// Supplies bytes for one exact external Font Container requirement.
-    pub fn font_fulfillment(
-        mut self,
-        expected: FontContainerIdentity,
-        fulfillment: FontContainerFulfillment,
-    ) -> Self {
-        self.font_fulfillments.insert(expected, fulfillment);
-        self
-    }
-
-    /// Supplies one Complete Package Tree under its exact Typst package specification.
-    pub fn package_fulfillment(
-        mut self,
-        spec: PackageSpec,
-        fulfillment: PackageTreeFulfillment,
-    ) -> Self {
-        self.package_fulfillments
-            .insert(spec.to_string(), fulfillment);
+    /// Supplies the complete duplicate-free external fulfillment set.
+    pub fn fulfillments(mut self, fulfillments: CompilationFulfillmentSet) -> Self {
+        self.fulfillments = fulfillments;
         self
     }
 }
@@ -1127,7 +1229,9 @@ impl CompilationResultIdentity {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageFulfillmentReport {
     spec: PackageSpec,
-    tree_identity: PackageTreeIdentity,
+    required_tree_identity: Option<PackageTreeIdentity>,
+    supplied_tree_identity: Option<PackageTreeIdentity>,
+    declared: bool,
     embedded: bool,
     provenance: Option<String>,
     cache_hit: bool,
@@ -1137,8 +1241,15 @@ impl PackageFulfillmentReport {
     pub fn spec(&self) -> &PackageSpec {
         &self.spec
     }
-    pub fn tree_identity(&self) -> PackageTreeIdentity {
-        self.tree_identity
+    /// The declared required tree, or `None` when the specification is undeclared.
+    pub fn required_tree_identity(&self) -> Option<PackageTreeIdentity> {
+        self.required_tree_identity
+    }
+    pub fn supplied_tree_identity(&self) -> Option<PackageTreeIdentity> {
+        self.supplied_tree_identity
+    }
+    pub fn declared(&self) -> bool {
+        self.declared
     }
     pub fn embedded(&self) -> bool {
         self.embedded
@@ -1155,14 +1266,23 @@ impl PackageFulfillmentReport {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FontFulfillmentReport {
     container_identity: FontContainerIdentity,
+    supplied_container_identity: Option<FontContainerIdentity>,
+    declared: bool,
     embedded: bool,
     provenance: Option<String>,
     licensing: Option<String>,
 }
 
 impl FontFulfillmentReport {
+    /// The declared or claimed identity used as the fulfillment-set key.
     pub fn container_identity(&self) -> FontContainerIdentity {
         self.container_identity
+    }
+    pub fn supplied_container_identity(&self) -> Option<FontContainerIdentity> {
+        self.supplied_container_identity
+    }
+    pub fn declared(&self) -> bool {
+        self.declared
     }
     pub fn embedded(&self) -> bool {
         self.embedded
@@ -1461,15 +1581,21 @@ impl std::fmt::Display for CompilationRequestRejection {
 
 impl std::error::Error for CompilationRequestRejection {}
 
-/// A Pack-owned operational outcome before official compilation begins.
-#[derive(Debug, Clone, thiserror::Error)]
-pub enum CompilationOperationOutcome {
-    /// The request supplied no authority for declared external packages.
-    #[error("external package fulfillment is unavailable for {packages:?}")]
-    MissingExternalPackageFulfillment { packages: Vec<PackageSpec> },
-    /// Supplied files do not match the exact required Complete Package Tree.
-    #[error("external package fulfillment for {spec} supplied {actual:?}, expected {expected:?}")]
-    MismatchedExternalPackageTree {
+/// One exact-set deviation detected before private World materialization.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum CompilationFulfillmentIssue {
+    #[error("external package fulfillment for {spec} is missing")]
+    MissingExternalPackage { spec: PackageSpec },
+    #[error("package fulfillment for undeclared specification {spec} supplied {actual:?}")]
+    UndeclaredPackage {
+        spec: PackageSpec,
+        actual: PackageTreeIdentity,
+    },
+    #[error("embedded package {spec} was unexpectedly fulfilled externally")]
+    UnexpectedEmbeddedPackage { spec: PackageSpec },
+    #[error("package fulfillment for {spec} supplied {actual:?}, expected {expected:?}")]
+    MismatchedPackageTree {
         spec: PackageSpec,
         expected: PackageTreeIdentity,
         actual: PackageTreeIdentity,
@@ -1478,32 +1604,48 @@ pub enum CompilationOperationOutcome {
         expected_byte_length: u64,
         actual_byte_length: u64,
     },
-    /// Supplied package files do not form a valid Complete Package Tree.
-    #[error("external package fulfillment for {spec} is malformed at `{path}`: {message}")]
-    MalformedExternalPackageTree {
-        spec: PackageSpec,
-        path: String,
-        message: String,
+    #[error("external Font Container fulfillment for {identity:?} is missing")]
+    MissingExternalFont { identity: FontContainerIdentity },
+    #[error("Font Container fulfillment for undeclared identity {identity:?} supplied {actual:?}")]
+    UndeclaredFont {
+        identity: FontContainerIdentity,
+        actual: FontContainerIdentity,
     },
-    /// No fulfillment was supplied for declared external Font Containers.
-    #[error("external font fulfillment is unavailable for {containers:?}")]
-    MissingExternalFontFulfillment {
-        containers: Vec<FontContainerIdentity>,
-    },
-    /// Supplied bytes do not match the exact required Font Container.
-    #[error("external font fulfillment for {expected:?} supplied {actual:?}")]
-    MismatchedExternalFontContainer {
+    #[error("embedded Font Container {identity:?} was unexpectedly fulfilled externally")]
+    UnexpectedEmbeddedFont { identity: FontContainerIdentity },
+    #[error("Font Container fulfillment for {expected:?} supplied {actual:?}")]
+    MismatchedFontContainer {
         expected: FontContainerIdentity,
         actual: FontContainerIdentity,
         expected_length: u64,
         actual_length: u64,
     },
-    /// Verified container bytes do not contain one declared face.
-    #[error("external font container {container:?} has no valid face at index {index}")]
-    MalformedExternalFontContainer {
-        container: FontContainerIdentity,
+    #[error("Font Container {identity:?} has no required face at index {index}")]
+    MissingFontFace {
+        identity: FontContainerIdentity,
         index: u32,
     },
+}
+
+/// Complete canonical evidence that a fulfillment set is not exact.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("Compilation Fulfillment Set has {} deviation(s)", .issues.len())]
+pub struct InvalidCompilationFulfillmentSet {
+    issues: Vec<CompilationFulfillmentIssue>,
+}
+
+impl InvalidCompilationFulfillmentSet {
+    /// Every deviation in domain-role, canonical-key, and issue-kind order.
+    pub fn issues(&self) -> &[CompilationFulfillmentIssue] {
+        &self.issues
+    }
+}
+
+/// A Pack-owned operational outcome before official compilation begins.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum CompilationOperationOutcome {
+    #[error(transparent)]
+    InvalidFulfillmentSet(InvalidCompilationFulfillmentSet),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -1606,9 +1748,12 @@ pub(crate) fn prepare_pack_compilation(
         overrides,
         features,
         document_time,
-        package_fulfillments,
-        font_fulfillments,
+        fulfillments,
     } = request;
+    let CompilationFulfillmentSet {
+        packages: package_fulfillments,
+        fonts: font_fulfillments,
+    } = fulfillments;
     let mut request_issues = vec![];
     if overrides.value.pack_identity != pack.identity() {
         request_issues.push(CompilationRequestIssue::OverrideSetPackMismatch);
@@ -1757,57 +1902,90 @@ pub(crate) fn prepare_pack_compilation(
         engine_identity,
         exporter_identity,
     );
+    let package_requirements = pack
+        .package_requirements()
+        .iter()
+        .map(|requirement| (requirement.spec().to_string(), requirement))
+        .collect::<BTreeMap<_, _>>();
+    let package_report_keys = package_requirements
+        .keys()
+        .chain(package_fulfillments.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let font_requirements = pack
+        .font_requirements()
+        .iter()
+        .map(|requirement| (requirement.container_identity(), requirement))
+        .collect::<BTreeMap<_, _>>();
+    let font_report_keys = font_requirements
+        .keys()
+        .chain(font_fulfillments.keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
     let fulfillments = CompilationFulfillmentReport {
-        packages: pack
-            .package_requirements()
-            .iter()
-            .map(|requirement| {
-                let supplied = package_fulfillments.get(&requirement.spec().to_string());
+        packages: package_report_keys
+            .into_iter()
+            .map(|key| {
+                let requirement = package_requirements.get(&key).copied();
+                let supplied = package_fulfillments.get(&key);
                 PackageFulfillmentReport {
-                    spec: requirement.spec().clone(),
-                    tree_identity: requirement.tree_identity(),
-                    embedded: requirement.is_embedded(),
+                    spec: requirement
+                        .map(|value| value.spec().clone())
+                        .unwrap_or_else(|| {
+                            supplied
+                                .expect("report key came from a requirement or fulfillment")
+                                .spec
+                                .clone()
+                        }),
+                    required_tree_identity: requirement.map(|value| value.tree_identity()),
+                    supplied_tree_identity: supplied.map(|value| value.tree.identity()),
+                    declared: requirement.is_some(),
+                    embedded: requirement.is_some_and(|value| value.is_embedded()),
                     provenance: supplied.and_then(|value| value.provenance.clone()),
                     cache_hit: supplied.is_some_and(|value| value.cache_hit),
                 }
             })
             .collect(),
-        fonts: pack
-            .font_requirements()
-            .iter()
-            .map(|requirement| {
-                let supplied = font_fulfillments.get(&requirement.container_identity());
+        fonts: font_report_keys
+            .into_iter()
+            .map(|identity| {
+                let requirement = font_requirements.get(&identity).copied();
+                let supplied = font_fulfillments.get(&identity);
                 FontFulfillmentReport {
-                    container_identity: requirement.container_identity(),
-                    embedded: requirement.is_embedded(),
+                    container_identity: identity,
+                    supplied_container_identity: supplied.map(|value| value.container.identity()),
+                    declared: requirement.is_some(),
+                    embedded: requirement.is_some_and(|value| value.is_embedded()),
                     provenance: supplied.and_then(|value| value.provenance.clone()),
                     licensing: supplied.and_then(|value| value.licensing.clone()),
                 }
             })
             .collect(),
     };
-    let package_files = package_fulfillments
+    let fulfillment_issues =
+        verify_compilation_fulfillment_set(&pack, &package_fulfillments, &font_fulfillments);
+    if !fulfillment_issues.is_empty() {
+        return Err(PackCompilationPreparationError::Operation {
+            outcome: CompilationOperationOutcome::InvalidFulfillmentSet(
+                InvalidCompilationFulfillmentSet {
+                    issues: fulfillment_issues,
+                },
+            ),
+            request_inventory: Box::new(request_inventory),
+            compilation_identity,
+            fulfillments: Box::new(fulfillments),
+        });
+    }
+    let package_trees = package_fulfillments
         .into_iter()
-        .map(|(spec, fulfillment)| (spec, fulfillment.files))
+        .map(|(spec, fulfillment)| (spec, fulfillment.tree))
         .collect();
-    let fulfillment_bytes = font_fulfillments
+    let font_containers = font_fulfillments
         .into_iter()
-        .map(|(identity, fulfillment)| (identity, fulfillment.data))
+        .map(|(identity, fulfillment)| (identity, fulfillment.container))
         .collect();
-    let dependencies = pack
-        .materialize_compilation_dependency_snapshot(package_files, &fulfillment_bytes)
-        .map_err(|error| {
-            let outcome = match error {
-                CompilationDependencySnapshotError::Package(error) => package_tree_outcome(*error),
-                CompilationDependencySnapshotError::Font(error) => font_catalog_outcome(error),
-            };
-            PackCompilationPreparationError::Operation {
-                outcome,
-                request_inventory: Box::new(request_inventory.clone()),
-                compilation_identity,
-                fulfillments: Box::new(fulfillments.clone()),
-            }
-        })?;
+    let dependencies =
+        pack.materialize_compilation_dependency_snapshot(package_trees, font_containers);
 
     let world = PackWorld::new(
         pack,
@@ -1995,6 +2173,124 @@ pub(crate) fn compile_pack_kernel(
     }
 }
 
+fn verify_compilation_fulfillment_set(
+    pack: &Pack,
+    package_fulfillments: &BTreeMap<String, PackageTreeFulfillment>,
+    font_fulfillments: &BTreeMap<FontContainerIdentity, FontContainerFulfillment>,
+) -> Vec<CompilationFulfillmentIssue> {
+    let package_requirements = pack
+        .package_requirements()
+        .iter()
+        .map(|requirement| (requirement.spec().to_string(), requirement))
+        .collect::<BTreeMap<_, _>>();
+    let package_keys = package_requirements
+        .keys()
+        .chain(package_fulfillments.keys())
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut issues = Vec::new();
+    for key in package_keys {
+        match (
+            package_requirements.get(&key),
+            package_fulfillments.get(&key),
+        ) {
+            (Some(requirement), None) if !requirement.is_embedded() => {
+                issues.push(CompilationFulfillmentIssue::MissingExternalPackage {
+                    spec: requirement.spec().clone(),
+                });
+            }
+            (None, Some(fulfillment)) => {
+                issues.push(CompilationFulfillmentIssue::UndeclaredPackage {
+                    spec: fulfillment.spec.clone(),
+                    actual: fulfillment.tree.identity(),
+                });
+            }
+            (Some(requirement), Some(fulfillment)) => {
+                if requirement.is_embedded() {
+                    issues.push(CompilationFulfillmentIssue::UnexpectedEmbeddedPackage {
+                        spec: requirement.spec().clone(),
+                    });
+                }
+                if fulfillment.tree.identity() != requirement.tree_identity()
+                    || fulfillment.tree.file_count() != requirement.file_count()
+                    || fulfillment.tree.byte_length() != requirement.byte_length()
+                {
+                    issues.push(CompilationFulfillmentIssue::MismatchedPackageTree {
+                        spec: requirement.spec().clone(),
+                        expected: requirement.tree_identity(),
+                        actual: fulfillment.tree.identity(),
+                        expected_file_count: requirement.file_count(),
+                        actual_file_count: fulfillment.tree.file_count(),
+                        expected_byte_length: requirement.byte_length(),
+                        actual_byte_length: fulfillment.tree.byte_length(),
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    let font_requirements = pack
+        .font_requirements()
+        .iter()
+        .map(|requirement| (requirement.container_identity(), requirement))
+        .collect::<BTreeMap<_, _>>();
+    let font_keys = font_requirements
+        .keys()
+        .chain(font_fulfillments.keys())
+        .copied()
+        .collect::<BTreeSet<_>>();
+    for identity in font_keys {
+        match (
+            font_requirements.get(&identity),
+            font_fulfillments.get(&identity),
+        ) {
+            (Some(requirement), None) if !requirement.is_embedded() => {
+                issues.push(CompilationFulfillmentIssue::MissingExternalFont { identity });
+            }
+            (None, Some(fulfillment)) => {
+                issues.push(CompilationFulfillmentIssue::UndeclaredFont {
+                    identity,
+                    actual: fulfillment.container.identity(),
+                });
+            }
+            (Some(requirement), Some(fulfillment)) => {
+                if requirement.is_embedded() {
+                    issues.push(CompilationFulfillmentIssue::UnexpectedEmbeddedFont { identity });
+                }
+                let actual = fulfillment.container.identity();
+                let actual_length = fulfillment.container.data().len() as u64;
+                if actual != identity || actual_length != requirement.container_length() {
+                    issues.push(CompilationFulfillmentIssue::MismatchedFontContainer {
+                        expected: identity,
+                        actual,
+                        expected_length: requirement.container_length(),
+                        actual_length,
+                    });
+                }
+                for index in requirement
+                    .face_indices()
+                    .iter()
+                    .copied()
+                    .collect::<BTreeSet<_>>()
+                {
+                    if !fulfillment
+                        .container
+                        .faces()
+                        .iter()
+                        .any(|face| face.identity().index() == index)
+                    {
+                        issues
+                            .push(CompilationFulfillmentIssue::MissingFontFace { identity, index });
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    issues
+}
+
 fn assemble_compilation_result(
     kernel: &PreparedPackCompilationKernel,
     status: CompilationStatus,
@@ -2056,62 +2352,6 @@ fn finalize_result(mut result: CompilationResult) -> CompilationResult {
         artifacts,
     )));
     result
-}
-
-pub(crate) fn package_tree_outcome(error: PackageFulfillmentError) -> CompilationOperationOutcome {
-    match error {
-        PackageFulfillmentError::Missing { packages } => {
-            CompilationOperationOutcome::MissingExternalPackageFulfillment { packages }
-        }
-        PackageFulfillmentError::Mismatched {
-            spec,
-            expected,
-            actual,
-            expected_file_count,
-            actual_file_count,
-            expected_byte_length,
-            actual_byte_length,
-        } => CompilationOperationOutcome::MismatchedExternalPackageTree {
-            spec,
-            expected,
-            actual,
-            expected_file_count,
-            actual_file_count,
-            expected_byte_length,
-            actual_byte_length,
-        },
-        PackageFulfillmentError::Malformed {
-            spec,
-            path,
-            message,
-        } => CompilationOperationOutcome::MalformedExternalPackageTree {
-            spec,
-            path,
-            message,
-        },
-    }
-}
-
-fn font_catalog_outcome(error: FontCatalogError) -> CompilationOperationOutcome {
-    match error {
-        FontCatalogError::Missing { containers } => {
-            CompilationOperationOutcome::MissingExternalFontFulfillment { containers }
-        }
-        FontCatalogError::Mismatched {
-            expected,
-            actual,
-            expected_length,
-            actual_length,
-        } => CompilationOperationOutcome::MismatchedExternalFontContainer {
-            expected,
-            actual,
-            expected_length,
-            actual_length,
-        },
-        FontCatalogError::Malformed { container, index } => {
-            CompilationOperationOutcome::MalformedExternalFontContainer { container, index }
-        }
-    }
 }
 
 fn compilation_identity(
