@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ecow::EcoVec;
-use typst::diag::{FileError, FileResult, SourceDiagnostic};
+use typst::diag::{FileError, FileResult, PackageError, SourceDiagnostic};
 use typst::foundations::{Bytes, Datetime, Dict, Duration};
 use typst::syntax::package::PackageSpec;
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
@@ -36,18 +36,15 @@ use crate::creation::{CreationError, CreationOutcome, CreationRequest, IssuedPac
 #[cfg(feature = "embedded-fonts")]
 use crate::font_catalog::typst_embedded_font_containers;
 use crate::font_catalog::{FontCatalog, FontCatalogEntry, FontContainer, FontDisposition};
-use crate::fs_packages::{AcquirePackageError, AcquiredPackages};
+use crate::fs_packages::{
+    AcquiredPackages, FilesystemPackageAcquisitionError, FilesystemPackageAuthority,
+};
 use crate::fs_project;
 use crate::manifest::PackMetadata;
 use crate::pack::{Pack, PackBuildError};
-use crate::package_catalog::{
-    PackageCatalog, PackageCatalogError, PackageDisposition, PackageTreeError,
-};
+use crate::package_catalog::{PackageCatalog, PackageCatalogError, PackageDisposition};
+use crate::package_failure::{PackageAcquisitionFailure, PackageAcquisitionFailureReason};
 use crate::project_snapshot::ProjectSnapshot;
-#[cfg(not(feature = "egress"))]
-use crate::world::local_packages;
-#[cfg(feature = "egress")]
-use crate::world::system_packages;
 
 /// Packs a Typst project directory into a [`Pack`].
 ///
@@ -78,7 +75,6 @@ pub struct Packer {
     features: Vec<Feature>,
     target: TypstTarget,
     package_path: Option<PathBuf>,
-    #[cfg(feature = "egress")]
     package_cache_path: Option<PathBuf>,
     offline: bool,
     #[cfg(feature = "egress")]
@@ -107,7 +103,6 @@ impl Packer {
             features: Vec::new(),
             target: TypstTarget::Paged,
             package_path: None,
-            #[cfg(feature = "egress")]
             package_cache_path: None,
             offline: false,
             #[cfg(feature = "egress")]
@@ -196,10 +191,8 @@ impl Packer {
 
     /// Overrides the directory in which downloaded packages are cached.
     ///
-    /// Only a build that can download has one, so this needs the `egress`
-    /// feature; without it, creation reads whichever package cache the host
-    /// has.
-    #[cfg(feature = "egress")]
+    /// This configures both cache reads and the destination of successful
+    /// downloads. A build without egress can still read the selected cache.
     pub fn package_cache_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.package_cache_path = Some(path.into());
         self
@@ -209,10 +202,10 @@ impl Packer {
     /// `false`.
     ///
     /// When enabled, package dependencies must already exist in the local
-    /// package directories; anything that would need to be downloaded fails
-    /// the compile as not found. A build without the `egress` feature behaves
-    /// this way regardless, having no transport to reach the network with, so
-    /// setting this stays available either way.
+    /// package directories or package cache; anything that would need to be
+    /// downloaded fails the compile as not found. A build without the `egress`
+    /// feature behaves this way regardless, having no transport to reach the
+    /// network with, so setting this stays available either way.
     pub fn offline(mut self, offline: bool) -> Self {
         self.offline = offline;
         self
@@ -254,25 +247,15 @@ impl Packer {
 
     /// The Package Authority this creation resolves reported specifications
     /// through, which is as far as the host's capabilities reach.
-    #[cfg(feature = "egress")]
-    fn package_authority(&self) -> typst_kit::packages::SystemPackages {
-        system_packages(
+    fn package_authority(&self) -> FilesystemPackageAuthority {
+        let authority = FilesystemPackageAuthority::new(
             self.package_path.as_deref(),
             self.package_cache_path.as_deref(),
             self.offline,
-            self.certificate.as_deref(),
-        )
-    }
-
-    /// Which, without egress, reaches the local package directories and the
-    /// host's package cache and no further.
-    #[cfg(not(feature = "egress"))]
-    fn package_authority(&self) -> typst_kit::packages::SystemPackages {
-        // There is no downloader to disable here, so the offline switch is
-        // already structurally satisfied: local package directories are all
-        // this build can resolve from either way.
-        let _ = self.offline;
-        local_packages(self.package_path.as_deref())
+        );
+        #[cfg(feature = "egress")]
+        let authority = authority.certificate(self.certificate.clone());
+        authority
     }
 
     /// Snapshots the project, runs the representative compile, and assembles the Pack.
@@ -312,7 +295,8 @@ impl Packer {
             fs_project::FilesystemProjectLimits::reference_v1(),
         )?);
 
-        let packages = Arc::new(AcquiredPackages::new(self.package_authority()));
+        let authority = self.package_authority();
+        let packages = Arc::new(AcquiredPackages::new());
 
         let font_sources = FontSources {
             system: self.system_fonts,
@@ -366,7 +350,12 @@ impl Packer {
         let mut timer = typst_kit::timer::Timer::new_or_placeholder(self.timings);
         let mut creation = None;
         let timings = timer.record(&mut world, |_| {
-            creation = Some(resolve_and_create(request, &packages, disposition));
+            creation = Some(resolve_and_create(
+                request,
+                &authority,
+                &packages,
+                disposition,
+            ));
         });
         let Some(creation) = creation else {
             return Err(PackerError::Timings(
@@ -388,7 +377,6 @@ impl Packer {
             hook();
         }
 
-        packages.revalidate()?;
         font_sources.revalidate(&font_catalog)?;
 
         Ok(PackOutcome {
@@ -417,13 +405,19 @@ impl Packer {
 /// before package resolution moved out of the representative compile.
 fn resolve_and_create(
     mut request: CreationRequest,
+    authority: &FilesystemPackageAuthority,
     packages: &AcquiredPackages,
     disposition: PackageDisposition,
 ) -> Result<IssuedPack, CreationFailure> {
     let mut acquired: HashSet<String> = HashSet::new();
+    let mut package_failures = Vec::new();
     let mut catalog = PackageCatalog::new();
     loop {
-        match create(&request)? {
+        let outcome = create(&request).map_err(|error| CreationFailure::Core {
+            error,
+            package_failures: std::mem::take(&mut package_failures),
+        })?;
+        match outcome {
             CreationOutcome::Issued(issued) => return Ok(*issued),
             CreationOutcome::MissingPackages(missing) => {
                 for spec in missing {
@@ -439,18 +433,19 @@ fn resolve_and_create(
                             spec,
                         }));
                     }
-                    request = match packages.acquire(&spec) {
-                        Ok(tree) => {
+                    request = match authority.acquire(&spec) {
+                        Ok(acquired) => {
+                            let (tree, _) = acquired.into_parts();
+                            packages.record(spec.clone(), tree.clone());
                             catalog
                                 .insert(spec.clone(), tree, disposition)
                                 .map_err(PackerError::InvalidPackageCatalog)?;
                             request.package_catalog(catalog.clone())
                         }
-                        Err(AcquirePackageError::Authority(failure)) => {
+                        Err(error) => {
+                            let failure = package_failure_for_creation(error.failure());
+                            package_failures.push(error);
                             request.unresolvable_package(spec, failure)
-                        }
-                        Err(AcquirePackageError::InvalidTree(source)) => {
-                            return Err(PackerError::InvalidPackageTree { spec, source }.into());
                         }
                     };
                 }
@@ -459,11 +454,35 @@ fn resolve_and_create(
     }
 }
 
+/// Transitional bridge until Pack Creation consumes Package Acquisition
+/// Failures directly rather than Typst's package error vocabulary.
+fn package_failure_for_creation(failure: &PackageAcquisitionFailure) -> PackageError {
+    let spec = failure.spec().clone();
+    match failure.reason() {
+        PackageAcquisitionFailureReason::NotFound => PackageError::NotFound(spec),
+        PackageAcquisitionFailureReason::VersionNotFound { latest } => {
+            PackageError::VersionNotFound(spec, *latest)
+        }
+        PackageAcquisitionFailureReason::NetworkFailed { detail } => {
+            PackageError::NetworkFailed(detail.clone().map(Into::into))
+        }
+        PackageAcquisitionFailureReason::MalformedArchive { detail } => {
+            PackageError::MalformedArchive(detail.clone().map(Into::into))
+        }
+        PackageAcquisitionFailureReason::Other { detail } => {
+            PackageError::Other(detail.clone().map(Into::into))
+        }
+    }
+}
+
 /// A failure that ended one creation loop, before the adapter dressed it in
 /// its own vocabulary.
 enum CreationFailure {
     /// The core issued no Pack.
-    Core(CreationError),
+    Core {
+        error: CreationError,
+        package_failures: Vec<FilesystemPackageAcquisitionError>,
+    },
     /// The adapter failed to acquire what the core reported as missing.
     Adapter(PackerError),
 }
@@ -474,22 +493,24 @@ impl CreationFailure {
     fn into_packer_error(self, world: AcquiredWorld) -> PackerError {
         match self {
             Self::Adapter(error) => error,
-            Self::Core(CreationError::Compile { errors, warnings }) => PackerError::Compile {
+            Self::Core {
+                error: CreationError::Compile { errors, warnings },
+                package_failures,
+            } => PackerError::Compile {
                 world: Box::new(CreationDiagnosticContext { world }),
                 errors,
                 warnings,
+                package_failures,
             },
-            Self::Core(CreationError::InvalidTimestamp(message)) => {
-                PackerError::InvalidTimestamp(message)
-            }
-            Self::Core(CreationError::Build(error)) => PackerError::Build(error),
+            Self::Core {
+                error: CreationError::InvalidTimestamp(message),
+                ..
+            } => PackerError::InvalidTimestamp(message),
+            Self::Core {
+                error: CreationError::Build(error),
+                ..
+            } => PackerError::Build(error),
         }
-    }
-}
-
-impl From<CreationError> for CreationFailure {
-    fn from(error: CreationError) -> Self {
-        Self::Core(error)
     }
 }
 
@@ -536,6 +557,9 @@ pub enum PackerError {
         world: Box<CreationDiagnosticContext>,
         errors: EcoVec<SourceDiagnostic>,
         warnings: EcoVec<SourceDiagnostic>,
+        /// Typed Package Authority failures attached to this representative
+        /// compile through the transitional creation bridge.
+        package_failures: Vec<FilesystemPackageAcquisitionError>,
     },
     #[error("invalid creation timestamp: {0}")]
     InvalidTimestamp(String),
@@ -543,12 +567,6 @@ pub enum PackerError {
     Timings(String),
     #[error("failed to load package {spec}: {message}")]
     Package { spec: PackageSpec, message: String },
-    /// A Package Authority returned bytes that do not form a Package Tree.
-    #[error("package {spec} does not contain a valid package tree: {source}")]
-    InvalidPackageTree {
-        spec: PackageSpec,
-        source: PackageTreeError,
-    },
     /// The acquired Package Trees do not form a valid Package Catalog.
     #[error(transparent)]
     InvalidPackageCatalog(PackageCatalogError),

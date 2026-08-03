@@ -14,9 +14,7 @@ use crate::compile::{
 use crate::packer::{CreationDiagnosticContext, PackOutcome};
 use crate::{CompilationResult, PackCompilationRequest, PdfStandardsValidationError};
 
-pub use crate::world::read_complete_package_tree;
-#[cfg(feature = "egress")]
-pub use crate::world::system_packages;
+pub use crate::FilesystemPackageAuthority;
 
 /// The process-facing outcome of an embedded compilation.
 pub enum CliCompilationPresentation<'a> {

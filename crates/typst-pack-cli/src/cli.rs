@@ -19,9 +19,9 @@ use typst_kit::fonts::FontSource;
 use typst_pdf::{PdfStandard, Timestamp};
 
 use typst_pack::cli_support::{
-    CliCompilationExecution, CliCompilationPresentation, compile_with_timing,
-    emit_creation_error_diagnostics, emit_creation_warnings, pdf_standard_requiring_tags,
-    read_complete_package_tree, system_packages, validate_pdf_standards,
+    CliCompilationExecution, CliCompilationPresentation, FilesystemPackageAuthority,
+    compile_with_timing, emit_creation_error_diagnostics, emit_creation_warnings,
+    pdf_standard_requiring_tags, validate_pdf_standards,
 };
 use typst_pack::pack_archive::{
     AcquisitionLimits, DecodeLimits, EncodeLimits, FORMAT_VERSION, FileAcquisitionError,
@@ -679,6 +679,7 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
             world,
             errors,
             warnings,
+            ..
         }) => {
             let mut stream = StandardStream::stderr(color);
             emit_creation_error_diagnostics(
@@ -992,12 +993,12 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
             }
         }
     }
-    let packages = system_packages(
+    let packages = FilesystemPackageAuthority::new(
         args.packages.package_path.as_deref(),
         args.packages.package_cache_path.as_deref(),
         args.packages.offline,
-        cert,
-    );
+    )
+    .certificate(cert.map(Path::to_path_buf));
     let mut package_roots = BTreeMap::new();
     let mut package_fulfillments = Vec::new();
     for requirement in pack
@@ -1005,15 +1006,18 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         .iter()
         .filter(|requirement| !requirement.is_embedded())
     {
-        let root = packages.obtain(requirement.spec()).map_err(|error| {
+        let acquired = packages.acquire(requirement.spec()).map_err(|error| {
             CliError::Message(format!(
-                "external package fulfillment for {} is unavailable: {error}",
-                requirement.spec()
+                "external package fulfillment for {} is unavailable: {}",
+                requirement.spec(),
+                error
             ))
         })?;
-        let files = read_complete_package_tree(root.path()).map_err(CliError::Message)?;
-        package_roots.insert(requirement.spec().to_string(), root.path().to_owned());
-        package_fulfillments.push((requirement.spec().clone(), files));
+        let (tree, root) = acquired.into_parts();
+        if let Some(root) = root {
+            package_roots.insert(requirement.spec().to_string(), root);
+        }
+        package_fulfillments.push((requirement.spec().clone(), tree));
     }
     let pdf_creation_timestamp = match creation_timestamp {
         Some(timestamp) => convert_datetime(timestamp)
@@ -1070,11 +1074,12 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     for (identity, data) in supplied_fonts {
         request = request.font_fulfillment(identity, FontContainerFulfillment::new(data.to_vec()));
     }
-    for (spec, files) in package_fulfillments {
+    for (spec, tree) in package_fulfillments {
         request = request.package_fulfillment(
             spec,
             PackageTreeFulfillment::new(
-                files.into_iter().map(|(path, data)| (path, data.to_vec())),
+                tree.files()
+                    .map(|(path, data)| (path.to_owned(), data.to_vec())),
             ),
         );
     }

@@ -8,14 +8,18 @@
 
 #![cfg(feature = "package-acquisition")]
 
+use std::cell::Cell;
+use std::io::{self, Read};
+use std::rc::Rc;
 use std::str::FromStr;
 
 use typst::syntax::package::PackageSpec;
 use typst_pack::{
-    CreationOutcome, CreationRequest, PackageAcquisitionError, PackageCatalog, PackageDisposition,
-    PackageExpansionLimitError, PackageExpansionLimits, PackageExpansionLimitsError,
-    PackageExpansionResource, PackageTree, PackageTreeIssue, ProjectSnapshotAssembly, create,
-    expand_package_archive, package_archive_url,
+    CreationOutcome, CreationRequest, PackageAcquisitionError, PackageArchiveAcquisitionError,
+    PackageCatalog, PackageDisposition, PackageExpansionLimitError, PackageExpansionLimits,
+    PackageExpansionLimitsError, PackageExpansionResource, PackageTree, PackageTreeIssue,
+    ProjectSnapshotAssembly, acquire_package_archive, create, expand_package_archive,
+    package_archive_url,
 };
 
 fn spec(text: &str) -> PackageSpec {
@@ -124,6 +128,62 @@ fn every_package_expansion_ceiling_must_leave_room_for_a_plus_one_probe() {
             })
         );
     }
+}
+
+struct ObservedReader {
+    bytes: io::Cursor<Vec<u8>>,
+    reads: Rc<Cell<usize>>,
+}
+
+impl Read for ObservedReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        self.reads.set(self.reads.get() + 1);
+        self.bytes.read(buffer)
+    }
+}
+
+#[test]
+fn known_oversized_package_archive_is_rejected_before_reading() {
+    let reads = Rc::new(Cell::new(0));
+    let reader = ObservedReader {
+        bytes: io::Cursor::new(vec![0; 5]),
+        reads: Rc::clone(&reads),
+    };
+
+    let error = acquire_package_archive(reader, Some(5), limits(4, 10, 100, 100, 100)).unwrap_err();
+
+    assert_eq!(reads.get(), 0);
+    assert!(matches!(
+        error,
+        PackageArchiveAcquisitionError::Limit(PackageExpansionLimitError::Exceeded {
+            resource: PackageExpansionResource::CompressedArchiveBytes,
+            ceiling: 4,
+            observed_at_least: 5,
+        })
+    ));
+}
+
+#[test]
+fn unknown_package_archive_size_is_incrementally_metered_with_a_plus_one_probe() {
+    let exact =
+        acquire_package_archive(io::Cursor::new(b"1234"), None, limits(4, 10, 100, 100, 100))
+            .unwrap();
+    assert_eq!(exact, b"1234");
+
+    let error = acquire_package_archive(
+        io::Cursor::new(b"12345-extra"),
+        None,
+        limits(4, 10, 100, 100, 100),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        PackageArchiveAcquisitionError::Limit(PackageExpansionLimitError::Exceeded {
+            resource: PackageExpansionResource::CompressedArchiveBytes,
+            ceiling: 4,
+            observed_at_least: 5,
+        })
+    ));
 }
 
 #[test]

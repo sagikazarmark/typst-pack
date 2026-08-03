@@ -23,6 +23,7 @@ pub mod pack_archive;
 #[cfg(feature = "package-acquisition")]
 mod package_acquisition;
 mod package_catalog;
+mod package_failure;
 mod packer;
 mod payload;
 mod project_snapshot;
@@ -60,6 +61,14 @@ pub use font_catalog::{
     FontContainerFace, FontDisposition,
 };
 #[cfg(feature = "fs")]
+pub use fs_packages::{
+    AcquiredPackage, FilesystemPackageAcquisitionError, FilesystemPackageAuthority,
+    FilesystemPackageEntryKind, FilesystemPackageGatherError, FilesystemPackageIssue,
+    FilesystemPackageLimitError, FilesystemPackageLimits, FilesystemPackageLimitsError,
+    FilesystemPackageOperation, FilesystemPackageResource, FilesystemPackageSurveyError,
+    gather_filesystem_package,
+};
+#[cfg(feature = "fs")]
 pub use fs_project::{
     FilesystemProjectEntryKind, FilesystemProjectGatherError, FilesystemProjectIssue,
     FilesystemProjectLimitError, FilesystemProjectLimits, FilesystemProjectLimitsError,
@@ -75,13 +84,15 @@ pub use pack::{
 #[cfg(feature = "package-acquisition")]
 pub use package_acquisition::{
     PACKAGE_REGISTRY_NAMESPACE, PACKAGE_REGISTRY_URL, PackageAcquisitionError,
-    PackageExpansionLimitError, PackageExpansionLimits, PackageExpansionLimitsError,
-    PackageExpansionResource, expand_package_archive, package_archive_url,
+    PackageArchiveAcquisitionError, PackageExpansionLimitError, PackageExpansionLimits,
+    PackageExpansionLimitsError, PackageExpansionResource, acquire_package_archive,
+    expand_package_archive, package_archive_url,
 };
 pub use package_catalog::{
     PackageCatalog, PackageCatalogEntry, PackageCatalogError, PackageCatalogIssue,
     PackageDisposition, PackageTree, PackageTreeError, PackageTreeIssue,
 };
+pub use package_failure::{PackageAcquisitionFailure, PackageAcquisitionFailureReason};
 #[cfg(feature = "fs")]
 pub use packer::{CreationDiagnosticContext, PackOutcome, Packer, PackerError};
 pub use payload::PackArchiveBytes;

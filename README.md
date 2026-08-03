@@ -319,23 +319,20 @@ Obtaining its inputs belongs to Pack Assembly;
 `Packer` is the reference filesystem Pack Assembler, implemented over
 `create` like any other adapter.
 
-Establishing that the acquired bytes represent one consistent source state is
-the adapter's own obligation, and it is advisory: creation holds owned bytes and
-has nothing to re-read, so an adapter acquiring from mutable storage without
-revalidating still conforms, and may issue a pack describing a source state that
-never existed simultaneously. `Packer` discharges it: it revalidates the
-project, the package trees it acquired, and the font catalog before returning
-the pack, and fails creation when any of them changed while it ran.
+Creation holds owned acquired bytes and has nothing to re-read. An adapter may
+therefore issue a pack describing values that never existed simultaneously in
+mutable storage; `Packer` does not reread package sources solely to detect later
+mutation.
 
 How far the adapter's own acquisition reaches is a build-time choice. With `fs`
 alone it resolves reported specifications from the local package directories and
 whichever package cache the host has, and fails creation with
 `PackerError::Package` when a specification is in neither; with `egress` it
 downloads the rest from the Typst Universe registry unless creation is offline.
-`Packer::certificate` and `Packer::package_cache_path`
-configure a download, so they need `egress`; `Packer::offline` does not, because
-a build without egress already resolves that way and code that sets it keeps
-compiling either way.
+`Packer::package_cache_path` configures cache reads and, with egress, the
+destination of successful downloads. `Packer::certificate` needs `egress`;
+`Packer::offline` does not, because a build without egress already resolves that
+way and code that sets it keeps compiling either way.
 
 Package requirements can only be discovered by compiling, so creation resolves
 package acquisition through a resumable protocol rather than a callback. A

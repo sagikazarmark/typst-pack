@@ -4,7 +4,7 @@
 //! project directory: what the adapter acquires — project files under the
 //! Project Ignore Policy, package trees from the configured Package Authority,
 //! and font containers from the host's font sources — is what the Pack it
-//! returns describes. The Creation Evidence Fence is covered in-crate instead,
+//! returns describes. Post-acquisition mutation behavior is covered in-crate
 //! because mutating the tree mid-creation needs a test hook this interface does
 //! not offer.
 
@@ -17,6 +17,8 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use archive_support::{decode_reference, encode_reference};
+#[cfg(feature = "egress")]
+use typst_pack::{FilesystemPackageAcquisitionError, PackageAcquisitionFailureReason};
 use typst_pack::{
     FilesystemProjectGatherError, FilesystemProjectIssue, Pack, Packer, PackerError, TypstTarget,
 };
@@ -340,10 +342,6 @@ fn exact_inputs_and_document_time_drive_representative_creation() {
     );
 }
 
-/// The package cache is where a download lands, so choosing its directory is
-/// only offered by a build that can download; a build without egress reads
-/// whichever cache the host has.
-#[cfg(feature = "egress")]
 #[test]
 fn package_data_precedes_package_cache_during_creation() {
     let dir = tempfile::tempdir().unwrap();
@@ -382,7 +380,6 @@ fn package_data_precedes_package_cache_during_creation() {
     assert_eq!(outcome.pack.package_requirements().len(), 1);
 }
 
-#[cfg(feature = "egress")]
 #[test]
 fn package_cache_resolves_during_online_and_offline_creation() {
     let dir = tempfile::tempdir().unwrap();
@@ -513,6 +510,18 @@ fn offline_creation_fails_on_an_uncached_universe_package() {
         .package_path(&empty)
         .package_cache_path(&empty)
         .pack();
+
+    assert!(matches!(
+        &result,
+        Err(PackerError::Compile { package_failures, .. })
+            if matches!(
+                package_failures.as_slice(),
+                [FilesystemPackageAcquisitionError::Unavailable(failure)]
+                    if failure.spec().to_string()
+                        == "@preview/typst-pack-no-such-package:0.0.1"
+                        && failure.reason() == &PackageAcquisitionFailureReason::NotFound
+            )
+    ));
 
     // A specification the Package Authority cannot resolve fails the
     // representative request at the import that needed it, carrying the

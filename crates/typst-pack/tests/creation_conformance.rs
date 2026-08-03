@@ -588,11 +588,9 @@ fn create_on_filesystem(fixture: &Fixture, plan: &FilesystemPlan) -> Result<Crea
         Err(PackerError::ProjectGather(typst_pack::FilesystemProjectGatherError::Snapshot(
             typst_pack::ProjectSnapshotError::MissingEntrypoint(_),
         ))) => Err(Failure::ExcludedEntrypoint),
-        Err(
-            PackerError::Package { .. }
-            | PackerError::InvalidPackageTree { .. }
-            | PackerError::InvalidPackageCatalog(_),
-        ) => Err(Failure::UnsatisfiedPackage),
+        Err(PackerError::Package { .. } | PackerError::InvalidPackageCatalog(_)) => {
+            Err(Failure::UnsatisfiedPackage)
+        }
         Err(PackerError::Compile { .. }) => Err(Failure::Compile),
         Err(error) => panic!("filesystem creation failed unexpectedly: {error}"),
     }

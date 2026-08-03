@@ -2215,26 +2215,24 @@ Rows: #csv("data.csv").len()
     }
 
     #[test]
-    fn changed_selected_package_evidence_prevents_pack_issuance() {
+    fn a_package_change_after_acquisition_does_not_replace_acquired_bytes() {
         let dir = tempfile::tempdir().unwrap();
         let (project, packages) = fixture(dir.path());
         let library = packages.join("local/greet/0.1.0/lib.typ");
 
-        let result = Packer::new(&project, "main.typ")
+        let outcome = Packer::new(&project, "main.typ")
             .package_path(&packages)
             .system_fonts(false)
             .after_creation_hook(move || {
                 fs::write(&library, "#let greet(name) = [Changed #name!]\n").unwrap()
             })
-            .pack();
+            .pack()
+            .unwrap();
 
-        assert!(
-            matches!(
-                result,
-                Err(PackerError::CreationEvidenceChanged { ref path })
-                    if path == "@local/greet:0.1.0"
-            ),
-            "the fence names the package whose tree changed"
+        let spec = "@local/greet:0.1.0".parse().unwrap();
+        assert_eq!(
+            outcome.pack.package_file(&spec, "lib.typ"),
+            Some(&b"#let greet(name) = [Hello #name!]\n"[..])
         );
     }
 

@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-#[cfg(any(feature = "fs", feature = "package-acquisition"))]
+#[cfg(feature = "package-acquisition")]
 use typst::foundations::Bytes;
 use typst::syntax::package::{PackageSpec, PackageVersion};
 
@@ -48,7 +48,7 @@ impl PackageTree {
         )
     }
 
-    #[cfg(any(feature = "fs", feature = "package-acquisition"))]
+    #[cfg(feature = "package-acquisition")]
     pub(crate) fn from_typst_entries(
         entries: Vec<(String, Bytes)>,
     ) -> Result<Self, PackageTreeError> {

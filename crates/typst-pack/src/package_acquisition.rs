@@ -19,6 +19,16 @@ use typst::syntax::package::PackageSpec;
 use crate::Pack;
 use crate::package_catalog::{PackageTree, PackageTreeError};
 
+/// A failure while acquiring exact Package Archive bytes from a stream.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum PackageArchiveAcquisitionError {
+    #[error(transparent)]
+    Limit(#[from] PackageExpansionLimitError),
+    #[error("failed to read Package Archive bytes: {0}")]
+    Read(#[source] std::io::Error),
+}
+
 /// The URL of the package registry these helpers describe the layout of, the
 /// official Typst Universe registry. There is no standardized registry
 /// protocol, so the layout is this registry's own.
@@ -144,6 +154,34 @@ impl PackageExpansionLimits {
     pub const fn total_expanded_bytes(&self) -> u64 {
         self.total_expanded_bytes
     }
+}
+
+/// Acquires exact Package Archive bytes under the expansion profile's
+/// compressed-byte ceiling.
+///
+/// A known size is checked before the reader is touched. The stream is still
+/// incrementally metered with a plus-one probe because a size declaration is
+/// only a hint.
+pub fn acquire_package_archive(
+    mut reader: impl Read,
+    known_size: Option<u64>,
+    limits: PackageExpansionLimits,
+) -> Result<Vec<u8>, PackageArchiveAcquisitionError> {
+    let resource = PackageExpansionResource::CompressedArchiveBytes;
+    if let Some(size) = known_size {
+        check_expansion_limit(resource, limits.compressed_archive_bytes, size)?;
+    }
+
+    let mut bytes = Vec::new();
+    reader
+        .by_ref()
+        .take(limits.compressed_archive_bytes + 1)
+        .read_to_end(&mut bytes)
+        .map_err(PackageArchiveAcquisitionError::Read)?;
+    let observed = u64::try_from(bytes.len())
+        .map_err(|_| PackageExpansionLimitError::AccountingOverflow { resource })?;
+    check_expansion_limit(resource, limits.compressed_archive_bytes, observed)?;
+    Ok(bytes)
 }
 
 /// The URL of the archive holding one exact package specification's Package
@@ -748,4 +786,19 @@ pub enum PackageAcquisitionError {
         spec: PackageSpec,
         source: PackageTreeError,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn package_expansion_accounting_overflow_is_typed() {
+        assert_eq!(
+            checked_add(u64::MAX, 1, PackageExpansionResource::TotalExpandedBytes),
+            Err(PackageExpansionLimitError::AccountingOverflow {
+                resource: PackageExpansionResource::TotalExpandedBytes,
+            })
+        );
+    }
 }
