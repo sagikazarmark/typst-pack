@@ -1,4 +1,5 @@
 use proptest::prelude::*;
+use std::num::NonZeroUsize;
 use typst_pack::{
     CompilationAccessKind, CompilationFulfillmentIssue, CompilationFulfillmentSet,
     CompilationFulfillmentSetIssue, CompilationOperationOutcome, CompilationOutputOrigins,
@@ -31,6 +32,12 @@ fn output(format: OutputFormat) -> CompilationOutputSpecification {
             CompilationOutputSpecification::Html(HtmlOutputSpecification::default())
         }
     }
+}
+
+fn one_input(key: &str, value: &str) -> typst::foundations::Dict {
+    let mut inputs = typst::foundations::Dict::new();
+    inputs.insert(key.into(), typst::foundations::Value::Str(value.into()));
+    inputs
 }
 
 fn page_output(
@@ -667,6 +674,43 @@ fn pack_overrides_replace_contained_bytes_without_mutating_the_pack() {
     );
 }
 
+proptest! {
+    #[test]
+    fn pack_override_declaration_permutations_have_identical_canonical_commitments(
+        permutation in prop::sample::select(vec![
+            [0usize, 1, 2], [0, 2, 1], [1, 0, 2],
+            [1, 2, 0], [2, 0, 1], [2, 1, 0],
+        ]),
+    ) {
+        let pack = Pack::builder("main.typ")
+            .file("main.typ", b"override commitments".to_vec()).unwrap()
+            .file("a.txt", b"a".to_vec()).unwrap()
+            .file("b.txt", b"b".to_vec()).unwrap()
+            .build().unwrap();
+        let entries = [
+            ("main.typ", b"main replacement".as_slice()),
+            ("a.txt", b"a replacement".as_slice()),
+            ("b.txt", b"b replacement".as_slice()),
+        ];
+        let build = |order: [usize; 3]| {
+            order.into_iter().fold(PackOverrideSet::new(&pack), |overrides, index| {
+                overrides.replace(entries[index].0, entries[index].1.to_vec()).unwrap()
+            })
+        };
+        let inventory = |overrides| {
+            compile_to_report(
+                PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg))
+                    .overrides(overrides)
+                    .feature(typst::Feature::Bundle),
+            ).unwrap_err().request_inventory().overrides().value().iter().map(|entry| {
+                (entry.path().to_owned(), entry.byte_len(), entry.commitment())
+            }).collect::<Vec<_>>()
+        };
+
+        prop_assert_eq!(inventory(build(permutation)), inventory(build([0, 1, 2])));
+    }
+}
+
 #[test]
 fn pack_override_set_cannot_be_applied_to_a_different_pack() {
     let first = Pack::builder("main.typ")
@@ -828,6 +872,17 @@ fn compilation_identity_ignores_pack_metadata() {
 
     assert_eq!(first.compilation_identity(), second.compilation_identity());
     assert_eq!(first.artifacts()[0].bytes(), second.artifacts()[0].bytes());
+    let CompilationOutputSpecification::Svg(first_output) =
+        first.request_inventory().output_specification().value()
+    else {
+        panic!("expected SVG output");
+    };
+    let CompilationOutputSpecification::Svg(second_output) =
+        second.request_inventory().output_specification().value()
+    else {
+        panic!("expected SVG output");
+    };
+    assert_eq!(first_output.page_selection, second_output.page_selection);
     assert_eq!(first.compilation_identity().kind(), "compilation");
     assert_eq!(
         first.compilation_identity().algorithm(),
@@ -882,6 +937,17 @@ fn compilation_identity_canonicalizes_page_ranges_and_pdf_standard_order() {
     ))
     .unwrap();
     assert_eq!(first.compilation_identity(), second.compilation_identity());
+    let CompilationOutputSpecification::Pdf(first_output) =
+        first.request_inventory().output_specification().value()
+    else {
+        panic!("expected PDF output");
+    };
+    let CompilationOutputSpecification::Pdf(second_output) =
+        second.request_inventory().output_specification().value()
+    else {
+        panic!("expected PDF output");
+    };
+    assert_eq!(first_output.standards, second_output.standards);
     assert_eq!(first.status(), second.status());
     assert_eq!(
         first
@@ -895,6 +961,132 @@ fn compilation_identity_canonicalizes_page_ranges_and_pdf_standard_order() {
             .map(|diagnostic| diagnostic.message())
             .collect::<Vec<_>>()
     );
+}
+
+proptest! {
+    #[test]
+    fn output_inventory_is_canonical_across_page_and_standard_permutations(
+        range_order in prop::sample::select(vec![
+            [0usize, 1, 2, 3], [3, 2, 1, 0], [1, 3, 0, 2],
+            [2, 0, 3, 1], [3, 1, 2, 0], [0, 2, 1, 3],
+        ]),
+        reverse_standards in any::<bool>(),
+    ) {
+        let pack = Pack::builder("main.typ")
+            .file("main.typ", b"canonical inventory".to_vec()).unwrap()
+            .build().unwrap();
+        let ranges = [
+            Some(NonZeroUsize::new(1).unwrap())..=Some(NonZeroUsize::new(2).unwrap()),
+            Some(NonZeroUsize::new(2).unwrap())..=Some(NonZeroUsize::new(3).unwrap()),
+            Some(NonZeroUsize::new(4).unwrap())..=Some(NonZeroUsize::new(4).unwrap()),
+            Some(NonZeroUsize::new(6).unwrap())..=Some(NonZeroUsize::new(5).unwrap()),
+        ];
+        let page_selection = typst_pack::PageSelection::new(
+            range_order.into_iter().map(|index| ranges[index].clone()).collect(),
+        );
+        let svg = compile_to_report(
+            PackCompilationRequest::new(
+                pack.clone(),
+                CompilationOutputSpecification::Svg(SvgOutputSpecification {
+                    page_selection,
+                    ..SvgOutputSpecification::default()
+                }),
+            ).feature(typst::Feature::Bundle),
+        ).unwrap_err();
+        let CompilationOutputSpecification::Svg(svg) =
+            svg.request_inventory().output_specification().value()
+        else {
+            unreachable!();
+        };
+        prop_assert_eq!(
+            &svg.page_selection,
+            &typst_pack::PageSelection::new(vec![
+                Some(NonZeroUsize::new(1).unwrap())..=Some(NonZeroUsize::new(4).unwrap()),
+                Some(NonZeroUsize::new(6).unwrap())..=Some(NonZeroUsize::new(5).unwrap()),
+            ]),
+        );
+
+        let mut standards = vec![typst_pdf::PdfStandard::A_2b, typst_pdf::PdfStandard::Ua_1];
+        if reverse_standards {
+            standards.reverse();
+        }
+        let pdf = compile_to_report(
+            PackCompilationRequest::new(
+                pack,
+                CompilationOutputSpecification::Pdf(PdfOutputSpecification {
+                    standards,
+                    ..PdfOutputSpecification::default()
+                }),
+            ).feature(typst::Feature::Bundle),
+        ).unwrap_err();
+        let CompilationOutputSpecification::Pdf(pdf) =
+            pdf.request_inventory().output_specification().value()
+        else {
+            unreachable!();
+        };
+        prop_assert_eq!(
+            &pdf.standards,
+            &[typst_pdf::PdfStandard::A_2b, typst_pdf::PdfStandard::Ua_1],
+        );
+    }
+}
+
+proptest! {
+    #[test]
+    fn request_issue_order_is_independent_of_setter_permutations_and_issue_subsets(
+        setter_order in prop::sample::select(vec![
+            [0u8, 1, 2], [0, 2, 1], [1, 0, 2],
+            [1, 2, 0], [2, 0, 1], [2, 1, 0],
+        ]),
+        include_override in any::<bool>(),
+        include_bundle in any::<bool>(),
+        include_document_time in any::<bool>(),
+    ) {
+        let pack = Pack::builder("main.typ")
+            .file("main.typ", b"rejection ordering".to_vec()).unwrap()
+            .build().unwrap();
+        let other_pack = Pack::builder("main.typ")
+            .file("main.typ", b"other rejection ordering".to_vec()).unwrap()
+            .build().unwrap();
+        let mismatched = PackOverrideSet::new(&other_pack)
+            .replace("main.typ", b"replacement".to_vec()).unwrap();
+        let mut request = PackCompilationRequest::new(
+            pack,
+            CompilationOutputSpecification::Png(PngOutputSpecification {
+                page_selection: typst_pack::PageSelection::new(vec![
+                    Some(NonZeroUsize::new(2).unwrap())..=Some(NonZeroUsize::new(1).unwrap()),
+                ]),
+                pixels_per_inch: Some(f64::NAN),
+                render_bleed: false,
+            }),
+        );
+        for setter in setter_order {
+            match setter {
+                0 if include_override => request = request.overrides(mismatched.clone()),
+                1 if include_bundle => request = request.feature(typst::Feature::Bundle),
+                2 if include_document_time => {
+                    request = request.document_time(DocumentTime::UnixTimestamp(i64::MAX));
+                }
+                _ => {}
+            }
+        }
+
+        let rejection = compile_to_report(request).unwrap_err();
+        let kinds = rejection.issues().iter().map(|issue| match issue {
+            CompilationRequestIssue::InvalidPageRange { start, end }
+                if start.get() == 2 && end.get() == 1 => 0,
+            CompilationRequestIssue::InvalidPpi => 1,
+            CompilationRequestIssue::OverrideSetPackMismatch => 2,
+            CompilationRequestIssue::UnsupportedBundleFeature => 3,
+            CompilationRequestIssue::InvalidDocumentTimestamp => 4,
+            issue => panic!("unexpected request issue: {issue:?}"),
+        }).collect::<Vec<_>>();
+        let mut expected = vec![0, 1];
+        if include_override { expected.push(2); }
+        if include_bundle { expected.push(3); }
+        if include_document_time { expected.push(4); }
+        prop_assert_eq!(kinds, expected);
+    }
 }
 
 #[test]
@@ -932,6 +1124,244 @@ fn adapter_resolved_shared_values_remain_distinguishable() {
         inventory.features()[0].origin(),
         RequestValueOrigin::AdapterResolved
     );
+}
+
+proptest! {
+    #[test]
+    fn scalar_request_origins_resolve_by_precedence_and_replace_within_each_origin(
+        operations in prop::collection::vec(0u8..12, 0..40),
+    ) {
+        let pack = Pack::builder("main.typ")
+            .file("main.typ", b"request precedence".to_vec()).unwrap()
+            .file("first.txt", b"first".to_vec()).unwrap()
+            .file("second.txt", b"second".to_vec()).unwrap()
+            .build().unwrap();
+        let caller_inputs = [one_input("c", "one"), one_input("caller", "two")];
+        let adapter_inputs = [one_input("a", "one"), one_input("adapter", "two")];
+        let caller_times = [
+            DocumentTime::Fixed(typst::foundations::Datetime::from_ymd(2024, 1, 2).unwrap()),
+            DocumentTime::Fixed(typst::foundations::Datetime::from_ymd(2025, 3, 4).unwrap()),
+        ];
+        let adapter_times = [
+            DocumentTime::UnixTimestamp(1_700_000_000),
+            DocumentTime::UnixTimestamp(1_710_000_000),
+        ];
+        let caller_overrides = [
+            PackOverrideSet::new(&pack).replace("first.txt", b"caller-one".to_vec()).unwrap(),
+            PackOverrideSet::new(&pack).replace("second.txt", b"caller-two-two".to_vec()).unwrap(),
+        ];
+        let adapter_overrides = [
+            PackOverrideSet::new(&pack).replace("first.txt", b"adapter-one-one".to_vec()).unwrap(),
+            PackOverrideSet::new(&pack).replace("second.txt", b"adapter-two".to_vec()).unwrap(),
+        ];
+        let mut request = PackCompilationRequest::new(pack, output(OutputFormat::Svg))
+            .feature(typst::Feature::Bundle);
+        let mut last_caller_inputs = None;
+        let mut last_adapter_inputs = None;
+        let mut last_caller_time = None;
+        let mut last_adapter_time = None;
+        let mut last_caller_override = None;
+        let mut last_adapter_override = None;
+
+        for operation in operations {
+            match operation {
+                0 | 1 => {
+                    let index = operation as usize;
+                    request = request.inputs(caller_inputs[index].clone());
+                    last_caller_inputs = Some(index);
+                }
+                2 | 3 => {
+                    let index = operation as usize - 2;
+                    request = request.adapter_resolved_inputs(adapter_inputs[index].clone());
+                    last_adapter_inputs = Some(index);
+                }
+                4 | 5 => {
+                    let index = operation as usize - 4;
+                    request = request.document_time(caller_times[index]);
+                    last_caller_time = Some(index);
+                }
+                6 | 7 => {
+                    let index = operation as usize - 6;
+                    request = request.adapter_resolved_document_time(adapter_times[index]);
+                    last_adapter_time = Some(index);
+                }
+                8 | 9 => {
+                    let index = operation as usize - 8;
+                    request = request.overrides(caller_overrides[index].clone());
+                    last_caller_override = Some(index);
+                }
+                10 | 11 => {
+                    let index = operation as usize - 10;
+                    request = request.adapter_resolved_overrides(adapter_overrides[index].clone());
+                    last_adapter_override = Some(index);
+                }
+                _ => unreachable!(),
+            }
+        }
+
+        let rejection = compile_to_report(request).unwrap_err();
+        let inventory = rejection.request_inventory();
+        let expected_inputs = last_caller_inputs
+            .map(|index| (&caller_inputs[index], RequestValueOrigin::CallerSupplied))
+            .or_else(|| last_adapter_inputs.map(|index| (&adapter_inputs[index], RequestValueOrigin::AdapterResolved)));
+        match expected_inputs {
+            Some((inputs, origin)) => {
+                prop_assert_eq!(inventory.inputs().origin(), origin);
+                prop_assert_eq!(inventory.inputs().value().entry_count(), inputs.len());
+                prop_assert_eq!(
+                    inventory.inputs().value().total_key_bytes(),
+                    inputs.iter().map(|(key, _)| key.len()).sum::<usize>(),
+                );
+            }
+            None => {
+                prop_assert_eq!(inventory.inputs().origin(), RequestValueOrigin::CoreDefaulted);
+                prop_assert_eq!(inventory.inputs().value().entry_count(), 0);
+            }
+        }
+        let expected_time = last_caller_time
+            .map(|index| (caller_times[index], RequestValueOrigin::CallerSupplied))
+            .or_else(|| last_adapter_time.map(|index| (adapter_times[index], RequestValueOrigin::AdapterResolved)))
+            .unwrap_or((DocumentTime::Absent, RequestValueOrigin::CoreDefaulted));
+        prop_assert_eq!(inventory.document_time().value(), &expected_time.0);
+        prop_assert_eq!(inventory.document_time().origin(), expected_time.1);
+        let expected_override = last_caller_override
+            .map(|index| (RequestValueOrigin::CallerSupplied, [10usize, 14][index]))
+            .or_else(|| last_adapter_override.map(|index| (RequestValueOrigin::AdapterResolved, [15usize, 11][index])));
+        match expected_override {
+            Some((origin, byte_len)) => {
+                prop_assert_eq!(inventory.overrides().origin(), origin);
+                prop_assert_eq!(inventory.overrides().value().len(), 1);
+                prop_assert_eq!(inventory.overrides().value().iter().next().unwrap().byte_len(), byte_len);
+                prop_assert_ne!(inventory.overrides().value().iter().next().unwrap().commitment(), [0; 16]);
+            }
+            None => {
+                prop_assert_eq!(inventory.overrides().origin(), RequestValueOrigin::CoreDefaulted);
+                prop_assert!(inventory.overrides().value().is_empty());
+            }
+        }
+    }
+}
+
+#[test]
+fn output_candidates_resolve_by_origin_instead_of_setter_order() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"output precedence".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let caller = CompilationOutputSpecification::Png(PngOutputSpecification {
+        pixels_per_inch: Some(216.0),
+        ..PngOutputSpecification::default()
+    });
+    let adapter = CompilationOutputSpecification::Svg(SvgOutputSpecification {
+        pretty: true,
+        ..SvgOutputSpecification::default()
+    });
+    let later_adapter =
+        CompilationOutputSpecification::Html(HtmlOutputSpecification { pretty: true });
+
+    let first = compile(
+        PackCompilationRequest::new_with_adapter_resolved_output(pack.clone(), adapter.clone())
+            .output(caller.clone())
+            .adapter_resolved_output(later_adapter.clone()),
+    )
+    .unwrap();
+    let second = compile(
+        PackCompilationRequest::new(pack, caller)
+            .adapter_resolved_output(adapter)
+            .adapter_resolved_output(later_adapter),
+    )
+    .unwrap();
+    let adapter_only = compile(
+        PackCompilationRequest::new_with_adapter_resolved_output(
+            Pack::builder("main.typ")
+                .file("main.typ", b"adapter output".to_vec())
+                .unwrap()
+                .build()
+                .unwrap(),
+            CompilationOutputSpecification::Html(HtmlOutputSpecification::default()),
+        )
+        .adapter_resolved_output(CompilationOutputSpecification::Svg(
+            SvgOutputSpecification {
+                pretty: true,
+                ..SvgOutputSpecification::default()
+            },
+        )),
+    )
+    .unwrap();
+
+    for result in [&first, &second] {
+        assert_eq!(
+            result.request_inventory().output_specification().origin(),
+            RequestValueOrigin::CallerSupplied
+        );
+        let CompilationOutputSpecification::Png(output) =
+            result.request_inventory().output_specification().value()
+        else {
+            panic!("caller output should win");
+        };
+        assert_eq!(output.pixels_per_inch, Some(216.0));
+    }
+    assert_eq!(first.compilation_identity(), second.compilation_identity());
+    assert_eq!(
+        adapter_only
+            .request_inventory()
+            .output_specification()
+            .origin(),
+        RequestValueOrigin::AdapterResolved
+    );
+    assert!(matches!(
+        adapter_only
+            .request_inventory()
+            .output_specification()
+            .value(),
+        CompilationOutputSpecification::Svg(SvgOutputSpecification { pretty: true, .. })
+    ));
+}
+
+proptest! {
+    #[test]
+    fn additive_features_form_a_canonical_union_with_the_strongest_origin(
+        operations in prop::collection::vec((0u8..3, any::<bool>()), 0..30),
+    ) {
+        let pack = Pack::builder("main.typ")
+            .file("main.typ", b"feature precedence".to_vec()).unwrap()
+            .build().unwrap();
+        let values = [typst::Feature::Html, typst::Feature::Bundle, typst::Feature::A11yExtras];
+        let mut expected = [None; 3];
+        let mut request = PackCompilationRequest::new(
+            pack,
+            CompilationOutputSpecification::Html(HtmlOutputSpecification::default()),
+        ).feature(typst::Feature::Bundle);
+        expected[1] = Some(RequestValueOrigin::CallerSupplied);
+        for (index, caller) in operations {
+            let index = index as usize;
+            if caller {
+                request = request.feature(values[index]);
+                expected[index] = Some(RequestValueOrigin::CallerSupplied);
+            } else {
+                request = request.adapter_resolved_feature(values[index]);
+                if expected[index] != Some(RequestValueOrigin::CallerSupplied) {
+                    expected[index] = Some(RequestValueOrigin::AdapterResolved);
+                }
+            }
+        }
+
+        let rejection = compile_to_report(request).unwrap_err();
+        let features = rejection.request_inventory().features();
+        let expected = expected.into_iter().enumerate().filter_map(|(index, origin)| {
+            if values[index] == typst::Feature::Html {
+                Some((values[index], origin.unwrap_or(RequestValueOrigin::CoreDerived)))
+            } else {
+                origin.map(|origin| (values[index], origin))
+            }
+        }).collect::<Vec<_>>();
+        prop_assert_eq!(features.len(), expected.len());
+        for (actual, (value, origin)) in features.iter().zip(expected) {
+            prop_assert_eq!(actual.value(), value);
+            prop_assert_eq!(actual.origin(), origin);
+        }
+    }
 }
 
 #[test]
@@ -1712,7 +2142,10 @@ fn pack_request_rejection_collects_independent_pdf_issues_in_stable_order() {
         .build()
         .unwrap();
     let specification = PdfOutputSpecification {
-        page_selection: typst_pack::parse_page_selection("1").unwrap(),
+        page_selection: typst_pack::PageSelection::new(vec![
+            Some(NonZeroUsize::new(5).unwrap())..=Some(NonZeroUsize::new(2).unwrap()),
+            Some(NonZeroUsize::new(3).unwrap())..=Some(NonZeroUsize::new(1).unwrap()),
+        ]),
         standards: vec![
             typst_pdf::PdfStandard::V_2_0,
             typst_pdf::PdfStandard::A_1b,
@@ -1720,22 +2153,61 @@ fn pack_request_rejection_collects_independent_pdf_issues_in_stable_order() {
         ],
         ..PdfOutputSpecification::default()
     };
+    let other_pack = Pack::builder("main.typ")
+        .file("main.typ", b"other".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let overrides = PackOverrideSet::new(&other_pack)
+        .replace("main.typ", b"replacement".to_vec())
+        .unwrap();
+    let undeclared: typst::syntax::package::PackageSpec =
+        "@local/undeclared:1.0.0".parse().unwrap();
+    let fulfillments = CompilationFulfillmentSet::new(
+        [PackageTreeFulfillment::new(
+            undeclared,
+            PackageTree::from_owned_entries([("lib.typ", b"uninspected".to_vec())]).unwrap(),
+        )],
+        [],
+    )
+    .unwrap();
     let request =
         PackCompilationRequest::new(pack, CompilationOutputSpecification::Pdf(specification))
-            .feature(typst::Feature::Bundle);
+            .overrides(overrides)
+            .feature(typst::Feature::Bundle)
+            .document_time(DocumentTime::UnixTimestamp(i64::MAX))
+            .fulfillments(fulfillments);
 
     let Err(rejection) = compile(request) else {
         panic!("expected a Pack request rejection");
     };
 
-    assert_eq!(rejection.issues().len(), 2);
+    assert_eq!(rejection.issues().len(), 6);
     assert!(matches!(
         rejection.issues()[0],
-        CompilationRequestIssue::UnsupportedBundleFeature
+        CompilationRequestIssue::InvalidPageRange { start, end }
+            if start.get() == 3 && end.get() == 1
     ));
     assert!(matches!(
         rejection.issues()[1],
+        CompilationRequestIssue::InvalidPageRange { start, end }
+            if start.get() == 5 && end.get() == 2
+    ));
+    assert!(matches!(
+        rejection.issues()[2],
         CompilationRequestIssue::InvalidPdfStandards(_)
+    ));
+    assert!(matches!(
+        rejection.issues()[3],
+        CompilationRequestIssue::OverrideSetPackMismatch
+    ));
+    assert!(matches!(
+        rejection.issues()[4],
+        CompilationRequestIssue::UnsupportedBundleFeature
+    ));
+    assert!(matches!(
+        rejection.issues()[5],
+        CompilationRequestIssue::InvalidDocumentTimestamp
     ));
 }
 

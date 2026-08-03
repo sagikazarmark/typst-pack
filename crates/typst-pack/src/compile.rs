@@ -340,6 +340,60 @@ impl<T> EffectiveRequestValue<T> {
     }
 }
 
+struct RequestValueCandidates<T> {
+    caller: Option<T>,
+    adapter: Option<T>,
+    core_default: Option<T>,
+}
+
+impl<T> RequestValueCandidates<T> {
+    fn caller(value: T) -> Self {
+        Self {
+            caller: Some(value),
+            adapter: None,
+            core_default: None,
+        }
+    }
+
+    fn adapter(value: T) -> Self {
+        Self {
+            caller: None,
+            adapter: Some(value),
+            core_default: None,
+        }
+    }
+
+    fn core_default(value: T) -> Self {
+        Self {
+            caller: None,
+            adapter: None,
+            core_default: Some(value),
+        }
+    }
+
+    fn set_caller(&mut self, value: T) {
+        self.caller = Some(value);
+    }
+
+    fn set_adapter(&mut self, value: T) {
+        self.adapter = Some(value);
+    }
+
+    fn resolve(self) -> EffectiveRequestValue<T> {
+        if let Some(value) = self.caller {
+            EffectiveRequestValue::new(value, RequestValueOrigin::CallerSupplied)
+        } else if let Some(value) = self.adapter {
+            EffectiveRequestValue::new(value, RequestValueOrigin::AdapterResolved)
+        } else {
+            EffectiveRequestValue::new(
+                self.core_default
+                    .expect("request value must have a default or supplied candidate"),
+                RequestValueOrigin::CoreDefaulted,
+            )
+        }
+    }
+}
+
 /// One enabled Typst engine feature and why it is enabled.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct EffectiveEngineFeature {
@@ -591,11 +645,11 @@ impl CompilationIdentity {
 /// environment, cache, or network fallback beyond the Pack and these values.
 pub struct PackCompilationRequest {
     pack: Pack,
-    output_specification: EffectiveRequestValue<CompilationOutputSpecification>,
-    inputs: EffectiveRequestValue<Dict>,
-    overrides: EffectiveRequestValue<PackOverrideSet>,
+    output_specification: RequestValueCandidates<CompilationOutputSpecification>,
+    inputs: RequestValueCandidates<Dict>,
+    overrides: RequestValueCandidates<PackOverrideSet>,
     features: Vec<EffectiveEngineFeature>,
-    document_time: EffectiveRequestValue<DocumentTime>,
+    document_time: RequestValueCandidates<DocumentTime>,
     fulfillments: CompilationFulfillmentSet,
 }
 
@@ -784,48 +838,71 @@ impl CompilationFulfillmentSet {
 }
 
 impl PackCompilationRequest {
-    /// Binds a validated Pack to a tagged semantic output specification.
-    pub fn new(pack: Pack, output_specification: CompilationOutputSpecification) -> Self {
+    fn with_output_candidate(
+        pack: Pack,
+        output_specification: RequestValueCandidates<CompilationOutputSpecification>,
+    ) -> Self {
         let overrides = PackOverrideSet::new(&pack);
         Self {
             pack,
-            output_specification: EffectiveRequestValue::new(
-                output_specification,
-                RequestValueOrigin::CallerSupplied,
-            ),
-            inputs: EffectiveRequestValue::new(Dict::new(), RequestValueOrigin::CoreDefaulted),
-            overrides: EffectiveRequestValue::new(overrides, RequestValueOrigin::CoreDefaulted),
+            output_specification,
+            inputs: RequestValueCandidates::core_default(Dict::new()),
+            overrides: RequestValueCandidates::core_default(overrides),
             features: Vec::new(),
-            document_time: EffectiveRequestValue::new(
-                DocumentTime::Absent,
-                RequestValueOrigin::CoreDefaulted,
-            ),
+            document_time: RequestValueCandidates::core_default(DocumentTime::Absent),
             fulfillments: CompilationFulfillmentSet::empty(),
         }
     }
 
-    #[cfg(feature = "diagnostics")]
-    #[doc(hidden)]
-    pub fn adapter_resolved_output(mut self) -> Self {
-        self.output_specification.origin = RequestValueOrigin::AdapterResolved;
+    /// Binds a validated Pack to a tagged semantic output specification.
+    pub fn new(pack: Pack, output_specification: CompilationOutputSpecification) -> Self {
+        Self::with_output_candidate(pack, RequestValueCandidates::caller(output_specification))
+    }
+
+    /// Starts a request whose initial output controls were resolved by an adapter.
+    pub fn new_with_adapter_resolved_output(
+        pack: Pack,
+        output_specification: CompilationOutputSpecification,
+    ) -> Self {
+        Self::with_output_candidate(pack, RequestValueCandidates::adapter(output_specification))
+    }
+
+    /// Sets caller-supplied output controls.
+    pub fn output(mut self, output_specification: CompilationOutputSpecification) -> Self {
+        self.output_specification.set_caller(output_specification);
+        self
+    }
+
+    /// Sets output controls resolved by an adapter.
+    pub fn adapter_resolved_output(
+        mut self,
+        output_specification: CompilationOutputSpecification,
+    ) -> Self {
+        self.output_specification.set_adapter(output_specification);
         self
     }
 
     /// Sets the exact values exposed to document code as `sys.inputs`.
     pub fn inputs(mut self, inputs: Dict) -> Self {
-        self.inputs = EffectiveRequestValue::new(inputs, RequestValueOrigin::CallerSupplied);
+        self.inputs.set_caller(inputs);
         self
     }
 
     /// Sets `sys.inputs` after an adapter has resolved its external defaults.
     pub fn adapter_resolved_inputs(mut self, inputs: Dict) -> Self {
-        self.inputs = EffectiveRequestValue::new(inputs, RequestValueOrigin::AdapterResolved);
+        self.inputs.set_adapter(inputs);
         self
     }
 
     /// Applies one immutable Pack-bound Pack Override Set.
     pub fn overrides(mut self, overrides: PackOverrideSet) -> Self {
-        self.overrides = EffectiveRequestValue::new(overrides, RequestValueOrigin::CallerSupplied);
+        self.overrides.set_caller(overrides);
+        self
+    }
+
+    /// Applies a Pack Override Set resolved by an adapter.
+    pub fn adapter_resolved_overrides(mut self, overrides: PackOverrideSet) -> Self {
+        self.overrides.set_adapter(overrides);
         self
     }
 
@@ -849,15 +926,13 @@ impl PackCompilationRequest {
 
     /// Sets the exact value returned by document-time requests.
     pub fn document_time(mut self, document_time: DocumentTime) -> Self {
-        self.document_time =
-            EffectiveRequestValue::new(document_time, RequestValueOrigin::CallerSupplied);
+        self.document_time.set_caller(document_time);
         self
     }
 
     /// Sets the exact document time resolved by an adapter.
     pub fn adapter_resolved_document_time(mut self, document_time: DocumentTime) -> Self {
-        self.document_time =
-            EffectiveRequestValue::new(document_time, RequestValueOrigin::AdapterResolved);
+        self.document_time.set_adapter(document_time);
         self
     }
 
@@ -1495,7 +1570,7 @@ pub(crate) enum CompileError {
 }
 
 /// A lossless projection of an official PDF standards validation error.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error("invalid PDF standards: {message}")]
 pub struct PdfStandardsValidationError {
     message: String,
@@ -1520,8 +1595,15 @@ impl PdfStandardsValidationError {
 }
 
 /// One independently detectable issue in a rejected semantic request.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum CompilationRequestIssue {
+    /// A page range ends before it starts.
+    #[error("page selection range {start}-{end} ends before it starts")]
+    InvalidPageRange {
+        start: NonZeroUsize,
+        end: NonZeroUsize,
+    },
     /// The Pack compilation contract intentionally excludes Typst Bundle.
     #[error("the Typst Bundle feature is not supported for Pack compilation")]
     UnsupportedBundleFeature,
@@ -1743,35 +1825,22 @@ pub(crate) fn prepare_pack_compilation(
 ) -> Result<(PackWorld, PreparedPackCompilationKernel), PackCompilationPreparationError> {
     let PackCompilationRequest {
         pack,
-        output_specification: mut output,
+        output_specification,
         inputs,
         overrides,
         features,
         document_time,
         fulfillments,
     } = request;
-    let CompilationFulfillmentSet {
-        packages: package_fulfillments,
-        fonts: font_fulfillments,
-    } = fulfillments;
+    let mut output = output_specification.resolve();
+    let inputs = inputs.resolve();
+    let overrides = overrides.resolve();
+    let document_time = document_time.resolve();
     let mut request_issues = vec![];
-    if overrides.value.pack_identity != pack.identity() {
-        request_issues.push(CompilationRequestIssue::OverrideSetPackMismatch);
-    }
-    if features
-        .iter()
-        .any(|feature| feature.value == Feature::Bundle)
-    {
-        request_issues.push(CompilationRequestIssue::UnsupportedBundleFeature);
-    }
-    if let DocumentTime::UnixTimestamp(timestamp) = document_time.value
-        && typst_kit::datetime::Time::fixed_timestamp(timestamp).is_err()
-    {
-        request_issues.push(CompilationRequestIssue::InvalidDocumentTimestamp);
-    }
     let page_selection_implies_untagged_pdf;
     let output_origins = match &mut output.value {
         CompilationOutputSpecification::Png(specification) => {
+            canonicalize_page_selection(&mut specification.page_selection, &mut request_issues);
             let mut pixels_per_inch = output.origin;
             if specification
                 .pixels_per_inch
@@ -1787,6 +1856,8 @@ pub(crate) fn prepare_pack_compilation(
             CompilationOutputOrigins::Png { pixels_per_inch }
         }
         CompilationOutputSpecification::Pdf(specification) => {
+            canonicalize_page_selection(&mut specification.page_selection, &mut request_issues);
+            specification.standards.sort_by_key(pdf_standard_identity);
             let mut tags = output.origin;
             let mut creation_time = output.origin;
             if let Err(error) = validate_pdf_standards(&specification.standards) {
@@ -1818,7 +1889,8 @@ pub(crate) fn prepare_pack_compilation(
                 creation_time,
             }
         }
-        CompilationOutputSpecification::Svg(_) => {
+        CompilationOutputSpecification::Svg(specification) => {
+            canonicalize_page_selection(&mut specification.page_selection, &mut request_issues);
             page_selection_implies_untagged_pdf = false;
             CompilationOutputOrigins::Svg
         }
@@ -1827,23 +1899,46 @@ pub(crate) fn prepare_pack_compilation(
             CompilationOutputOrigins::Html
         }
     };
+    if overrides.value.pack_identity != pack.identity() {
+        request_issues.push(CompilationRequestIssue::OverrideSetPackMismatch);
+    }
+    if features
+        .iter()
+        .any(|feature| feature.value == Feature::Bundle)
+    {
+        request_issues.push(CompilationRequestIssue::UnsupportedBundleFeature);
+    }
+    if let DocumentTime::UnixTimestamp(timestamp) = document_time.value
+        && typst_kit::datetime::Time::fixed_timestamp(timestamp).is_err()
+    {
+        request_issues.push(CompilationRequestIssue::InvalidDocumentTimestamp);
+    }
     let selected_features = [Feature::Html, Feature::Bundle, Feature::A11yExtras]
         .into_iter()
         .filter_map(|value| {
             features
                 .iter()
-                .find(|feature| feature.value == value)
+                .filter(|feature| feature.value == value)
+                .max_by_key(|feature| request_origin_rank(feature.origin))
                 .copied()
         })
         .collect::<Vec<_>>();
-    let mut effective_features = selected_features.clone();
-    if matches!(&output.value, CompilationOutputSpecification::Html(_)) {
-        effective_features.retain(|feature| feature.value != Feature::Html);
-        effective_features.push(EffectiveEngineFeature {
-            value: Feature::Html,
-            origin: RequestValueOrigin::CoreDerived,
-        });
-    }
+    let derives_html = matches!(&output.value, CompilationOutputSpecification::Html(_));
+    let effective_features = [Feature::Html, Feature::Bundle, Feature::A11yExtras]
+        .into_iter()
+        .filter_map(|value| {
+            selected_features
+                .iter()
+                .find(|feature| feature.value == value)
+                .copied()
+                .or_else(|| {
+                    (value == Feature::Html && derives_html).then_some(EffectiveEngineFeature {
+                        value,
+                        origin: RequestValueOrigin::CoreDerived,
+                    })
+                })
+        })
+        .collect::<Vec<_>>();
     let engine_identity = EmbeddedTypst::engine_identity();
     let exporter_identity = EmbeddedTypst::exporter_identity(output.value.format());
     let raw_inputs = inputs.value;
@@ -1902,6 +1997,10 @@ pub(crate) fn prepare_pack_compilation(
         engine_identity,
         exporter_identity,
     );
+    let CompilationFulfillmentSet {
+        packages: package_fulfillments,
+        fonts: font_fulfillments,
+    } = fulfillments;
     let package_requirements = pack
         .package_requirements()
         .iter()
@@ -2451,6 +2550,64 @@ fn canonical_page_selection(selection: &PageSelection) -> (bool, Vec<(usize, usi
         }
     }
     (selects_all, canonical)
+}
+
+fn canonicalize_page_selection(
+    selection: &mut PageSelection,
+    issues: &mut Vec<CompilationRequestIssue>,
+) {
+    let invalid = selection
+        .ranges
+        .iter()
+        .filter_map(|range| {
+            let (Some(start), Some(end)) = (*range.start(), *range.end()) else {
+                return None;
+            };
+            (start > end).then_some((start, end))
+        })
+        .collect::<BTreeSet<_>>();
+    issues.extend(
+        invalid
+            .iter()
+            .map(|(start, end)| CompilationRequestIssue::InvalidPageRange {
+                start: *start,
+                end: *end,
+            }),
+    );
+    if selection.ranges.is_empty() {
+        return;
+    }
+    let (_, ranges) = canonical_page_selection(selection);
+    let mut ranges = ranges
+        .into_iter()
+        .map(|(start, end)| {
+            let start = Some(NonZeroUsize::new(start).expect("canonical page starts at one"));
+            let end = (end != usize::MAX)
+                .then(|| NonZeroUsize::new(end).expect("canonical page ends at one or later"));
+            start..=end
+        })
+        .chain(
+            invalid
+                .into_iter()
+                .map(|(start, end)| Some(start)..=Some(end)),
+        )
+        .collect::<Vec<_>>();
+    ranges.sort_by_key(|range| {
+        (
+            range.start().map_or(1, NonZeroUsize::get),
+            range.end().map_or(usize::MAX, NonZeroUsize::get),
+        )
+    });
+    selection.ranges = ranges;
+}
+
+fn request_origin_rank(origin: RequestValueOrigin) -> u8 {
+    match origin {
+        RequestValueOrigin::CoreDefaulted => 0,
+        RequestValueOrigin::CoreDerived => 1,
+        RequestValueOrigin::AdapterResolved => 2,
+        RequestValueOrigin::CallerSupplied => 3,
+    }
 }
 
 fn pdf_standard_identity(standard: &PdfStandard) -> &'static str {

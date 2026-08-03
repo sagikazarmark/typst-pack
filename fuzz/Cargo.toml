@@ -51,5 +51,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "compilation_request"
+path = "fuzz_targets/compilation_request.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

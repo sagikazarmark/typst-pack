@@ -671,7 +671,7 @@ fn effective_defaults_and_required_features_keep_their_origins() {
     );
     assert_eq!(
         explicit.request_inventory().features()[0].origin(),
-        RequestValueOrigin::CoreDerived
+        RequestValueOrigin::CallerSupplied
     );
 
     let rejected = compile(

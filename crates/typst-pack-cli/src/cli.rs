@@ -1079,10 +1079,10 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         .filter(|requirement| !requirement.is_embedded())
         .map(|requirement| requirement.container_identity())
         .collect::<BTreeSet<_>>();
-    let mut request = PackCompilationRequest::new(pack, output_specification)
-        .adapter_resolved_output()
-        .adapter_resolved_inputs(parse_inputs(&args.compilation.inputs))
-        .adapter_resolved_document_time(DocumentTime::UnixTimestamp(document_timestamp));
+    let mut request =
+        PackCompilationRequest::new_with_adapter_resolved_output(pack, output_specification)
+            .adapter_resolved_inputs(parse_inputs(&args.compilation.inputs))
+            .adapter_resolved_document_time(DocumentTime::UnixTimestamp(document_timestamp));
     if !args.overrides.is_empty() {
         request = request.overrides(overrides);
     }
