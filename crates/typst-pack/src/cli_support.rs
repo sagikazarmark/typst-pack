@@ -11,7 +11,7 @@ use crate::compile::{
     PackCompilationExecution, PackCompilationPresentation, compile_pack_kernel,
     prepare_pack_compilation,
 };
-use crate::packer::{CreationDiagnosticContext, PackOutcome};
+use crate::fs_assembly::{PackAssemblyDiagnosticContext, PackAssemblyReport};
 use crate::{CompilationResult, PackCompilationRequest, PdfStandardsValidationError};
 
 pub use crate::FilesystemPackageAuthority;
@@ -115,7 +115,7 @@ pub fn compile_with_timing(
 }
 
 pub fn emit_creation_error_diagnostics<'a>(
-    context: &CreationDiagnosticContext,
+    context: &PackAssemblyDiagnosticContext,
     diagnostics: impl IntoIterator<Item = &'a SourceDiagnostic>,
     output: &mut impl WriteColor,
     format: DiagnosticFormat,
@@ -124,11 +124,11 @@ pub fn emit_creation_error_diagnostics<'a>(
 }
 
 pub fn emit_creation_warnings(
-    outcome: &PackOutcome,
+    report: &PackAssemblyReport,
     output: &mut impl WriteColor,
     format: DiagnosticFormat,
 ) {
-    let _ = typst_kit::diagnostics::emit(output, &outcome.world, outcome.warnings.iter(), format);
+    let _ = typst_kit::diagnostics::emit(output, &report.world, report.warnings().iter(), format);
 }
 
 pub fn validate_pdf_standards(

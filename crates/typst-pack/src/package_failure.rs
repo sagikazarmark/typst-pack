@@ -37,6 +37,12 @@ impl PackageAcquisitionFailures {
     pub fn get(&self, spec: &PackageSpec) -> Option<&PackageAcquisitionFailure> {
         self.failures.get(&spec.to_string())
     }
+
+    /// Removes an older failed attempt after the specification is acquired.
+    #[cfg(feature = "fs")]
+    pub(crate) fn remove(&mut self, spec: &PackageSpec) -> Option<PackageAcquisitionFailure> {
+        self.failures.remove(&spec.to_string())
+    }
 }
 
 impl FromIterator<PackageAcquisitionFailure> for PackageAcquisitionFailures {

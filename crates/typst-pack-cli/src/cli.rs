@@ -36,8 +36,9 @@ use typst_pack::{
     parse_page_selection,
 };
 use typst_pack::{
-    ExtractOptions, FILE_EXTENSION, FontContainerIdentity, Pack, PackCreationError, PackMetadata,
-    Packer, PackerError, extract,
+    ExtractOptions, FILE_EXTENSION, FilesystemPackAssembler, FilesystemPackAssemblerConfig,
+    FilesystemPackAssemblyError, FilesystemPackAssemblyRequest, FontContainerIdentity, Pack,
+    PackCreationError, PackMetadata, extract,
 };
 
 const ENV_PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
@@ -624,31 +625,35 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
         .output
         .unwrap_or_else(|| args.input.with_extension(FILE_EXTENSION));
 
-    let mut packer = Packer::new(&root, &input)
-        .vendor_packages(!args.no_vendor_packages)
-        .embed_fonts(args.embed_fonts)
-        .include_typst_embedded_fonts(args.include_typst_embedded_fonts)
+    let mut config = FilesystemPackAssemblerConfig::new()
         .typst_embedded_fonts(!args.fonts.ignore_embedded_fonts)
         .system_fonts(!args.fonts.ignore_system_fonts)
         .offline(args.packages.offline)
-        .certificate(cert.map(Path::to_path_buf))
-        .creation_timestamp(args.automation.creation_timestamp)
-        .timings(args.automation.timings.clone())
-        .inputs(parse_inputs(&args.compilation.inputs));
-    if let Some(target) = args.target {
-        packer = packer.target(target.into());
-    }
-    for feature in args.compilation.features {
-        packer = packer.feature(feature.into());
-    }
+        .certificate(cert.map(Path::to_path_buf));
     for path in &args.fonts.font_paths {
-        packer = packer.font_path(path);
+        config = config.font_path(path);
     }
     if let Some(path) = &args.packages.package_path {
-        packer = packer.package_path(path);
+        config = config.package_path(path);
     }
     if let Some(path) = &args.packages.package_cache_path {
-        packer = packer.package_cache_path(path);
+        config = config.package_cache_path(path);
+    }
+
+    let mut request = FilesystemPackAssemblyRequest::new(&root, &input)
+        .vendor_packages(!args.no_vendor_packages)
+        .embed_fonts(args.embed_fonts)
+        .include_typst_embedded_fonts(args.include_typst_embedded_fonts)
+        .timings(args.automation.timings.clone())
+        .inputs(parse_inputs(&args.compilation.inputs));
+    if let Some(timestamp) = args.automation.creation_timestamp {
+        request = request.document_time(DocumentTime::UnixTimestamp(timestamp));
+    }
+    if let Some(target) = args.target {
+        request = request.target(target.into());
+    }
+    for feature in args.compilation.features {
+        request = request.feature(feature.into());
     }
     if args.name.is_some() || args.description.is_some() || !args.authors.is_empty() {
         let mut metadata = PackMetadata::new();
@@ -661,21 +666,24 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
         for author in args.authors {
             metadata = metadata.with_author(author);
         }
-        packer = packer.metadata(metadata);
+        request = request.metadata(metadata);
     }
 
-    let (outcome, timing_error) = packer.pack_with_timing();
+    let assembler = FilesystemPackAssembler::new(config);
+    let (report, timing_error) = assembler.assemble_with_timing(request);
     let timing_error = timing_error.map(|error| error.to_string());
-    let outcome = match outcome {
-        Ok(outcome) => outcome,
-        Err(PackerError::ProjectGather(typst_pack::FilesystemProjectGatherError::Snapshot(
-            typst_pack::ProjectSnapshotError::MissingEntrypoint(path),
-        ))) => {
+    let report = match report {
+        Ok(report) => report,
+        Err(FilesystemPackAssemblyError::ProjectGather(
+            typst_pack::FilesystemProjectGatherError::Snapshot(
+                typst_pack::ProjectSnapshotError::MissingEntrypoint(path),
+            ),
+        )) => {
             return Err(
                 format!("entrypoint `{path}` is excluded by the Project Ignore Policy").into(),
             );
         }
-        Err(PackerError::Creation(error))
+        Err(FilesystemPackAssemblyError::Creation(error))
             if matches!(
                 error.error(),
                 PackCreationError::DependencyDiscoveryRejected(_)
@@ -707,7 +715,7 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
     };
 
     let mut stream = StandardStream::stderr(color);
-    emit_creation_warnings(&outcome, &mut stream, diagnostic_format);
+    emit_creation_warnings(&report, &mut stream, diagnostic_format);
     if let Some(error) = timing_error {
         return Err(error.into());
     }
@@ -715,7 +723,7 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
     if output == Path::new("-") {
         write_pack(
             std::io::stdout().lock(),
-            &outcome.pack,
+            report.pack(),
             EncodeLimits::reference_v1(),
         )
         .map_err(|err| format!("cannot write Pack to stdout: {err}"))?;
@@ -730,23 +738,23 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
     } else {
         FilePublicationPolicy::CreateNew
     };
-    save_pack(&output, &outcome.pack, EncodeLimits::reference_v1(), policy)
+    save_pack(&output, report.pack(), EncodeLimits::reference_v1(), policy)
         .map_err(|error| error.to_string())?;
 
-    let project_file_count = outcome.pack.files().count();
-    let vendored_package_count = outcome
-        .pack
+    let project_file_count = report.pack().files().count();
+    let vendored_package_count = report
+        .pack()
         .package_requirements()
         .iter()
         .filter(|requirement| requirement.is_embedded())
         .count();
-    let unvendored_packages = outcome
-        .pack
+    let unvendored_packages = report
+        .pack()
         .package_requirements()
         .iter()
         .filter(|requirement| !requirement.is_embedded())
         .collect::<Vec<_>>();
-    let font_count = outcome.pack.font_catalog().len();
+    let font_count = report.pack().font_catalog().len();
     println!(
         "packed {} project file(s), {} package(s), {} font(s) into `{}`",
         project_file_count,

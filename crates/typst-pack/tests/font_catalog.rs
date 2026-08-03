@@ -194,7 +194,10 @@ mod filesystem {
     use std::fs;
     use std::path::{Path, PathBuf};
 
-    use typst_pack::{FontContainerIdentity, Packer};
+    use typst_pack::{
+        FilesystemPackAssembler, FilesystemPackAssemblerConfig, FilesystemPackAssemblyRequest,
+        FontContainerIdentity,
+    };
 
     use crate::font_bytes::{family_of, renamed_family, typst_container};
 
@@ -231,14 +234,20 @@ mod filesystem {
         let second_directory = font_directory(dir.path(), "second", &second);
 
         let selected = |directories: [&Path; 2]| {
-            let mut packer = Packer::new(&project, "main.typ")
+            let mut config = FilesystemPackAssemblerConfig::new()
                 .system_fonts(false)
                 .typst_embedded_fonts(false);
             for directory in directories {
-                packer = packer.font_path(directory);
+                config = config.font_path(directory);
             }
-            let outcome = packer.pack().unwrap();
-            let requirements = outcome.pack.font_requirements();
+            let assembler = FilesystemPackAssembler::new(config);
+            let report = assembler
+                .assemble(FilesystemPackAssemblyRequest::new(
+                    &project,
+                    Path::new("main.typ"),
+                ))
+                .unwrap();
+            let requirements = report.pack().font_requirements();
             assert_eq!(requirements.len(), 1);
             requirements[0].container_identity()
         };
@@ -269,14 +278,19 @@ mod filesystem {
         )
         .unwrap();
 
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .font_path(&fonts)
-            .embed_fonts(true)
-            .pack()
+        let assembler = FilesystemPackAssembler::new(
+            FilesystemPackAssemblerConfig::new()
+                .system_fonts(false)
+                .font_path(&fonts),
+        );
+        let report = assembler
+            .assemble(
+                FilesystemPackAssemblyRequest::new(&project, Path::new("main.typ"))
+                    .embed_fonts(true),
+            )
             .unwrap();
 
-        let requirements = outcome.pack.font_requirements();
+        let requirements = report.pack().font_requirements();
         let embedded = requirements
             .iter()
             .filter(|requirement| requirement.is_embedded())
@@ -299,8 +313,8 @@ mod filesystem {
         // The Pack Font Catalog keeps the candidate catalog's relative order:
         // Typst's containers precede the scanned directory.
         assert_eq!(
-            outcome
-                .pack
+            report
+                .pack()
                 .font_catalog()
                 .iter()
                 .map(|face| face.identity().container())
@@ -322,15 +336,20 @@ mod filesystem {
         let project = project_using_family(dir.path(), &family_of(&data));
         let fonts = font_directory(dir.path(), "fonts", &data);
 
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .typst_embedded_fonts(false)
-            .font_path(&fonts)
-            .embed_fonts(true)
-            .pack()
+        let assembler = FilesystemPackAssembler::new(
+            FilesystemPackAssemblerConfig::new()
+                .system_fonts(false)
+                .typst_embedded_fonts(false)
+                .font_path(&fonts),
+        );
+        let report = assembler
+            .assemble(
+                FilesystemPackAssemblyRequest::new(&project, Path::new("main.typ"))
+                    .embed_fonts(true),
+            )
             .unwrap();
 
-        let requirements = outcome.pack.font_requirements();
+        let requirements = report.pack().font_requirements();
         assert_eq!(requirements.len(), 1);
         assert_eq!(
             requirements[0].container_identity(),

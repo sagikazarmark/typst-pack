@@ -557,7 +557,12 @@ impl Fixture {
 /// font container, and the reference adapter acquires them from there.
 #[cfg(feature = "fs")]
 fn create_on_filesystem(fixture: &Fixture, plan: &FilesystemPlan) -> Result<Created, Failure> {
-    use typst_pack::{Packer, PackerError};
+    use std::path::Path;
+
+    use typst_pack::{
+        FilesystemPackAssembler, FilesystemPackAssemblerConfig, FilesystemPackAssemblyError,
+        FilesystemPackAssemblyRequest,
+    };
 
     let dir = tempfile::tempdir().expect("a temporary directory for the fixture");
     let project = dir.path().join("project");
@@ -580,33 +585,41 @@ fn create_on_filesystem(fixture: &Fixture, plan: &FilesystemPlan) -> Result<Crea
         }
     }
 
-    let mut packer = Packer::new(&project, fixture.entrypoint)
+    let mut config = FilesystemPackAssemblerConfig::new()
         .package_path(&packages)
-        .creation_timestamp(Some(CREATION_TIMESTAMP))
-        .vendor_packages(plan.vendor_packages)
         // No ambient source participates: the fixture's bytes are the catalog.
         .system_fonts(false)
-        .typst_embedded_fonts(plan.typst_embedded_fonts)
+        .typst_embedded_fonts(plan.typst_embedded_fonts);
+    let request = FilesystemPackAssemblyRequest::new(&project, Path::new(fixture.entrypoint))
+        .document_time(DocumentTime::UnixTimestamp(CREATION_TIMESTAMP))
+        .vendor_packages(plan.vendor_packages)
         .include_typst_embedded_fonts(plan.include_typst_embedded_fonts)
         .embed_fonts(plan.embed_fonts);
     for (position, data) in plan.scanned_fonts.iter().enumerate() {
         let directory = dir.path().join(format!("fonts/{position}"));
         write_file(&directory.join(font_file_name(data)), data);
-        packer = packer.font_path(&directory);
+        config = config.font_path(directory);
     }
 
-    match packer.pack() {
-        Ok(outcome) => Ok(Created {
-            pack: outcome.pack,
-            warnings: messages(&outcome.warnings),
-        }),
-        Err(PackerError::ProjectGather(typst_pack::FilesystemProjectGatherError::Snapshot(
-            typst_pack::ProjectSnapshotError::MissingEntrypoint(_),
-        ))) => Err(Failure::ExcludedEntrypoint),
-        Err(PackerError::Package { .. } | PackerError::InvalidPackageCatalog(_)) => {
-            Err(Failure::UnsatisfiedPackage)
+    let assembler = FilesystemPackAssembler::new(config);
+    match assembler.assemble(request) {
+        Ok(report) => {
+            let (pack, warnings) = report.into_parts();
+            Ok(Created {
+                pack,
+                warnings: messages(&warnings),
+            })
         }
-        Err(PackerError::Creation(error))
+        Err(FilesystemPackAssemblyError::ProjectGather(
+            typst_pack::FilesystemProjectGatherError::Snapshot(
+                typst_pack::ProjectSnapshotError::MissingEntrypoint(_),
+            ),
+        )) => Err(Failure::ExcludedEntrypoint),
+        Err(
+            FilesystemPackAssemblyError::Package { .. }
+            | FilesystemPackAssemblyError::InvalidPackageCatalog(_),
+        ) => Err(Failure::UnsatisfiedPackage),
+        Err(FilesystemPackAssemblyError::Creation(error))
             if matches!(
                 error.error(),
                 PackCreationError::DependencyDiscoveryRejected(_)

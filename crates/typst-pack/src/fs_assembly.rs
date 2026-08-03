@@ -1,10 +1,9 @@
-//! The reference Pack Assembler: Pack Assembly over a project
-//! directory.
+//! The reference filesystem Pack Assembler.
 //!
 //! The adapter acquires and the core transforms. It lists and reads the
 //! project, composes the Font Catalog out of the font sources the
 //! host offers, obtains the Package Trees the core reports as
-//! missing, and resolves the creation timestamp; Pack Creation itself runs in
+//! missing, and resolves Document Time; Pack Creation itself runs in
 //! the core over those bytes.
 //!
 //! Each acquired value records the exact bytes observed by its source adapter;
@@ -15,7 +14,6 @@
 
 use std::collections::HashSet;
 use std::fmt;
-#[cfg(feature = "diagnostics")]
 use std::path::Path;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -39,6 +37,7 @@ use crate::font_catalog::FontDisposition;
 use crate::fs_fonts::{FilesystemFontLimits, FilesystemFontSource, gather_filesystem_font_catalog};
 use crate::fs_packages::{
     AcquiredPackages, FilesystemPackageAcquisitionError, FilesystemPackageAuthority,
+    FilesystemPackageLimits,
 };
 use crate::fs_project;
 use crate::manifest::PackMetadata;
@@ -47,139 +46,117 @@ use crate::package_catalog::{PackageCatalog, PackageCatalogError, PackageDisposi
 use crate::package_failure::PackageAcquisitionFailures;
 use crate::project_snapshot::ProjectSnapshot;
 
-/// Packs a Typst project directory into a [`Pack`].
-///
-/// The packer snapshots every eligible regular file beneath the project root,
-/// then performs one representative compile to select package and font
-/// dependencies. Compiler observations never select project files.
-///
-/// It is the reference Pack Assembler: it acquires the project, the
-/// Font Catalog, and the package trees creation reports as missing,
-/// and [`create`](crate::create) selects requirements over those bytes. How far
-/// its acquisition reaches is a build-time choice: with the `fs` feature alone
-/// it resolves reported specifications from local package directories and the
-/// host's package cache, and with `egress` it downloads the rest unless
-/// creation is [offline](Self::offline).
-///
-/// The returned Pack represents the exact values acquired. Project files
-/// are not reread solely to detect concurrent source mutation.
-pub struct Packer {
-    root: PathBuf,
-    entrypoint: PathBuf,
-    vendor_packages: bool,
-    embed_fonts: bool,
-    include_typst_embedded_fonts: bool,
-    typst_embedded_fonts: bool,
+/// Named finite resource policy for one filesystem Pack Assembly run.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FilesystemPackAssemblyProfile {
+    project: fs_project::FilesystemProjectLimits,
+    packages: FilesystemPackageLimits,
+    fonts: FilesystemFontLimits,
+    #[cfg(feature = "egress")]
+    package_expansion: crate::PackageExpansionLimits,
+}
+
+impl FilesystemPackAssemblyProfile {
+    /// The first-party finite profile used by ordinary filesystem workflows.
+    pub const fn reference_v1() -> Self {
+        Self {
+            project: fs_project::FilesystemProjectLimits::reference_v1(),
+            packages: FilesystemPackageLimits::reference_v1(),
+            fonts: FilesystemFontLimits::reference_v1(),
+            #[cfg(feature = "egress")]
+            package_expansion: crate::PackageExpansionLimits::reference_v1(),
+        }
+    }
+
+    pub const fn project(&self) -> fs_project::FilesystemProjectLimits {
+        self.project
+    }
+
+    pub const fn packages(&self) -> FilesystemPackageLimits {
+        self.packages
+    }
+
+    pub const fn fonts(&self) -> FilesystemFontLimits {
+        self.fonts
+    }
+
+    #[cfg(feature = "egress")]
+    pub const fn package_expansion(&self) -> crate::PackageExpansionLimits {
+        self.package_expansion
+    }
+}
+
+/// Clock policy used when a run does not supply an exact Document Time.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+#[non_exhaustive]
+pub enum FilesystemPackAssemblyClock {
+    /// Resolve the current UNIX timestamp from the host clock for each run.
+    #[default]
+    System,
+    /// Reuse one exact configured Document Time for every run.
+    Fixed(DocumentTime),
+}
+
+/// Reusable host policy for the reference filesystem Pack Assembler.
+#[derive(Debug)]
+pub struct FilesystemPackAssemblerConfig {
     font_paths: Vec<PathBuf>,
     system_fonts: bool,
-    inputs: Dict,
-    features: Vec<Feature>,
-    target: TypstTarget,
+    typst_embedded_fonts: bool,
     package_path: Option<PathBuf>,
     package_cache_path: Option<PathBuf>,
     offline: bool,
     #[cfg(feature = "egress")]
     certificate: Option<PathBuf>,
-    creation_timestamp: Option<i64>,
-    timings: Option<PathBuf>,
-    metadata: Option<PackMetadata>,
-    #[cfg(test)]
-    after_creation_hook: Option<Box<dyn Fn()>>,
+    clock: FilesystemPackAssemblyClock,
+    profile: FilesystemPackAssemblyProfile,
 }
 
-impl Packer {
-    /// Creates a packer for the project in `root` with the given entrypoint
-    /// (absolute, or relative to `root`).
-    pub fn new(root: impl Into<PathBuf>, entrypoint: impl Into<PathBuf>) -> Self {
+impl FilesystemPackAssemblerConfig {
+    /// Starts with ordinary first-party host policy and the reference-v1
+    /// finite profile.
+    pub fn new() -> Self {
         Self {
-            root: root.into(),
-            entrypoint: entrypoint.into(),
-            vendor_packages: true,
-            embed_fonts: false,
-            include_typst_embedded_fonts: false,
-            typst_embedded_fonts: true,
             font_paths: Vec::new(),
             system_fonts: true,
-            inputs: Dict::new(),
-            features: Vec::new(),
-            target: TypstTarget::Paged,
+            typst_embedded_fonts: true,
             package_path: None,
             package_cache_path: None,
             offline: false,
             #[cfg(feature = "egress")]
             certificate: None,
-            creation_timestamp: None,
-            timings: None,
-            metadata: None,
-            #[cfg(test)]
-            after_creation_hook: None,
+            clock: FilesystemPackAssemblyClock::System,
+            profile: FilesystemPackAssemblyProfile::reference_v1(),
         }
     }
 
-    /// Whether to store the files of all observed package dependencies inside
-    /// the pack. Defaults to `true`; when disabled, dependencies are recorded
-    /// as unvendored and must be resolvable when the pack is compiled.
-    pub fn vendor_packages(mut self, vendor: bool) -> Self {
-        self.vendor_packages = vendor;
+    /// Selects the finite resource policy applied to every run.
+    pub fn profile(mut self, profile: FilesystemPackAssemblyProfile) -> Self {
+        self.profile = profile;
         self
     }
 
-    /// Whether to embed the fonts used by the document. Defaults to `false`.
-    ///
-    /// Note that font licenses differ; make sure you may redistribute the
-    /// fonts you embed.
-    pub fn embed_fonts(mut self, embed: bool) -> Self {
-        self.embed_fonts = embed;
+    /// Selects how omitted per-run Document Time is resolved.
+    pub fn clock(mut self, clock: FilesystemPackAssemblyClock) -> Self {
+        self.clock = clock;
         self
     }
 
-    /// Whether font embedding also stores the containers Typst embeds.
-    /// Defaults to `false`; consumers then need the `embedded-fonts` feature
-    /// or another source for those containers.
-    ///
-    /// This follows where a container came from, not what its bytes are: a
-    /// scanned directory holding a copy of one of Typst's containers is
-    /// embedded like any other scanned container.
-    pub fn include_typst_embedded_fonts(mut self, include: bool) -> Self {
-        self.include_typst_embedded_fonts = include;
-        self
-    }
-
-    /// Whether creation may use fonts embedded into Typst. Defaults to `true`.
-    pub fn typst_embedded_fonts(mut self, include: bool) -> Self {
-        self.typst_embedded_fonts = include;
-        self
-    }
-
-    /// Adds a directory to scan for fonts during creation.
+    /// Adds a directory to the configured Font Authority.
     pub fn font_path(mut self, path: impl Into<PathBuf>) -> Self {
         self.font_paths.push(path.into());
         self
     }
 
-    /// Whether the creation compile may use system fonts. Defaults to
-    /// `true`.
+    /// Whether the configured Font Authority scans host system fonts.
     pub fn system_fonts(mut self, system: bool) -> Self {
         self.system_fonts = system;
         self
     }
 
-    /// Values made available to document code as `sys.inputs` during the
-    /// creation compile.
-    pub fn inputs(mut self, inputs: Dict) -> Self {
-        self.inputs = inputs;
-        self
-    }
-
-    /// Enables an experimental Typst language feature during creation.
-    pub fn feature(mut self, feature: Feature) -> Self {
-        self.features.push(feature);
-        self
-    }
-
-    /// Selects the target for the representative creation compilation.
-    pub fn target(mut self, target: TypstTarget) -> Self {
-        self.target = target;
+    /// Whether the configured Font Authority offers Typst's embedded fonts.
+    pub fn typst_embedded_fonts(mut self, include: bool) -> Self {
+        self.typst_embedded_fonts = include;
         self
     }
 
@@ -221,10 +198,87 @@ impl Packer {
         self.certificate = path;
         self
     }
+}
 
-    /// Uses a fixed UNIX timestamp during creation.
-    pub fn creation_timestamp(mut self, timestamp: Option<i64>) -> Self {
-        self.creation_timestamp = timestamp;
+impl Default for FilesystemPackAssemblerConfig {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+/// Per-run roots, Discovery Specification controls, embedding choices, and
+/// Pack metadata.
+pub struct FilesystemPackAssemblyRequest<'a> {
+    root: &'a Path,
+    entrypoint: &'a Path,
+    vendor_packages: bool,
+    embed_fonts: bool,
+    include_typst_embedded_fonts: bool,
+    inputs: Dict,
+    features: Vec<Feature>,
+    target: TypstTarget,
+    document_time: Option<DocumentTime>,
+    timings: Option<PathBuf>,
+    metadata: Option<PackMetadata>,
+}
+
+impl<'a> FilesystemPackAssemblyRequest<'a> {
+    /// Starts one run for an entrypoint that is absolute or relative to `root`.
+    pub fn new(root: &'a Path, entrypoint: &'a Path) -> Self {
+        Self {
+            root,
+            entrypoint,
+            vendor_packages: true,
+            embed_fonts: false,
+            include_typst_embedded_fonts: false,
+            inputs: Dict::new(),
+            features: Vec::new(),
+            target: TypstTarget::Paged,
+            document_time: None,
+            timings: None,
+            metadata: None,
+        }
+    }
+
+    /// Whether selected Package Trees are embedded in the Pack.
+    pub fn vendor_packages(mut self, vendor: bool) -> Self {
+        self.vendor_packages = vendor;
+        self
+    }
+
+    /// Whether selected scanned and system Font Containers are embedded.
+    pub fn embed_fonts(mut self, embed: bool) -> Self {
+        self.embed_fonts = embed;
+        self
+    }
+
+    /// Whether embedding includes selected Typst-embedded Font Containers.
+    pub fn include_typst_embedded_fonts(mut self, include: bool) -> Self {
+        self.include_typst_embedded_fonts = include;
+        self
+    }
+
+    /// Values made available to document code as `sys.inputs` during discovery.
+    pub fn inputs(mut self, inputs: Dict) -> Self {
+        self.inputs = inputs;
+        self
+    }
+
+    /// Enables one Typst engine feature during discovery.
+    pub fn feature(mut self, feature: Feature) -> Self {
+        self.features.push(feature);
+        self
+    }
+
+    /// Selects the Typst Target for discovery.
+    pub fn target(mut self, target: TypstTarget) -> Self {
+        self.target = target;
+        self
+    }
+
+    /// Supplies an exact Document Time instead of resolving the host clock.
+    pub fn document_time(mut self, document_time: DocumentTime) -> Self {
+        self.document_time = Some(document_time);
         self
     }
 
@@ -239,6 +293,45 @@ impl Packer {
         self.metadata = Some(metadata);
         self
     }
+}
+
+/// Reusable filesystem Pack Assembly over configured concrete authorities.
+pub struct FilesystemPackAssembler {
+    authority: FilesystemPackageAuthority,
+    font_paths: Vec<PathBuf>,
+    system_fonts: bool,
+    typst_embedded_fonts: bool,
+    clock: FilesystemPackAssemblyClock,
+    profile: FilesystemPackAssemblyProfile,
+    #[cfg(test)]
+    after_creation_hook: Option<Box<dyn Fn()>>,
+}
+
+impl FilesystemPackAssembler {
+    /// Configures the concrete project, package, font, clock, and finite-profile
+    /// policy reused by each assembly request.
+    pub fn new(config: FilesystemPackAssemblerConfig) -> Self {
+        let authority = FilesystemPackageAuthority::with_limits(
+            config.package_path.as_deref(),
+            config.package_cache_path.as_deref(),
+            config.offline,
+            config.profile.packages,
+            #[cfg(feature = "egress")]
+            config.profile.package_expansion,
+        );
+        #[cfg(feature = "egress")]
+        let authority = authority.certificate(config.certificate);
+        Self {
+            authority,
+            font_paths: config.font_paths,
+            system_fonts: config.system_fonts,
+            typst_embedded_fonts: config.typst_embedded_fonts,
+            clock: config.clock,
+            profile: config.profile,
+            #[cfg(test)]
+            after_creation_hook: None,
+        }
+    }
 
     #[cfg(test)]
     pub(crate) fn after_creation_hook(mut self, hook: impl Fn() + 'static) -> Self {
@@ -246,60 +339,56 @@ impl Packer {
         self
     }
 
-    /// The Package Authority this creation resolves reported specifications
-    /// through, which is as far as the host's capabilities reach.
-    fn package_authority(&self) -> FilesystemPackageAuthority {
-        let authority = FilesystemPackageAuthority::new(
-            self.package_path.as_deref(),
-            self.package_cache_path.as_deref(),
-            self.offline,
-        );
-        #[cfg(feature = "egress")]
-        let authority = authority.certificate(self.certificate.clone());
-        authority
-    }
-
-    /// Snapshots the project, runs the representative compile, and assembles the Pack.
-    pub fn pack(self) -> Result<PackOutcome, PackerError> {
-        let (result, timing_error) = self.pack_with_timing();
+    /// Gathers one Project Snapshot and Font Catalog, then resolves exactly the
+    /// packages reported between stateless Pack Creation invocations.
+    pub fn assemble(
+        &self,
+        request: FilesystemPackAssemblyRequest<'_>,
+    ) -> Result<PackAssemblyReport, FilesystemPackAssemblyError> {
+        let (result, timing_error) = self.assemble_with_timing(request);
         timing_error.map_or(result, Err)
     }
 
     #[doc(hidden)]
-    pub fn pack_with_timing(self) -> (Result<PackOutcome, PackerError>, Option<PackerError>) {
+    pub fn assemble_with_timing(
+        &self,
+        request: FilesystemPackAssemblyRequest<'_>,
+    ) -> (
+        Result<PackAssemblyReport, FilesystemPackAssemblyError>,
+        Option<FilesystemPackAssemblyError>,
+    ) {
         let mut timing_error = None;
-        let result = self.pack_inner(&mut timing_error);
+        let result = self.assemble_inner(request, &mut timing_error);
         (result, timing_error)
     }
 
-    fn pack_inner(
-        self,
-        timing_error: &mut Option<PackerError>,
-    ) -> Result<PackOutcome, PackerError> {
-        let root = self
-            .root
-            .canonicalize()
-            .map_err(|err| PackerError::io("failed to resolve project root", err))?;
-        let entrypoint_abs = if self.entrypoint.is_absolute() {
-            self.entrypoint.clone()
+    fn assemble_inner(
+        &self,
+        request: FilesystemPackAssemblyRequest<'_>,
+        timing_error: &mut Option<FilesystemPackAssemblyError>,
+    ) -> Result<PackAssemblyReport, FilesystemPackAssemblyError> {
+        let root = request.root.canonicalize().map_err(|err| {
+            FilesystemPackAssemblyError::io("failed to resolve project root", err)
+        })?;
+        let entrypoint_abs = if request.entrypoint.is_absolute() {
+            request.entrypoint.to_owned()
         } else {
-            root.join(&self.entrypoint)
+            root.join(request.entrypoint)
         };
         let entrypoint_abs = entrypoint_abs
             .canonicalize()
-            .map_err(|err| PackerError::io("failed to resolve entrypoint", err))?;
+            .map_err(|err| FilesystemPackAssemblyError::io("failed to resolve entrypoint", err))?;
         let entrypoint = VirtualPath::virtualize(&root, &entrypoint_abs)
-            .map_err(|_| PackerError::OutsideRoot(entrypoint_abs.clone()))?;
+            .map_err(|_| FilesystemPackAssemblyError::OutsideRoot(entrypoint_abs.clone()))?;
         let snapshot = Arc::new(fs_project::gather_filesystem_project(
             &root,
             entrypoint.get_without_slash(),
-            fs_project::FilesystemProjectLimits::reference_v1(),
+            self.profile.project,
         )?);
 
-        let authority = self.package_authority();
         let packages = Arc::new(AcquiredPackages::new());
 
-        let scanned_disposition = FontDisposition::embedded_if(self.embed_fonts);
+        let scanned_disposition = FontDisposition::embedded_if(request.embed_fonts);
         let mut font_sources = Vec::new();
         if self.system_fonts {
             font_sources.push(FilesystemFontSource::system(scanned_disposition));
@@ -307,35 +396,39 @@ impl Packer {
         #[cfg(feature = "embedded-fonts")]
         if self.typst_embedded_fonts {
             font_sources.push(FilesystemFontSource::typst_embedded(
-                FontDisposition::embedded_if(self.embed_fonts && self.include_typst_embedded_fonts),
+                FontDisposition::embedded_if(
+                    request.embed_fonts && request.include_typst_embedded_fonts,
+                ),
             ));
         }
         #[cfg(not(feature = "embedded-fonts"))]
-        let _ = (self.typst_embedded_fonts, self.include_typst_embedded_fonts);
+        let _ = (
+            self.typst_embedded_fonts,
+            request.include_typst_embedded_fonts,
+        );
         font_sources.extend(
             self.font_paths
                 .iter()
                 .map(|path| FilesystemFontSource::directory(path, scanned_disposition)),
         );
-        let font_catalog =
-            gather_filesystem_font_catalog(font_sources, FilesystemFontLimits::reference_v1())?;
+        let font_catalog = gather_filesystem_font_catalog(font_sources, self.profile.fonts)?;
 
         // The core consults no wall clock, so the adapter resolves the
         // representative request's Document Time from the host's.
-        let creation_timestamp = self.creation_timestamp.unwrap_or_else(|| {
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |duration| duration.as_secs() as i64)
-        });
+        let document_time = request
+            .document_time
+            .unwrap_or_else(|| self.clock.document_time());
 
         let discovery = DiscoverySpecification::new(
-            self.target,
-            self.inputs.clone(),
-            DocumentTime::UnixTimestamp(creation_timestamp),
-            self.features.iter().copied(),
+            request.target,
+            request.inputs,
+            document_time,
+            request.features,
         )
         .map_err(|source| {
-            PackerError::DiscoverySpecification(PackerDiscoverySpecificationError { source })
+            FilesystemPackAssemblyError::DiscoverySpecification(
+                FilesystemPackAssemblyDiscoveryError { source },
+            )
         })?;
 
         let mut world = AcquiredWorld {
@@ -353,26 +446,26 @@ impl Packer {
             fonts: FontStore::new(),
         };
 
-        let disposition = if self.vendor_packages {
+        let disposition = if request.vendor_packages {
             PackageDisposition::Embedded
         } else {
             PackageDisposition::External
         };
-        let mut timer = typst_kit::timer::Timer::new_or_placeholder(self.timings);
+        let mut timer = typst_kit::timer::Timer::new_or_placeholder(request.timings);
         let mut creation = None;
         let timings = timer.record(&mut world, |_| {
             creation = Some(resolve_and_create(
                 &snapshot,
                 &font_catalog,
                 &discovery,
-                self.metadata.as_ref(),
-                &authority,
+                request.metadata.as_ref(),
+                &self.authority,
                 &packages,
                 disposition,
             ));
         });
         let Some(creation) = creation else {
-            return Err(PackerError::Timings(
+            return Err(FilesystemPackAssemblyError::Timings(
                 timings
                     .expect_err("timer did not execute creation")
                     .to_string(),
@@ -380,10 +473,10 @@ impl Packer {
         };
         *timing_error = timings
             .err()
-            .map(|error| PackerError::Timings(error.to_string()));
+            .map(|error| FilesystemPackAssemblyError::Timings(error.to_string()));
         let (pack, warnings) = match creation {
             Ok(created) => created,
-            Err(error) => return Err(error.into_packer_error(world)),
+            Err(error) => return Err(error.into_assembly_error(world)),
         };
 
         #[cfg(test)]
@@ -391,12 +484,26 @@ impl Packer {
             hook();
         }
 
-        Ok(PackOutcome {
+        Ok(PackAssemblyReport {
             pack,
             warnings,
             #[cfg(feature = "diagnostics")]
             world,
         })
+    }
+}
+
+impl FilesystemPackAssemblyClock {
+    fn document_time(self) -> DocumentTime {
+        match self {
+            Self::System => {
+                let timestamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |duration| duration.as_secs() as i64);
+                DocumentTime::UnixTimestamp(timestamp)
+            }
+            Self::Fixed(document_time) => document_time,
+        }
     }
 }
 
@@ -450,20 +557,23 @@ fn resolve_and_create(
                         // nor what was declared unresolvable, so this cannot
                         // repeat; failing keeps that a diagnosis rather than a
                         // loop that never progresses.
-                        return Err(CreationFailure::Adapter(PackerError::Package {
-                            message: "the representative creation compile did not accept the \
+                        return Err(CreationFailure::Adapter(
+                            FilesystemPackAssemblyError::Package {
+                                message: "the representative creation compile did not accept the \
                                       resolved package tree"
-                                .to_owned(),
-                            spec,
-                        }));
+                                    .to_owned(),
+                                spec,
+                            },
+                        ));
                     }
                     match authority.acquire(&spec) {
                         Ok(acquired) => {
                             let (tree, _) = acquired.into_parts();
                             packages.record(spec.clone(), tree.clone());
+                            acquisition_failures.remove(&spec);
                             catalog
                                 .insert(spec.clone(), tree, disposition)
-                                .map_err(PackerError::InvalidPackageCatalog)?;
+                                .map_err(FilesystemPackAssemblyError::InvalidPackageCatalog)?;
                         }
                         Err(error) => {
                             acquisition_failures.insert(error.failure().clone());
@@ -485,20 +595,20 @@ enum CreationFailure {
         package_failures: Vec<FilesystemPackageAcquisitionError>,
     },
     /// The adapter failed to acquire what the core reported as missing.
-    Adapter(PackerError),
+    Adapter(FilesystemPackAssemblyError),
 }
 
 impl CreationFailure {
     /// Reports the failure in the filesystem adapter's vocabulary, handing a
     /// failed representative compile the sources that render its diagnostics.
-    fn into_packer_error(self, world: AcquiredWorld) -> PackerError {
+    fn into_assembly_error(self, world: AcquiredWorld) -> FilesystemPackAssemblyError {
         match self {
             Self::Adapter(error) => error,
             Self::Core {
                 error,
                 package_failures,
-            } => PackerError::Creation(PackerCreationError {
-                context: Box::new(CreationDiagnosticContext { world }),
+            } => FilesystemPackAssemblyError::Creation(FilesystemPackAssemblyCreationError {
+                context: Box::new(PackAssemblyDiagnosticContext { world }),
                 error,
                 package_failures,
             }),
@@ -506,42 +616,57 @@ impl CreationFailure {
     }
 }
 
-impl From<PackerError> for CreationFailure {
-    fn from(error: PackerError) -> Self {
+impl From<FilesystemPackAssemblyError> for CreationFailure {
+    fn from(error: FilesystemPackAssemblyError) -> Self {
         Self::Adapter(error)
     }
 }
 
-/// The result of a successful [`Packer::pack`] run.
-pub struct PackOutcome {
-    /// The assembled pack.
-    pub pack: Pack,
-    /// Warnings emitted by the representative creation compile.
-    pub warnings: EcoVec<SourceDiagnostic>,
+/// The terminal report of a successful filesystem Pack Assembly run.
+pub struct PackAssemblyReport {
+    pack: Pack,
+    warnings: EcoVec<SourceDiagnostic>,
     #[cfg(feature = "diagnostics")]
     pub(crate) world: AcquiredWorld,
+}
+
+impl PackAssemblyReport {
+    /// The assembled, authoritatively validated Pack.
+    pub fn pack(&self) -> &Pack {
+        &self.pack
+    }
+
+    /// Warnings emitted by the successful Dependency Discovery run.
+    pub fn warnings(&self) -> &[SourceDiagnostic] {
+        &self.warnings
+    }
+
+    /// Recovers the Pack and discovery warnings.
+    pub fn into_parts(self) -> (Pack, EcoVec<SourceDiagnostic>) {
+        (self.pack, self.warnings)
+    }
 }
 
 /// Opaque source context retained for first-party creation diagnostics.
 ///
 /// This value intentionally does not implement Typst's [`World`] interface.
 #[derive(Debug)]
-pub struct CreationDiagnosticContext {
+pub struct PackAssemblyDiagnosticContext {
     #[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
     pub(crate) world: AcquiredWorld,
 }
 
-/// A Pack Creation failure retained by the reference filesystem Packer.
+/// A Pack Creation failure retained by the filesystem Pack Assembler.
 #[derive(Debug)]
-pub struct PackerCreationError {
-    context: Box<CreationDiagnosticContext>,
+pub struct FilesystemPackAssemblyCreationError {
+    context: Box<PackAssemblyDiagnosticContext>,
     error: PackCreationError,
     package_failures: Vec<FilesystemPackageAcquisitionError>,
 }
 
-impl PackerCreationError {
+impl FilesystemPackAssemblyCreationError {
     /// Opaque source context for first-party diagnostic rendering.
-    pub fn context(&self) -> &CreationDiagnosticContext {
+    pub fn context(&self) -> &PackAssemblyDiagnosticContext {
         &self.context
     }
 
@@ -559,7 +684,7 @@ impl PackerCreationError {
     pub fn into_parts(
         self,
     ) -> (
-        Box<CreationDiagnosticContext>,
+        Box<PackAssemblyDiagnosticContext>,
         PackCreationError,
         Vec<FilesystemPackageAcquisitionError>,
     ) {
@@ -567,25 +692,25 @@ impl PackerCreationError {
     }
 }
 
-impl std::fmt::Display for PackerCreationError {
+impl std::fmt::Display for FilesystemPackAssemblyCreationError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         self.error.fmt(formatter)
     }
 }
 
-impl std::error::Error for PackerCreationError {
+impl std::error::Error for FilesystemPackAssemblyCreationError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.error)
     }
 }
 
-/// An invalid Discovery Specification retained by the filesystem Packer.
+/// An invalid Discovery Specification retained by filesystem Pack Assembly.
 #[derive(Debug)]
-pub struct PackerDiscoverySpecificationError {
+pub struct FilesystemPackAssemblyDiscoveryError {
     source: crate::creation::DiscoverySpecificationError,
 }
 
-impl PackerDiscoverySpecificationError {
+impl FilesystemPackAssemblyDiscoveryError {
     /// The unchanged Discovery Specification construction failure.
     pub fn source_error(&self) -> &crate::creation::DiscoverySpecificationError {
         &self.source
@@ -597,13 +722,17 @@ impl PackerDiscoverySpecificationError {
     }
 }
 
-impl std::fmt::Display for PackerDiscoverySpecificationError {
+impl std::fmt::Display for FilesystemPackAssemblyDiscoveryError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str("invalid creation timestamp: timestamp is out of range")
+        write!(
+            formatter,
+            "invalid Discovery Specification: {}",
+            self.source
+        )
     }
 }
 
-impl std::error::Error for PackerDiscoverySpecificationError {
+impl std::error::Error for FilesystemPackAssemblyDiscoveryError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(&self.source)
     }
@@ -612,7 +741,7 @@ impl std::error::Error for PackerDiscoverySpecificationError {
 /// A failure while packing a project directory.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum PackerError {
+pub enum FilesystemPackAssemblyError {
     #[error("{message}: {source}")]
     Io {
         message: String,
@@ -622,9 +751,9 @@ pub enum PackerError {
     #[error("`{0}` is outside the project root and cannot be packed")]
     OutsideRoot(PathBuf),
     #[error(transparent)]
-    Creation(PackerCreationError),
+    Creation(FilesystemPackAssemblyCreationError),
     #[error(transparent)]
-    DiscoverySpecification(PackerDiscoverySpecificationError),
+    DiscoverySpecification(FilesystemPackAssemblyDiscoveryError),
     #[error("failed to write creation timings: {0}")]
     Timings(String),
     #[error("failed to load package {spec}: {message}")]
@@ -638,7 +767,7 @@ pub enum PackerError {
     FontGather(#[from] crate::fs_fonts::FilesystemFontGatherError),
 }
 
-impl PackerError {
+impl FilesystemPackAssemblyError {
     pub(crate) fn io(message: &str, source: std::io::Error) -> Self {
         Self::Io {
             message: message.to_owned(),

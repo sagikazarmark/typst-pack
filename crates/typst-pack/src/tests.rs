@@ -2167,13 +2167,18 @@ Rows: #csv("data.csv").len()
         (project, packages)
     }
 
-    fn pack_fixture(dir: &Path) -> PackOutcome {
+    fn pack_fixture(dir: &Path) -> PackAssemblyReport {
         let (project, packages) = fixture(dir);
-        Packer::new(&project, "main.typ")
-            .package_path(&packages)
-            .system_fonts(false)
-            .pack()
-            .unwrap()
+        FilesystemPackAssembler::new(
+            FilesystemPackAssemblerConfig::new()
+                .package_path(&packages)
+                .system_fonts(false),
+        )
+        .assemble(FilesystemPackAssemblyRequest::new(
+            &project,
+            Path::new("main.typ"),
+        ))
+        .unwrap()
     }
 
     #[test]
@@ -2183,16 +2188,20 @@ Rows: #csv("data.csv").len()
         fs::create_dir_all(&project).unwrap();
         let main = project.join("main.typ");
         fs::write(&main, "original").unwrap();
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .after_creation_hook({
-                let main = main.clone();
-                move || fs::write(&main, "changed").unwrap()
-            })
-            .pack()
+        let assembler =
+            FilesystemPackAssembler::new(FilesystemPackAssemblerConfig::new().system_fonts(false))
+                .after_creation_hook({
+                    let main = main.clone();
+                    move || fs::write(&main, "changed").unwrap()
+                });
+        let report = assembler
+            .assemble(FilesystemPackAssemblyRequest::new(
+                &project,
+                Path::new("main.typ"),
+            ))
             .unwrap();
 
-        assert_eq!(outcome.pack.file("main.typ"), Some(&b"original"[..]));
+        assert_eq!(report.pack().file("main.typ"), Some(&b"original"[..]));
     }
 
     #[test]
@@ -2202,16 +2211,20 @@ Rows: #csv("data.csv").len()
         fs::create_dir_all(&project).unwrap();
         fs::write(project.join("main.typ"), "original").unwrap();
         let added = project.join("added.txt");
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .after_creation_hook({
-                let added = added.clone();
-                move || fs::write(&added, "added").unwrap()
-            })
-            .pack()
+        let assembler =
+            FilesystemPackAssembler::new(FilesystemPackAssemblerConfig::new().system_fonts(false))
+                .after_creation_hook({
+                    let added = added.clone();
+                    move || fs::write(&added, "added").unwrap()
+                });
+        let report = assembler
+            .assemble(FilesystemPackAssemblyRequest::new(
+                &project,
+                Path::new("main.typ"),
+            ))
             .unwrap();
 
-        assert!(outcome.pack.file("added.txt").is_none());
+        assert!(report.pack().file("added.txt").is_none());
     }
 
     #[test]
@@ -2220,18 +2233,24 @@ Rows: #csv("data.csv").len()
         let (project, packages) = fixture(dir.path());
         let library = packages.join("local/greet/0.1.0/lib.typ");
 
-        let outcome = Packer::new(&project, "main.typ")
-            .package_path(&packages)
-            .system_fonts(false)
-            .after_creation_hook(move || {
-                fs::write(&library, "#let greet(name) = [Changed #name!]\n").unwrap()
-            })
-            .pack()
+        let assembler = FilesystemPackAssembler::new(
+            FilesystemPackAssemblerConfig::new()
+                .package_path(&packages)
+                .system_fonts(false),
+        )
+        .after_creation_hook(move || {
+            fs::write(&library, "#let greet(name) = [Changed #name!]\n").unwrap()
+        });
+        let report = assembler
+            .assemble(FilesystemPackAssemblyRequest::new(
+                &project,
+                Path::new("main.typ"),
+            ))
             .unwrap();
 
         let spec = "@local/greet:0.1.0".parse().unwrap();
         assert_eq!(
-            outcome.pack.package_file(&spec, "lib.typ"),
+            report.pack().package_file(&spec, "lib.typ"),
             Some(&b"#let greet(name) = [Hello #name!]\n"[..])
         );
     }
@@ -2245,13 +2264,17 @@ Rows: #csv("data.csv").len()
         fs::write(project.join(".typkignore"), "ignored/\n").unwrap();
         let ignored = project.join("ignored/added.txt");
 
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .after_creation_hook(move || fs::write(&ignored, "added").unwrap())
-            .pack()
+        let assembler =
+            FilesystemPackAssembler::new(FilesystemPackAssemblerConfig::new().system_fonts(false))
+                .after_creation_hook(move || fs::write(&ignored, "added").unwrap());
+        let report = assembler
+            .assemble(FilesystemPackAssemblyRequest::new(
+                &project,
+                Path::new("main.typ"),
+            ))
             .unwrap();
 
-        assert!(outcome.pack.file("ignored/added.txt").is_none());
+        assert!(report.pack().file("ignored/added.txt").is_none());
     }
 
     #[cfg(feature = "embedded-fonts")]
@@ -2275,27 +2298,32 @@ Rows: #csv("data.csv").len()
         )
         .unwrap();
 
-        let outcome = Packer::new(&project, "main.typ")
-            .system_fonts(false)
-            .typst_embedded_fonts(false)
-            .font_path(&fonts)
-            .embed_fonts(true)
-            .after_creation_hook(move || fs::write(&font_path, b"changed").unwrap())
-            .pack()
+        let assembler = FilesystemPackAssembler::new(
+            FilesystemPackAssemblerConfig::new()
+                .system_fonts(false)
+                .typst_embedded_fonts(false)
+                .font_path(&fonts),
+        )
+        .after_creation_hook(move || fs::write(&font_path, b"changed").unwrap());
+        let report = assembler
+            .assemble(
+                FilesystemPackAssemblyRequest::new(&project, Path::new("main.typ"))
+                    .embed_fonts(true),
+            )
             .unwrap();
 
-        assert_eq!(outcome.pack.fonts().len(), 1);
-        assert_eq!(outcome.pack.fonts()[0].data(), data);
+        assert_eq!(report.pack().fonts().len(), 1);
+        assert_eq!(report.pack().fonts()[0].data(), data);
     }
 
     #[test]
     fn extract_writes_project_and_packages() {
         let dir = tempfile::tempdir().unwrap();
-        let outcome = pack_fixture(dir.path());
+        let assembly_report = pack_fixture(dir.path());
 
         let target = dir.path().join("extracted");
-        let report = extract(
-            &outcome.pack,
+        let extraction_report = extract(
+            assembly_report.pack(),
             &target,
             &ExtractOptions {
                 packages: true,
@@ -2304,13 +2332,13 @@ Rows: #csv("data.csv").len()
             },
         )
         .unwrap();
-        assert!(!report.written.is_empty());
+        assert!(!extraction_report.written.is_empty());
         assert!(target.join("main.typ").exists());
         assert!(target.join("assets/logo.png").exists());
         assert!(target.join("packages/local/greet/0.1.0/lib.typ").exists());
 
         // Refuses to overwrite without force.
-        let result = extract(&outcome.pack, &target, &ExtractOptions::default());
+        let result = extract(assembly_report.pack(), &target, &ExtractOptions::default());
         assert!(matches!(result, Err(ExtractError::Exists(_))));
     }
 

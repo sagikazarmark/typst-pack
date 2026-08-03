@@ -14,6 +14,8 @@ mod embedded;
 mod extract;
 mod font_catalog;
 #[cfg(feature = "fs")]
+mod fs_assembly;
+#[cfg(feature = "fs")]
 mod fs_fonts;
 #[cfg(feature = "fs")]
 mod fs_packages;
@@ -26,7 +28,6 @@ pub mod pack_archive;
 mod package_acquisition;
 mod package_catalog;
 mod package_failure;
-mod packer;
 mod payload;
 mod project_snapshot;
 mod world;
@@ -64,6 +65,13 @@ pub use font_catalog::typst_embedded_font_containers;
 pub use font_catalog::{
     FontCatalog, FontCatalogEntry, FontCatalogFace, FontContainer, FontContainerError,
     FontContainerFace, FontDisposition,
+};
+#[cfg(feature = "fs")]
+pub use fs_assembly::{
+    FilesystemPackAssembler, FilesystemPackAssemblerConfig, FilesystemPackAssemblyClock,
+    FilesystemPackAssemblyCreationError, FilesystemPackAssemblyDiscoveryError,
+    FilesystemPackAssemblyError, FilesystemPackAssemblyProfile, FilesystemPackAssemblyRequest,
+    PackAssemblyDiagnosticContext, PackAssemblyReport,
 };
 #[cfg(feature = "fs")]
 pub use fs_fonts::{
@@ -106,11 +114,6 @@ pub use package_catalog::{
 };
 pub use package_failure::{
     PackageAcquisitionFailure, PackageAcquisitionFailureReason, PackageAcquisitionFailures,
-};
-#[cfg(feature = "fs")]
-pub use packer::{
-    CreationDiagnosticContext, PackOutcome, Packer, PackerCreationError,
-    PackerDiscoverySpecificationError, PackerError,
 };
 pub use payload::PackArchiveBytes;
 pub use project_snapshot::{ProjectSnapshot, ProjectSnapshotAssembly, ProjectSnapshotError};

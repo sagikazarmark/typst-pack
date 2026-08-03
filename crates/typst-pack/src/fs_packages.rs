@@ -795,6 +795,8 @@ pub struct FilesystemPackageAuthority {
     offline: bool,
     source_limits: FilesystemPackageLimits,
     #[cfg(feature = "egress")]
+    expansion_limits: PackageExpansionLimits,
+    #[cfg(feature = "egress")]
     certificate: Option<PathBuf>,
 }
 
@@ -804,6 +806,23 @@ impl FilesystemPackageAuthority {
         package_path: Option<&Path>,
         package_cache_path: Option<&Path>,
         offline: bool,
+    ) -> Self {
+        Self::with_limits(
+            package_path,
+            package_cache_path,
+            offline,
+            FilesystemPackageLimits::reference_v1(),
+            #[cfg(feature = "egress")]
+            PackageExpansionLimits::reference_v1(),
+        )
+    }
+
+    pub(crate) fn with_limits(
+        package_path: Option<&Path>,
+        package_cache_path: Option<&Path>,
+        offline: bool,
+        source_limits: FilesystemPackageLimits,
+        #[cfg(feature = "egress")] expansion_limits: PackageExpansionLimits,
     ) -> Self {
         let data = match package_path {
             Some(path) => Some(FsPackages::new(path)),
@@ -817,7 +836,9 @@ impl FilesystemPackageAuthority {
             data,
             cache,
             offline,
-            source_limits: FilesystemPackageLimits::reference_v1(),
+            source_limits,
+            #[cfg(feature = "egress")]
+            expansion_limits,
             #[cfg(feature = "egress")]
             certificate: None,
         }
@@ -917,8 +938,7 @@ impl FilesystemPackageAuthority {
                 failure: other_failure(spec, "download size is not representable"),
                 source,
             })?;
-        let expansion_limits = PackageExpansionLimits::reference_v1();
-        let tree = acquire_registry_tree(spec, reader, known_size, expansion_limits)?;
+        let tree = acquire_registry_tree(spec, reader, known_size, self.expansion_limits)?;
 
         let root = if let Some(cache) = &self.cache {
             cache

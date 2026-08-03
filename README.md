@@ -147,8 +147,9 @@ container identities remain distinct positions. Faces are expanded in
 container-local index order, catalog order decides which container wins a
 family, and nothing joins a catalog implicitly:
 `typst_embedded_font_containers` yields Typst's own containers for a caller to
-splice in where it wants. `Packer` composes its catalog from system fonts,
-Typst's embedded fonts, and `--font-path` directories, in that order.
+splice in where it wants. `FilesystemPackAssembler` composes its catalog from
+system fonts, Typst's embedded fonts, and configured font directories, in that
+order.
 
 ### Output formats
 
@@ -192,17 +193,25 @@ reach the network. Add the `egress` feature to let filesystem creation download
 the packages a project imports.
 
 ```rust,ignore
+use std::path::Path;
+
 use typst_pack::pack_archive::{DecodeLimits, EncodeLimits, decode, encode};
 use typst_pack::{
-    compile, CompilationOutputSpecification, OutputFormat, Pack,
-    PackCompilationRequest, Packer, PdfOutputSpecification,
+    compile, CompilationOutputSpecification, FilesystemPackAssembler,
+    FilesystemPackAssemblerConfig, FilesystemPackAssemblyRequest, OutputFormat,
+    Pack, PackCompilationRequest, PdfOutputSpecification,
 };
 
 // Pack a project directory (requires the `fs` feature).
-let outcome = Packer::new("path/to/project", "main.typ")
-    .embed_fonts(true)
-    .pack()?;
-let bytes = encode(&outcome.pack, EncodeLimits::reference_v1())?;
+let assembler = FilesystemPackAssembler::new(FilesystemPackAssemblerConfig::new());
+let report = assembler.assemble(
+    FilesystemPackAssemblyRequest::new(
+        Path::new("path/to/project"),
+        Path::new("main.typ"),
+    )
+    .embed_fonts(true),
+)?;
+let bytes = encode(report.pack(), EncodeLimits::reference_v1())?;
 
 // ... ship the bytes somewhere, then compile without a file system:
 let pack = decode(&bytes, DecodeLimits::reference_v1())?;
@@ -237,10 +246,10 @@ reports the completed phase, visible prefix or staging residue, and Commit
 Certainty. A strict filesystem policy is rejected before staging on platforms
 where the adapter cannot guarantee it.
 
-`PackOutcome::warnings` retains warnings from the representative creation
-compile. Inspect `PackOutcome::pack` for authoritative project files, package
-requirements and their embedding disposition, and the Pack Font Catalog; that
-static inventory is not duplicated in the creation outcome.
+`PackAssemblyReport::warnings` retains warnings from the representative
+creation compile. Inspect `PackAssemblyReport::pack` for authoritative project
+files, package requirements and their embedding disposition, and the Pack Font
+Catalog; that static inventory is not duplicated in the assembly report.
 
 `compile` always returns a `CompilationReport` after accepting the semantic
 request. Its outcome contains either the immutable semantic result or an
@@ -328,24 +337,25 @@ Package Requirements and Font Requirements record. The `Created` outcome
 retains Dependency Discovery warnings, and a discovery run that does not compile
 fails creation instead of returning an incomplete pack. The operation borrows
 all inputs and retains nothing, so the same values can be used again.
-Obtaining its inputs belongs to Pack Assembly;
-`Packer` is the reference filesystem Pack Assembler, implemented over
-`create` like any other adapter.
+Obtaining its inputs belongs to Pack Assembly. `FilesystemPackAssembler` is the
+reference filesystem implementation over `create`; reusable
+`FilesystemPackAssemblerConfig` host policy is separate from each
+`FilesystemPackAssemblyRequest`.
 
 Creation borrows validated acquired bytes and has nothing to re-read. An adapter
 may therefore issue a pack describing values that never existed simultaneously
-in mutable storage; `Packer` does not reread package sources solely to detect
-later mutation.
+in mutable storage; `FilesystemPackAssembler` does not reread package sources
+solely to detect later mutation.
 
 How far the adapter's own acquisition reaches is a build-time choice. With `fs`
-alone it resolves reported specifications from the local package directories and
-whichever package cache the host has, and fails creation with
-`PackerError::Package` when a specification is in neither; with `egress` it
-downloads the rest from the Typst Universe registry unless creation is offline.
-`Packer::package_cache_path` configures cache reads and, with egress, the
-destination of successful downloads. `Packer::certificate` needs `egress`;
-`Packer::offline` does not, because a build without egress already resolves that
-way and code that sets it keeps compiling either way.
+alone it resolves reported specifications from configured local package
+directories and the package cache; with `egress` it downloads the rest from the
+Typst Universe registry unless assembly is offline. The assembler configuration
+owns package paths, cache, offline policy, certificate, font sources, clock, and
+the named finite profile. The per-run request owns roots, discovery controls,
+embedding choices, timings, and Pack metadata. Certificate configuration needs
+`egress`; offline configuration does not, because a build without egress already
+resolves that way.
 
 Package requirements can only be discovered by compiling, so creation resolves
 package acquisition through a resumable protocol rather than a callback. A
@@ -401,9 +411,9 @@ and rejects the next Dependency Discovery at the import that needed it, carrying
 that failure as its diagnostic. This is how an acquisition failure keeps a
 source location: the specifications creation reports name a package, never the
 file that imported one, so only a failed representative request can point at the
-import. `Packer` drives it, which is why an unresolvable package still fails
-with `PackerError::Creation` and a spanned diagnostic rather than beside the
-source that asked for it.
+import. `FilesystemPackAssembler` drives it, which is why an unresolvable
+package still fails with `FilesystemPackAssemblyError::Creation` and a spanned
+diagnostic rather than beside the source that asked for it.
 
 Resolving a reported specification against the Typst Universe registry needs
 the registry layout and the archive encoding, not an HTTP client. The
@@ -521,8 +531,11 @@ compatibility aliases:
 - Replace `CreationTarget` and `CompilationTarget` with `TypstTarget`.
 - Configure document time with one `DocumentTime` value. `Absent`, `Fixed`, and
   `UnixTimestamp` replace the former date/timestamp fields and setters.
-- Read representative-compile warnings from `PackOutcome::warnings`; the
-  one-field `PackReport` is removed.
+- Replace `Packer` with reusable `FilesystemPackAssemblerConfig` and
+  `FilesystemPackAssembler`, and put roots, discovery controls, embedding
+  choices, and metadata in `FilesystemPackAssemblyRequest`.
+- Read representative-compile warnings from `PackAssemblyReport::warnings`;
+  the one-field `PackReport` is removed.
 - Pack inspection exposes domain values rather than Pack Manifest records. Use
   `pack.entrypoint()`, `pack.metadata()`, `pack.package_requirements()`,
   `pack.font_catalog()`, and `font.identity()`/`font.data()`/`font.info()`.
@@ -543,10 +556,10 @@ fields are removed in place. Old fields and aliases are not accepted.
 
 ### Feature flags
 
-- `fs`: `Packer`, `extract`, local package directories and cache, system font
-  scanning. Requires a file system, so disable this for wasm targets. It links
-  no transport, so a build with this feature alone cannot download under any
-  runtime configuration.
+- `fs`: `FilesystemPackAssembler`, `extract`, local package directories and
+  cache, system font scanning. Requires a file system, so disable this for wasm
+  targets. It links no transport, so a build with this feature alone cannot
+  download under any runtime configuration.
 - `egress`: package downloading during filesystem creation, with the custom
   certificate and package cache directory only a download needs. Implies `fs`,
   builds on `package-acquisition`, and is what links an HTTP client and TLS

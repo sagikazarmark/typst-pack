@@ -17,12 +17,13 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use archive_support::{decode_reference, encode_reference};
+use typst_pack::{
+    DocumentTime, FilesystemPackAssembler, FilesystemPackAssemblerConfig,
+    FilesystemPackAssemblyError, FilesystemPackAssemblyRequest, FilesystemProjectGatherError,
+    FilesystemProjectIssue, Pack, PackCreationError, TypstTarget,
+};
 #[cfg(feature = "egress")]
 use typst_pack::{FilesystemPackageAcquisitionError, PackageAcquisitionFailureReason};
-use typst_pack::{
-    FilesystemProjectGatherError, FilesystemProjectIssue, Pack, PackCreationError, Packer,
-    PackerError, TypstTarget,
-};
 
 /// A project directory with an image, a data file, an included chapter, and an
 /// import from a local package, plus the package itself in a separate
@@ -75,16 +76,25 @@ fn project_files(pack: &Pack) -> Vec<&str> {
     pack.files().map(|(path, _)| path).collect()
 }
 
+fn request(project: &Path) -> FilesystemPackAssemblyRequest<'_> {
+    FilesystemPackAssemblyRequest::new(project, Path::new("main.typ"))
+}
+
+fn no_font_assembler() -> FilesystemPackAssembler {
+    FilesystemPackAssembler::new(FilesystemPackAssemblerConfig::new().system_fonts(false))
+}
+
 #[test]
 fn structural_creation_packs_all_project_files_and_complete_packages() {
     let dir = tempfile::tempdir().unwrap();
     let (project, packages) = fixture(dir.path());
 
-    let outcome = Packer::new(&project, "main.typ")
-        .package_path(&packages)
-        .system_fonts(false)
-        .pack()
-        .unwrap();
+    let assembler = FilesystemPackAssembler::new(
+        FilesystemPackAssemblerConfig::new()
+            .package_path(&packages)
+            .system_fonts(false),
+    );
+    let report = assembler.assemble(request(&project)).unwrap();
 
     for expected in [
         "main.typ",
@@ -93,23 +103,23 @@ fn structural_creation_packs_all_project_files_and_complete_packages() {
         "data.csv",
         "notes.txt",
     ] {
-        let files = project_files(&outcome.pack);
+        let files = project_files(report.pack());
         assert!(files.contains(&expected), "missing {expected} in {files:?}");
     }
-    assert_eq!(outcome.pack.package_requirements().len(), 1);
-    let requirement = &outcome.pack.package_requirements()[0];
+    assert_eq!(report.pack().package_requirements().len(), 1);
+    let requirement = &report.pack().package_requirements()[0];
     assert!(requirement.is_embedded());
     assert_eq!(requirement.spec().to_string(), "@local/greet:0.1.0");
 
     let spec = requirement.spec();
-    assert!(outcome.pack.has_package(spec));
-    assert!(outcome.pack.package_file(spec, "lib.typ").is_some());
-    assert!(outcome.pack.package_file(spec, "typst.toml").is_some());
+    assert!(report.pack().has_package(spec));
+    assert!(report.pack().package_file(spec, "lib.typ").is_some());
+    assert!(report.pack().package_file(spec, "typst.toml").is_some());
     // The whole Complete Package Tree travels, not only what was read.
-    assert!(outcome.pack.package_file(spec, "unused.txt").is_some());
+    assert!(report.pack().package_file(spec, "unused.txt").is_some());
 
-    let reread = decode_reference(encode_reference(&outcome.pack).unwrap()).unwrap();
-    assert_eq!(reread.identity(), outcome.pack.identity());
+    let reread = decode_reference(encode_reference(report.pack()).unwrap()).unwrap();
+    assert_eq!(reread.identity(), report.pack().identity());
 }
 
 #[test]
@@ -132,13 +142,10 @@ fn structural_creation_applies_the_root_project_ignore_policy() {
     fs::write(project.join("private.secret"), "drop").unwrap();
     fs::write(project.join("old.typk"), "drop").unwrap();
 
-    let outcome = Packer::new(&project, "main.typ")
-        .system_fonts(false)
-        .pack()
-        .unwrap();
+    let report = no_font_assembler().assemble(request(&project)).unwrap();
 
     assert_eq!(
-        project_files(&outcome.pack),
+        project_files(report.pack()),
         [
             ".typkignore",
             "ignored/reincluded/keep.txt",
@@ -159,12 +166,9 @@ fn structural_creation_does_not_reinclude_files_beneath_ignored_parents() {
     fs::write(project.join(".typkignore"), "ignored/\n!ignored/keep.txt\n").unwrap();
     fs::write(project.join("ignored/keep.txt"), "still ignored").unwrap();
 
-    let outcome = Packer::new(&project, "main.typ")
-        .system_fonts(false)
-        .pack()
-        .unwrap();
+    let report = no_font_assembler().assemble(request(&project)).unwrap();
 
-    assert_eq!(project_files(&outcome.pack), [".typkignore", "main.typ"]);
+    assert_eq!(project_files(report.pack()), [".typkignore", "main.typ"]);
 }
 
 #[test]
@@ -201,13 +205,10 @@ fn structural_creation_supports_gitignore_pattern_syntax() {
     fs::write(project.join("trailing.txt"), "ignored").unwrap();
     fs::write(project.join("literal "), "ignored").unwrap();
 
-    let outcome = Packer::new(&project, "main.typ")
-        .system_fonts(false)
-        .pack()
-        .unwrap();
+    let report = no_font_assembler().assemble(request(&project)).unwrap();
 
     assert_eq!(
-        project_files(&outcome.pack),
+        project_files(report.pack()),
         [
             "# Project policy",
             ".typkignore",
@@ -232,13 +233,10 @@ fn structural_creation_prunes_conclusively_ignored_subtrees() {
     fs::write(project.join("other/keep.txt"), "keep").unwrap();
     symlink(dir.path(), project.join("ignored/outside")).unwrap();
 
-    let outcome = Packer::new(&project, "main.typ")
-        .system_fonts(false)
-        .pack()
-        .unwrap();
+    let report = no_font_assembler().assemble(request(&project)).unwrap();
 
     assert_eq!(
-        project_files(&outcome.pack),
+        project_files(report.pack()),
         [".typkignore", "main.typ", "other/keep.txt"]
     );
 }
@@ -260,11 +258,11 @@ fn structural_creation_rejects_a_symlinked_root_ignore_policy() {
     .unwrap();
 
     let policy = project.canonicalize().unwrap().join(".typkignore");
-    let result = Packer::new(&project, "main.typ").system_fonts(false).pack();
+    let result = no_font_assembler().assemble(request(&project));
 
     assert!(matches!(
         result,
-        Err(PackerError::ProjectGather(FilesystemProjectGatherError::Survey(ref survey)))
+        Err(FilesystemPackAssemblyError::ProjectGather(FilesystemProjectGatherError::Survey(ref survey)))
             if matches!(survey.issues(), [FilesystemProjectIssue::Alias { path }] if path == &policy)
     ));
 }
@@ -276,18 +274,19 @@ fn the_adapter_preserves_the_timestamp_range_error() {
     fs::create_dir(&project).unwrap();
     fs::write(project.join("main.typ"), "Hello").unwrap();
 
-    let result = Packer::new(&project, "main.typ")
-        .system_fonts(false)
-        .creation_timestamp(Some(i64::MAX))
-        .pack();
+    let result = no_font_assembler()
+        .assemble(request(&project).document_time(DocumentTime::UnixTimestamp(i64::MAX)));
 
     let Err(error) = result else {
         panic!("the invalid Discovery Specification was accepted");
     };
-    assert!(matches!(&error, PackerError::DiscoverySpecification(_)));
+    assert!(matches!(
+        &error,
+        FilesystemPackAssemblyError::DiscoverySpecification(_)
+    ));
     assert_eq!(
         error.to_string(),
-        "invalid creation timestamp: timestamp is out of range"
+        "invalid Discovery Specification: the discovery document-time UNIX timestamp is out of range"
     );
 }
 
@@ -304,15 +303,16 @@ fn creation_target_does_not_select_project_files() {
     fs::write(project.join("paged.txt"), "paged").unwrap();
     fs::write(project.join("html.txt"), "html").unwrap();
 
-    let outcome = Packer::new(&project, "main.typ")
-        .system_fonts(false)
-        .feature(typst::Feature::Html)
-        .target(TypstTarget::Html)
-        .pack()
+    let report = no_font_assembler()
+        .assemble(
+            request(&project)
+                .feature(typst::Feature::Html)
+                .target(TypstTarget::Html),
+        )
         .unwrap();
 
     assert_eq!(
-        project_files(&outcome.pack),
+        project_files(report.pack()),
         ["html.txt", "main.typ", "paged.txt"]
     );
 }
@@ -333,15 +333,16 @@ fn exact_inputs_and_document_time_drive_representative_creation() {
     let mut inputs = typst::foundations::Dict::new();
     inputs.insert("pick".into(), typst::foundations::Value::Str("yes".into()));
 
-    let outcome = Packer::new(&project, "main.typ")
-        .system_fonts(false)
-        .inputs(inputs)
-        .creation_timestamp(Some(1_704_067_200))
-        .pack()
+    let report = no_font_assembler()
+        .assemble(
+            request(&project)
+                .inputs(inputs)
+                .document_time(DocumentTime::UnixTimestamp(1_704_067_200)),
+        )
         .unwrap();
 
     assert_eq!(
-        project_files(&outcome.pack),
+        project_files(report.pack()),
         ["input.txt", "main.typ", "time.txt"]
     );
 }
@@ -374,14 +375,15 @@ fn package_data_precedes_package_cache_during_creation() {
     fs::create_dir_all(&cache_package).unwrap();
     fs::write(cache_package.join("lib.typ"), "this is not valid Typst: {").unwrap();
 
-    let outcome = Packer::new(&project, "main.typ")
-        .package_path(dir.path().join("data"))
-        .package_cache_path(dir.path().join("cache"))
-        .system_fonts(false)
-        .pack()
-        .unwrap();
+    let assembler = FilesystemPackAssembler::new(
+        FilesystemPackAssemblerConfig::new()
+            .package_path(dir.path().join("data"))
+            .package_cache_path(dir.path().join("cache"))
+            .system_fonts(false),
+    );
+    let report = assembler.assemble(request(&project)).unwrap();
 
-    assert_eq!(outcome.pack.package_requirements().len(), 1);
+    assert_eq!(report.pack().package_requirements().len(), 1);
 }
 
 #[test]
@@ -411,17 +413,18 @@ fn package_cache_resolves_during_online_and_offline_creation() {
     .unwrap();
 
     for offline in [false, true] {
-        let outcome = Packer::new(&project, "main.typ")
-            .package_path(&data)
-            .package_cache_path(dir.path().join("cache"))
-            .offline(offline)
-            .system_fonts(false)
-            .pack()
-            .unwrap();
+        let assembler = FilesystemPackAssembler::new(
+            FilesystemPackAssemblerConfig::new()
+                .package_path(&data)
+                .package_cache_path(dir.path().join("cache"))
+                .offline(offline)
+                .system_fonts(false),
+        );
+        let report = assembler.assemble(request(&project)).unwrap();
 
-        let spec = outcome.pack.package_requirements()[0].spec();
+        let spec = report.pack().package_requirements()[0].spec();
         assert_eq!(spec.to_string(), "@preview/cached:0.1.0");
-        assert!(outcome.pack.package_file(spec, "lib.typ").is_some());
+        assert!(report.pack().package_file(spec, "lib.typ").is_some());
     }
 }
 
@@ -448,17 +451,18 @@ fn a_project_needing_chained_packages_is_resolved_to_completion() {
         "#let inner = rect(width: 1pt, height: 1pt)",
     );
 
-    let outcome = Packer::new(&project, "main.typ")
-        .package_path(&packages)
-        .system_fonts(false)
-        .pack()
-        .unwrap();
+    let assembler = FilesystemPackAssembler::new(
+        FilesystemPackAssemblerConfig::new()
+            .package_path(&packages)
+            .system_fonts(false),
+    );
+    let report = assembler.assemble(request(&project)).unwrap();
 
     // The package only another package's tree imports is resolved too, however
     // many rounds of creation that took.
     assert_eq!(
-        outcome
-            .pack
+        report
+            .pack()
             .package_requirements()
             .iter()
             .map(|requirement| requirement.spec().to_string())
@@ -484,14 +488,15 @@ fn offline_creation_works_with_local_packages() {
     let dir = tempfile::tempdir().unwrap();
     let (project, packages) = fixture(dir.path());
 
-    let outcome = Packer::new(&project, "main.typ")
-        .package_path(&packages)
-        .system_fonts(false)
-        .offline(true)
-        .pack()
-        .unwrap();
+    let assembler = FilesystemPackAssembler::new(
+        FilesystemPackAssemblerConfig::new()
+            .package_path(&packages)
+            .system_fonts(false)
+            .offline(true),
+    );
+    let report = assembler.assemble(request(&project)).unwrap();
 
-    assert_eq!(outcome.pack.package_requirements().len(), 1);
+    assert_eq!(report.pack().package_requirements().len(), 1);
 }
 
 #[cfg(feature = "egress")]
@@ -508,16 +513,18 @@ fn offline_creation_fails_on_an_uncached_universe_package() {
     let empty = dir.path().join("empty");
     fs::create_dir_all(&empty).unwrap();
 
-    let result = Packer::new(&project, "main.typ")
-        .system_fonts(false)
-        .offline(true)
-        .package_path(&empty)
-        .package_cache_path(&empty)
-        .pack();
+    let assembler = FilesystemPackAssembler::new(
+        FilesystemPackAssemblerConfig::new()
+            .system_fonts(false)
+            .offline(true)
+            .package_path(&empty)
+            .package_cache_path(&empty),
+    );
+    let result = assembler.assemble(request(&project));
 
     assert!(matches!(
         &result,
-        Err(PackerError::Creation(error))
+        Err(FilesystemPackAssemblyError::Creation(error))
             if matches!(
                 error.package_failures(),
                 [FilesystemPackageAcquisitionError::Unavailable(failure)]
@@ -555,10 +562,12 @@ fn creation_without_egress_never_downloads_a_universe_package() {
     let empty = dir.path().join("empty");
     fs::create_dir_all(&empty).unwrap();
 
-    let result = Packer::new(&project, "main.typ")
-        .system_fonts(false)
-        .package_path(&empty)
-        .pack();
+    let assembler = FilesystemPackAssembler::new(
+        FilesystemPackAssemblerConfig::new()
+            .system_fonts(false)
+            .package_path(&empty),
+    );
+    let result = assembler.assemble(request(&project));
 
     assert_eq!(
         unresolvable_package_diagnostics(result),
@@ -573,9 +582,9 @@ fn creation_without_egress_never_downloads_a_universe_package() {
 /// failed representative request carries a span, and the adapter has none of
 /// its own to offer.
 fn unresolvable_package_diagnostics(
-    result: Result<typst_pack::PackOutcome, PackerError>,
+    result: Result<typst_pack::PackAssemblyReport, FilesystemPackAssemblyError>,
 ) -> Vec<String> {
-    let Err(PackerError::Creation(error)) = result else {
+    let Err(FilesystemPackAssemblyError::Creation(error)) = result else {
         panic!("an unresolvable package did not fail the representative request");
     };
     let PackCreationError::DependencyDiscoveryRejected(rejection) = error.error() else {
@@ -601,11 +610,11 @@ fn a_representative_compile_that_fails_issues_no_pack() {
     fs::create_dir_all(&project).unwrap();
     fs::write(project.join("main.typ"), "#import \"missing.typ\": x\n").unwrap();
 
-    let result = Packer::new(&project, "main.typ").system_fonts(false).pack();
+    let result = no_font_assembler().assemble(request(&project));
 
     assert!(matches!(
         result,
-        Err(PackerError::Creation(error))
+        Err(FilesystemPackAssemblyError::Creation(error))
             if matches!(
                 error.error(),
                 PackCreationError::DependencyDiscoveryRejected(_)
@@ -624,19 +633,20 @@ fn creation_retains_representative_compile_warnings() {
     )
     .unwrap();
 
-    let outcome = Packer::new(&project, "main.typ")
-        .system_fonts(false)
-        .typst_embedded_fonts(false)
-        .pack()
-        .unwrap();
+    let assembler = FilesystemPackAssembler::new(
+        FilesystemPackAssemblerConfig::new()
+            .system_fonts(false)
+            .typst_embedded_fonts(false),
+    );
+    let report = assembler.assemble(request(&project)).unwrap();
 
     assert!(
-        outcome
-            .warnings
+        report
+            .warnings()
             .iter()
             .any(|warning| warning.message.contains("unknown font family")),
         "{:?}",
-        outcome.warnings
+        report.warnings()
     );
 }
 
@@ -651,27 +661,29 @@ mod fonts {
         let dir = tempfile::tempdir().unwrap();
         let (project, packages) = fixture(dir.path());
 
-        let slim = Packer::new(&project, "main.typ")
-            .package_path(&packages)
-            .system_fonts(false)
-            .embed_fonts(true)
-            .pack()
+        let assembler = FilesystemPackAssembler::new(
+            FilesystemPackAssemblerConfig::new()
+                .package_path(&packages)
+                .system_fonts(false),
+        );
+        let slim = assembler
+            .assemble(request(&project).embed_fonts(true))
             .unwrap();
         assert!(
-            slim.pack.fonts().is_empty(),
+            slim.pack().fonts().is_empty(),
             "only Typst embedded fonts are used, so nothing should be embedded"
         );
 
-        let full = Packer::new(&project, "main.typ")
-            .package_path(&packages)
-            .system_fonts(false)
-            .embed_fonts(true)
-            .include_typst_embedded_fonts(true)
-            .pack()
+        let full = assembler
+            .assemble(
+                request(&project)
+                    .embed_fonts(true)
+                    .include_typst_embedded_fonts(true),
+            )
             .unwrap();
-        assert!(!full.pack.fonts().is_empty());
+        assert!(!full.pack().fonts().is_empty());
         // The embedded containers must load again from the pack.
-        decode_reference(encode_reference(&full.pack).unwrap()).unwrap();
+        decode_reference(encode_reference(full.pack()).unwrap()).unwrap();
     }
 
     #[test]
@@ -681,16 +693,17 @@ mod fonts {
         fs::create_dir_all(&project).unwrap();
         fs::write(project.join("main.typ"), "#html.frame[Hello]").unwrap();
 
-        let outcome = Packer::new(&project, "main.typ")
-            .target(TypstTarget::Html)
-            .feature(typst::Feature::Html)
-            .system_fonts(false)
-            .embed_fonts(true)
-            .include_typst_embedded_fonts(true)
-            .pack()
+        let report = no_font_assembler()
+            .assemble(
+                request(&project)
+                    .target(TypstTarget::Html)
+                    .feature(typst::Feature::Html)
+                    .embed_fonts(true)
+                    .include_typst_embedded_fonts(true),
+            )
             .unwrap();
 
-        assert!(!outcome.pack.fonts().is_empty());
+        assert!(!report.pack().fonts().is_empty());
     }
 
     #[test]
@@ -702,14 +715,15 @@ mod fonts {
 
         let dir = tempfile::tempdir().unwrap();
         let (project, packages) = fixture(dir.path());
-        let outcome = Packer::new(&project, "main.typ")
-            .package_path(&packages)
-            .system_fonts(false)
-            .pack()
-            .unwrap();
+        let assembler = FilesystemPackAssembler::new(
+            FilesystemPackAssemblerConfig::new()
+                .package_path(&packages)
+                .system_fonts(false),
+        );
+        let report = assembler.assemble(request(&project)).unwrap();
 
         // Round-trip through bytes: nothing may depend on the filesystem.
-        let pack = decode_reference(encode_reference(&outcome.pack).unwrap()).unwrap();
+        let pack = decode_reference(encode_reference(report.pack()).unwrap()).unwrap();
         let mut request = PackCompilationRequest::new(
             pack.clone(),
             CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
