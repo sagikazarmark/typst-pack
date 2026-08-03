@@ -32,10 +32,11 @@ parallel = ["dep:rayon"]
 # with this feature alone cannot download under any runtime configuration. Not
 # available on wasm targets.
 fs = [
+    "dep:fontconfig-parser",
     "dep:ignore",
     "dep:libc",
     "dep:walkdir",
-    "typst-kit/scan-fonts",
+    "dep:windows-sys",
     "typst-kit/system-files",
     "typst-kit/timer",
 ]
@@ -80,6 +81,12 @@ zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = { version = "0.2", optional = true }
+
+[target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))'.dependencies]
+fontconfig-parser = { version = "0.5", default-features = false, optional = true }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"], optional = true }
 
 [dev-dependencies]
 # The acquisition suite writes the archives the helpers expand.

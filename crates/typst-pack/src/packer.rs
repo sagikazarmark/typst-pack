@@ -25,17 +25,16 @@ use typst::diag::{FileError, FileResult, PackageError, SourceDiagnostic};
 use typst::foundations::{Bytes, Datetime, Dict, Duration};
 use typst::syntax::package::PackageSpec;
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
-use typst::text::{Font, FontBook, FontInfo};
+use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst::{Feature, Library, LibraryExt, World};
 use typst_kit::files::{FileLoader, FileStore};
-use typst_kit::fonts::{FontPath, FontStore};
+use typst_kit::fonts::FontStore;
 
 use crate::compile::TypstTarget;
 use crate::creation::{CreationError, CreationOutcome, CreationRequest, IssuedPack, create};
-#[cfg(feature = "embedded-fonts")]
-use crate::font_catalog::typst_embedded_font_containers;
-use crate::font_catalog::{FontCatalog, FontCatalogEntry, FontContainer, FontDisposition};
+use crate::font_catalog::FontDisposition;
+use crate::fs_fonts::{FilesystemFontLimits, FilesystemFontSource, gather_filesystem_font_catalog};
 use crate::fs_packages::{
     AcquiredPackages, FilesystemPackageAcquisitionError, FilesystemPackageAuthority,
 };
@@ -298,14 +297,26 @@ impl Packer {
         let authority = self.package_authority();
         let packages = Arc::new(AcquiredPackages::new());
 
-        let font_sources = FontSources {
-            system: self.system_fonts,
-            typst_embedded: self.typst_embedded_fonts,
-            paths: &self.font_paths,
-            embed: self.embed_fonts,
-            include_typst_embedded: self.include_typst_embedded_fonts,
-        };
-        let font_catalog = font_sources.compose();
+        let scanned_disposition = FontDisposition::embedded_if(self.embed_fonts);
+        let mut font_sources = Vec::new();
+        if self.system_fonts {
+            font_sources.push(FilesystemFontSource::system(scanned_disposition));
+        }
+        #[cfg(feature = "embedded-fonts")]
+        if self.typst_embedded_fonts {
+            font_sources.push(FilesystemFontSource::typst_embedded(
+                FontDisposition::embedded_if(self.embed_fonts && self.include_typst_embedded_fonts),
+            ));
+        }
+        #[cfg(not(feature = "embedded-fonts"))]
+        let _ = (self.typst_embedded_fonts, self.include_typst_embedded_fonts);
+        font_sources.extend(
+            self.font_paths
+                .iter()
+                .map(|path| FilesystemFontSource::directory(path, scanned_disposition)),
+        );
+        let font_catalog =
+            gather_filesystem_font_catalog(font_sources, FilesystemFontLimits::reference_v1())?;
 
         // The core consults no wall clock, so the adapter resolves the
         // representative request's Document Time from the host's.
@@ -376,8 +387,6 @@ impl Packer {
         if let Some(hook) = &self.after_creation_hook {
             hook();
         }
-
-        font_sources.revalidate(&font_catalog)?;
 
         Ok(PackOutcome {
             pack: issued.pack,
@@ -572,8 +581,8 @@ pub enum PackerError {
     InvalidPackageCatalog(PackageCatalogError),
     #[error(transparent)]
     ProjectGather(#[from] fs_project::FilesystemProjectGatherError),
-    #[error("creation evidence changed before Pack issuance: `{path}`")]
-    CreationEvidenceChanged { path: String },
+    #[error(transparent)]
+    FontGather(#[from] crate::fs_fonts::FilesystemFontGatherError),
     #[error(transparent)]
     Build(#[from] PackBuildError),
 }
@@ -736,78 +745,4 @@ impl FileLoader for AcquiredLoader {
         }
         .ok_or_else(|| FileError::NotFound(PathBuf::from(path)))
     }
-}
-
-/// The font acquisition half of Pack Assembly for the filesystem adapter: the
-/// ambient sources it acquires Font Containers from, and the
-/// disposition each source's containers carry.
-struct FontSources<'a> {
-    system: bool,
-    typst_embedded: bool,
-    paths: &'a [PathBuf],
-    embed: bool,
-    include_typst_embedded: bool,
-}
-
-impl FontSources<'_> {
-    /// Composes the Font Catalog: system fonts, then Typst's
-    /// embedded fonts, then each scanned directory in the order it was added.
-    fn compose(&self) -> FontCatalog {
-        let mut catalog = FontCatalog::new();
-        let scanned = FontDisposition::embedded_if(self.embed);
-        if self.system {
-            catalog.extend(read_containers(typst_kit::fonts::system(), scanned));
-        }
-        #[cfg(feature = "embedded-fonts")]
-        if self.typst_embedded {
-            let disposition =
-                FontDisposition::embedded_if(self.embed && self.include_typst_embedded);
-            catalog.extend(
-                typst_embedded_font_containers()
-                    .map(|container| FontCatalogEntry::new(container, disposition)),
-            );
-        }
-        #[cfg(not(feature = "embedded-fonts"))]
-        let _ = (self.typst_embedded, self.include_typst_embedded);
-        for path in self.paths {
-            catalog.extend(read_containers(typst_kit::fonts::scan(path), scanned));
-        }
-        catalog
-    }
-
-    /// Fails when the fonts backing `catalog` no longer agree with the
-    /// filesystem, which is the font half of the Creation Evidence Fence.
-    fn revalidate(&self, catalog: &FontCatalog) -> Result<(), PackerError> {
-        if &self.compose() != catalog {
-            return Err(PackerError::CreationEvidenceChanged {
-                path: "font catalog".to_owned(),
-            });
-        }
-        Ok(())
-    }
-}
-
-/// Reads the containers behind scanned faces, one container per font file, in
-/// the order the scan first reported them.
-///
-/// A listed file that cannot be read offers no candidate face at all, so
-/// selection never reaches a container the adapter cannot supply.
-fn read_containers(
-    faces: impl Iterator<Item = (FontPath, FontInfo)>,
-    disposition: FontDisposition,
-) -> Vec<FontCatalogEntry> {
-    let mut seen = HashSet::new();
-    let mut containers = Vec::new();
-    for (source, _) in faces {
-        if !seen.insert(source.path.clone()) {
-            continue;
-        }
-        let Ok(data) = std::fs::read(&source.path) else {
-            continue;
-        };
-        if let Ok(container) = FontContainer::new(data) {
-            containers.push(FontCatalogEntry::new(container, disposition));
-        }
-    }
-    containers
 }

@@ -14,6 +14,8 @@ mod embedded;
 mod extract;
 mod font_catalog;
 #[cfg(feature = "fs")]
+mod fs_fonts;
+#[cfg(feature = "fs")]
 mod fs_packages;
 #[cfg(feature = "fs")]
 mod fs_project;
@@ -59,6 +61,13 @@ pub use font_catalog::typst_embedded_font_containers;
 pub use font_catalog::{
     FontCatalog, FontCatalogEntry, FontCatalogFace, FontContainer, FontContainerError,
     FontContainerFace, FontDisposition,
+};
+#[cfg(feature = "fs")]
+pub use fs_fonts::{
+    FilesystemFontContainerIssue, FilesystemFontEntryKind, FilesystemFontGatherError,
+    FilesystemFontIssue, FilesystemFontLimitError, FilesystemFontLimits, FilesystemFontLimitsError,
+    FilesystemFontOperation, FilesystemFontResource, FilesystemFontSource,
+    FilesystemFontSurveyError, FilesystemFontValidationError, gather_filesystem_font_catalog,
 };
 #[cfg(feature = "fs")]
 pub use fs_packages::{

@@ -3043,6 +3043,7 @@ dependencies = [
  "ecow",
  "env_proxy",
  "flate2",
+ "fontconfig-parser",
  "hayro-syntax",
  "ignore",
  "libc",
@@ -3066,6 +3067,7 @@ dependencies = [
  "ureq",
  "walkdir",
  "webpki-roots 1.0.9",
+ "windows-sys 0.61.2",
  "zip",
 ]
 

@@ -2256,7 +2256,7 @@ Rows: #csv("data.csv").len()
 
     #[cfg(feature = "embedded-fonts")]
     #[test]
-    fn changed_selected_font_evidence_prevents_pack_issuance() {
+    fn a_selected_font_is_not_reread_after_pack_creation() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
         let fonts = dir.path().join("fonts");
@@ -2275,18 +2275,17 @@ Rows: #csv("data.csv").len()
         )
         .unwrap();
 
-        let result = Packer::new(&project, "main.typ")
+        let outcome = Packer::new(&project, "main.typ")
             .system_fonts(false)
             .typst_embedded_fonts(false)
             .font_path(&fonts)
+            .embed_fonts(true)
             .after_creation_hook(move || fs::write(&font_path, b"changed").unwrap())
-            .pack();
+            .pack()
+            .unwrap();
 
-        assert!(matches!(
-            result,
-            Err(PackerError::CreationEvidenceChanged { ref path })
-                if path.starts_with("font catalog")
-        ));
+        assert_eq!(outcome.pack.fonts().len(), 1);
+        assert_eq!(outcome.pack.fonts()[0].data(), data);
     }
 
     #[test]

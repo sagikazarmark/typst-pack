@@ -3,7 +3,7 @@
 //! The catalog itself is core: its tests run on a build with no crate feature
 //! enabled, except the ones that need real font bytes, which Typst only ships
 //! with the `embedded-fonts` feature. The filesystem section covers the
-//! catalog the reference Creation Adapter composes.
+//! catalog the reference Pack Assembler composes.
 
 #[cfg(feature = "embedded-fonts")]
 #[path = "support/fonts.rs"]
@@ -187,7 +187,7 @@ mod containers {
     }
 }
 
-/// The candidate font catalog the filesystem Creation Adapter composes from
+/// The Font Catalog the filesystem Pack Assembler composes from
 /// system fonts, Typst's embedded fonts, and scanned font directories.
 #[cfg(all(feature = "fs", feature = "embedded-fonts"))]
 mod filesystem {
