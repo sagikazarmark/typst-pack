@@ -1730,17 +1730,13 @@ pub enum CompilationOperationOutcome {
     InvalidFulfillmentSet(InvalidCompilationFulfillmentSet),
 }
 
-#[derive(Debug, thiserror::Error)]
-pub(crate) enum PackCompilationPreparationError {
-    #[error("{0}")]
-    RequestRejected(CompilationRequestRejection),
-    #[error("{outcome}")]
-    Operation {
-        outcome: CompilationOperationOutcome,
-        request_inventory: Box<CompilationRequestInventory>,
-        compilation_identity: CompilationIdentity,
-        fulfillments: Box<CompilationFulfillmentReport>,
+pub(crate) enum PackCompilationPreparation {
+    Execute {
+        world: PackWorld,
+        kernel: PreparedPackCompilationKernel,
     },
+    Report(CompilationReport),
+    Rejected(CompilationRequestRejection),
 }
 
 /// Compiles one private adapter world through the embedded Typst implementation.
@@ -1758,25 +1754,9 @@ pub fn compile(
     request: PackCompilationRequest,
 ) -> Result<CompilationReport, CompilationRequestRejection> {
     let (world, kernel) = match prepare_pack_compilation(request) {
-        Ok(prepared) => prepared,
-        Err(PackCompilationPreparationError::Operation {
-            outcome,
-            request_inventory,
-            compilation_identity,
-            fulfillments,
-        }) => {
-            return Ok(CompilationReport {
-                outcome: CompilationReportOutcome::Operation {
-                    outcome,
-                    request_inventory,
-                    compilation_identity,
-                },
-                fulfillments: *fulfillments,
-            });
-        }
-        Err(PackCompilationPreparationError::RequestRejected(rejection)) => {
-            return Err(rejection);
-        }
+        PackCompilationPreparation::Execute { world, kernel } => (world, kernel),
+        PackCompilationPreparation::Report(report) => return Ok(report),
+        PackCompilationPreparation::Rejected(rejection) => return Err(rejection),
     };
     let execution = compile_pack_kernel(&world, kernel);
     Ok(CompilationReport {
@@ -1819,10 +1799,9 @@ pub(crate) enum PackCompilationPresentation {
     },
 }
 
-#[allow(clippy::result_large_err)]
 pub(crate) fn prepare_pack_compilation(
     request: PackCompilationRequest,
-) -> Result<(PackWorld, PreparedPackCompilationKernel), PackCompilationPreparationError> {
+) -> PackCompilationPreparation {
     let PackCompilationRequest {
         pack,
         output_specification,
@@ -1939,8 +1918,6 @@ pub(crate) fn prepare_pack_compilation(
                 })
         })
         .collect::<Vec<_>>();
-    let engine_identity = EmbeddedTypst::engine_identity();
-    let exporter_identity = EmbeddedTypst::exporter_identity(output.value.format());
     let raw_inputs = inputs.value;
     let total_key_bytes = raw_inputs.iter().map(|(key, _)| key.len()).sum();
     let total_value_repr_bytes = raw_inputs.iter().map(|(_, value)| value.repr().len()).sum();
@@ -1987,10 +1964,16 @@ pub(crate) fn prepare_pack_compilation(
         document_time,
     };
     if !request_issues.is_empty() {
-        return Err(PackCompilationPreparationError::RequestRejected(
-            CompilationRequestRejection::new(request_issues, request_inventory),
+        return PackCompilationPreparation::Rejected(CompilationRequestRejection::new(
+            request_issues,
+            request_inventory,
         ));
     }
+
+    // Implementation identities exist only for an accepted semantic request.
+    let engine_identity = EmbeddedTypst::engine_identity();
+    let exporter_identity =
+        EmbeddedTypst::exporter_identity(request_inventory.output_specification.value().format());
     let compilation_identity = compilation_identity(
         &pack,
         &request_inventory,
@@ -2064,15 +2047,17 @@ pub(crate) fn prepare_pack_compilation(
     let fulfillment_issues =
         verify_compilation_fulfillment_set(&pack, &package_fulfillments, &font_fulfillments);
     if !fulfillment_issues.is_empty() {
-        return Err(PackCompilationPreparationError::Operation {
-            outcome: CompilationOperationOutcome::InvalidFulfillmentSet(
-                InvalidCompilationFulfillmentSet {
-                    issues: fulfillment_issues,
-                },
-            ),
-            request_inventory: Box::new(request_inventory),
-            compilation_identity,
-            fulfillments: Box::new(fulfillments),
+        return PackCompilationPreparation::Report(CompilationReport {
+            outcome: CompilationReportOutcome::Operation {
+                outcome: CompilationOperationOutcome::InvalidFulfillmentSet(
+                    InvalidCompilationFulfillmentSet {
+                        issues: fulfillment_issues,
+                    },
+                ),
+                request_inventory: Box::new(request_inventory),
+                compilation_identity,
+            },
+            fulfillments,
         });
     }
     let package_trees = package_fulfillments
@@ -2100,9 +2085,9 @@ pub(crate) fn prepare_pack_compilation(
     )
     .expect("preflighted Pack World inputs must remain valid");
 
-    Ok((
+    PackCompilationPreparation::Execute {
         world,
-        PreparedPackCompilationKernel {
+        kernel: PreparedPackCompilationKernel {
             request_inventory,
             compilation_identity,
             engine_identity,
@@ -2110,7 +2095,7 @@ pub(crate) fn prepare_pack_compilation(
             page_selection_implies_untagged_pdf,
             fulfillments,
         },
-    ))
+    }
 }
 
 pub(crate) fn compile_pack_kernel(

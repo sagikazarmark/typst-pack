@@ -105,7 +105,10 @@ fn package_fulfillment_verification_aggregates_every_exact_set_deviation() {
     let embedded: typst::syntax::package::PackageSpec = "@local/c:1.0.0".parse().unwrap();
     let mismatched: typst::syntax::package::PackageSpec = "@local/d:1.0.0".parse().unwrap();
     let pack = Pack::builder("main.typ")
-        .file("main.typ", b"unreached".to_vec())
+        .file(
+            "main.typ",
+            b"#panic(\"fulfillment verification reached Typst\")".to_vec(),
+        )
         .unwrap()
         .external_package_file(missing.clone(), "lib.typ", b"missing".to_vec())
         .unwrap()
@@ -142,14 +145,18 @@ fn package_fulfillment_verification_aggregates_every_exact_set_deviation() {
     .unwrap();
     let CompilationReportOutcome::Operation {
         outcome: CompilationOperationOutcome::InvalidFulfillmentSet(invalid),
+        request_inventory,
         compilation_identity,
-        ..
     } = report.outcome()
     else {
         panic!("expected an invalid Compilation Fulfillment Set outcome");
     };
 
     assert_ne!(compilation_identity.digest(), [0; 16]);
+    assert_eq!(
+        request_inventory.output_specification().value().format(),
+        OutputFormat::Svg
+    );
     assert!(matches!(
         invalid.issues(),
         [
@@ -174,6 +181,46 @@ fn package_fulfillment_verification_aggregates_every_exact_set_deviation() {
     assert!(!undeclared_report.declared());
     assert_eq!(undeclared_report.provenance(), Some("undeclared:package"));
     assert!(undeclared_report.cache_hit());
+}
+
+#[cfg(all(feature = "diagnostics", feature = "fs"))]
+#[test]
+fn cli_timing_path_preserves_accepted_fulfillment_outcomes() {
+    let spec: typst::syntax::package::PackageSpec = "@local/example:1.0.0".parse().unwrap();
+    let pack = Pack::builder("main.typ")
+        .file(
+            "main.typ",
+            b"#panic(\"fulfillment verification reached Typst\")".to_vec(),
+        )
+        .unwrap()
+        .external_package_file(spec.clone(), "lib.typ", b"expected".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let timed = typst_pack::cli_support::compile_with_timing(
+        PackCompilationRequest::new(pack, output(OutputFormat::Svg)),
+        None,
+    )
+    .unwrap();
+    let (outcome, timing_error) = timed.into_parts();
+
+    assert!(timing_error.is_none());
+    let Some(typst_pack::cli_support::CliCompilationOutcome::Operation(report)) = outcome else {
+        panic!("expected an accepted Compilation Operation Outcome");
+    };
+    assert!(matches!(
+        report.outcome(),
+        CompilationReportOutcome::Operation {
+            outcome: CompilationOperationOutcome::InvalidFulfillmentSet(invalid),
+            ..
+        } if matches!(
+            invalid.issues(),
+            [CompilationFulfillmentIssue::MissingExternalPackage { spec: missing }]
+                if missing == &spec
+        )
+    ));
+    assert_eq!(report.fulfillments().packages().len(), 1);
 }
 
 #[cfg(feature = "embedded-fonts")]

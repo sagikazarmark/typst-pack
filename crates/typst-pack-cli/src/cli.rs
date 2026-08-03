@@ -19,9 +19,9 @@ use typst_kit::fonts::FontSource;
 use typst_pdf::{PdfStandard, Timestamp};
 
 use typst_pack::cli_support::{
-    CliCompilationExecution, CliCompilationPresentation, FilesystemPackageAuthority,
-    compile_with_timing, emit_creation_error_diagnostics, emit_creation_warnings,
-    pdf_standard_requiring_tags, validate_pdf_standards,
+    CliCompilationExecution, CliCompilationOutcome, CliCompilationPresentation,
+    FilesystemPackageAuthority, compile_with_timing, emit_creation_error_diagnostics,
+    emit_creation_warnings, pdf_standard_requiring_tags, validate_pdf_standards,
 };
 use typst_pack::pack_archive::{
     AcquisitionLimits, DecodeLimits, EncodeLimits, FORMAT_VERSION, FileAcquisitionError,
@@ -30,9 +30,9 @@ use typst_pack::pack_archive::{
 };
 use typst_pack::{
     CompilationArtifact, CompilationFulfillmentSet, CompilationOutputSpecification,
-    CompilationStatus, CreationTimestamp, DocumentTime, FontContainer, FontContainerFulfillment,
-    HtmlOutputSpecification, OutputFormat, PackCompilationRequest, PackOverrideSet,
-    PackageTreeFulfillment, PageRange, PageSelection, PdfOutputSpecification,
+    CompilationReportOutcome, CompilationStatus, CreationTimestamp, DocumentTime, FontContainer,
+    FontContainerFulfillment, HtmlOutputSpecification, OutputFormat, PackCompilationRequest,
+    PackOverrideSet, PackageTreeFulfillment, PageRange, PageSelection, PdfOutputSpecification,
     PngOutputSpecification, SvgOutputSpecification, TypstTarget, parse_page_selection,
 };
 use typst_pack::{
@@ -1107,7 +1107,7 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     request = request.fulfillments(fulfillments);
     let timed = compile_with_timing(request, args.automation.timings.clone())
         .map_err(|error| CliError::Message(error.to_string()))?;
-    let (execution, timing_error) = timed.into_parts();
+    let (outcome, timing_error) = timed.into_parts();
 
     let diagnostic_format = args.automation.diagnostic_format.into();
     let write_requested_dependencies = |outputs: Option<&[PathBuf]>| {
@@ -1124,7 +1124,16 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         write_dependencies(destination, args.deps_format, &inputs, outputs)
     };
 
-    let mut command_result = None;
+    let (execution, mut command_result) = match outcome {
+        Some(CliCompilationOutcome::Execution(execution)) => (Some(execution), None),
+        Some(CliCompilationOutcome::Operation(report)) => {
+            let CompilationReportOutcome::Operation { outcome, .. } = report.outcome() else {
+                unreachable!("the timing adapter returned a result as an operation")
+            };
+            (None, Some(Err(CliError::Message(outcome.to_string()))))
+        }
+        None => (None, None),
+    };
     if let Some(execution) = execution {
         command_result = Some((|| -> CliResult {
             for id in execution.file_dependencies() {

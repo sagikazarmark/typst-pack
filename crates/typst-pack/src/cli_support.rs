@@ -8,11 +8,14 @@ use typst_kit::diagnostics::DiagnosticFormat;
 use typst_kit::diagnostics::termcolor::WriteColor;
 
 use crate::compile::{
-    PackCompilationExecution, PackCompilationPresentation, compile_pack_kernel,
-    prepare_pack_compilation,
+    PackCompilationExecution, PackCompilationPreparation, PackCompilationPresentation,
+    compile_pack_kernel, prepare_pack_compilation,
 };
 use crate::fs_assembly::{PackAssemblyDiagnosticContext, PackAssemblyReport};
-use crate::{CompilationResult, PackCompilationRequest, PdfStandardsValidationError};
+use crate::{
+    CompilationReport, CompilationRequestRejection, CompilationResult, PackCompilationRequest,
+    PdfStandardsValidationError,
+};
 
 pub use crate::FilesystemPackageAuthority;
 
@@ -28,6 +31,12 @@ pub struct CliCompilationExecution {
     world: crate::world::PackWorld,
     execution: PackCompilationExecution,
     file_dependencies: Vec<FileId>,
+}
+
+/// The accepted terminal produced through the first-party timing adapter.
+pub enum CliCompilationOutcome {
+    Execution(CliCompilationExecution),
+    Operation(CompilationReport),
 }
 
 impl CliCompilationExecution {
@@ -75,41 +84,47 @@ impl CliCompilationExecution {
 
 /// A timed operation may fail to execute if the timing adapter cannot start.
 pub struct TimedCliCompilation {
-    execution: Option<CliCompilationExecution>,
+    outcome: Option<CliCompilationOutcome>,
     timing_error: Option<String>,
 }
 
-#[derive(Debug, thiserror::Error)]
-#[error("{0}")]
-pub struct CliCompilationError(String);
-
 impl TimedCliCompilation {
-    pub fn into_parts(self) -> (Option<CliCompilationExecution>, Option<String>) {
-        (self.execution, self.timing_error)
+    pub fn into_parts(self) -> (Option<CliCompilationOutcome>, Option<String>) {
+        (self.outcome, self.timing_error)
     }
 }
 
 pub fn compile_with_timing(
     request: PackCompilationRequest,
     timings: Option<PathBuf>,
-) -> Result<TimedCliCompilation, CliCompilationError> {
-    let (mut world, kernel) = prepare_pack_compilation(request)
-        .map_err(|error| CliCompilationError(error.to_string()))?;
+) -> Result<TimedCliCompilation, CompilationRequestRejection> {
+    let (mut world, kernel) = match prepare_pack_compilation(request) {
+        PackCompilationPreparation::Execute { world, kernel } => (world, kernel),
+        PackCompilationPreparation::Rejected(rejection) => {
+            return Err(rejection);
+        }
+        PackCompilationPreparation::Report(report) => {
+            return Ok(TimedCliCompilation {
+                outcome: Some(CliCompilationOutcome::Operation(report)),
+                timing_error: None,
+            });
+        }
+    };
     let mut timer = typst_kit::timer::Timer::new_or_placeholder(timings);
     let mut execution = None;
     let timing_result = timer.record(&mut world, |world| {
         execution = Some(compile_pack_kernel(world, kernel));
     });
-    let execution = execution.map(|execution| {
+    let outcome = execution.map(|execution| {
         let file_dependencies = world.file_dependencies();
-        CliCompilationExecution {
+        CliCompilationOutcome::Execution(CliCompilationExecution {
             world,
             execution,
             file_dependencies,
-        }
+        })
     });
     Ok(TimedCliCompilation {
-        execution,
+        outcome,
         timing_error: timing_result.err().map(|error| error.to_string()),
     })
 }
