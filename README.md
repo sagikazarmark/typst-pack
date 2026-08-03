@@ -270,19 +270,20 @@ let pack = Pack::builder("main.typ")
 let bytes = encode(&pack, EncodeLimits::reference_v1())?;
 ```
 
-Building a pack by hand gives up the representative compile that discovers
-dependencies. `create` keeps it and still needs no crate feature: it takes the
-bytes a caller already holds, runs one representative Typst request, and issues
-the pack it selected. It acquires nothing itself and consults no wall clock, so
-the creation timestamp fixing that request's Document Time is required. Project
+Building a pack by hand gives up Dependency Discovery. `create` keeps it and
+still needs no crate feature: it borrows the validated values a caller already
+holds, runs one representative Typst request, and returns the pack it selected.
+It acquires nothing itself and consults no wall clock. The Discovery
+Specification explicitly supplies the run's Document Time. Project
 Snapshot assembly accepts entries already selected by the caller; source-specific
 ignore policy and resource limits belong to the gatherer that obtains them:
 
 ```rust,ignore
 use typst_pack::{
-    create, CreationRequest, FontCatalog, FontCatalogEntry, FontContainer,
-    FontDisposition, PackageCatalog, PackageDisposition, PackageTree,
-    ProjectSnapshotAssembly,
+    create, DiscoverySpecification, DocumentTime, FontCatalog, FontCatalogEntry,
+    FontContainer, FontDisposition, PackCreationInput, PackCreationOutcome,
+    PackageAcquisitionFailures, PackageCatalog, PackageDisposition, PackageTree,
+    ProjectSnapshotAssembly, TypstTarget,
 };
 use typst_pack::pack_archive::{EncodeLimits, encode};
 
@@ -296,33 +297,45 @@ let packages = PackageCatalog::from_entries([(
     PackageTree::from_owned_entries(package_files)?,
     PackageDisposition::Embedded,
 )])?;
-let request = CreationRequest::new(project, creation_timestamp)
-    .font_catalog(FontCatalog::from_iter([
-        FontCatalogEntry::new(
-            FontContainer::new(font_bytes)?,
-            FontDisposition::Embedded,
-        ),
-    ]))
-    .package_catalog(packages);
-let issued = create(&request)?.into_issued().expect("no package is missing");
-let bytes = encode(&issued.pack, EncodeLimits::reference_v1())?;
+let fonts = FontCatalog::from_iter([FontCatalogEntry::new(
+    FontContainer::new(font_bytes)?,
+    FontDisposition::Embedded,
+)]);
+let package_failures = PackageAcquisitionFailures::new();
+let discovery = DiscoverySpecification::new(
+    TypstTarget::Paged,
+    typst::foundations::Dict::new(),
+    DocumentTime::UnixTimestamp(creation_timestamp),
+    [],
+)?;
+let PackCreationOutcome::Created { pack, warnings } = create(PackCreationInput {
+    project: &project,
+    packages: &packages,
+    fonts: &fonts,
+    package_failures: &package_failures,
+    discovery: &discovery,
+    metadata: None,
+})? else {
+    panic!("no package is missing");
+};
+let bytes = encode(&pack, EncodeLimits::reference_v1())?;
 ```
 
 Compiler observations select package and font requirements; project files come
 from the Project Snapshot alone. Each supplied package tree and font container
 carries its own embedded-or-external disposition, which is what the pack's
-Package Requirements and Font Requirements record. `IssuedPack::warnings`
-retains the representative compile's warnings, and a representative request that
-does not compile fails creation instead of issuing an incomplete pack. The
-request is an owned value the core retains nothing of, so it can be run again.
+Package Requirements and Font Requirements record. The `Created` outcome
+retains Dependency Discovery warnings, and a discovery run that does not compile
+fails creation instead of returning an incomplete pack. The operation borrows
+all inputs and retains nothing, so the same values can be used again.
 Obtaining its inputs belongs to Pack Assembly;
 `Packer` is the reference filesystem Pack Assembler, implemented over
 `create` like any other adapter.
 
-Creation holds owned acquired bytes and has nothing to re-read. An adapter may
-therefore issue a pack describing values that never existed simultaneously in
-mutable storage; `Packer` does not reread package sources solely to detect later
-mutation.
+Creation borrows validated acquired bytes and has nothing to re-read. An adapter
+may therefore issue a pack describing values that never existed simultaneously
+in mutable storage; `Packer` does not reread package sources solely to detect
+later mutation.
 
 How far the adapter's own acquisition reaches is a build-time choice. With `fs`
 alone it resolves reported specifications from the local package directories and
@@ -336,25 +349,32 @@ way and code that sets it keeps compiling either way.
 
 Package requirements can only be discovered by compiling, so creation resolves
 package acquisition through a resumable protocol rather than a callback. A
-request that read a package no supplied tree covers reports that exact
+discovery run that read a package no supplied tree covers reports that exact
 specification instead of issuing a pack, which is a normal outcome and not a
 failure. The caller resolves it however its host allows and invokes creation
-again with the same request values and the tree added:
+again with the same borrowed values and the tree added:
 
 ```rust,ignore
 use typst_pack::{
-    create, CreationOutcome, CreationRequest, PackageCatalog, PackageDisposition,
+    create, PackCreationInput, PackCreationOutcome, PackageAcquisitionFailures,
+    PackageCatalog, PackageDisposition,
 };
 
 let mut catalog = PackageCatalog::new();
-let issued = loop {
-    let request = CreationRequest::new(project.clone(), creation_timestamp)
-        .package_catalog(catalog.clone());
-    match create(&request)? {
-        CreationOutcome::Issued(issued) => break issued,
+let package_failures = PackageAcquisitionFailures::new();
+let pack = loop {
+    match create(PackCreationInput {
+        project: &project,
+        packages: &catalog,
+        fonts: &fonts,
+        package_failures: &package_failures,
+        discovery: &discovery,
+        metadata: None,
+    })? {
+        PackCreationOutcome::Created { pack, .. } => break pack,
         // Acquire each reported specification however this host allows: from a
         // cache, over an asynchronous transport, or in a later request.
-        CreationOutcome::MissingPackages(missing) => {
+        PackCreationOutcome::MissingPackageSpecifications(missing) => {
             for spec in missing {
                 let tree = acquire_tree(&spec)?;
                 catalog.insert(spec, tree, PackageDisposition::Embedded)?;
@@ -374,16 +394,16 @@ and nothing in the core is `async`. `PackageCatalog::insert` eagerly rejects a
 tree whose `typst.toml` does not declare the claimed name and version, so a loop
 that would otherwise never progress gets a diagnosis before creation runs.
 
-A specification the caller cannot resolve ends the loop through
-`CreationRequest::unresolvable_package`, which takes the caller's own
-`PackageError`. Creation stops reporting that specification and fails the next
-representative request at the import that needed it, carrying that error as its
-diagnostic. This is how an acquisition failure keeps a source location: the
-specifications creation reports name a package, never the file that imported
-one, so only a failed representative request can point at the import. `Packer`
-drives it, which is why an unresolvable package still fails with
-`PackerError::Compile` and a spanned diagnostic rather than beside the source
-that asked for it.
+A specification the caller cannot resolve is recorded in
+`PackageAcquisitionFailures` with a typst-pack-owned
+`PackageAcquisitionFailureReason`. Creation stops reporting that specification
+and rejects the next Dependency Discovery at the import that needed it, carrying
+that failure as its diagnostic. This is how an acquisition failure keeps a
+source location: the specifications creation reports name a package, never the
+file that imported one, so only a failed representative request can point at the
+import. `Packer` drives it, which is why an unresolvable package still fails
+with `PackerError::Creation` and a spanned diagnostic rather than beside the
+source that asked for it.
 
 Resolving a reported specification against the Typst Universe registry needs
 the registry layout and the archive encoding, not an HTTP client. The

@@ -53,7 +53,10 @@ pub use compile::{
     RequestValueOrigin, SvgOutputSpecification, TracepointKind, TypstInputsInventory, TypstTarget,
     compile, parse_page_selection,
 };
-pub use creation::{CreationError, CreationOutcome, CreationRequest, IssuedPack, create};
+pub use creation::{
+    DependencyDiscoveryRejection, DiscoverySpecification, DiscoverySpecificationError,
+    PackCreationError, PackCreationInput, PackCreationOutcome, create,
+};
 #[cfg(feature = "fs")]
 pub use extract::{ExtractError, ExtractOptions, ExtractReport, extract};
 #[cfg(feature = "embedded-fonts")]
@@ -101,9 +104,14 @@ pub use package_catalog::{
     PackageCatalog, PackageCatalogEntry, PackageCatalogError, PackageCatalogIssue,
     PackageDisposition, PackageTree, PackageTreeError, PackageTreeIssue,
 };
-pub use package_failure::{PackageAcquisitionFailure, PackageAcquisitionFailureReason};
+pub use package_failure::{
+    PackageAcquisitionFailure, PackageAcquisitionFailureReason, PackageAcquisitionFailures,
+};
 #[cfg(feature = "fs")]
-pub use packer::{CreationDiagnosticContext, PackOutcome, Packer, PackerError};
+pub use packer::{
+    CreationDiagnosticContext, PackOutcome, Packer, PackerCreationError,
+    PackerDiscoverySpecificationError, PackerError,
+};
 pub use payload::PackArchiveBytes;
 pub use project_snapshot::{ProjectSnapshot, ProjectSnapshotAssembly, ProjectSnapshotError};
 #[cfg(feature = "fs")]

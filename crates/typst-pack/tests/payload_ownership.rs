@@ -1,13 +1,24 @@
 use typst_pack::pack_archive::{DecodeLimits, decode};
 use typst_pack::{
-    CompilationOutputSpecification, CreationOutcome, CreationRequest, Pack, PackArchiveBytes,
-    PackCompilationRequest, PackageCatalog, PackageDisposition, PackageTree,
-    ProjectSnapshotAssembly, SvgOutputSpecification, compile, create,
+    CompilationOutputSpecification, DiscoverySpecification, DocumentTime, FontCatalog, Pack,
+    PackArchiveBytes, PackCompilationRequest, PackCreationInput, PackCreationOutcome,
+    PackageAcquisitionFailures, PackageCatalog, PackageDisposition, PackageTree,
+    ProjectSnapshotAssembly, SvgOutputSpecification, TypstTarget, compile, create,
 };
 
 #[cfg(feature = "embedded-fonts")]
 #[path = "support/fonts.rs"]
 mod fonts;
+
+fn discovery() -> DiscoverySpecification {
+    DiscoverySpecification::new(
+        TypstTarget::Paged,
+        typst::foundations::Dict::new(),
+        DocumentTime::UnixTimestamp(1_700_000_000),
+        [],
+    )
+    .unwrap()
+}
 
 #[test]
 fn project_snapshot_moves_and_shares_payload_bytes() {
@@ -79,15 +90,25 @@ fn font_values_and_pack_creation_share_container_payloads() {
     let snapshot = ProjectSnapshotAssembly::new("main.typ")
         .assemble([("main.typ", source)])
         .unwrap();
-    let request = CreationRequest::new(snapshot, 1_700_000_000).font_catalog(catalog);
-    let CreationOutcome::Issued(issued) = create(&request).unwrap() else {
+    let packages = PackageCatalog::new();
+    let package_failures = PackageAcquisitionFailures::new();
+    let discovery = discovery();
+    let PackCreationOutcome::Created { pack, .. } = create(PackCreationInput {
+        project: &snapshot,
+        packages: &packages,
+        fonts: &catalog,
+        package_failures: &package_failures,
+        discovery: &discovery,
+        metadata: None,
+    })
+    .unwrap() else {
         panic!("the supplied font should issue a Pack");
     };
 
-    assert_eq!(issued.pack.fonts()[0].data().as_ptr(), font_pointer);
+    assert_eq!(pack.fonts()[0].data().as_ptr(), font_pointer);
     assert_eq!(
-        issued.pack.clone().fonts()[0].data().as_ptr(),
-        issued.pack.fonts()[0].data().as_ptr()
+        pack.clone().fonts()[0].data().as_ptr(),
+        pack.fonts()[0].data().as_ptr()
     );
 }
 
@@ -161,21 +182,24 @@ fn pack_creation_reuses_project_and_package_payloads() {
     let catalog =
         PackageCatalog::from_entries([(package.clone(), tree, PackageDisposition::Embedded)])
             .unwrap();
-    let request = CreationRequest::new(snapshot.clone(), 1_700_000_000).package_catalog(catalog);
-    let CreationOutcome::Issued(issued) = create(&request).unwrap() else {
+    let fonts = FontCatalog::new();
+    let package_failures = PackageAcquisitionFailures::new();
+    let discovery = discovery();
+    let PackCreationOutcome::Created { pack, .. } = create(PackCreationInput {
+        project: &snapshot,
+        packages: &catalog,
+        fonts: &fonts,
+        package_failures: &package_failures,
+        discovery: &discovery,
+        metadata: None,
+    })
+    .unwrap() else {
         panic!("the supplied package tree should issue a Pack");
     };
 
+    assert_eq!(pack.file("main.typ").unwrap().as_ptr(), project_pointer);
     assert_eq!(
-        issued.pack.file("main.typ").unwrap().as_ptr(),
-        project_pointer
-    );
-    assert_eq!(
-        issued
-            .pack
-            .package_file(&package, "lib.typ")
-            .unwrap()
-            .as_ptr(),
+        pack.package_file(&package, "lib.typ").unwrap().as_ptr(),
         tree_clone
             .files()
             .find(|(path, _)| *path == "lib.typ")
@@ -184,21 +208,17 @@ fn pack_creation_reuses_project_and_package_payloads() {
             .as_ptr()
     );
 
-    let pack_clone = issued.pack.clone();
+    let pack_clone = pack.clone();
     assert_eq!(
         pack_clone.file("main.typ").unwrap().as_ptr(),
-        issued.pack.file("main.typ").unwrap().as_ptr()
+        pack.file("main.typ").unwrap().as_ptr()
     );
     assert_eq!(
         pack_clone
             .package_file(&package, "lib.typ")
             .unwrap()
             .as_ptr(),
-        issued
-            .pack
-            .package_file(&package, "lib.typ")
-            .unwrap()
-            .as_ptr()
+        pack.package_file(&package, "lib.typ").unwrap().as_ptr()
     );
     let package_files: Vec<(&str, &[u8])> = pack_clone
         .packages()

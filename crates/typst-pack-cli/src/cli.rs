@@ -36,8 +36,8 @@ use typst_pack::{
     parse_page_selection,
 };
 use typst_pack::{
-    ExtractOptions, FILE_EXTENSION, FontContainerIdentity, Pack, PackMetadata, Packer, PackerError,
-    extract,
+    ExtractOptions, FILE_EXTENSION, FontContainerIdentity, Pack, PackCreationError, PackMetadata,
+    Packer, PackerError, extract,
 };
 
 const ENV_PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
@@ -675,16 +675,20 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
                 format!("entrypoint `{path}` is excluded by the Project Ignore Policy").into(),
             );
         }
-        Err(PackerError::Compile {
-            world,
-            errors,
-            warnings,
-            ..
-        }) => {
+        Err(PackerError::Creation(error))
+            if matches!(
+                error.error(),
+                PackCreationError::DependencyDiscoveryRejected(_)
+            ) =>
+        {
+            let (context, error, _) = error.into_parts();
+            let PackCreationError::DependencyDiscoveryRejected(rejection) = error else {
+                unreachable!("the match guard accepted only discovery rejection");
+            };
             let mut stream = StandardStream::stderr(color);
             emit_creation_error_diagnostics(
-                &world,
-                errors.iter().chain(&warnings),
+                &context,
+                rejection.diagnostics().iter().chain(rejection.warnings()),
                 &mut stream,
                 diagnostic_format,
             );

@@ -28,9 +28,10 @@ use std::str::FromStr;
 
 use typst::syntax::package::PackageSpec;
 use typst_pack::{
-    CreationError, CreationOutcome, CreationRequest, FontCatalog, FontCatalogEntry, FontContainer,
-    FontContainerIdentity, FontDisposition, Pack, PackageCatalog, PackageCatalogIssue,
-    PackageDisposition, PackageTree, ProjectSnapshotAssembly, create,
+    DiscoverySpecification, DocumentTime, FontCatalog, FontCatalogEntry, FontContainer,
+    FontContainerIdentity, FontDisposition, Pack, PackCreationError, PackCreationInput,
+    PackCreationOutcome, PackageAcquisitionFailures, PackageCatalog, PackageCatalogIssue,
+    PackageDisposition, PackageTree, ProjectSnapshotAssembly, TypstTarget, create,
 };
 
 const IGNORE_FILE: &str = ".typkignore";
@@ -386,6 +387,14 @@ fn create_in_memory(fixture: &Fixture) -> Result<Created, Failure> {
         )
         .unwrap();
     let catalog = fixture.font_catalog();
+    let package_failures = PackageAcquisitionFailures::new();
+    let discovery = DiscoverySpecification::new(
+        TypstTarget::Paged,
+        typst::foundations::Dict::new(),
+        DocumentTime::UnixTimestamp(CREATION_TIMESTAMP),
+        [],
+    )
+    .unwrap();
 
     let mut resolved: Vec<(PackageSpec, PackageTree, PackageDisposition)> = Vec::new();
     for _ in 0..RESUME_BOUND {
@@ -400,17 +409,21 @@ fn create_in_memory(fixture: &Fixture) -> Result<Created, Failure> {
                 }
                 Failure::UnsatisfiedPackage
             })?;
-        let request = CreationRequest::new(snapshot.clone(), CREATION_TIMESTAMP)
-            .font_catalog(catalog.clone())
-            .package_catalog(packages);
-        match create(&request) {
-            Ok(CreationOutcome::Issued(issued)) => {
+        match create(PackCreationInput {
+            project: &snapshot,
+            packages: &packages,
+            fonts: &catalog,
+            package_failures: &package_failures,
+            discovery: &discovery,
+            metadata: None,
+        }) {
+            Ok(PackCreationOutcome::Created { pack, warnings }) => {
                 return Ok(Created {
-                    pack: issued.pack,
-                    warnings: messages(&issued.warnings),
+                    pack,
+                    warnings: messages(&warnings),
                 });
             }
-            Ok(CreationOutcome::MissingPackages(missing)) => {
+            Ok(PackCreationOutcome::MissingPackageSpecifications(missing)) => {
                 assert!(
                     !missing.is_empty(),
                     "a missing outcome names a specification"
@@ -419,7 +432,9 @@ fn create_in_memory(fixture: &Fixture) -> Result<Created, Failure> {
                     resolved.push(fixture.resolve(spec)?);
                 }
             }
-            Err(CreationError::Compile { .. }) => return Err(Failure::Compile),
+            Err(PackCreationError::DependencyDiscoveryRejected(_)) => {
+                return Err(Failure::Compile);
+            }
             Err(error) => panic!("in-memory creation failed unexpectedly: {error}"),
         }
     }
@@ -591,7 +606,14 @@ fn create_on_filesystem(fixture: &Fixture, plan: &FilesystemPlan) -> Result<Crea
         Err(PackerError::Package { .. } | PackerError::InvalidPackageCatalog(_)) => {
             Err(Failure::UnsatisfiedPackage)
         }
-        Err(PackerError::Compile { .. }) => Err(Failure::Compile),
+        Err(PackerError::Creation(error))
+            if matches!(
+                error.error(),
+                PackCreationError::DependencyDiscoveryRejected(_)
+            ) =>
+        {
+            Err(Failure::Compile)
+        }
         Err(error) => panic!("filesystem creation failed unexpectedly: {error}"),
     }
 }

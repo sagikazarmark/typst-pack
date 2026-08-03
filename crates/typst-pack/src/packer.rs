@@ -21,7 +21,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use ecow::EcoVec;
-use typst::diag::{FileError, FileResult, PackageError, SourceDiagnostic};
+use typst::diag::{FileError, FileResult, SourceDiagnostic};
 use typst::foundations::{Bytes, Datetime, Dict, Duration};
 use typst::syntax::package::PackageSpec;
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
@@ -31,8 +31,10 @@ use typst::{Feature, Library, LibraryExt, World};
 use typst_kit::files::{FileLoader, FileStore};
 use typst_kit::fonts::FontStore;
 
-use crate::compile::TypstTarget;
-use crate::creation::{CreationError, CreationOutcome, CreationRequest, IssuedPack, create};
+use crate::compile::{DocumentTime, TypstTarget};
+use crate::creation::{
+    DiscoverySpecification, PackCreationError, PackCreationInput, PackCreationOutcome, create,
+};
 use crate::font_catalog::FontDisposition;
 use crate::fs_fonts::{FilesystemFontLimits, FilesystemFontSource, gather_filesystem_font_catalog};
 use crate::fs_packages::{
@@ -40,9 +42,9 @@ use crate::fs_packages::{
 };
 use crate::fs_project;
 use crate::manifest::PackMetadata;
-use crate::pack::{Pack, PackBuildError};
+use crate::pack::Pack;
 use crate::package_catalog::{PackageCatalog, PackageCatalogError, PackageDisposition};
-use crate::package_failure::{PackageAcquisitionFailure, PackageAcquisitionFailureReason};
+use crate::package_failure::PackageAcquisitionFailures;
 use crate::project_snapshot::ProjectSnapshot;
 
 /// Packs a Typst project directory into a [`Pack`].
@@ -326,17 +328,15 @@ impl Packer {
                 .map_or(0, |duration| duration.as_secs() as i64)
         });
 
-        let mut request =
-            CreationRequest::new(ProjectSnapshot::clone(&snapshot), creation_timestamp)
-                .font_catalog(font_catalog.clone())
-                .target(self.target)
-                .inputs(self.inputs.clone());
-        for feature in &self.features {
-            request = request.feature(*feature);
-        }
-        if let Some(metadata) = self.metadata.clone() {
-            request = request.metadata(metadata);
-        }
+        let discovery = DiscoverySpecification::new(
+            self.target,
+            self.inputs.clone(),
+            DocumentTime::UnixTimestamp(creation_timestamp),
+            self.features.iter().copied(),
+        )
+        .map_err(|source| {
+            PackerError::DiscoverySpecification(PackerDiscoverySpecificationError { source })
+        })?;
 
         let mut world = AcquiredWorld {
             root: root.clone(),
@@ -362,7 +362,10 @@ impl Packer {
         let mut creation = None;
         let timings = timer.record(&mut world, |_| {
             creation = Some(resolve_and_create(
-                request,
+                &snapshot,
+                &font_catalog,
+                &discovery,
+                self.metadata.as_ref(),
                 &authority,
                 &packages,
                 disposition,
@@ -378,8 +381,8 @@ impl Packer {
         *timing_error = timings
             .err()
             .map(|error| PackerError::Timings(error.to_string()));
-        let issued = match creation {
-            Ok(issued) => issued,
+        let (pack, warnings) = match creation {
+            Ok(created) => created,
             Err(error) => return Err(error.into_packer_error(world)),
         };
 
@@ -389,8 +392,8 @@ impl Packer {
         }
 
         Ok(PackOutcome {
-            pack: issued.pack,
-            warnings: issued.warnings,
+            pack,
+            warnings,
             #[cfg(feature = "diagnostics")]
             world,
         })
@@ -413,24 +416,36 @@ impl Packer {
 /// package is reported where the document asked for it exactly as it was
 /// before package resolution moved out of the representative compile.
 fn resolve_and_create(
-    mut request: CreationRequest,
+    project: &ProjectSnapshot,
+    fonts: &crate::font_catalog::FontCatalog,
+    discovery: &DiscoverySpecification,
+    metadata: Option<&PackMetadata>,
     authority: &FilesystemPackageAuthority,
     packages: &AcquiredPackages,
     disposition: PackageDisposition,
-) -> Result<IssuedPack, CreationFailure> {
-    let mut acquired: HashSet<String> = HashSet::new();
+) -> Result<(Pack, EcoVec<SourceDiagnostic>), CreationFailure> {
+    let mut attempted_specs: HashSet<String> = HashSet::new();
     let mut package_failures = Vec::new();
+    let mut acquisition_failures = PackageAcquisitionFailures::new();
     let mut catalog = PackageCatalog::new();
     loop {
-        let outcome = create(&request).map_err(|error| CreationFailure::Core {
+        let outcome = create(PackCreationInput {
+            project,
+            packages: &catalog,
+            fonts,
+            package_failures: &acquisition_failures,
+            discovery,
+            metadata,
+        })
+        .map_err(|error| CreationFailure::Core {
             error,
             package_failures: std::mem::take(&mut package_failures),
         })?;
         match outcome {
-            CreationOutcome::Issued(issued) => return Ok(*issued),
-            CreationOutcome::MissingPackages(missing) => {
+            PackCreationOutcome::Created { pack, warnings } => return Ok((pack, warnings)),
+            PackCreationOutcome::MissingPackageSpecifications(missing) => {
                 for spec in missing {
-                    if !acquired.insert(spec.to_string()) {
+                    if !attempted_specs.insert(spec.to_string()) {
                         // Creation reports neither what a supplied tree covers
                         // nor what was declared unresolvable, so this cannot
                         // repeat; failing keeps that a diagnosis rather than a
@@ -442,44 +457,21 @@ fn resolve_and_create(
                             spec,
                         }));
                     }
-                    request = match authority.acquire(&spec) {
+                    match authority.acquire(&spec) {
                         Ok(acquired) => {
                             let (tree, _) = acquired.into_parts();
                             packages.record(spec.clone(), tree.clone());
                             catalog
                                 .insert(spec.clone(), tree, disposition)
                                 .map_err(PackerError::InvalidPackageCatalog)?;
-                            request.package_catalog(catalog.clone())
                         }
                         Err(error) => {
-                            let failure = package_failure_for_creation(error.failure());
+                            acquisition_failures.insert(error.failure().clone());
                             package_failures.push(error);
-                            request.unresolvable_package(spec, failure)
                         }
-                    };
+                    }
                 }
             }
-        }
-    }
-}
-
-/// Transitional bridge until Pack Creation consumes Package Acquisition
-/// Failures directly rather than Typst's package error vocabulary.
-fn package_failure_for_creation(failure: &PackageAcquisitionFailure) -> PackageError {
-    let spec = failure.spec().clone();
-    match failure.reason() {
-        PackageAcquisitionFailureReason::NotFound => PackageError::NotFound(spec),
-        PackageAcquisitionFailureReason::VersionNotFound { latest } => {
-            PackageError::VersionNotFound(spec, *latest)
-        }
-        PackageAcquisitionFailureReason::NetworkFailed { detail } => {
-            PackageError::NetworkFailed(detail.clone().map(Into::into))
-        }
-        PackageAcquisitionFailureReason::MalformedArchive { detail } => {
-            PackageError::MalformedArchive(detail.clone().map(Into::into))
-        }
-        PackageAcquisitionFailureReason::Other { detail } => {
-            PackageError::Other(detail.clone().map(Into::into))
         }
     }
 }
@@ -489,7 +481,7 @@ fn package_failure_for_creation(failure: &PackageAcquisitionFailure) -> PackageE
 enum CreationFailure {
     /// The core issued no Pack.
     Core {
-        error: CreationError,
+        error: PackCreationError,
         package_failures: Vec<FilesystemPackageAcquisitionError>,
     },
     /// The adapter failed to acquire what the core reported as missing.
@@ -503,22 +495,13 @@ impl CreationFailure {
         match self {
             Self::Adapter(error) => error,
             Self::Core {
-                error: CreationError::Compile { errors, warnings },
+                error,
                 package_failures,
-            } => PackerError::Compile {
-                world: Box::new(CreationDiagnosticContext { world }),
-                errors,
-                warnings,
+            } => PackerError::Creation(PackerCreationError {
+                context: Box::new(CreationDiagnosticContext { world }),
+                error,
                 package_failures,
-            },
-            Self::Core {
-                error: CreationError::InvalidTimestamp(message),
-                ..
-            } => PackerError::InvalidTimestamp(message),
-            Self::Core {
-                error: CreationError::Build(error),
-                ..
-            } => PackerError::Build(error),
+            }),
         }
     }
 }
@@ -548,6 +531,84 @@ pub struct CreationDiagnosticContext {
     pub(crate) world: AcquiredWorld,
 }
 
+/// A Pack Creation failure retained by the reference filesystem Packer.
+#[derive(Debug)]
+pub struct PackerCreationError {
+    context: Box<CreationDiagnosticContext>,
+    error: PackCreationError,
+    package_failures: Vec<FilesystemPackageAcquisitionError>,
+}
+
+impl PackerCreationError {
+    /// Opaque source context for first-party diagnostic rendering.
+    pub fn context(&self) -> &CreationDiagnosticContext {
+        &self.context
+    }
+
+    /// The unchanged core Pack Creation failure.
+    pub fn error(&self) -> &PackCreationError {
+        &self.error
+    }
+
+    /// Package Authority failures from the same assembly attempt.
+    pub fn package_failures(&self) -> &[FilesystemPackageAcquisitionError] {
+        &self.package_failures
+    }
+
+    /// Recovers the diagnostic context, core error, and authority failures.
+    pub fn into_parts(
+        self,
+    ) -> (
+        Box<CreationDiagnosticContext>,
+        PackCreationError,
+        Vec<FilesystemPackageAcquisitionError>,
+    ) {
+        (self.context, self.error, self.package_failures)
+    }
+}
+
+impl std::fmt::Display for PackerCreationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.error.fmt(formatter)
+    }
+}
+
+impl std::error::Error for PackerCreationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+/// An invalid Discovery Specification retained by the filesystem Packer.
+#[derive(Debug)]
+pub struct PackerDiscoverySpecificationError {
+    source: crate::creation::DiscoverySpecificationError,
+}
+
+impl PackerDiscoverySpecificationError {
+    /// The unchanged Discovery Specification construction failure.
+    pub fn source_error(&self) -> &crate::creation::DiscoverySpecificationError {
+        &self.source
+    }
+
+    /// Recovers the Discovery Specification construction failure.
+    pub fn into_source(self) -> crate::creation::DiscoverySpecificationError {
+        self.source
+    }
+}
+
+impl std::fmt::Display for PackerDiscoverySpecificationError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("invalid creation timestamp: timestamp is out of range")
+    }
+}
+
+impl std::error::Error for PackerDiscoverySpecificationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.source)
+    }
+}
+
 /// A failure while packing a project directory.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
@@ -560,18 +621,10 @@ pub enum PackerError {
     },
     #[error("`{0}` is outside the project root and cannot be packed")]
     OutsideRoot(PathBuf),
-    #[error("the representative creation compile failed with {} error(s)", errors.len())]
-    Compile {
-        /// Opaque source context retained for first-party diagnostic rendering.
-        world: Box<CreationDiagnosticContext>,
-        errors: EcoVec<SourceDiagnostic>,
-        warnings: EcoVec<SourceDiagnostic>,
-        /// Typed Package Authority failures attached to this representative
-        /// compile through the transitional creation bridge.
-        package_failures: Vec<FilesystemPackageAcquisitionError>,
-    },
-    #[error("invalid creation timestamp: {0}")]
-    InvalidTimestamp(String),
+    #[error(transparent)]
+    Creation(PackerCreationError),
+    #[error(transparent)]
+    DiscoverySpecification(PackerDiscoverySpecificationError),
     #[error("failed to write creation timings: {0}")]
     Timings(String),
     #[error("failed to load package {spec}: {message}")]
@@ -583,8 +636,6 @@ pub enum PackerError {
     ProjectGather(#[from] fs_project::FilesystemProjectGatherError),
     #[error(transparent)]
     FontGather(#[from] crate::fs_fonts::FilesystemFontGatherError),
-    #[error(transparent)]
-    Build(#[from] PackBuildError),
 }
 
 impl PackerError {

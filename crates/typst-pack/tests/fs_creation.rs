@@ -20,7 +20,8 @@ use archive_support::{decode_reference, encode_reference};
 #[cfg(feature = "egress")]
 use typst_pack::{FilesystemPackageAcquisitionError, PackageAcquisitionFailureReason};
 use typst_pack::{
-    FilesystemProjectGatherError, FilesystemProjectIssue, Pack, Packer, PackerError, TypstTarget,
+    FilesystemProjectGatherError, FilesystemProjectIssue, Pack, PackCreationError, Packer,
+    PackerError, TypstTarget,
 };
 
 /// A project directory with an image, a data file, an included chapter, and an
@@ -280,11 +281,14 @@ fn the_adapter_preserves_the_timestamp_range_error() {
         .creation_timestamp(Some(i64::MAX))
         .pack();
 
-    assert!(matches!(
-        result,
-        Err(PackerError::InvalidTimestamp(ref message))
-            if message == "timestamp is out of range"
-    ));
+    let Err(error) = result else {
+        panic!("the invalid Discovery Specification was accepted");
+    };
+    assert!(matches!(&error, PackerError::DiscoverySpecification(_)));
+    assert_eq!(
+        error.to_string(),
+        "invalid creation timestamp: timestamp is out of range"
+    );
 }
 
 #[test]
@@ -513,9 +517,9 @@ fn offline_creation_fails_on_an_uncached_universe_package() {
 
     assert!(matches!(
         &result,
-        Err(PackerError::Compile { package_failures, .. })
+        Err(PackerError::Creation(error))
             if matches!(
-                package_failures.as_slice(),
+                error.package_failures(),
                 [FilesystemPackageAcquisitionError::Unavailable(failure)]
                     if failure.spec().to_string()
                         == "@preview/typst-pack-no-such-package:0.0.1"
@@ -571,10 +575,14 @@ fn creation_without_egress_never_downloads_a_universe_package() {
 fn unresolvable_package_diagnostics(
     result: Result<typst_pack::PackOutcome, PackerError>,
 ) -> Vec<String> {
-    let Err(PackerError::Compile { errors, .. }) = result else {
+    let Err(PackerError::Creation(error)) = result else {
         panic!("an unresolvable package did not fail the representative request");
     };
-    for error in &errors {
+    let PackCreationError::DependencyDiscoveryRejected(rejection) = error.error() else {
+        panic!("the compile failure did not retain its discovery rejection");
+    };
+    let errors = rejection.diagnostics();
+    for error in errors {
         assert!(
             !error.span.is_detached(),
             "the failure is reported away from the import that needed the package"
@@ -595,7 +603,14 @@ fn a_representative_compile_that_fails_issues_no_pack() {
 
     let result = Packer::new(&project, "main.typ").system_fonts(false).pack();
 
-    assert!(matches!(result, Err(PackerError::Compile { .. })));
+    assert!(matches!(
+        result,
+        Err(PackerError::Creation(error))
+            if matches!(
+                error.error(),
+                PackCreationError::DependencyDiscoveryRejected(_)
+            )
+    ));
 }
 
 #[test]

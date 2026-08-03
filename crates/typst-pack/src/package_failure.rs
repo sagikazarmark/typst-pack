@@ -1,6 +1,53 @@
 //! Stable Package Acquisition Failure data carried by Pack Assembly.
 
+use std::collections::BTreeMap;
+
 use typst::syntax::package::{PackageSpec, PackageVersion};
+
+/// Package Acquisition Failures keyed by exact package specification.
+///
+/// Pack Assembly updates this value between Pack Creation invocations. A
+/// separately supplied Package Catalog entry always takes precedence during
+/// Dependency Discovery.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PackageAcquisitionFailures {
+    failures: BTreeMap<String, PackageAcquisitionFailure>,
+}
+
+impl PackageAcquisitionFailures {
+    /// An empty failure map.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Records the latest failed attempt for one exact specification.
+    pub fn insert(
+        &mut self,
+        failure: PackageAcquisitionFailure,
+    ) -> Option<PackageAcquisitionFailure> {
+        self.failures.insert(failure.spec.to_string(), failure)
+    }
+
+    /// Failures in canonical exact-specification order.
+    pub fn entries(&self) -> impl Iterator<Item = &PackageAcquisitionFailure> {
+        self.failures.values()
+    }
+
+    /// Looks up the failed attempt for one exact specification.
+    pub fn get(&self, spec: &PackageSpec) -> Option<&PackageAcquisitionFailure> {
+        self.failures.get(&spec.to_string())
+    }
+}
+
+impl FromIterator<PackageAcquisitionFailure> for PackageAcquisitionFailures {
+    fn from_iter<T: IntoIterator<Item = PackageAcquisitionFailure>>(failures: T) -> Self {
+        let mut result = Self::new();
+        for failure in failures {
+            result.insert(failure);
+        }
+        result
+    }
+}
 
 /// An external attempt to acquire one exact package specification failed.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]

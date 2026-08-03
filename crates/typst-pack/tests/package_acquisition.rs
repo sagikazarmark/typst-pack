@@ -15,10 +15,11 @@ use std::str::FromStr;
 
 use typst::syntax::package::PackageSpec;
 use typst_pack::{
-    CreationOutcome, CreationRequest, PackageAcquisitionError, PackageArchiveAcquisitionError,
+    DiscoverySpecification, DocumentTime, FontCatalog, PackCreationInput, PackCreationOutcome,
+    PackageAcquisitionError, PackageAcquisitionFailures, PackageArchiveAcquisitionError,
     PackageCatalog, PackageDisposition, PackageExpansionLimitError, PackageExpansionLimits,
     PackageExpansionLimitsError, PackageExpansionResource, PackageTree, PackageTreeIssue,
-    ProjectSnapshotAssembly, acquire_package_archive, create, expand_package_archive,
+    ProjectSnapshotAssembly, TypstTarget, acquire_package_archive, create, expand_package_archive,
     package_archive_url,
 };
 
@@ -29,6 +30,16 @@ fn spec(text: &str) -> PackageSpec {
 /// 2023-11-14T22:13:20Z, the Document Time the representative request here is
 /// fixed to.
 const CREATION_TIMESTAMP: i64 = 1_700_000_000;
+
+fn discovery() -> DiscoverySpecification {
+    DiscoverySpecification::new(
+        TypstTarget::Paged,
+        typst::foundations::Dict::new(),
+        DocumentTime::UnixTimestamp(CREATION_TIMESTAMP),
+        [],
+    )
+    .unwrap()
+}
 
 /// The declaration a tree for `@preview/example:1.0.0` carries.
 const DECLARATION: &[u8] =
@@ -559,17 +570,25 @@ fn package_expansion_ceiling_does_not_contribute_to_pack_identity() {
                 .to_vec(),
         )])
         .unwrap();
+    let fonts = FontCatalog::new();
+    let package_failures = PackageAcquisitionFailures::new();
+    let discovery = discovery();
     let issue = |tree| {
         let catalog =
             PackageCatalog::from_entries([(example.clone(), tree, PackageDisposition::Embedded)])
                 .unwrap();
-        match create(
-            &CreationRequest::new(project.clone(), CREATION_TIMESTAMP).package_catalog(catalog),
-        )
+        match create(PackCreationInput {
+            project: &project,
+            packages: &catalog,
+            fonts: &fonts,
+            package_failures: &package_failures,
+            discovery: &discovery,
+            metadata: None,
+        })
         .unwrap()
         {
-            CreationOutcome::Issued(issued) => issued.pack,
-            CreationOutcome::MissingPackages(missing) => {
+            PackCreationOutcome::Created { pack, .. } => pack,
+            PackCreationOutcome::MissingPackageSpecifications(missing) => {
                 panic!("the supplied tree did not cover {missing:?}")
             }
         }
@@ -853,19 +872,29 @@ fn a_resume_loop_fetches_and_expands_what_creation_reported() {
         .unwrap();
 
     let mut resolved: Vec<(PackageSpec, PackageTree, PackageDisposition)> = Vec::new();
+    let fonts = FontCatalog::new();
+    let package_failures = PackageAcquisitionFailures::new();
+    let discovery = discovery();
     // Bounded so that a loop making no progress fails instead of hanging; the
     // number of rounds it actually takes is not asserted.
     let mut issued = None;
     for _ in 0..8 {
         let catalog = PackageCatalog::from_entries(resolved.iter().cloned()).unwrap();
-        let request =
-            CreationRequest::new(project.clone(), CREATION_TIMESTAMP).package_catalog(catalog);
-        match create(&request).unwrap() {
-            CreationOutcome::Issued(pack) => {
-                issued = Some(*pack);
+        match create(PackCreationInput {
+            project: &project,
+            packages: &catalog,
+            fonts: &fonts,
+            package_failures: &package_failures,
+            discovery: &discovery,
+            metadata: None,
+        })
+        .unwrap()
+        {
+            PackCreationOutcome::Created { pack, .. } => {
+                issued = Some(pack);
                 break;
             }
-            CreationOutcome::MissingPackages(missing) => {
+            PackCreationOutcome::MissingPackageSpecifications(missing) => {
                 for spec in missing {
                     let url = package_archive_url(&spec).unwrap();
                     let bytes = fetch(&url).expect("the registry serves the reported package");
@@ -876,12 +905,10 @@ fn a_resume_loop_fetches_and_expands_what_creation_reported() {
             }
         }
     }
-    let issued = issued.expect("creation issued a Pack over the expanded trees");
+    let pack = issued.expect("creation issued a Pack over the expanded trees");
 
     assert_eq!(
-        issued
-            .pack
-            .package_requirements()
+        pack.package_requirements()
             .iter()
             .map(|requirement| requirement.spec().to_string())
             .collect::<Vec<_>>(),
@@ -890,9 +917,7 @@ fn a_resume_loop_fetches_and_expands_what_creation_reported() {
     // The whole expanded tree travels, not only what the representative request
     // read.
     assert!(
-        issued
-            .pack
-            .package_file(&spec("@preview/example:1.0.0"), "README.md")
+        pack.package_file(&spec("@preview/example:1.0.0"), "README.md")
             .is_some()
     );
 }
