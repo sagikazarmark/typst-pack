@@ -2,10 +2,10 @@
 
 use typst::foundations::{Datetime, Dict, Smart, Value};
 use typst_pack::{
-    CompilationOutputSpecification, CompilationRequestRejection, CompilationResult,
-    CreationTimestamp, DocumentTime, HtmlOutputSpecification, Pack, PackCompilationRequest,
-    PackMetadata, PackOverrideSet, PackageDisposition, PdfOutputSpecification,
-    PngOutputSpecification, RequestValueOrigin, SvgOutputSpecification,
+    CompilationLimits, CompilationOutputSpecification, CompilationRequestRejection,
+    CompilationResult, CreationTimestamp, DocumentTime, HtmlOutputSpecification, Pack,
+    PackCompilationRequest, PackMetadata, PackOverrideSet, PackageDisposition,
+    PdfOutputSpecification, PngOutputSpecification, RequestValueOrigin, SvgOutputSpecification,
     compile as compile_to_report, parse_page_selection,
 };
 
@@ -16,7 +16,7 @@ fn svg_output() -> CompilationOutputSpecification {
 fn compile(
     request: PackCompilationRequest,
 ) -> Result<CompilationResult, CompilationRequestRejection> {
-    let report = compile_to_report(request)?;
+    let report = compile_to_report(request, CompilationLimits::reference_v1())?;
     Ok(report
         .result()
         .expect("expected a semantic Compilation Result")

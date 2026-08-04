@@ -158,7 +158,11 @@ fn public_compilation_attests_the_approved_engine_and_exporters() {
                 typst_pack::HtmlOutputSpecification::default(),
             ),
         };
-        let report = compile(PackCompilationRequest::new(pack, specification)).unwrap();
+        let report = compile(
+            PackCompilationRequest::new(pack, specification),
+            typst_pack::CompilationLimits::reference_v1(),
+        )
+        .unwrap();
         let result = report
             .result()
             .expect("differential fixture must produce a result");

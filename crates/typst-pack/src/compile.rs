@@ -21,6 +21,158 @@ use crate::world::PackWorld;
 use crate::world_trace::{WorldTrace, logical_path};
 use crate::{FontContainer, FontContainerIdentity, Pack, PackageTree, PackageTreeIdentity};
 
+/// A resource bounded during compilation artifact export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[non_exhaustive]
+pub enum CompilationResource {
+    SourcePages,
+    Artifacts,
+    PixelsPerArtifact,
+    TotalPixels,
+    ArtifactBytes,
+    RetainedArtifactBytes,
+    ExportWorkers,
+}
+
+/// A supplied compilation ceiling that cannot support bounded accounting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum CompilationLimitsError {
+    #[error("the {resource:?} ceiling must leave room for a plus-one probe")]
+    CannotProbe {
+        resource: CompilationResource,
+        ceiling: u64,
+    },
+    #[error("the ExportWorkers ceiling must be greater than zero")]
+    ZeroWorkers,
+}
+
+/// A mandatory compilation export ceiling was exceeded or could not be accounted.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
+pub enum CompilationLimitError {
+    #[error(
+        "compilation {resource:?} limit exceeded: ceiling {ceiling}, observed at least {observed_at_least}"
+    )]
+    Exceeded {
+        resource: CompilationResource,
+        ceiling: u64,
+        observed_at_least: u64,
+    },
+    #[error("compilation {resource:?} accounting overflowed")]
+    AccountingOverflow { resource: CompilationResource },
+}
+
+/// Mandatory finite resource ceilings for compilation artifact export.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompilationLimits {
+    source_pages: u64,
+    artifacts: u64,
+    pixels_per_artifact: u64,
+    total_pixels: u64,
+    artifact_bytes: u64,
+    retained_artifact_bytes: u64,
+    export_workers: u64,
+}
+
+impl CompilationLimits {
+    /// Constructs validated mandatory finite compilation ceilings.
+    pub fn new(
+        source_pages: u64,
+        artifacts: u64,
+        pixels_per_artifact: u64,
+        total_pixels: u64,
+        artifact_bytes: u64,
+        retained_artifact_bytes: u64,
+        export_workers: u64,
+    ) -> Result<Self, CompilationLimitsError> {
+        let ceilings = [
+            (CompilationResource::SourcePages, source_pages),
+            (CompilationResource::Artifacts, artifacts),
+            (CompilationResource::PixelsPerArtifact, pixels_per_artifact),
+            (CompilationResource::TotalPixels, total_pixels),
+            (CompilationResource::ArtifactBytes, artifact_bytes),
+            (
+                CompilationResource::RetainedArtifactBytes,
+                retained_artifact_bytes,
+            ),
+            (CompilationResource::ExportWorkers, export_workers),
+        ];
+        if let Some((resource, ceiling)) = ceilings
+            .into_iter()
+            .find(|(_, ceiling)| *ceiling == u64::MAX)
+        {
+            return Err(CompilationLimitsError::CannotProbe { resource, ceiling });
+        }
+        if export_workers == 0 {
+            return Err(CompilationLimitsError::ZeroWorkers);
+        }
+        Ok(Self {
+            source_pages,
+            artifacts,
+            pixels_per_artifact,
+            total_pixels,
+            artifact_bytes,
+            retained_artifact_bytes,
+            export_workers,
+        })
+    }
+
+    /// The first-party bounded compilation export profile.
+    pub const fn reference_v1() -> Self {
+        Self {
+            source_pages: 10_000,
+            artifacts: 10_000,
+            pixels_per_artifact: 100_000_000,
+            total_pixels: 1_000_000_000,
+            artifact_bytes: 512 * 1024 * 1024,
+            retained_artifact_bytes: 2 * 1024 * 1024 * 1024,
+            export_workers: 4,
+        }
+    }
+
+    /// Replaces the export-worker ceiling while preserving every other limit.
+    pub fn with_export_workers(self, export_workers: u64) -> Result<Self, CompilationLimitsError> {
+        Self::new(
+            self.source_pages,
+            self.artifacts,
+            self.pixels_per_artifact,
+            self.total_pixels,
+            self.artifact_bytes,
+            self.retained_artifact_bytes,
+            export_workers,
+        )
+    }
+
+    pub const fn source_pages(self) -> u64 {
+        self.source_pages
+    }
+
+    pub const fn artifacts(self) -> u64 {
+        self.artifacts
+    }
+
+    pub const fn pixels_per_artifact(self) -> u64 {
+        self.pixels_per_artifact
+    }
+
+    pub const fn total_pixels(self) -> u64 {
+        self.total_pixels
+    }
+
+    pub const fn artifact_bytes(self) -> u64 {
+        self.artifact_bytes
+    }
+
+    pub const fn retained_artifact_bytes(self) -> u64 {
+        self.retained_artifact_bytes
+    }
+
+    pub const fn export_workers(self) -> u64 {
+        self.export_workers
+    }
+}
+
 /// The exact embedded Typst compiler implementation that produced a result.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ImplementationIdentity {
@@ -1543,6 +1695,9 @@ pub(crate) struct CompilationOutput {
 /// A failed compilation.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum CompileError {
+    /// Compilation artifact export exceeded a mandatory operational ceiling.
+    #[error(transparent)]
+    Limit(#[from] CompilationLimitError),
     /// The official PDF standards validator rejected the requested set.
     #[error(transparent)]
     InvalidPdfStandards(#[from] PdfStandardsValidationError),
@@ -1723,11 +1878,13 @@ impl InvalidCompilationFulfillmentSet {
     }
 }
 
-/// A Pack-owned operational outcome before official compilation begins.
+/// A Pack-owned operational outcome after request acceptance and before a semantic result.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum CompilationOperationOutcome {
     #[error(transparent)]
     InvalidFulfillmentSet(InvalidCompilationFulfillmentSet),
+    #[error(transparent)]
+    ResourceLimit(CompilationLimitError),
 }
 
 pub(crate) enum PackCompilationPreparation {
@@ -1745,23 +1902,28 @@ pub(crate) fn compile_world(
     world: &dyn World,
     output: &CompilationOutputSpecification,
 ) -> Result<CompilationOutput, CompileError> {
-    compile_with_default_pdf_timestamp(world, output, || world.today(None).map(Timestamp::new_utc))
+    compile_with_default_pdf_timestamp(world, output, CompilationLimits::reference_v1(), || {
+        world.today(None).map(Timestamp::new_utc)
+    })
 }
 
 /// Compiles a validated Pack and retains operational fulfillment evidence.
 #[allow(clippy::result_large_err)]
 pub fn compile(
     request: PackCompilationRequest,
+    limits: CompilationLimits,
 ) -> Result<CompilationReport, CompilationRequestRejection> {
-    let (world, kernel) = match prepare_pack_compilation(request) {
+    let (world, kernel) = match prepare_pack_compilation(request, limits) {
         PackCompilationPreparation::Execute { world, kernel } => (world, kernel),
         PackCompilationPreparation::Report(report) => return Ok(report),
         PackCompilationPreparation::Rejected(rejection) => return Err(rejection),
     };
-    let execution = compile_pack_kernel(&world, kernel);
-    Ok(CompilationReport {
-        outcome: CompilationReportOutcome::Result(Box::new(execution.result)),
-        fulfillments: execution.fulfillments,
+    Ok(match compile_pack_kernel(&world, kernel) {
+        PackCompilationKernelOutcome::Execution(execution) => CompilationReport {
+            outcome: CompilationReportOutcome::Result(Box::new(execution.result)),
+            fulfillments: execution.fulfillments,
+        },
+        PackCompilationKernelOutcome::Operation(report) => report,
     })
 }
 
@@ -1772,6 +1934,7 @@ pub(crate) struct PreparedPackCompilationKernel {
     exporter_identity: ExporterIdentity,
     page_selection_implies_untagged_pdf: bool,
     fulfillments: CompilationFulfillmentReport,
+    limits: CompilationLimits,
 }
 
 pub(crate) struct PackCompilationExecution {
@@ -1779,6 +1942,11 @@ pub(crate) struct PackCompilationExecution {
     #[cfg(feature = "diagnostics")]
     pub(crate) presentation: PackCompilationPresentation,
     pub(crate) fulfillments: CompilationFulfillmentReport,
+}
+
+pub(crate) enum PackCompilationKernelOutcome {
+    Execution(PackCompilationExecution),
+    Operation(CompilationReport),
 }
 
 #[cfg(feature = "diagnostics")]
@@ -1801,6 +1969,7 @@ pub(crate) enum PackCompilationPresentation {
 
 pub(crate) fn prepare_pack_compilation(
     request: PackCompilationRequest,
+    limits: CompilationLimits,
 ) -> PackCompilationPreparation {
     let PackCompilationRequest {
         pack,
@@ -2094,6 +2263,7 @@ pub(crate) fn prepare_pack_compilation(
             exporter_identity,
             page_selection_implies_untagged_pdf,
             fulfillments,
+            limits,
         },
     }
 }
@@ -2101,11 +2271,12 @@ pub(crate) fn prepare_pack_compilation(
 pub(crate) fn compile_pack_kernel(
     world: &PackWorld,
     kernel: PreparedPackCompilationKernel,
-) -> PackCompilationExecution {
+) -> PackCompilationKernelOutcome {
     let traced = WorldTrace::new(world);
     let compiled = compile_with_default_pdf_timestamp(
         &traced,
         kernel.request_inventory.output_specification.value(),
+        kernel.limits,
         || None,
     );
     let access_trace = traced.snapshot();
@@ -2129,7 +2300,7 @@ pub(crate) fn compile_pack_kernel(
                 output.pack_warnings,
                 kernel.page_selection_implies_untagged_pdf,
             );
-            PackCompilationExecution {
+            PackCompilationKernelOutcome::Execution(PackCompilationExecution {
                 result: assemble_compilation_result(
                     &kernel,
                     CompilationStatus::Succeeded,
@@ -2145,7 +2316,7 @@ pub(crate) fn compile_pack_kernel(
                     pack_warnings: presentation_pack_warnings,
                 },
                 fulfillments: kernel.fulfillments,
-            }
+            })
         }
         Err(CompileError::Diagnostics {
             errors,
@@ -2177,7 +2348,7 @@ pub(crate) fn compile_pack_kernel(
                 DiagnosticPhase::Export => DiagnosticProducer::Exporter(kernel.exporter_identity),
             };
             diagnostics.extend(project_diagnostics(&traced, errors, phase, producer));
-            PackCompilationExecution {
+            PackCompilationKernelOutcome::Execution(PackCompilationExecution {
                 result: assemble_compilation_result(
                     &kernel,
                     CompilationStatus::Rejected,
@@ -2193,7 +2364,7 @@ pub(crate) fn compile_pack_kernel(
                 #[cfg(feature = "diagnostics")]
                 presentation,
                 fulfillments: kernel.fulfillments,
-            }
+            })
         }
         Err(CompileError::PngExport {
             message,
@@ -2233,7 +2404,7 @@ pub(crate) fn compile_pack_kernel(
                 producer: DiagnosticProducer::Exporter(kernel.exporter_identity),
                 source_page_number: Some(source_page_number),
             });
-            PackCompilationExecution {
+            PackCompilationKernelOutcome::Execution(PackCompilationExecution {
                 result: assemble_compilation_result(
                     &kernel,
                     CompilationStatus::Rejected,
@@ -2249,10 +2420,20 @@ pub(crate) fn compile_pack_kernel(
                 #[cfg(feature = "diagnostics")]
                 presentation,
                 fulfillments: kernel.fulfillments,
-            }
+            })
         }
         Err(CompileError::InvalidPdfStandards(error)) => {
             unreachable!("PDF standards are validated during request preparation: {error}");
+        }
+        Err(CompileError::Limit(error)) => {
+            PackCompilationKernelOutcome::Operation(CompilationReport {
+                outcome: CompilationReportOutcome::Operation {
+                    outcome: CompilationOperationOutcome::ResourceLimit(error),
+                    request_inventory: Box::new(kernel.request_inventory),
+                    compilation_identity: kernel.compilation_identity,
+                },
+                fulfillments: kernel.fulfillments,
+            })
         }
     }
 }
@@ -2621,6 +2802,7 @@ fn pdf_standard_identity(standard: &PdfStandard) -> &'static str {
 pub(crate) fn compile_with_default_pdf_timestamp(
     world: &dyn World,
     specification: &CompilationOutputSpecification,
+    limits: CompilationLimits,
     default_pdf_timestamp: impl FnOnce() -> Option<Timestamp>,
 ) -> Result<CompilationOutput, CompileError> {
     let _compilation_timing = typst_timing::TimingScope::new("typst-pack compilation");
@@ -2634,6 +2816,7 @@ pub(crate) fn compile_with_default_pdf_timestamp(
             phase: DiagnosticPhase::Compilation,
             source_page_count: None,
         })?;
+        check_artifact_count(limits, 1)?;
         let _export_timing = typst_timing::TimingScope::new("export");
         let bytes = EmbeddedTypst::export_html(
             &document,
@@ -2648,12 +2831,14 @@ pub(crate) fn compile_with_default_pdf_timestamp(
             phase: DiagnosticPhase::Export,
             source_page_count: None,
         })?;
+        let artifacts = vec![CompilationArtifact {
+            format: OutputFormat::Html,
+            bytes: SharedBytes::new(bytes),
+            source_page_number: None,
+        }];
+        check_artifact_bytes(limits, &artifacts)?;
         return Ok(CompilationOutput {
-            artifacts: vec![CompilationArtifact {
-                format: OutputFormat::Html,
-                bytes: SharedBytes::new(bytes),
-                source_page_number: None,
-            }],
+            artifacts,
             warnings,
             pack_warnings,
             source_page_count: None,
@@ -2681,10 +2866,20 @@ pub(crate) fn compile_with_default_pdf_timestamp(
         source_page_count: None,
     })?;
     let source_page_count = document.pages().len();
+    check_compilation_limit(
+        CompilationResource::SourcePages,
+        limits.source_pages,
+        u64::try_from(source_page_count).map_err(|_| {
+            CompilationLimitError::AccountingOverflow {
+                resource: CompilationResource::SourcePages,
+            }
+        })?,
+    )?;
     let artifacts = {
         let _export_timing = typst_timing::TimingScope::new("export");
         match specification {
             CompilationOutputSpecification::Pdf(specification) => {
+                check_artifact_count(limits, 1)?;
                 let standards = validate_pdf_standards(&specification.standards)
                     .map_err(CompileError::InvalidPdfStandards)?;
                 let timestamp = match specification.creation_timestamp {
@@ -2732,6 +2927,8 @@ pub(crate) fn compile_with_default_pdf_timestamp(
                 };
                 let pages =
                     selected_pages(&document, &specification.page_selection).collect::<Vec<_>>();
+                check_artifact_count(limits, pages.len())?;
+                check_png_pixels(limits, &pages, &render_options)?;
                 let export = |(source_page_number, page)| {
                     let bytes =
                         EmbeddedTypst::export_png(page, &render_options).map_err(|message| {
@@ -2749,17 +2946,7 @@ pub(crate) fn compile_with_default_pdf_timestamp(
                         source_page_number: Some(source_page_number),
                     })
                 };
-                #[cfg(feature = "parallel")]
-                let artifacts = pages
-                    .into_par_iter()
-                    .map(export)
-                    .collect::<Result<Vec<_>, _>>()?;
-                #[cfg(not(feature = "parallel"))]
-                let artifacts = pages
-                    .into_iter()
-                    .map(export)
-                    .collect::<Result<Vec<_>, _>>()?;
-                artifacts
+                export_artifacts_bounded(pages, limits, export)?
             }
             CompilationOutputSpecification::Svg(specification) => {
                 let svg_options = typst_svg::SvgOptions {
@@ -2768,26 +2955,124 @@ pub(crate) fn compile_with_default_pdf_timestamp(
                 };
                 let pages =
                     selected_pages(&document, &specification.page_selection).collect::<Vec<_>>();
-                let export = |(source_page_number, page)| CompilationArtifact {
-                    format: OutputFormat::Svg,
-                    bytes: SharedBytes::new(EmbeddedTypst::export_svg(page, &svg_options)),
-                    source_page_number: Some(source_page_number),
+                check_artifact_count(limits, pages.len())?;
+                let export = |(source_page_number, page)| {
+                    Ok(CompilationArtifact {
+                        format: OutputFormat::Svg,
+                        bytes: SharedBytes::new(EmbeddedTypst::export_svg(page, &svg_options)),
+                        source_page_number: Some(source_page_number),
+                    })
                 };
-                #[cfg(feature = "parallel")]
-                let artifacts = pages.into_par_iter().map(export).collect();
-                #[cfg(not(feature = "parallel"))]
-                let artifacts = pages.into_iter().map(export).collect();
-                artifacts
+                export_artifacts_bounded(pages, limits, export)?
             }
             CompilationOutputSpecification::Html(_) => unreachable!("handled above"),
         }
     };
+    check_artifact_bytes(limits, &artifacts)?;
     Ok(CompilationOutput {
         artifacts,
         warnings,
         pack_warnings,
         source_page_count: Some(source_page_count),
     })
+}
+
+fn check_compilation_limit(
+    resource: CompilationResource,
+    ceiling: u64,
+    observed: u64,
+) -> Result<(), CompilationLimitError> {
+    if observed > ceiling {
+        Err(CompilationLimitError::Exceeded {
+            resource,
+            ceiling,
+            observed_at_least: observed,
+        })
+    } else {
+        Ok(())
+    }
+}
+
+fn check_artifact_count(
+    limits: CompilationLimits,
+    count: usize,
+) -> Result<(), CompilationLimitError> {
+    let observed = u64::try_from(count).map_err(|_| CompilationLimitError::AccountingOverflow {
+        resource: CompilationResource::Artifacts,
+    })?;
+    check_compilation_limit(CompilationResource::Artifacts, limits.artifacts, observed)
+}
+
+fn check_png_pixels(
+    limits: CompilationLimits,
+    pages: &[(NonZeroUsize, &typst_layout::Page)],
+    options: &typst_render::RenderOptions,
+) -> Result<(), CompilationLimitError> {
+    let mut total = 0u64;
+    for (_, page) in pages {
+        let size = if options.render_bleed {
+            page.frame.size() + page.bleed.sum_by_axis()
+        } else {
+            page.frame.size()
+        };
+        let pixel_per_pt = options.pixel_per_pt.get() as f32;
+        let width = (pixel_per_pt * size.x.to_pt() as f32).round().max(1.0) as u32;
+        let height = (pixel_per_pt * size.y.to_pt() as f32).round().max(1.0) as u32;
+        let pixels = u64::from(width).checked_mul(u64::from(height)).ok_or(
+            CompilationLimitError::AccountingOverflow {
+                resource: CompilationResource::PixelsPerArtifact,
+            },
+        )?;
+        check_compilation_limit(
+            CompilationResource::PixelsPerArtifact,
+            limits.pixels_per_artifact,
+            pixels,
+        )?;
+        total = total
+            .checked_add(pixels)
+            .ok_or(CompilationLimitError::AccountingOverflow {
+                resource: CompilationResource::TotalPixels,
+            })?;
+    }
+    check_compilation_limit(CompilationResource::TotalPixels, limits.total_pixels, total)
+}
+
+fn check_artifact_bytes(
+    limits: CompilationLimits,
+    artifacts: &[CompilationArtifact],
+) -> Result<(), CompilationLimitError> {
+    let mut retained = 0u64;
+    for artifact in artifacts {
+        retain_artifact_bytes(limits, &mut retained, artifact)?;
+    }
+    Ok(())
+}
+
+fn retain_artifact_bytes(
+    limits: CompilationLimits,
+    retained: &mut u64,
+    artifact: &CompilationArtifact,
+) -> Result<(), CompilationLimitError> {
+    let bytes = u64::try_from(artifact.bytes.len()).map_err(|_| {
+        CompilationLimitError::AccountingOverflow {
+            resource: CompilationResource::ArtifactBytes,
+        }
+    })?;
+    check_compilation_limit(
+        CompilationResource::ArtifactBytes,
+        limits.artifact_bytes,
+        bytes,
+    )?;
+    *retained = retained
+        .checked_add(bytes)
+        .ok_or(CompilationLimitError::AccountingOverflow {
+            resource: CompilationResource::RetainedArtifactBytes,
+        })?;
+    check_compilation_limit(
+        CompilationResource::RetainedArtifactBytes,
+        limits.retained_artifact_bytes,
+        *retained,
+    )
 }
 
 pub(crate) fn validate_pdf_standards(
@@ -2825,6 +3110,62 @@ fn selected_pages<'a>(
             })
         })
         .map(|(index, page)| (NonZeroUsize::new(index + 1).unwrap(), page))
+}
+
+#[cfg(feature = "parallel")]
+fn export_artifacts_bounded<T>(
+    items: Vec<T>,
+    limits: CompilationLimits,
+    export: impl Fn(T) -> Result<CompilationArtifact, CompileError> + Sync + Send,
+) -> Result<Vec<CompilationArtifact>, CompileError>
+where
+    T: Send,
+{
+    if items.is_empty() {
+        return Ok(vec![]);
+    }
+    let workers = usize::try_from(limits.export_workers)
+        .unwrap_or(usize::MAX)
+        .min(items.len());
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(workers)
+        .build()
+        .ok();
+    let mut items = items.into_iter();
+    let mut artifacts = Vec::new();
+    let mut retained = 0;
+    loop {
+        let batch = items.by_ref().take(workers).collect::<Vec<_>>();
+        if batch.is_empty() {
+            break;
+        }
+        let batch: Vec<Result<CompilationArtifact, CompileError>> = match &pool {
+            Some(pool) => pool.install(|| batch.into_par_iter().map(&export).collect()),
+            None => batch.into_iter().map(&export).collect(),
+        };
+        for artifact in batch {
+            let artifact = artifact?;
+            retain_artifact_bytes(limits, &mut retained, &artifact)?;
+            artifacts.push(artifact);
+        }
+    }
+    Ok(artifacts)
+}
+
+#[cfg(not(feature = "parallel"))]
+fn export_artifacts_bounded<T>(
+    items: Vec<T>,
+    limits: CompilationLimits,
+    export: impl Fn(T) -> Result<CompilationArtifact, CompileError>,
+) -> Result<Vec<CompilationArtifact>, CompileError> {
+    let mut artifacts = Vec::new();
+    let mut retained = 0;
+    for item in items {
+        let artifact = export(item)?;
+        retain_artifact_bytes(limits, &mut retained, &artifact)?;
+        artifacts.push(artifact);
+    }
+    Ok(artifacts)
 }
 
 fn default_png_ppi() -> f64 {
@@ -2942,10 +3283,13 @@ mod result_identity_tests {
             .unwrap()
             .build()
             .unwrap();
-        let report = compile(PackCompilationRequest::new(
-            pack,
-            CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
-        ))
+        let report = compile(
+            PackCompilationRequest::new(
+                pack,
+                CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
+            ),
+            CompilationLimits::reference_v1(),
+        )
         .unwrap();
         let base = report.result().unwrap().clone();
         let identity = base.result_identity;
@@ -3276,10 +3620,13 @@ mod result_identity_tests {
             .unwrap()
             .build()
             .unwrap();
-        let report = compile(PackCompilationRequest::new(
-            pack.clone(),
-            CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
-        ))
+        let report = compile(
+            PackCompilationRequest::new(
+                pack.clone(),
+                CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
+            ),
+            CompilationLimits::reference_v1(),
+        )
         .unwrap();
         let result = report.result().unwrap();
         let inventory = result.request_inventory();
@@ -3298,6 +3645,85 @@ mod result_identity_tests {
                 compilation_identity(&pack, inventory, engine, exporter),
                 baseline
             );
+        }
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn parallel_export_scheduler_obeys_worker_limit_and_preserves_input_order() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::{Arc, Barrier};
+
+        let active = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let barrier = Arc::new(Barrier::new(4));
+        let output =
+            export_artifacts_bounded((0u8..8).collect(), CompilationLimits::reference_v1(), {
+                let active = Arc::clone(&active);
+                let peak = Arc::clone(&peak);
+                let barrier = Arc::clone(&barrier);
+                move |item| {
+                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    barrier.wait();
+                    let workers = rayon::current_num_threads();
+                    active.fetch_sub(1, Ordering::SeqCst);
+                    Ok(CompilationArtifact {
+                        format: OutputFormat::Svg,
+                        bytes: SharedBytes::new(vec![item, workers as u8]),
+                        source_page_number: None,
+                    })
+                }
+            })
+            .unwrap();
+
+        assert_eq!(peak.load(Ordering::SeqCst), 4);
+        assert_eq!(
+            output
+                .iter()
+                .map(|artifact| artifact.bytes().to_vec())
+                .collect::<Vec<_>>(),
+            (0u8..8).map(|item| vec![item, 4]).collect::<Vec<_>>()
+        );
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn worker_count_does_not_change_exporter_and_limit_outcome_order() {
+        let execute = |workers| {
+            export_artifacts_bounded(
+                vec![0u8, 1],
+                CompilationLimits::new(2, 2, 1, 1, 0, 2, workers).unwrap(),
+                |item| {
+                    if item == 1 {
+                        Err(CompileError::PngExport {
+                            message: "later exporter failure".to_owned(),
+                            warnings: EcoVec::new(),
+                            pack_warnings: EcoVec::new(),
+                            source_page_count: 2,
+                            source_page_number: NonZeroUsize::new(2).unwrap(),
+                        })
+                    } else {
+                        Ok(CompilationArtifact {
+                            format: OutputFormat::Png,
+                            bytes: SharedBytes::new(vec![item]),
+                            source_page_number: NonZeroUsize::new(1),
+                        })
+                    }
+                },
+            )
+            .unwrap_err()
+        };
+
+        for error in [execute(1), execute(2)] {
+            assert!(matches!(
+                error,
+                CompileError::Limit(CompilationLimitError::Exceeded {
+                    resource: CompilationResource::ArtifactBytes,
+                    ceiling: 0,
+                    observed_at_least: 1,
+                })
+            ));
         }
     }
 }

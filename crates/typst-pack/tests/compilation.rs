@@ -2,13 +2,15 @@ use proptest::prelude::*;
 use std::num::NonZeroUsize;
 use typst_pack::{
     CompilationAccessKind, CompilationFulfillmentIssue, CompilationFulfillmentSet,
-    CompilationFulfillmentSetIssue, CompilationOperationOutcome, CompilationOutputOrigins,
-    CompilationOutputSpecification, CompilationReportOutcome, CompilationRequestIssue,
-    CompilationRequestRejection, CompilationResult, CompilationStatus, CreationTimestamp,
-    DiagnosticPhase, DiagnosticProducer, DocumentTime, HtmlOutputSpecification, OutputFormat, Pack,
-    PackCompilationRequest, PackMetadata, PackOverrideSet, PackOverrideSetError, PackageTree,
-    PackageTreeFulfillment, PdfOutputSpecification, PngOutputSpecification, RequestValueOrigin,
-    SvgOutputSpecification, compile as compile_to_report,
+    CompilationFulfillmentSetIssue, CompilationLimitError, CompilationLimits,
+    CompilationLimitsError, CompilationOperationOutcome, CompilationOutputOrigins,
+    CompilationOutputSpecification, CompilationReport, CompilationReportOutcome,
+    CompilationRequestIssue, CompilationRequestRejection, CompilationResource, CompilationResult,
+    CompilationStatus, CreationTimestamp, DiagnosticPhase, DiagnosticProducer, DocumentTime,
+    HtmlOutputSpecification, OutputFormat, Pack, PackCompilationRequest, PackMetadata,
+    PackOverrideSet, PackOverrideSetError, PackageTree, PackageTreeFulfillment,
+    PdfOutputSpecification, PngOutputSpecification, RequestValueOrigin, SvgOutputSpecification,
+    compile as compile_with_limits,
 };
 #[cfg(feature = "embedded-fonts")]
 use typst_pack::{FontContainer, FontContainerFulfillment};
@@ -21,6 +23,12 @@ fn compile(
         .result()
         .expect("expected a semantic Compilation Result")
         .clone())
+}
+
+fn compile_to_report(
+    request: PackCompilationRequest,
+) -> Result<CompilationReport, CompilationRequestRejection> {
+    compile_with_limits(request, CompilationLimits::reference_v1())
 }
 
 fn output(format: OutputFormat) -> CompilationOutputSpecification {
@@ -75,6 +83,395 @@ fn five_page_pack() -> Pack {
         .unwrap()
         .build()
         .unwrap()
+}
+
+fn fixed_size_page_pack(page_count: usize) -> Pack {
+    let source = (1..=page_count)
+        .map(|page| {
+            "#set page(width: 10pt, height: 10pt, margin: 0pt)\n\
+             #rect(width: 1pt, height: 1pt)\n"
+                .to_owned()
+                + if page < page_count {
+                    "#pagebreak()\n"
+                } else {
+                    ""
+                }
+        })
+        .collect::<String>();
+    Pack::builder("main.typ")
+        .file("main.typ", source.into_bytes())
+        .unwrap()
+        .build()
+        .unwrap()
+}
+
+#[test]
+fn compilation_limits_reference_v1_is_finite_and_bounded() {
+    let limits = CompilationLimits::reference_v1();
+
+    assert_eq!(limits.source_pages(), 10_000);
+    assert_eq!(limits.artifacts(), 10_000);
+    assert_eq!(limits.pixels_per_artifact(), 100_000_000);
+    assert_eq!(limits.total_pixels(), 1_000_000_000);
+    assert_eq!(limits.artifact_bytes(), 512 * 1024 * 1024);
+    assert_eq!(limits.retained_artifact_bytes(), 2 * 1024 * 1024 * 1024);
+    assert_eq!(limits.export_workers(), 4);
+}
+
+#[test]
+fn compilation_limits_reject_unbounded_ceilings_and_zero_workers() {
+    let fields = [
+        CompilationResource::SourcePages,
+        CompilationResource::Artifacts,
+        CompilationResource::PixelsPerArtifact,
+        CompilationResource::TotalPixels,
+        CompilationResource::ArtifactBytes,
+        CompilationResource::RetainedArtifactBytes,
+        CompilationResource::ExportWorkers,
+    ];
+
+    for (index, resource) in fields.into_iter().enumerate() {
+        let mut values = [1; 7];
+        values[index] = u64::MAX;
+        assert!(matches!(
+            CompilationLimits::new(
+                values[0], values[1], values[2], values[3], values[4], values[5], values[6],
+            ),
+            Err(CompilationLimitsError::CannotProbe {
+                resource: actual,
+                ceiling: u64::MAX,
+            }) if actual == resource
+        ));
+    }
+
+    assert!(matches!(
+        CompilationLimits::new(1, 1, 1, 1, 1, 1, 0),
+        Err(CompilationLimitsError::ZeroWorkers)
+    ));
+}
+
+#[test]
+fn compilation_limits_can_reduce_the_reference_worker_ceiling() {
+    let limits = CompilationLimits::reference_v1()
+        .with_export_workers(1)
+        .unwrap();
+
+    assert_eq!(limits.source_pages(), 10_000);
+    assert_eq!(limits.artifacts(), 10_000);
+    assert_eq!(limits.export_workers(), 1);
+    assert!(matches!(
+        limits.with_export_workers(0),
+        Err(CompilationLimitsError::ZeroWorkers)
+    ));
+}
+
+#[test]
+fn source_page_limit_is_an_accepted_operation_outcome() {
+    let limits = CompilationLimits::new(
+        4,
+        10,
+        1_000_000,
+        10_000_000,
+        1024 * 1024,
+        10 * 1024 * 1024,
+        1,
+    )
+    .unwrap();
+
+    let report = compile_with_limits(
+        PackCompilationRequest::new(
+            five_page_pack(),
+            page_output(
+                OutputFormat::Svg,
+                typst_pack::parse_page_selection("5").unwrap(),
+            ),
+        ),
+        limits,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        report.outcome(),
+        CompilationReportOutcome::Operation {
+            outcome: CompilationOperationOutcome::ResourceLimit(
+                CompilationLimitError::Exceeded {
+                    resource: CompilationResource::SourcePages,
+                    ceiling: 4,
+                    observed_at_least: 5,
+                }
+            ),
+            request_inventory,
+            compilation_identity,
+        } if request_inventory.output_specification().value().format() == OutputFormat::Svg
+            && compilation_identity.digest() != [0; 16]
+    ));
+    assert!(report.result().is_none());
+    assert!(report.fulfillments().packages().is_empty());
+    assert!(report.fulfillments().fonts().is_empty());
+}
+
+#[test]
+fn selected_artifact_count_is_bounded_before_export() {
+    let limits = CompilationLimits::new(
+        10,
+        4,
+        1_000_000,
+        10_000_000,
+        1024 * 1024,
+        10 * 1024 * 1024,
+        1,
+    )
+    .unwrap();
+
+    let report = compile_with_limits(
+        PackCompilationRequest::new(five_page_pack(), output(OutputFormat::Svg)),
+        limits,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        report.outcome(),
+        CompilationReportOutcome::Operation {
+            outcome: CompilationOperationOutcome::ResourceLimit(CompilationLimitError::Exceeded {
+                resource: CompilationResource::Artifacts,
+                ceiling: 4,
+                observed_at_least: 5,
+            }),
+            ..
+        }
+    ));
+    assert!(report.result().is_none());
+}
+
+#[test]
+fn png_pixels_per_artifact_are_bounded_before_rendering() {
+    let limits = CompilationLimits::new(1, 1, 99, 1_000, 1024 * 1024, 1024 * 1024, 1).unwrap();
+    let specification = CompilationOutputSpecification::Png(PngOutputSpecification {
+        pixels_per_inch: Some(72.0),
+        ..PngOutputSpecification::default()
+    });
+
+    let report = compile_with_limits(
+        PackCompilationRequest::new(fixed_size_page_pack(1), specification),
+        limits,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        report.outcome(),
+        CompilationReportOutcome::Operation {
+            outcome: CompilationOperationOutcome::ResourceLimit(CompilationLimitError::Exceeded {
+                resource: CompilationResource::PixelsPerArtifact,
+                ceiling: 99,
+                observed_at_least: 100,
+            }),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn total_png_pixels_use_checked_canonical_accounting() {
+    let exact_limits =
+        CompilationLimits::new(2, 2, 100, 200, 1024 * 1024, 2 * 1024 * 1024, 2).unwrap();
+    let limits = CompilationLimits::new(2, 2, 100, 199, 1024 * 1024, 2 * 1024 * 1024, 2).unwrap();
+    let specification = CompilationOutputSpecification::Png(PngOutputSpecification {
+        pixels_per_inch: Some(72.0),
+        ..PngOutputSpecification::default()
+    });
+
+    assert!(
+        compile_with_limits(
+            PackCompilationRequest::new(fixed_size_page_pack(2), specification.clone()),
+            exact_limits,
+        )
+        .unwrap()
+        .result()
+        .is_some()
+    );
+
+    let report = compile_with_limits(
+        PackCompilationRequest::new(fixed_size_page_pack(2), specification),
+        limits,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        report.outcome(),
+        CompilationReportOutcome::Operation {
+            outcome: CompilationOperationOutcome::ResourceLimit(CompilationLimitError::Exceeded {
+                resource: CompilationResource::TotalPixels,
+                ceiling: 199,
+                observed_at_least: 200,
+            }),
+            ..
+        }
+    ));
+}
+
+#[test]
+fn artifact_bytes_are_bounded_after_generation_without_a_partial_result() {
+    let pack = fixed_size_page_pack(1);
+    let baseline = compile(PackCompilationRequest::new(
+        pack.clone(),
+        output(OutputFormat::Svg),
+    ))
+    .unwrap();
+    let byte_length = u64::try_from(baseline.artifacts()[0].bytes().len()).unwrap();
+    let exact_limits =
+        CompilationLimits::new(1, 1, 1_000_000, 1_000_000, byte_length, byte_length, 1).unwrap();
+    let limits =
+        CompilationLimits::new(1, 1, 1_000_000, 1_000_000, byte_length - 1, byte_length, 1)
+            .unwrap();
+
+    assert!(
+        compile_with_limits(
+            PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)),
+            exact_limits,
+        )
+        .unwrap()
+        .result()
+        .is_some()
+    );
+
+    let report = compile_with_limits(
+        PackCompilationRequest::new(pack, output(OutputFormat::Svg)),
+        limits,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        report.outcome(),
+        CompilationReportOutcome::Operation {
+            outcome: CompilationOperationOutcome::ResourceLimit(
+                CompilationLimitError::Exceeded {
+                    resource: CompilationResource::ArtifactBytes,
+                    ceiling,
+                    observed_at_least,
+                }
+            ),
+            ..
+        } if *ceiling == byte_length - 1 && *observed_at_least == byte_length
+    ));
+    assert!(report.result().is_none());
+}
+
+#[test]
+fn retained_artifact_bytes_use_checked_canonical_accounting() {
+    let pack = fixed_size_page_pack(2);
+    let baseline = compile(PackCompilationRequest::new(
+        pack.clone(),
+        output(OutputFormat::Svg),
+    ))
+    .unwrap();
+    let byte_lengths = baseline
+        .artifacts()
+        .iter()
+        .map(|artifact| u64::try_from(artifact.bytes().len()).unwrap())
+        .collect::<Vec<_>>();
+    let retained = byte_lengths.iter().sum::<u64>();
+    let exact_limits = CompilationLimits::new(
+        2,
+        2,
+        1_000_000,
+        1_000_000,
+        *byte_lengths.iter().max().unwrap(),
+        retained,
+        2,
+    )
+    .unwrap();
+    let limits = CompilationLimits::new(
+        2,
+        2,
+        1_000_000,
+        1_000_000,
+        *byte_lengths.iter().max().unwrap(),
+        retained - 1,
+        2,
+    )
+    .unwrap();
+
+    assert!(
+        compile_with_limits(
+            PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)),
+            exact_limits,
+        )
+        .unwrap()
+        .result()
+        .is_some()
+    );
+
+    let report = compile_with_limits(
+        PackCompilationRequest::new(pack, output(OutputFormat::Svg)),
+        limits,
+    )
+    .unwrap();
+
+    assert!(matches!(
+        report.outcome(),
+        CompilationReportOutcome::Operation {
+            outcome: CompilationOperationOutcome::ResourceLimit(
+                CompilationLimitError::Exceeded {
+                    resource: CompilationResource::RetainedArtifactBytes,
+                    ceiling,
+                    observed_at_least,
+                }
+            ),
+            ..
+        } if *ceiling == retained - 1 && *observed_at_least == retained
+    ));
+    assert!(report.result().is_none());
+}
+
+#[cfg(feature = "parallel")]
+#[test]
+fn compilation_limits_and_worker_scheduling_do_not_change_canonical_results() {
+    let pack = five_page_pack();
+    let compile_under_limits = |limits| {
+        compile_with_limits(
+            PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)),
+            limits,
+        )
+        .unwrap()
+        .result()
+        .unwrap()
+        .clone()
+    };
+
+    let sequential = compile_under_limits(
+        CompilationLimits::new(
+            6,
+            6,
+            2_000_000,
+            6_000_000,
+            2 * 1024 * 1024,
+            6 * 1024 * 1024,
+            1,
+        )
+        .unwrap(),
+    );
+    let parallel = compile_under_limits(
+        CompilationLimits::new(5, 5, 1_000_000, 5_000_000, 1024 * 1024, 5 * 1024 * 1024, 4)
+            .unwrap(),
+    );
+
+    assert_eq!(
+        sequential.compilation_identity(),
+        parallel.compilation_identity()
+    );
+    assert_eq!(sequential.result_identity(), parallel.result_identity());
+    assert_eq!(
+        sequential
+            .artifacts()
+            .iter()
+            .map(|artifact| (artifact.source_page_number(), artifact.bytes()))
+            .collect::<Vec<_>>(),
+        parallel
+            .artifacts()
+            .iter()
+            .map(|artifact| (artifact.source_page_number(), artifact.bytes()))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -200,6 +597,7 @@ fn cli_timing_path_preserves_accepted_fulfillment_outcomes() {
 
     let timed = typst_pack::cli_support::compile_with_timing(
         PackCompilationRequest::new(pack, output(OutputFormat::Svg)),
+        CompilationLimits::reference_v1(),
         None,
     )
     .unwrap();

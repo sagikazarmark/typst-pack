@@ -17,7 +17,7 @@ use support::official_typst::{
 use typst::foundations::Bytes;
 use typst::foundations::{Datetime, Dict, Smart, Value};
 use typst_pack::{
-    CompilationAccessKind, CompilationDiagnostic, CompilationFulfillmentSet,
+    CompilationAccessKind, CompilationDiagnostic, CompilationFulfillmentSet, CompilationLimits,
     CompilationOutputSpecification, CompilationRequestIssue, CompilationRequestRejection,
     CompilationResult, CompilationStatus, CreationTimestamp, DiagnosticPhase, DiagnosticProducer,
     DiagnosticSeverity as PackDiagnosticSeverity, DocumentTime, HtmlOutputSpecification,
@@ -30,7 +30,7 @@ use typst_pdf::PdfStandard;
 fn compile(
     request: PackCompilationRequest,
 ) -> Result<CompilationResult, CompilationRequestRejection> {
-    let report = compile_to_report(request)?;
+    let report = compile_to_report(request, CompilationLimits::reference_v1())?;
     Ok(report
         .result()
         .expect("expected a semantic Compilation Result")

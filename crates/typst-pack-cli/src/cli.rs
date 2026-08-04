@@ -29,11 +29,12 @@ use typst_pack::pack_archive::{
     read_pack as read_pack_archive, save_pack, write_pack,
 };
 use typst_pack::{
-    CompilationArtifact, CompilationFulfillmentSet, CompilationOutputSpecification,
-    CompilationReportOutcome, CompilationStatus, CreationTimestamp, DocumentTime, FontContainer,
-    FontContainerFulfillment, HtmlOutputSpecification, OutputFormat, PackCompilationRequest,
-    PackOverrideSet, PackageTreeFulfillment, PageRange, PageSelection, PdfOutputSpecification,
-    PngOutputSpecification, SvgOutputSpecification, TypstTarget, parse_page_selection,
+    CompilationArtifact, CompilationFulfillmentSet, CompilationLimits,
+    CompilationOutputSpecification, CompilationReportOutcome, CompilationStatus, CreationTimestamp,
+    DocumentTime, FontContainer, FontContainerFulfillment, HtmlOutputSpecification, OutputFormat,
+    PackCompilationRequest, PackOverrideSet, PackageTreeFulfillment, PageRange, PageSelection,
+    PdfOutputSpecification, PngOutputSpecification, SvgOutputSpecification, TypstTarget,
+    parse_page_selection,
 };
 use typst_pack::{
     ExtractOptions, FILE_EXTENSION, FilesystemPackAssembler, FilesystemPackAssemblerConfig,
@@ -1105,8 +1106,12 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     let fulfillments = CompilationFulfillmentSet::new(package_fulfillments, font_fulfillments)
         .expect("filesystem acquisition supplies each exact dependency at most once");
     request = request.fulfillments(fulfillments);
-    let timed = compile_with_timing(request, args.automation.timings.clone())
-        .map_err(|error| CliError::Message(error.to_string()))?;
+    let timed = compile_with_timing(
+        request,
+        reference_compilation_limits(rayon::current_num_threads()),
+        args.automation.timings.clone(),
+    )
+    .map_err(|error| CliError::Message(error.to_string()))?;
     let (outcome, timing_error) = timed.into_parts();
 
     let diagnostic_format = args.automation.diagnostic_format.into();
@@ -1416,6 +1421,16 @@ fn initialize_jobs(jobs: Option<usize>) {
     }
 }
 
+fn reference_compilation_limits(worker_count: usize) -> CompilationLimits {
+    let limits = CompilationLimits::reference_v1();
+    let worker_count = u64::try_from(worker_count)
+        .unwrap_or(limits.export_workers())
+        .clamp(1, limits.export_workers());
+    limits
+        .with_export_workers(worker_count)
+        .expect("the first-party worker ceiling is finite and nonzero")
+}
+
 fn write_dependencies(
     destination: &Path,
     format: DepsFormat,
@@ -1606,7 +1621,7 @@ fn human_size(bytes: usize) -> String {
 mod parser_tests {
     use clap::Parser as _;
 
-    use super::Cli;
+    use super::{Cli, reference_compilation_limits};
 
     #[test]
     fn uses_typst_embedded_font_terminology() {
@@ -1630,6 +1645,13 @@ mod parser_tests {
             ])
             .is_err()
         );
+    }
+
+    #[test]
+    fn reference_compilation_workers_honor_jobs_without_exceeding_the_profile() {
+        assert_eq!(reference_compilation_limits(1).export_workers(), 1);
+        assert_eq!(reference_compilation_limits(4).export_workers(), 4);
+        assert_eq!(reference_compilation_limits(64).export_workers(), 4);
     }
 }
 

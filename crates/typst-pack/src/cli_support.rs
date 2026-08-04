@@ -8,13 +8,13 @@ use typst_kit::diagnostics::DiagnosticFormat;
 use typst_kit::diagnostics::termcolor::WriteColor;
 
 use crate::compile::{
-    PackCompilationExecution, PackCompilationPreparation, PackCompilationPresentation,
-    compile_pack_kernel, prepare_pack_compilation,
+    PackCompilationExecution, PackCompilationKernelOutcome, PackCompilationPreparation,
+    PackCompilationPresentation, compile_pack_kernel, prepare_pack_compilation,
 };
 use crate::fs_assembly::{PackAssemblyDiagnosticContext, PackAssemblyReport};
 use crate::{
-    CompilationReport, CompilationRequestRejection, CompilationResult, PackCompilationRequest,
-    PdfStandardsValidationError,
+    CompilationLimits, CompilationReport, CompilationRequestRejection, CompilationResult,
+    PackCompilationRequest, PdfStandardsValidationError,
 };
 
 pub use crate::FilesystemPackageAuthority;
@@ -96,9 +96,10 @@ impl TimedCliCompilation {
 
 pub fn compile_with_timing(
     request: PackCompilationRequest,
+    limits: CompilationLimits,
     timings: Option<PathBuf>,
 ) -> Result<TimedCliCompilation, CompilationRequestRejection> {
-    let (mut world, kernel) = match prepare_pack_compilation(request) {
+    let (mut world, kernel) = match prepare_pack_compilation(request, limits) {
         PackCompilationPreparation::Execute { world, kernel } => (world, kernel),
         PackCompilationPreparation::Rejected(rejection) => {
             return Err(rejection);
@@ -115,13 +116,16 @@ pub fn compile_with_timing(
     let timing_result = timer.record(&mut world, |world| {
         execution = Some(compile_pack_kernel(world, kernel));
     });
-    let outcome = execution.map(|execution| {
-        let file_dependencies = world.file_dependencies();
-        CliCompilationOutcome::Execution(CliCompilationExecution {
-            world,
-            execution,
-            file_dependencies,
-        })
+    let outcome = execution.map(|outcome| match outcome {
+        PackCompilationKernelOutcome::Execution(execution) => {
+            let file_dependencies = world.file_dependencies();
+            CliCompilationOutcome::Execution(CliCompilationExecution {
+                world,
+                execution,
+                file_dependencies,
+            })
+        }
+        PackCompilationKernelOutcome::Operation(report) => CliCompilationOutcome::Operation(report),
     });
     Ok(TimedCliCompilation {
         outcome,

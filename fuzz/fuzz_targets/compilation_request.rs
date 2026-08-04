@@ -179,8 +179,16 @@ fuzz_target!(|data: &[u8]| {
         request.fulfillments(fulfillments())
     };
 
-    let first_rejection = compile(build_request(reverse, reverse)).unwrap_err();
-    let second_rejection = compile(build_request(!reverse, !reverse)).unwrap_err();
+    let first_rejection = compile(
+        build_request(reverse, reverse),
+        typst_pack::CompilationLimits::reference_v1(),
+    )
+    .unwrap_err();
+    let second_rejection = compile(
+        build_request(!reverse, !reverse),
+        typst_pack::CompilationLimits::reference_v1(),
+    )
+    .unwrap_err();
     for rejection in [&first_rejection, &second_rejection] {
         let issue_kinds = rejection
             .issues()

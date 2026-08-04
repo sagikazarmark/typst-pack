@@ -197,7 +197,7 @@ use std::path::Path;
 
 use typst_pack::pack_archive::{DecodeLimits, EncodeLimits, decode, encode};
 use typst_pack::{
-    compile, CompilationOutputSpecification, FilesystemPackAssembler,
+    compile, CompilationLimits, CompilationOutputSpecification, FilesystemPackAssembler,
     FilesystemPackAssemblerConfig, FilesystemPackAssemblyRequest, OutputFormat,
     Pack, PackCompilationRequest, PdfOutputSpecification,
 };
@@ -219,7 +219,7 @@ let request = PackCompilationRequest::new(
     pack,
     CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
 );
-let report = compile(request)?;
+let report = compile(request, CompilationLimits::reference_v1())?;
 let output = report.result().expect("semantic compilation result");
 assert_eq!(output.engine_identity().implementation(), "typst");
 assert_eq!(output.exporter_identity().implementation(), "typst-pdf");
@@ -457,7 +457,7 @@ let request = PackCompilationRequest::new(
     pack,
     CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
 ).overrides(overrides);
-let report = compile(request)?;
+let report = compile(request, CompilationLimits::reference_v1())?;
 let output = report.result().expect("semantic compilation result");
 ```
 
@@ -521,7 +521,9 @@ compatibility aliases:
   `TypstTarget`. Removed resource and inclusion arguments have no replacements.
 - Change creation from a directory plus `--entrypoint`/`--output` to
   `create <INPUT> [OUTPUT]`.
-- Replace `compile_pack(request)` with `compile(request)`. The provisional
+- Replace `compile_pack(request)` with `compile(request, limits)` and pass an
+  explicit finite `CompilationLimits` value. First-party workflows use
+  `CompilationLimits::reference_v1()`. The provisional
   arbitrary-`World` `compile` overload and public `PackWorld` builder are
   removed; configure semantic values on `PackCompilationRequest`.
 - `compile` returns `CompilationReport`; inspect `report.outcome()` or

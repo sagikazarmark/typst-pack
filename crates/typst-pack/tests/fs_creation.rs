@@ -745,7 +745,7 @@ mod fonts {
         )
         .fulfillments(CompilationFulfillmentSet::new([], font_fulfillments).unwrap());
 
-        let report = compile(request).unwrap();
+        let report = compile(request, typst_pack::CompilationLimits::reference_v1()).unwrap();
         let result = report.result().expect("semantic Compilation Result");
         assert!(result.artifacts()[0].bytes().starts_with(b"%PDF"));
     }

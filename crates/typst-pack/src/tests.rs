@@ -1938,6 +1938,7 @@ fn pdf_default_timestamp_is_resolved_after_compilation() {
     let default_output = crate::compile::compile_with_default_pdf_timestamp(
         &world,
         &CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
+        crate::CompilationLimits::reference_v1(),
         || {
             default_resolutions.fetch_add(1, Ordering::Relaxed);
             Some(timestamp)
@@ -1951,6 +1952,7 @@ fn pdf_default_timestamp_is_resolved_after_compilation() {
             creation_timestamp: CreationTimestamp::Explicit(timestamp),
             ..PdfOutputSpecification::default()
         }),
+        crate::CompilationLimits::reference_v1(),
         || panic!("an explicit timestamp must not resolve the default"),
     )
     .unwrap();

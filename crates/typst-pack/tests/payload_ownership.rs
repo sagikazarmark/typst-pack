@@ -1,10 +1,10 @@
 use typst_pack::pack_archive::{DecodeLimits, decode};
 use typst_pack::{
-    CompilationFulfillmentSet, CompilationOutputSpecification, DiscoverySpecification,
-    DocumentTime, FontCatalog, Pack, PackArchiveBytes, PackCompilationRequest, PackCreationInput,
-    PackCreationOutcome, PackageAcquisitionFailures, PackageCatalog, PackageDisposition,
-    PackageTree, PackageTreeFulfillment, ProjectSnapshotAssembly, SvgOutputSpecification,
-    TypstTarget, compile, create,
+    CompilationFulfillmentSet, CompilationLimits, CompilationOutputSpecification,
+    DiscoverySpecification, DocumentTime, FontCatalog, Pack, PackArchiveBytes,
+    PackCompilationRequest, PackCreationInput, PackCreationOutcome, PackageAcquisitionFailures,
+    PackageCatalog, PackageDisposition, PackageTree, PackageTreeFulfillment,
+    ProjectSnapshotAssembly, SvgOutputSpecification, TypstTarget, compile, create,
 };
 
 #[cfg(feature = "embedded-fonts")]
@@ -124,10 +124,13 @@ fn compilation_artifact_clones_share_payload_bytes() {
         .unwrap()
         .build()
         .unwrap();
-    let report = compile(PackCompilationRequest::new(
-        pack,
-        CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
-    ))
+    let report = compile(
+        PackCompilationRequest::new(
+            pack,
+            CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
+        ),
+        CompilationLimits::reference_v1(),
+    )
     .unwrap();
     let artifact = &report.result().unwrap().artifacts()[0];
     let artifact_pointer = artifact.bytes().as_ptr();
@@ -192,6 +195,7 @@ fn package_fulfillment_sets_reuse_validated_tree_payloads() {
             CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
         )
         .fulfillments(cloned),
+        CompilationLimits::reference_v1(),
     )
     .unwrap();
     assert!(report.result().is_some());
@@ -235,6 +239,7 @@ fn font_fulfillment_sets_reuse_validated_container_payloads() {
             CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
         )
         .fulfillments(cloned),
+        CompilationLimits::reference_v1(),
     )
     .unwrap();
     assert!(report.result().is_some());

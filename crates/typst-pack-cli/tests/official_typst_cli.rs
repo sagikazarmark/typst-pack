@@ -7,14 +7,15 @@ use std::process::{Command, Output};
 use official_typst_cli::OfficialTypstCli;
 use typst_pack::pack_archive::{EncodeLimits, encode};
 use typst_pack::{
-    CompilationOutputSpecification, CompilationRequestRejection, CompilationResult, Pack,
-    PackCompilationRequest, SvgOutputSpecification, compile as compile_to_report,
+    CompilationLimits, CompilationOutputSpecification, CompilationRequestRejection,
+    CompilationResult, Pack, PackCompilationRequest, SvgOutputSpecification,
+    compile as compile_to_report,
 };
 
 fn compile(
     request: PackCompilationRequest,
 ) -> Result<CompilationResult, CompilationRequestRejection> {
-    let report = compile_to_report(request)?;
+    let report = compile_to_report(request, CompilationLimits::reference_v1())?;
     Ok(report
         .result()
         .expect("expected a semantic Compilation Result")
