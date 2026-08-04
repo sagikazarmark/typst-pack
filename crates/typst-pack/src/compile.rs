@@ -1675,6 +1675,10 @@ impl CompilationArtifact {
         self.bytes.as_slice()
     }
 
+    pub(crate) fn shared_bytes(&self) -> &SharedBytes {
+        &self.bytes
+    }
+
     /// Extracts the owned artifact bytes.
     pub fn into_bytes(self) -> Vec<u8> {
         self.bytes.into_vec()
@@ -3248,6 +3252,48 @@ fn logical_span(world: &dyn World, span: DiagSpan) -> LogicalSpan {
     LogicalSpan {
         logical_path: span.id().map(logical_path),
         byte_range: world.range(span),
+    }
+}
+
+#[cfg(test)]
+mod artifact_publication_tests {
+    use super::*;
+
+    #[test]
+    fn artifact_publication_planning_aggregates_collisions_in_canonical_order() {
+        let pack = Pack::builder("main.typ")
+            .file(
+                "main.typ",
+                b"collision one\n#pagebreak()\ncollision two".to_vec(),
+            )
+            .unwrap()
+            .build()
+            .unwrap();
+        let report = compile(
+            PackCompilationRequest::new(
+                pack,
+                CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
+            ),
+            CompilationLimits::reference_v1(),
+        )
+        .unwrap();
+        let mut result = report.result().unwrap().clone();
+        result.artifacts.push(result.artifacts[1].clone());
+        result.artifacts.push(result.artifacts[0].clone());
+
+        assert_eq!(
+            crate::plan_compilation_artifact_publication(&result)
+                .unwrap_err()
+                .issues(),
+            [
+                crate::ArtifactPublicationPlanIssue::NamingCollision {
+                    relative_path: "page-1.svg".to_owned(),
+                },
+                crate::ArtifactPublicationPlanIssue::NamingCollision {
+                    relative_path: "page-2.svg".to_owned(),
+                },
+            ]
+        );
     }
 }
 

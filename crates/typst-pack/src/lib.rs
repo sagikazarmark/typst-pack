@@ -8,6 +8,7 @@ pub const VERSION: &str = concat!(
     ")"
 );
 
+mod compilation_artifact_publication;
 mod compile;
 mod creation;
 mod embedded;
@@ -38,6 +39,11 @@ mod world_trace;
 #[doc(hidden)]
 pub mod cli_support;
 
+pub use compilation_artifact_publication::{
+    ArtifactPublicationPlanError, ArtifactPublicationPlanIssue,
+    CompilationArtifactPublicationEntry, CompilationArtifactPublicationPlan,
+    plan_compilation_artifact_publication,
+};
 pub use compile::{
     CompilationAccessKind, CompilationAccessObservation, CompilationAccessOutcome,
     CompilationAccessTrace, CompilationArtifact, CompilationDiagnostic, CompilationDocumentSummary,
