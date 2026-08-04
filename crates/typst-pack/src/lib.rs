@@ -13,6 +13,8 @@ mod compile;
 mod creation;
 mod embedded;
 mod extract;
+#[cfg(feature = "fs")]
+mod filesystem_plan_publication;
 mod font_catalog;
 #[cfg(feature = "fs")]
 mod fs_assembly;
@@ -70,6 +72,20 @@ pub use creation::{
 };
 #[cfg(feature = "fs")]
 pub use extract::{ExtractError, ExtractOptions, ExtractReport, extract};
+#[cfg(feature = "fs")]
+pub use filesystem_plan_publication::{
+    CompilationArtifactPublicationError, CompilationArtifactPublicationProgress,
+    CompilationArtifactPublicationReceipt, FilesystemDestinationEntryKind, FilesystemMergePolicy,
+    FilesystemPlanPublicationErrorCause, FilesystemPlanPublicationPhase,
+    FilesystemPublicationPreflightIssue, PackExtractionPublicationError,
+    PackExtractionPublicationProgress, PackExtractionPublicationReceipt,
+    publish_compilation_artifact_plan_to_filesystem, publish_pack_extraction_plan_to_filesystem,
+};
+#[cfg(all(feature = "fs", fuzzing))]
+#[doc(hidden)]
+pub use filesystem_plan_publication::{
+    FilesystemPublicationFaultProbe, publish_pack_extraction_plan_to_filesystem_with_fault_probe,
+};
 #[cfg(feature = "embedded-fonts")]
 pub use font_catalog::typst_embedded_font_containers;
 pub use font_catalog::{

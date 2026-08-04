@@ -5,8 +5,9 @@
 use std::path::{Path, PathBuf};
 
 use crate::{
-    Pack, PackExtractionEntry, PackExtractionPlanError, PackExtractionSelection,
-    plan_pack_extraction,
+    FilesystemMergePolicy, FilesystemPublicationPreflightIssue, Pack, PackExtractionPlanError,
+    PackExtractionPublicationError, PackExtractionSelection, plan_pack_extraction,
+    publish_pack_extraction_plan_to_filesystem,
 };
 
 /// Options for [`extract`].
@@ -28,20 +29,66 @@ pub struct ExtractReport {
 }
 
 /// A failure while extracting a pack.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug)]
+#[non_exhaustive]
 pub enum ExtractError {
-    #[error(transparent)]
-    Plan(#[from] PackExtractionPlanError),
-    #[error("`{0}` already exists (pass force to overwrite)")]
-    Exists(PathBuf),
-    #[error("existing destination entry `{0}` conflicts with extraction")]
-    DestinationConflict(PathBuf),
-    #[error("failed to write `{path}`: {source}")]
-    Io {
-        path: PathBuf,
-        #[source]
-        source: std::io::Error,
-    },
+    Plan(PackExtractionPlanError),
+    Publication(PackExtractionPublicationError),
+}
+
+impl std::fmt::Display for ExtractError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Plan(error) => error.fmt(formatter),
+            Self::Publication(error) => {
+                match error.preflight_issues().and_then(|issues| issues.first()) {
+                    Some(FilesystemPublicationPreflightIssue::ExistingTarget { relative_path }) => {
+                        write!(
+                            formatter,
+                            "`{}` already exists (pass force to overwrite)",
+                            error.destination().join(relative_path).display()
+                        )
+                    }
+                    Some(FilesystemPublicationPreflightIssue::ConflictingTarget {
+                        relative_path,
+                        ..
+                    }) => write!(
+                        formatter,
+                        "existing destination entry `{}` conflicts with extraction",
+                        error.destination().join(relative_path).display()
+                    ),
+                    Some(FilesystemPublicationPreflightIssue::ConflictingAncestor {
+                        ancestor,
+                        ..
+                    })
+                    | Some(FilesystemPublicationPreflightIssue::ConflictingDestinationRoot {
+                        path: ancestor,
+                        ..
+                    }) => write!(
+                        formatter,
+                        "existing destination entry `{}` conflicts with extraction",
+                        ancestor.display()
+                    ),
+                    _ => error.fmt(formatter),
+                }
+            }
+        }
+    }
+}
+
+impl std::error::Error for ExtractError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Plan(error) => Some(error),
+            Self::Publication(error) => Some(error),
+        }
+    }
+}
+
+impl From<PackExtractionPlanError> for ExtractError {
+    fn from(error: PackExtractionPlanError) -> Self {
+        Self::Plan(error)
+    }
 }
 
 /// Writes the project files of a pack into a directory.
@@ -60,97 +107,19 @@ pub fn extract(
         pack,
         PackExtractionSelection::new(options.packages, options.fonts),
     )?;
-    preflight_destination(plan.entries(), dir, options.force)?;
-
-    let mut report = ExtractReport::default();
-
-    for entry in plan.entries() {
-        write_file(
-            dir,
-            Path::new(entry.relative_path()),
-            entry.bytes(),
-            &mut report,
-        )?;
-    }
-
-    Ok(report)
-}
-
-fn preflight_destination(
-    entries: &[PackExtractionEntry],
-    dir: &Path,
-    force: bool,
-) -> Result<(), ExtractError> {
-    for entry in entries {
-        let relative = Path::new(entry.relative_path());
-        let target = dir.join(relative);
-        match std::fs::symlink_metadata(&target) {
-            Ok(metadata) => {
-                if metadata.file_type().is_symlink() {
-                    return Err(ExtractError::DestinationConflict(target));
-                }
-                if metadata.is_file() {
-                    if !force {
-                        return Err(ExtractError::Exists(target));
-                    }
-                } else {
-                    return Err(ExtractError::DestinationConflict(target));
-                }
-            }
-            Err(source)
-                if matches!(
-                    source.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) => {}
-            Err(source) => {
-                return Err(ExtractError::Io {
-                    path: target,
-                    source,
-                });
-            }
-        }
-
-        let mut parent = target.parent();
-        while let Some(path) = parent.filter(|path| path.starts_with(dir)) {
-            match std::fs::symlink_metadata(path) {
-                Ok(metadata) if metadata.file_type().is_symlink() || !metadata.is_dir() => {
-                    return Err(ExtractError::DestinationConflict(path.to_owned()));
-                }
-                Ok(_) => {}
-                Err(source) if source.kind() == std::io::ErrorKind::NotFound => {}
-                Err(source) => {
-                    return Err(ExtractError::Io {
-                        path: path.to_owned(),
-                        source,
-                    });
-                }
-            }
-            if path == dir {
-                break;
-            }
-            parent = path.parent();
-        }
-    }
-    Ok(())
-}
-
-fn write_file(
-    dir: &Path,
-    relative: &Path,
-    data: &[u8],
-    report: &mut ExtractReport,
-) -> Result<(), ExtractError> {
-    let target = dir.join(relative);
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| ExtractError::Io {
-            path: parent.to_owned(),
-            source,
-        })?;
-    }
-    std::fs::write(&target, data).map_err(|source| ExtractError::Io {
-        path: target.clone(),
-        source,
-    })?;
-    report.written.push(relative.to_owned());
-    Ok(())
+    let policy = if options.force {
+        FilesystemMergePolicy::MergeReplaceExactFiles
+    } else {
+        FilesystemMergePolicy::MergeCreateOnly
+    };
+    let receipt = publish_pack_extraction_plan_to_filesystem(&plan, dir, policy)
+        .map_err(ExtractError::Publication)?;
+    Ok(ExtractReport {
+        written: receipt
+            .progress()
+            .committed_files()
+            .iter()
+            .map(PathBuf::from)
+            .collect(),
+    })
 }

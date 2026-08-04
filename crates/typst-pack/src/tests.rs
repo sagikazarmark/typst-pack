@@ -2270,7 +2270,14 @@ Rows: #csv("data.csv").len()
 
         // Refuses to overwrite without force.
         let result = extract(assembly_report.pack(), &target, &ExtractOptions::default());
-        assert!(matches!(result, Err(ExtractError::Exists(_))));
+        assert!(matches!(
+            result,
+            Err(ExtractError::Publication(error))
+                if matches!(
+                    error.preflight_issues(),
+                    Some([FilesystemPublicationPreflightIssue::ExistingTarget { .. }, ..])
+                )
+        ));
     }
 
     #[test]
@@ -2321,7 +2328,14 @@ Rows: #csv("data.csv").len()
 
         let result = extract(&pack, &target, &ExtractOptions::default());
 
-        assert!(matches!(result, Err(ExtractError::Exists(_))));
+        assert!(matches!(
+            result,
+            Err(ExtractError::Publication(error))
+                if matches!(
+                    error.preflight_issues(),
+                    Some([FilesystemPublicationPreflightIssue::ExistingTarget { .. }, ..])
+                )
+        ));
         assert!(!target.join("main.typ").exists());
         assert_eq!(fs::read(target.join("z.txt")).unwrap(), b"external");
 
@@ -2357,7 +2371,14 @@ Rows: #csv("data.csv").len()
             },
         );
 
-        assert!(matches!(result, Err(ExtractError::DestinationConflict(_))));
+        assert!(matches!(
+            result,
+            Err(ExtractError::Publication(error))
+                if matches!(
+                    error.preflight_issues(),
+                    Some([FilesystemPublicationPreflightIssue::ConflictingAncestor { .. }, ..])
+                )
+        ));
         assert!(!blocked_target.join("main.typ").exists());
         assert_eq!(fs::read(blocked_target.join("tree")).unwrap(), b"external");
     }
@@ -2390,7 +2411,14 @@ Rows: #csv("data.csv").len()
             },
         );
 
-        assert!(matches!(result, Err(ExtractError::DestinationConflict(_))));
+        assert!(matches!(
+            result,
+            Err(ExtractError::Publication(error))
+                if matches!(
+                    error.preflight_issues(),
+                    Some([FilesystemPublicationPreflightIssue::ConflictingAncestor { .. }, ..])
+                )
+        ));
         assert!(!target.join("main.typ").exists());
         assert!(!outside.join("logo.txt").exists());
     }

@@ -32,9 +32,13 @@ parallel = ["dep:rayon"]
 # with this feature alone cannot download under any runtime configuration. Not
 # available on wasm targets.
 fs = [
+    "dep:cap-primitives",
+    "dep:cap-std",
     "dep:fontconfig-parser",
     "dep:ignore",
     "dep:libc",
+    "dep:same-file",
+    "dep:unicode-normalization",
     "dep:walkdir",
     "dep:windows-sys",
     "typst-kit/system-files",
@@ -55,14 +59,18 @@ egress = [
 ]
 
 [dependencies]
+cap-primitives = { version = "4", optional = true }
+cap-std = { version = "4", optional = true }
 ecow = "0.2"
 env_proxy = { version = "0.4", optional = true }
 flate2 = { version = "1", optional = true }
 ignore = { version = "0.4", optional = true }
 rayon = { workspace = true, optional = true }
+same-file = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "1.1"
+unicode-normalization = { version = "0.1", optional = true }
 rustls-pemfile = { version = "2", optional = true }
 tar = { version = "0.4", default-features = false, optional = true }
 # Typst crates share internal types and must resolve to the same exact release.

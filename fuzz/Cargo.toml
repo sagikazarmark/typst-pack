@@ -58,5 +58,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "filesystem_plan_publication"
+path = "fuzz_targets/filesystem_plan_publication.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

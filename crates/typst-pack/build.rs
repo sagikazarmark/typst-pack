@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 fn main() {
+    println!("cargo:rustc-check-cfg=cfg(fuzzing)");
     for path in ["Cargo.toml", "embedded-typst.toml"] {
         println!("cargo:rerun-if-changed={path}");
     }
