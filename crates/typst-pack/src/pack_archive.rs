@@ -19,7 +19,7 @@ use crate::manifest::PackManifest;
 pub use crate::manifest::{FORMAT_VERSION, MANIFEST_PATH, PackManifestError as ManifestError};
 use crate::pack::{
     PackConstructionInput, PackFontInput, PackInvariantError, PackageFileInput,
-    PackageRequirementInput, ProjectFileInput,
+    PackageRequirementInput, ProjectFileInput, font_container_path,
 };
 use crate::payload::SharedBytes;
 use crate::{Pack, PackArchiveBytes};
@@ -257,7 +257,7 @@ pub fn encode(pack: &Pack, limits: EncodeLimits) -> Result<PackArchiveBytes, Enc
         }
     }
     for (identity, data) in &font_members {
-        let path = font_archive_path(*identity, Some(data));
+        let path = font_container_path(*identity, Some(data));
         add_generated_name_bytes(&mut generated_name_bytes, [path.len()])?;
         check_encode_exceeded(
             EncodeResource::GeneratedMemberNameBytes,
@@ -309,7 +309,7 @@ pub fn encode(pack: &Pack, limits: EncodeLimits) -> Result<PackArchiveBytes, Enc
         }
 
         for (identity, data) in &font_members {
-            let path = font_archive_path(*identity, Some(data));
+            let path = font_container_path(*identity, Some(data));
             zip.start_file(path, zip_file_options(data.len()))?;
             zip.write_all(data)?;
         }
@@ -386,7 +386,7 @@ fn encode_manifest(pack: &Pack, ceiling: u64) -> Result<String, EncodeLimitError
             .find(|requirement| requirement.container_identity() == face.identity().container())
             .expect("Pack Font Catalog requirement invariant violated");
         manifest.push("\n[[fonts]]\npath = ")?;
-        manifest.push_quoted(&font_archive_path(
+        manifest.push_quoted(&font_container_path(
             face.identity().container(),
             embedded.map(|font| font.data()),
         ))?;
@@ -525,19 +525,6 @@ impl BoundedManifest {
         }
         self.push(&value[unescaped_start..])
     }
-}
-
-pub(crate) fn font_archive_path(
-    identity: crate::FontContainerIdentity,
-    data: Option<&[u8]>,
-) -> String {
-    let extension = match data.and_then(|data| data.get(..4)) {
-        Some(b"OTTO") => "otf",
-        Some(b"ttcf") => "ttc",
-        Some(_) => "ttf",
-        None => "font",
-    };
-    format!("fonts/{}.{extension}", identity.encode())
 }
 
 fn zip_file_options(size: usize) -> SimpleFileOptions {

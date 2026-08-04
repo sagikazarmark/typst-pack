@@ -24,6 +24,7 @@ mod fs_project;
 mod manifest;
 mod pack;
 pub mod pack_archive;
+mod pack_extraction;
 #[cfg(feature = "package-acquisition")]
 mod package_acquisition;
 mod package_catalog;
@@ -103,6 +104,10 @@ pub use pack::{
     FILE_EXTENSION, FontContainerIdentity, FontFaceIdentity, FontRequirement, Pack, PackBuildError,
     PackBuilder, PackFont, PackFontCatalogFace, PackIdentity, PackInvariantError,
     PackInvariantIssue, PackPathRole, PackageRequirement, PackageTreeIdentity,
+};
+pub use pack_extraction::{
+    PackExtractionEntry, PackExtractionEntryRole, PackExtractionPlan, PackExtractionPlanError,
+    PackExtractionPlanIssue, PackExtractionSelection, plan_pack_extraction,
 };
 #[cfg(feature = "package-acquisition")]
 pub use package_acquisition::{

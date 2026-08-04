@@ -246,6 +246,16 @@ impl FontContainerIdentity {
     }
 }
 
+pub(crate) fn font_container_path(identity: FontContainerIdentity, data: Option<&[u8]>) -> String {
+    let extension = match data.and_then(|data| data.get(..4)) {
+        Some(b"OTTO") => "otf",
+        Some(b"ttcf") => "ttc",
+        Some(_) => "ttf",
+        None => "font",
+    };
+    format!("fonts/{}.{extension}", identity.encode())
+}
+
 /// The exact identity of one face within a Font Container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FontFaceIdentity {
@@ -325,6 +335,10 @@ impl PackFont {
     /// The contained font bytes.
     pub fn data(&self) -> &[u8] {
         self.data.as_slice()
+    }
+
+    pub(crate) fn shared_data(&self) -> &SharedBytes {
+        &self.data
     }
 
     /// Official selection metadata derived from the verified container bytes.

@@ -89,7 +89,7 @@ fn only_read_issue(result: Result<Pack, DecodeError>) -> PackInvariantIssue {
 
 #[cfg(all(feature = "embedded-fonts", feature = "fs"))]
 fn pack_font_path(font: &PackFont) -> String {
-    crate::pack_archive::font_archive_path(font.identity().container(), Some(font.data()))
+    crate::pack::font_container_path(font.identity().container(), Some(font.data()))
 }
 
 fn test_package_manifest(
@@ -2300,10 +2300,7 @@ Rows: #csv("data.csv").len()
                 },
             );
 
-            assert!(matches!(
-                result,
-                Err(ExtractError::PlannedPathConflict { .. })
-            ));
+            assert!(matches!(result, Err(ExtractError::Plan(_))));
             assert!(!target.exists());
         }
     }
@@ -2432,10 +2429,7 @@ Rows: #csv("data.csv").len()
             },
         );
 
-        assert!(matches!(
-            result,
-            Err(ExtractError::PlannedPathConflict { .. })
-        ));
+        assert!(matches!(result, Err(ExtractError::Plan(_))));
         assert!(!target.exists());
     }
 
