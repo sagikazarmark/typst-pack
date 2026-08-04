@@ -2,10 +2,13 @@
 
 use typst_pack::pack_archive::{CommitCertainty, StagingResidueStatus};
 use typst_pack::{
-    CompilationLimits, CompilationOutputSpecification, FilesystemMergePolicy,
-    FilesystemPublicationPreflightIssue, Pack, PackCompilationRequest, PackExtractionSelection,
-    PdfOutputSpecification, compile, plan_compilation_artifact_publication, plan_pack_extraction,
-    publish_compilation_artifact_plan_to_filesystem, publish_pack_extraction_plan_to_filesystem,
+    CompilationArtifactPathIssue, CompilationLimits, CompilationOutputSpecification,
+    FilesystemMergePolicy, FilesystemPublicationPreflightIssue, Pack, PackCompilationRequest,
+    PackExtractionSelection, PdfOutputSpecification, SvgOutputSpecification, compile,
+    plan_compilation_artifact_publication, plan_pack_extraction,
+    publish_compilation_artifact_plan_to_filesystem,
+    publish_compilation_artifact_plan_to_filesystem_paths,
+    publish_pack_extraction_plan_to_filesystem,
 };
 
 fn extraction_plan() -> typst_pack::PackExtractionPlan {
@@ -21,6 +24,23 @@ fn extraction_plan() -> typst_pack::PackExtractionPlan {
 
 fn temp_path(directory: &tempfile::TempDir) -> std::path::PathBuf {
     std::fs::canonicalize(directory.path()).unwrap()
+}
+
+fn two_page_artifact_plan() -> typst_pack::CompilationArtifactPublicationPlan {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"first#pagebreak()second".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let report = compile(
+        PackCompilationRequest::new(
+            pack,
+            CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
+        ),
+        CompilationLimits::reference_v1(),
+    )
+    .unwrap();
+    plan_compilation_artifact_publication(report.result().unwrap()).unwrap()
 }
 
 #[test]
@@ -43,7 +63,10 @@ fn publish_new_tree_exposes_the_complete_plan_through_one_root_commit() {
     );
     assert_eq!(
         receipt.progress().committed_files(),
-        ["assets/data.txt", "main.typ"]
+        [
+            std::path::PathBuf::from("assets/data.txt"),
+            std::path::PathBuf::from("main.typ"),
+        ]
     );
     assert_eq!(
         std::fs::read(destination.join("assets/data.txt")).unwrap(),
@@ -161,12 +184,18 @@ fn merge_policies_remain_distinct_and_preserve_unrelated_content() {
         .iter()
         .filter_map(|issue| match issue {
             FilesystemPublicationPreflightIssue::ExistingTarget { relative_path } => {
-                Some(relative_path.as_str())
+                Some(relative_path.as_path())
             }
             _ => None,
         })
         .collect::<Vec<_>>();
-    assert_eq!(existing, ["assets/data.txt", "main.typ"]);
+    assert_eq!(
+        existing,
+        [
+            std::path::Path::new("assets/data.txt"),
+            std::path::Path::new("main.typ"),
+        ]
+    );
     assert_eq!(
         error.phase(),
         typst_pack::FilesystemPlanPublicationPhase::Preflight
@@ -194,7 +223,10 @@ fn merge_policies_remain_distinct_and_preserve_unrelated_content() {
 
     assert_eq!(
         receipt.progress().committed_files(),
-        ["assets/data.txt", "main.typ"]
+        [
+            std::path::PathBuf::from("assets/data.txt"),
+            std::path::PathBuf::from("main.typ"),
+        ]
     );
     assert_eq!(
         std::fs::read(destination.join("main.typ")).unwrap(),
@@ -255,7 +287,7 @@ fn preflight_aggregates_detectable_issues_before_writing() {
     assert!(issues.iter().any(|issue| matches!(
         issue,
         FilesystemPublicationPreflightIssue::ComponentTooLong { relative_path, .. }
-            if relative_path.ends_with("/child.txt")
+            if relative_path.ends_with("child.txt")
     )));
     assert!(error.progress().committed_files().is_empty());
     assert!(!destination.join("main.typ").exists());
@@ -291,9 +323,157 @@ fn artifact_plans_publish_with_workflow_specific_progress() {
     )
     .unwrap();
 
-    assert_eq!(receipt.progress().committed_files(), ["output.pdf"]);
+    assert_eq!(
+        receipt.progress().committed_files(),
+        [std::path::PathBuf::from("output.pdf")]
+    );
     assert_eq!(
         std::fs::read(destination.join("output.pdf")).unwrap(),
+        plan.entries()[0].bytes()
+    );
+}
+
+#[test]
+fn artifact_plans_publish_through_caller_selected_platform_paths() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"= Published".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let report = compile(
+        PackCompilationRequest::new(
+            pack,
+            CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
+        ),
+        CompilationLimits::reference_v1(),
+    )
+    .unwrap();
+    let plan = plan_compilation_artifact_publication(report.result().unwrap()).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let destination = temp_path(&directory).join("artifacts");
+    let paths = vec![std::path::PathBuf::from("reports/custom-name.pdf")];
+
+    let receipt = publish_compilation_artifact_plan_to_filesystem_paths(
+        &plan,
+        &destination,
+        &paths,
+        FilesystemMergePolicy::MergeReplaceExactFiles,
+    )
+    .unwrap();
+
+    assert_eq!(
+        receipt.progress().committed_files(),
+        [std::path::PathBuf::from("reports/custom-name.pdf")]
+    );
+    assert_eq!(
+        std::fs::read(destination.join(&paths[0])).unwrap(),
+        plan.entries()[0].bytes()
+    );
+}
+
+#[test]
+fn caller_selected_artifact_paths_reject_count_and_tree_conflicts_before_writes() {
+    let plan = two_page_artifact_plan();
+    let directory = tempfile::tempdir().unwrap();
+    let destination = temp_path(&directory).join("artifacts");
+
+    let mismatch = publish_compilation_artifact_plan_to_filesystem_paths(
+        &plan,
+        &destination,
+        &[std::path::PathBuf::from("one.svg")],
+        FilesystemMergePolicy::MergeReplaceExactFiles,
+    )
+    .unwrap_err();
+    assert_eq!(mismatch.path_count_mismatch(), Some((2, 1)));
+
+    for paths in [
+        vec![
+            std::path::PathBuf::from("same.svg"),
+            std::path::PathBuf::from("same.svg"),
+        ],
+        vec![
+            std::path::PathBuf::from("tree"),
+            std::path::PathBuf::from("tree/page.svg"),
+        ],
+    ] {
+        let error = publish_compilation_artifact_plan_to_filesystem_paths(
+            &plan,
+            &destination,
+            &paths,
+            FilesystemMergePolicy::MergeReplaceExactFiles,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            error.issues(),
+            Some([CompilationArtifactPathIssue::PathConflict { .. }])
+        ));
+        assert!(!destination.exists());
+    }
+
+    for invalid in [
+        std::path::PathBuf::from("/absolute.svg"),
+        std::path::PathBuf::from("../parent.svg"),
+    ] {
+        let error = publish_compilation_artifact_plan_to_filesystem_paths(
+            &plan,
+            &destination,
+            &[invalid.clone(), std::path::PathBuf::from("valid.svg")],
+            FilesystemMergePolicy::MergeReplaceExactFiles,
+        )
+        .unwrap_err();
+        let error = error
+            .publication_error()
+            .expect("path count matches and selected paths do not conflict");
+        assert!(error.preflight_issues().unwrap().iter().any(|issue| {
+            matches!(
+                issue,
+                FilesystemPublicationPreflightIssue::InvalidRelativePath { relative_path }
+                    if relative_path == &invalid
+            )
+        }));
+        assert!(error.progress().committed_files().is_empty());
+        assert!(!destination.exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn caller_selected_artifact_progress_preserves_non_unicode_platform_paths() {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"= Published".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let report = compile(
+        PackCompilationRequest::new(
+            pack,
+            CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
+        ),
+        CompilationLimits::reference_v1(),
+    )
+    .unwrap();
+    let plan = plan_compilation_artifact_publication(report.result().unwrap()).unwrap();
+    let directory = tempfile::tempdir().unwrap();
+    let destination = temp_path(&directory).join("artifacts");
+    let relative =
+        std::path::PathBuf::from(std::ffi::OsString::from_vec(b"report-\xff.pdf".to_vec()));
+
+    let receipt = publish_compilation_artifact_plan_to_filesystem_paths(
+        &plan,
+        &destination,
+        std::slice::from_ref(&relative),
+        FilesystemMergePolicy::MergeReplaceExactFiles,
+    )
+    .unwrap();
+
+    assert_eq!(
+        receipt.progress().committed_files(),
+        std::slice::from_ref(&relative)
+    );
+    assert_eq!(
+        std::fs::read(destination.join(relative)).unwrap(),
         plan.entries()[0].bytes()
     );
 }

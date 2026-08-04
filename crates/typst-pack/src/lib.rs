@@ -12,7 +12,6 @@ mod compilation_artifact_publication;
 mod compile;
 mod creation;
 mod embedded;
-mod extract;
 #[cfg(feature = "fs")]
 mod filesystem_plan_publication;
 mod font_catalog;
@@ -71,15 +70,16 @@ pub use creation::{
     PackCreationError, PackCreationInput, PackCreationOutcome, create,
 };
 #[cfg(feature = "fs")]
-pub use extract::{ExtractError, ExtractOptions, ExtractReport, extract};
-#[cfg(feature = "fs")]
 pub use filesystem_plan_publication::{
+    CompilationArtifactPathIssue, CompilationArtifactPathPublicationError,
     CompilationArtifactPublicationError, CompilationArtifactPublicationProgress,
     CompilationArtifactPublicationReceipt, FilesystemDestinationEntryKind, FilesystemMergePolicy,
     FilesystemPlanPublicationErrorCause, FilesystemPlanPublicationPhase,
     FilesystemPublicationPreflightIssue, PackExtractionPublicationError,
     PackExtractionPublicationProgress, PackExtractionPublicationReceipt,
-    publish_compilation_artifact_plan_to_filesystem, publish_pack_extraction_plan_to_filesystem,
+    publish_compilation_artifact_plan_to_filesystem,
+    publish_compilation_artifact_plan_to_filesystem_paths,
+    publish_pack_extraction_plan_to_filesystem,
 };
 #[cfg(all(feature = "fs", fuzzing))]
 #[doc(hidden)]
@@ -146,9 +146,9 @@ pub use package_failure::{
     PackageAcquisitionFailure, PackageAcquisitionFailureReason, PackageAcquisitionFailures,
 };
 pub use payload::PackArchiveBytes;
-pub use project_snapshot::{ProjectSnapshot, ProjectSnapshotAssembly, ProjectSnapshotError};
-#[cfg(feature = "fs")]
-pub use world::OfflineDownloader;
+pub use project_snapshot::{
+    ProjectSnapshot, ProjectSnapshotAssembly, ProjectSnapshotError, ProjectSnapshotIssue,
+};
 
 #[cfg(test)]
 mod tests;

@@ -550,18 +550,20 @@ compatibility aliases:
   structure. PDF creation time is configured through
   `PdfOutputSpecification::creation_timestamp`; use `CreationTimestamp::Omit`
   to suppress PDF creation datetime metadata.
-- `ExtractError` adds `PlannedPathConflict` and `DestinationConflict`; exhaustive
-  matches must handle both variants.
+- Replace `extract` and its boolean destination policy with
+  `plan_pack_extraction` followed by
+  `publish_pack_extraction_plan_to_filesystem` and one explicit
+  `FilesystemMergePolicy`.
 
 The unstable Pack format remains version 1, but discovery and Resource Slot
 fields are removed in place. Old fields and aliases are not accepted.
 
 ### Feature flags
 
-- `fs`: `FilesystemPackAssembler`, `extract`, local package directories and
-  cache, system font scanning. Requires a file system, so disable this for wasm
-  targets. It links no transport, so a build with this feature alone cannot
-  download under any runtime configuration.
+- `fs`: `FilesystemPackAssembler`, concrete filesystem plan publication, local
+  package directories and cache, system font scanning. Requires a file system,
+  so disable this for wasm targets. It links no transport, so a build with this
+  feature alone cannot download under any runtime configuration.
 - `egress`: package downloading during filesystem creation, with the custom
   certificate and package cache directory only a download needs. Implies `fs`,
   builds on `package-acquisition`, and is what links an HTTP client and TLS

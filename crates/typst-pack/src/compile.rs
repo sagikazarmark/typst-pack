@@ -1893,8 +1893,8 @@ pub enum CompilationOperationOutcome {
 
 pub(crate) enum PackCompilationPreparation {
     Execute {
-        world: PackWorld,
-        kernel: PreparedPackCompilationKernel,
+        world: Box<PackWorld>,
+        kernel: Box<PreparedPackCompilationKernel>,
     },
     Report(CompilationReport),
     Rejected(CompilationRequestRejection),
@@ -1922,11 +1922,14 @@ pub fn compile(
         PackCompilationPreparation::Report(report) => return Ok(report),
         PackCompilationPreparation::Rejected(rejection) => return Err(rejection),
     };
-    Ok(match compile_pack_kernel(&world, kernel) {
-        PackCompilationKernelOutcome::Execution(execution) => CompilationReport {
-            outcome: CompilationReportOutcome::Result(Box::new(execution.result)),
-            fulfillments: execution.fulfillments,
-        },
+    Ok(match compile_pack_kernel(world.as_ref(), *kernel) {
+        PackCompilationKernelOutcome::Execution(execution) => {
+            let execution = *execution;
+            CompilationReport {
+                outcome: CompilationReportOutcome::Result(Box::new(execution.result)),
+                fulfillments: execution.fulfillments,
+            }
+        }
         PackCompilationKernelOutcome::Operation(report) => report,
     })
 }
@@ -1949,7 +1952,7 @@ pub(crate) struct PackCompilationExecution {
 }
 
 pub(crate) enum PackCompilationKernelOutcome {
-    Execution(PackCompilationExecution),
+    Execution(Box<PackCompilationExecution>),
     Operation(CompilationReport),
 }
 
@@ -2259,8 +2262,8 @@ pub(crate) fn prepare_pack_compilation(
     .expect("preflighted Pack World inputs must remain valid");
 
     PackCompilationPreparation::Execute {
-        world,
-        kernel: PreparedPackCompilationKernel {
+        world: Box::new(world),
+        kernel: Box::new(PreparedPackCompilationKernel {
             request_inventory,
             compilation_identity,
             engine_identity,
@@ -2268,7 +2271,7 @@ pub(crate) fn prepare_pack_compilation(
             page_selection_implies_untagged_pdf,
             fulfillments,
             limits,
-        },
+        }),
     }
 }
 
@@ -2304,7 +2307,7 @@ pub(crate) fn compile_pack_kernel(
                 output.pack_warnings,
                 kernel.page_selection_implies_untagged_pdf,
             );
-            PackCompilationKernelOutcome::Execution(PackCompilationExecution {
+            PackCompilationKernelOutcome::Execution(Box::new(PackCompilationExecution {
                 result: assemble_compilation_result(
                     &kernel,
                     CompilationStatus::Succeeded,
@@ -2320,7 +2323,7 @@ pub(crate) fn compile_pack_kernel(
                     pack_warnings: presentation_pack_warnings,
                 },
                 fulfillments: kernel.fulfillments,
-            })
+            }))
         }
         Err(CompileError::Diagnostics {
             errors,
@@ -2352,7 +2355,7 @@ pub(crate) fn compile_pack_kernel(
                 DiagnosticPhase::Export => DiagnosticProducer::Exporter(kernel.exporter_identity),
             };
             diagnostics.extend(project_diagnostics(&traced, errors, phase, producer));
-            PackCompilationKernelOutcome::Execution(PackCompilationExecution {
+            PackCompilationKernelOutcome::Execution(Box::new(PackCompilationExecution {
                 result: assemble_compilation_result(
                     &kernel,
                     CompilationStatus::Rejected,
@@ -2368,7 +2371,7 @@ pub(crate) fn compile_pack_kernel(
                 #[cfg(feature = "diagnostics")]
                 presentation,
                 fulfillments: kernel.fulfillments,
-            })
+            }))
         }
         Err(CompileError::PngExport {
             message,
@@ -2408,7 +2411,7 @@ pub(crate) fn compile_pack_kernel(
                 producer: DiagnosticProducer::Exporter(kernel.exporter_identity),
                 source_page_number: Some(source_page_number),
             });
-            PackCompilationKernelOutcome::Execution(PackCompilationExecution {
+            PackCompilationKernelOutcome::Execution(Box::new(PackCompilationExecution {
                 result: assemble_compilation_result(
                     &kernel,
                     CompilationStatus::Rejected,
@@ -2424,7 +2427,7 @@ pub(crate) fn compile_pack_kernel(
                 #[cfg(feature = "diagnostics")]
                 presentation,
                 fulfillments: kernel.fulfillments,
-            })
+            }))
         }
         Err(CompileError::InvalidPdfStandards(error)) => {
             unreachable!("PDF standards are validated during request preparation: {error}");

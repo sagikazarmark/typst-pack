@@ -63,24 +63,24 @@ impl fmt::Display for FilesystemDestinationEntryKind {
 #[non_exhaustive]
 pub enum FilesystemPublicationPreflightIssue {
     #[error("planned path {relative_path:?} is not a canonical relative filesystem path")]
-    InvalidRelativePath { relative_path: String },
+    InvalidRelativePath { relative_path: PathBuf },
     #[error("planned paths {first_path:?} and {second_path:?} alias on this platform")]
     PathAlias {
-        first_path: String,
-        second_path: String,
+        first_path: PathBuf,
+        second_path: PathBuf,
     },
     #[error("planned path {relative_path:?} contains reserved component {component:?}")]
     ReservedName {
-        relative_path: String,
+        relative_path: PathBuf,
         component: String,
     },
     #[error("component {component:?} in planned path {relative_path:?} exceeds the platform limit")]
     ComponentTooLong {
-        relative_path: String,
+        relative_path: PathBuf,
         component: String,
     },
     #[error("planned destination path {relative_path:?} exceeds the platform path limit")]
-    PathTooLong { relative_path: String },
+    PathTooLong { relative_path: PathBuf },
     #[error("destination path {path:?} contains reserved component {component:?}")]
     DestinationReservedName { path: PathBuf, component: String },
     #[error("component {component:?} in destination path {path:?} exceeds the platform limit")]
@@ -88,15 +88,15 @@ pub enum FilesystemPublicationPreflightIssue {
     #[error("destination path {path:?} exceeds the platform path limit")]
     DestinationPathTooLong { path: PathBuf },
     #[error("planned target {relative_path:?} already exists")]
-    ExistingTarget { relative_path: String },
+    ExistingTarget { relative_path: PathBuf },
     #[error("planned target {relative_path:?} is an existing {kind}, not a regular file")]
     ConflictingTarget {
-        relative_path: String,
+        relative_path: PathBuf,
         kind: FilesystemDestinationEntryKind,
     },
     #[error("ancestor {ancestor:?} of planned target {relative_path:?} is a {kind}")]
     ConflictingAncestor {
-        relative_path: String,
+        relative_path: PathBuf,
         ancestor: PathBuf,
         kind: FilesystemDestinationEntryKind,
     },
@@ -116,58 +116,54 @@ pub enum FilesystemPublicationPreflightIssue {
 }
 
 impl FilesystemPublicationPreflightIssue {
-    fn sort_key(&self) -> (String, u8, String) {
+    fn sort_key(&self) -> (PathBuf, u8, PathBuf, String) {
         match self {
             Self::InvalidRelativePath { relative_path } => {
-                (relative_path.clone(), 0, String::new())
+                (relative_path.clone(), 0, PathBuf::new(), String::new())
             }
             Self::PathAlias {
                 first_path,
                 second_path,
-            } => (first_path.clone(), 1, second_path.clone()),
+            } => (first_path.clone(), 1, second_path.clone(), String::new()),
             Self::ReservedName {
                 relative_path,
                 component,
-            } => (relative_path.clone(), 2, component.clone()),
+            } => (relative_path.clone(), 2, PathBuf::new(), component.clone()),
             Self::ComponentTooLong {
                 relative_path,
                 component,
-            } => (relative_path.clone(), 3, component.clone()),
-            Self::PathTooLong { relative_path } => (relative_path.clone(), 4, String::new()),
-            Self::DestinationReservedName { path, component } => (
-                String::new(),
-                0,
-                format!("{}:{component}", path.to_string_lossy()),
-            ),
-            Self::DestinationComponentTooLong { path, component } => (
-                String::new(),
-                1,
-                format!("{}:{component}", path.to_string_lossy()),
-            ),
-            Self::DestinationPathTooLong { path } => {
-                (String::new(), 2, path.to_string_lossy().into_owned())
+            } => (relative_path.clone(), 3, PathBuf::new(), component.clone()),
+            Self::PathTooLong { relative_path } => {
+                (relative_path.clone(), 4, PathBuf::new(), String::new())
             }
-            Self::ExistingTarget { relative_path } => (relative_path.clone(), 5, String::new()),
+            Self::DestinationReservedName { path, component } => {
+                (PathBuf::new(), 0, path.clone(), component.clone())
+            }
+            Self::DestinationComponentTooLong { path, component } => {
+                (PathBuf::new(), 1, path.clone(), component.clone())
+            }
+            Self::DestinationPathTooLong { path } => {
+                (PathBuf::new(), 2, path.clone(), String::new())
+            }
+            Self::ExistingTarget { relative_path } => {
+                (relative_path.clone(), 5, PathBuf::new(), String::new())
+            }
             Self::ConflictingTarget { relative_path, .. } => {
-                (relative_path.clone(), 6, String::new())
+                (relative_path.clone(), 6, PathBuf::new(), String::new())
             }
             Self::ConflictingAncestor {
                 relative_path,
                 ancestor,
                 ..
-            } => (
-                relative_path.clone(),
-                7,
-                ancestor.to_string_lossy().into_owned(),
-            ),
+            } => (relative_path.clone(), 7, ancestor.clone(), String::new()),
             Self::ExistingDestinationRoot { path } => {
-                (String::new(), 8, path.to_string_lossy().into_owned())
+                (PathBuf::new(), 8, path.clone(), String::new())
             }
             Self::ConflictingDestinationRoot { path, .. } => {
-                (String::new(), 9, path.to_string_lossy().into_owned())
+                (PathBuf::new(), 9, path.clone(), String::new())
             }
             Self::InspectionFailed { path, .. } => {
-                (String::new(), 10, path.to_string_lossy().into_owned())
+                (PathBuf::new(), 10, path.clone(), String::new())
             }
         }
     }
@@ -189,7 +185,7 @@ macro_rules! workflow_evidence {
     ($progress:ident, $receipt:ident, $error:ident) => {
         #[derive(Clone, Debug, Eq, PartialEq)]
         pub struct $progress {
-            committed_files: Vec<String>,
+            committed_files: Vec<PathBuf>,
             commit_certainty: CommitCertainty,
             staging_residue: Option<Box<Path>>,
             staging_residue_status: StagingResidueStatus,
@@ -197,7 +193,7 @@ macro_rules! workflow_evidence {
 
         impl $progress {
             /// Planned relative paths committed before the attempt returned.
-            pub fn committed_files(&self) -> &[String] {
+            pub fn committed_files(&self) -> &[PathBuf] {
                 &self.committed_files
             }
 
@@ -328,7 +324,7 @@ workflow_evidence!(
 );
 
 struct PlannedFile<'a> {
-    relative_path: &'a str,
+    relative_path: &'a Path,
     bytes: &'a [u8],
 }
 
@@ -405,7 +401,7 @@ enum CommitScope {
 
 #[derive(Debug)]
 struct CoreReceipt {
-    committed_files: Vec<String>,
+    committed_files: Vec<PathBuf>,
 }
 
 struct CoreError {
@@ -414,7 +410,7 @@ struct CoreError {
     staging_residue: Option<PathBuf>,
     staging_residue_status: Option<StagingResidueStatus>,
     commit_certainty: CommitCertainty,
-    committed_files: Vec<String>,
+    committed_files: Vec<PathBuf>,
     preflight_issues: Option<Vec<FilesystemPublicationPreflightIssue>>,
     source: FilesystemPlanPublicationErrorCause,
 }
@@ -437,7 +433,7 @@ pub fn publish_pack_extraction_plan_to_filesystem(
         .entries()
         .iter()
         .map(|entry| PlannedFile {
-            relative_path: entry.relative_path(),
+            relative_path: Path::new(entry.relative_path()),
             bytes: entry.bytes(),
         })
         .collect::<Vec<_>>();
@@ -469,7 +465,7 @@ pub fn publish_pack_extraction_plan_to_filesystem_with_fault_probe(
         .entries()
         .iter()
         .map(|entry| PlannedFile {
-            relative_path: entry.relative_path(),
+            relative_path: Path::new(entry.relative_path()),
             bytes: entry.bytes(),
         })
         .collect::<Vec<_>>();
@@ -506,11 +502,169 @@ pub fn publish_compilation_artifact_plan_to_filesystem(
         .entries()
         .iter()
         .map(|entry| PlannedFile {
-            relative_path: entry.relative_path(),
+            relative_path: Path::new(entry.relative_path()),
             bytes: entry.bytes(),
         })
         .collect::<Vec<_>>();
-    match publish_files(&files, destination, policy) {
+    publish_compilation_artifact_files(&files, destination, policy)
+}
+
+/// One independently detectable caller-selected artifact path issue.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum CompilationArtifactPathIssue {
+    #[error("caller-selected artifact paths {first_path:?} and {second_path:?} conflict")]
+    PathConflict {
+        first_path: PathBuf,
+        second_path: PathBuf,
+    },
+}
+
+#[derive(Debug)]
+enum CompilationArtifactPathPublicationErrorKind {
+    PathCountMismatch {
+        artifact_count: usize,
+        path_count: usize,
+    },
+    PathIssues(Box<[CompilationArtifactPathIssue]>),
+    Publication(CompilationArtifactPublicationError),
+}
+
+/// A failure while publishing an artifact plan to caller-selected paths.
+#[derive(Debug)]
+pub struct CompilationArtifactPathPublicationError {
+    kind: CompilationArtifactPathPublicationErrorKind,
+}
+
+impl CompilationArtifactPathPublicationError {
+    /// The supplied and required path counts when they differ.
+    pub fn path_count_mismatch(&self) -> Option<(usize, usize)> {
+        match self.kind {
+            CompilationArtifactPathPublicationErrorKind::PathCountMismatch {
+                artifact_count,
+                path_count,
+            } => Some((artifact_count, path_count)),
+            _ => None,
+        }
+    }
+
+    /// Every independently detectable caller-selected path issue.
+    pub fn issues(&self) -> Option<&[CompilationArtifactPathIssue]> {
+        match &self.kind {
+            CompilationArtifactPathPublicationErrorKind::PathIssues(issues) => Some(issues),
+            _ => None,
+        }
+    }
+
+    /// The concrete filesystem publication failure, when publication was attempted.
+    pub fn publication_error(&self) -> Option<&CompilationArtifactPublicationError> {
+        match &self.kind {
+            CompilationArtifactPathPublicationErrorKind::Publication(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+impl fmt::Display for CompilationArtifactPathPublicationError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match &self.kind {
+            CompilationArtifactPathPublicationErrorKind::PathCountMismatch {
+                artifact_count,
+                path_count,
+            } => write!(
+                formatter,
+                "the artifact publication plan has {artifact_count} artifact(s), but {path_count} output path(s) were supplied"
+            ),
+            CompilationArtifactPathPublicationErrorKind::PathIssues(issues) => {
+                write!(
+                    formatter,
+                    "caller-selected artifact paths have {} issue(s)",
+                    issues.len()
+                )?;
+                for issue in issues {
+                    write!(formatter, ": {issue}")?;
+                }
+                Ok(())
+            }
+            CompilationArtifactPathPublicationErrorKind::Publication(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for CompilationArtifactPathPublicationError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        self.publication_error()
+            .map(|error| error as &(dyn std::error::Error + 'static))
+    }
+}
+
+impl From<CompilationArtifactPublicationError> for CompilationArtifactPathPublicationError {
+    fn from(error: CompilationArtifactPublicationError) -> Self {
+        Self {
+            kind: CompilationArtifactPathPublicationErrorKind::Publication(error),
+        }
+    }
+}
+
+/// Publishes an artifact plan through caller-selected destination-relative
+/// filesystem paths.
+///
+/// This concrete adapter supports platform paths used by CLI output templates
+/// while retaining the semantic artifact plan as the source of roles, order,
+/// and exact bytes.
+pub fn publish_compilation_artifact_plan_to_filesystem_paths(
+    plan: &CompilationArtifactPublicationPlan,
+    destination: impl AsRef<Path>,
+    relative_paths: &[PathBuf],
+    policy: FilesystemMergePolicy,
+) -> Result<CompilationArtifactPublicationReceipt, CompilationArtifactPathPublicationError> {
+    let destination = destination.as_ref();
+    if plan.entries().len() != relative_paths.len() {
+        return Err(CompilationArtifactPathPublicationError {
+            kind: CompilationArtifactPathPublicationErrorKind::PathCountMismatch {
+                artifact_count: plan.entries().len(),
+                path_count: relative_paths.len(),
+            },
+        });
+    }
+    let mut ordered_paths = relative_paths.iter().collect::<Vec<_>>();
+    ordered_paths.sort();
+    let mut conflicts = Vec::new();
+    for (index, first) in ordered_paths.iter().enumerate() {
+        for second in &ordered_paths[index + 1..] {
+            if second.starts_with(first) {
+                conflicts.push(CompilationArtifactPathIssue::PathConflict {
+                    first_path: (*first).to_owned(),
+                    second_path: (*second).to_owned(),
+                });
+            }
+        }
+    }
+    if !conflicts.is_empty() {
+        return Err(CompilationArtifactPathPublicationError {
+            kind: CompilationArtifactPathPublicationErrorKind::PathIssues(
+                conflicts.into_boxed_slice(),
+            ),
+        });
+    }
+    let files = plan
+        .entries()
+        .iter()
+        .zip(relative_paths)
+        .map(|(entry, relative_path)| PlannedFile {
+            relative_path,
+            bytes: entry.bytes(),
+        })
+        .collect::<Vec<_>>();
+    publish_compilation_artifact_files(&files, destination, policy).map_err(Into::into)
+}
+
+fn publish_compilation_artifact_files(
+    files: &[PlannedFile<'_>],
+    destination: &Path,
+    policy: FilesystemMergePolicy,
+) -> Result<CompilationArtifactPublicationReceipt, CompilationArtifactPublicationError> {
+    match publish_files(files, destination, policy) {
         Ok(receipt) => Ok(CompilationArtifactPublicationReceipt {
             destination: destination.to_owned(),
             policy,
@@ -583,6 +737,7 @@ fn compilation_artifact_error(
     }
 }
 
+#[allow(clippy::result_large_err)]
 fn publish_files(
     files: &[PlannedFile<'_>],
     destination: &Path,
@@ -591,6 +746,7 @@ fn publish_files(
     publish_files_before_commit(files, destination, policy, |_, _, _| {})
 }
 
+#[allow(clippy::result_large_err)]
 fn publish_files_before_commit(
     files: &[PlannedFile<'_>],
     destination: &Path,
@@ -606,6 +762,7 @@ fn publish_files_before_commit(
     )
 }
 
+#[allow(clippy::result_large_err)]
 fn publish_files_with_faults(
     files: &[PlannedFile<'_>],
     destination: &Path,
@@ -838,6 +995,7 @@ fn publish_files_with_faults(
     Ok(CoreReceipt { committed_files })
 }
 
+#[allow(clippy::result_large_err)]
 fn publish_new_tree(
     files: &[PlannedFile<'_>],
     destination: &Path,
@@ -1045,7 +1203,7 @@ fn publish_new_tree(
     Ok(CoreReceipt { committed_files })
 }
 
-fn planned_file_paths(files: &[PlannedFile<'_>]) -> Vec<String> {
+fn planned_file_paths(files: &[PlannedFile<'_>]) -> Vec<PathBuf> {
     files
         .iter()
         .map(|file| file.relative_path.to_owned())
@@ -1134,7 +1292,7 @@ fn preflight(
     policy: FilesystemMergePolicy,
 ) -> Vec<FilesystemPublicationPreflightIssue> {
     let mut issues = Vec::new();
-    let mut aliases = BTreeMap::<String, &str>::new();
+    let mut aliases = BTreeMap::<PlatformAliasKey, &Path>::new();
     let case_insensitive = platform_case_insensitive(destination);
     let limits = platform_path_limits(destination);
 
@@ -1239,12 +1397,12 @@ fn inspect_destination_root(
 }
 
 fn inspect_target(
-    relative_path: &str,
+    relative_path: &Path,
     destination: &Path,
     policy: FilesystemMergePolicy,
     issues: &mut Vec<FilesystemPublicationPreflightIssue>,
 ) {
-    let target = destination.join(Path::new(relative_path));
+    let target = destination.join(relative_path);
     let mut ancestor = target.parent();
     while let Some(path) = ancestor.filter(|path| path.starts_with(destination)) {
         match std::fs::symlink_metadata(path) {
@@ -1297,26 +1455,33 @@ fn inspect_target(
 }
 
 fn inspect_platform_path(
-    relative_path: &str,
+    relative_path: &Path,
     destination: &Path,
     limits: PlatformPathLimits,
     issues: &mut Vec<FilesystemPublicationPreflightIssue>,
 ) {
-    for component in relative_path.split('/') {
-        if component_length(component) > limits.component {
+    for component in relative_path
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(component) => Some(component),
+            _ => None,
+        })
+    {
+        let rendered_component = component.to_string_lossy();
+        if path_length(Path::new(component)) > limits.component {
             issues.push(FilesystemPublicationPreflightIssue::ComponentTooLong {
                 relative_path: relative_path.to_owned(),
-                component: component.to_owned(),
+                component: rendered_component.clone().into_owned(),
             });
         }
-        if is_reserved_component(component) {
+        if is_reserved_component(&rendered_component) {
             issues.push(FilesystemPublicationPreflightIssue::ReservedName {
                 relative_path: relative_path.to_owned(),
-                component: component.to_owned(),
+                component: rendered_component.into_owned(),
             });
         }
     }
-    let target = destination.join(Path::new(relative_path));
+    let target = destination.join(relative_path);
     let target = if target.is_absolute() {
         target
     } else {
@@ -1339,35 +1504,57 @@ fn is_canonical_relative_path(path: &Path) -> bool {
             .all(|component| matches!(component, Component::Normal(_)))
 }
 
+#[derive(Eq, Ord, PartialEq, PartialOrd)]
+enum PlatformAliasKey {
+    Exact(std::ffi::OsString),
+    Folded(String),
+}
+
 #[cfg(windows)]
-fn platform_alias_key(path: &str, _case_insensitive: bool) -> String {
-    path.split('/')
-        .map(|component| component.trim_end_matches([' ', '.']).to_lowercase())
-        .collect::<Vec<_>>()
-        .join("/")
+fn platform_alias_key(path: &Path, _case_insensitive: bool) -> PlatformAliasKey {
+    path.to_str().map_or_else(
+        || PlatformAliasKey::Exact(path.as_os_str().to_owned()),
+        |path| {
+            PlatformAliasKey::Folded(
+                path.split(['/', '\\'])
+                    .map(|component| component.trim_end_matches([' ', '.']).to_lowercase())
+                    .collect::<Vec<_>>()
+                    .join("/"),
+            )
+        },
+    )
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
-fn platform_alias_key(path: &str, case_insensitive: bool) -> String {
+fn platform_alias_key(path: &Path, case_insensitive: bool) -> PlatformAliasKey {
     use unicode_normalization::UnicodeNormalization;
 
-    let normalized = path.nfd().collect::<String>();
-    if case_insensitive {
-        normalized.to_lowercase()
-    } else {
-        normalized
-    }
+    path.to_str().map_or_else(
+        || PlatformAliasKey::Exact(path.as_os_str().to_owned()),
+        |path| {
+            let normalized = path.nfd().collect::<String>();
+            PlatformAliasKey::Folded(if case_insensitive {
+                normalized.to_lowercase()
+            } else {
+                normalized
+            })
+        },
+    )
 }
 
 #[cfg(not(any(windows, target_os = "macos", target_os = "ios")))]
-fn platform_alias_key(path: &str, case_insensitive: bool) -> String {
-    if case_insensitive {
-        use unicode_normalization::UnicodeNormalization;
-
-        path.nfc().collect::<String>().to_lowercase()
-    } else {
-        path.to_owned()
+fn platform_alias_key(path: &Path, case_insensitive: bool) -> PlatformAliasKey {
+    if !case_insensitive {
+        return PlatformAliasKey::Exact(path.as_os_str().to_owned());
     }
+    path.to_str().map_or_else(
+        || PlatformAliasKey::Exact(path.as_os_str().to_owned()),
+        |path| {
+            use unicode_normalization::UnicodeNormalization;
+
+            PlatformAliasKey::Folded(path.nfc().collect::<String>().to_lowercase())
+        },
+    )
 }
 
 #[cfg(windows)]
@@ -1611,22 +1798,6 @@ fn is_reserved_component(component: &str) -> bool {
 #[cfg(not(windows))]
 const fn is_reserved_component(_component: &str) -> bool {
     false
-}
-
-#[cfg(windows)]
-fn component_length(component: &str) -> usize {
-    component.encode_utf16().count()
-}
-
-#[cfg(unix)]
-fn component_length(component: &str) -> usize {
-    use std::os::unix::ffi::OsStrExt;
-    std::ffi::OsStr::new(component).as_bytes().len()
-}
-
-#[cfg(not(any(unix, windows)))]
-fn component_length(component: &str) -> usize {
-    component.len()
 }
 
 #[cfg(windows)]
@@ -2496,7 +2667,7 @@ fn io_core_error(
     failed_target: Option<PathBuf>,
     staging_residue: Option<PathBuf>,
     commit_certainty: CommitCertainty,
-    committed_files: Vec<String>,
+    committed_files: Vec<PathBuf>,
     source: io::Error,
 ) -> CoreError {
     CoreError {
@@ -2650,11 +2821,11 @@ mod tests {
         let destination = directory.path().join("published");
         let files = [
             PlannedFile {
-                relative_path: "a.txt",
+                relative_path: Path::new("a.txt"),
                 bytes: b"a",
             },
             PlannedFile {
-                relative_path: "b.txt",
+                relative_path: Path::new("b.txt"),
                 bytes: b"b",
             },
         ];
@@ -2682,7 +2853,7 @@ mod tests {
             Some(destination.join("b.txt").as_path())
         );
         assert_eq!(error.commit_certainty(), CommitCertainty::Indeterminate);
-        assert_eq!(error.progress().committed_files(), ["a.txt"]);
+        assert_eq!(error.progress().committed_files(), [PathBuf::from("a.txt")]);
         assert_eq!(error.staging_residue_status(), StagingResidueStatus::Absent);
         assert!(matches!(
             error.cause(),
@@ -2698,7 +2869,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("published");
         let files = [PlannedFile {
-            relative_path: "nested/file.txt",
+            relative_path: Path::new("nested/file.txt"),
             bytes: b"complete",
         }];
 
@@ -2718,7 +2889,10 @@ mod tests {
         assert_eq!(error.phase(), FilesystemPlanPublicationPhase::Commit);
         assert_eq!(error.failed_target(), Some(destination.as_path()));
         assert_eq!(error.commit_certainty(), CommitCertainty::Committed);
-        assert_eq!(error.progress().committed_files(), ["nested/file.txt"]);
+        assert_eq!(
+            error.progress().committed_files(),
+            [PathBuf::from("nested/file.txt")]
+        );
         assert_eq!(error.staging_residue_status(), StagingResidueStatus::Absent);
         assert_eq!(
             std::fs::read(destination.join("nested/file.txt")).unwrap(),
@@ -2731,7 +2905,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("published");
         let files = [PlannedFile {
-            relative_path: "nested/file.txt",
+            relative_path: Path::new("nested/file.txt"),
             bytes: b"complete",
         }];
 
@@ -2777,7 +2951,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("published");
         let files = [PlannedFile {
-            relative_path: "file.txt",
+            relative_path: Path::new("file.txt"),
             bytes: b"complete",
         }];
 
@@ -2807,7 +2981,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("published");
         let files = [PlannedFile {
-            relative_path: "file.txt",
+            relative_path: Path::new("file.txt"),
             bytes: b"complete",
         }];
 
@@ -2848,7 +3022,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let destination = directory.path().join("published");
         let files = [PlannedFile {
-            relative_path: "file.txt",
+            relative_path: Path::new("file.txt"),
             bytes: b"complete",
         }];
 
@@ -2904,7 +3078,7 @@ mod tests {
             let directory = tempfile::tempdir().unwrap();
             let destination = directory.path().join("published");
             let files = [PlannedFile {
-                relative_path: "file.txt",
+                relative_path: Path::new("file.txt"),
                 bytes: b"complete",
             }];
 
@@ -2944,7 +3118,7 @@ mod tests {
         let outside = directory.path().join("outside.txt");
         std::fs::write(&outside, b"outside").unwrap();
         let files = [PlannedFile {
-            relative_path: "target.txt",
+            relative_path: Path::new("target.txt"),
             bytes: b"planned",
         }];
 
@@ -2973,7 +3147,7 @@ mod tests {
         let outside = directory.path().join("outside");
         std::fs::create_dir(&outside).unwrap();
         let files = [PlannedFile {
-            relative_path: "nested/target.txt",
+            relative_path: Path::new("nested/target.txt"),
             bytes: b"planned",
         }];
 

@@ -123,7 +123,7 @@ impl<'de> Deserialize<'de> for PackagesManifest {
     }
 }
 
-/// One exact Complete Package Tree declaration.
+/// One exact Package Tree declaration.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", deny_unknown_fields)]
 pub(crate) struct PackageManifest {
@@ -264,6 +264,26 @@ impl std::fmt::Display for PackageManifest {
 }
 
 impl FontManifest {
+    #[cfg(test)]
+    pub(crate) fn with_identity_fields(
+        container_digest: Option<String>,
+        container_identity_kind: Option<String>,
+        container_identity_schema: Option<String>,
+        container_identity_algorithm: Option<String>,
+    ) -> Self {
+        Self {
+            path: "fonts/test.ttf".to_owned(),
+            index: 0,
+            families: Vec::new(),
+            external: false,
+            container_digest,
+            container_identity_kind,
+            container_identity_schema,
+            container_identity_algorithm,
+            container_length: None,
+        }
+    }
+
     /// The archive path containing this font's bytes.
     pub fn path(&self) -> &str {
         &self.path

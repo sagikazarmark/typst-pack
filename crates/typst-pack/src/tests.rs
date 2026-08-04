@@ -2253,30 +2253,33 @@ Rows: #csv("data.csv").len()
         let assembly_report = pack_fixture(dir.path());
 
         let target = dir.path().join("extracted");
-        let extraction_report = extract(
+        let plan = plan_pack_extraction(
             assembly_report.pack(),
-            &target,
-            &ExtractOptions {
-                packages: true,
-                fonts: true,
-                force: false,
-            },
+            PackExtractionSelection::new(true, true),
         )
         .unwrap();
-        assert!(!extraction_report.written.is_empty());
+        let receipt = publish_pack_extraction_plan_to_filesystem(
+            &plan,
+            &target,
+            FilesystemMergePolicy::MergeCreateOnly,
+        )
+        .unwrap();
+        assert!(!receipt.progress().committed_files().is_empty());
         assert!(target.join("main.typ").exists());
         assert!(target.join("assets/logo.png").exists());
         assert!(target.join("packages/local/greet/0.1.0/lib.typ").exists());
 
-        // Refuses to overwrite without force.
-        let result = extract(assembly_report.pack(), &target, &ExtractOptions::default());
+        let result = publish_pack_extraction_plan_to_filesystem(
+            &plan,
+            &target,
+            FilesystemMergePolicy::MergeCreateOnly,
+        );
         assert!(matches!(
             result,
-            Err(ExtractError::Publication(error))
-                if matches!(
-                    error.preflight_issues(),
-                    Some([FilesystemPublicationPreflightIssue::ExistingTarget { .. }, ..])
-                )
+            Err(error) if matches!(
+                error.preflight_issues(),
+                Some([FilesystemPublicationPreflightIssue::ExistingTarget { .. }, ..])
+            )
         ));
     }
 
@@ -2297,17 +2300,9 @@ Rows: #csv("data.csv").len()
             let dir = tempfile::tempdir().unwrap();
             let target = dir.path().join("extracted");
 
-            let result = extract(
-                &pack,
-                &target,
-                &ExtractOptions {
-                    packages: true,
-                    fonts: false,
-                    force: true,
-                },
-            );
+            let result = plan_pack_extraction(&pack, PackExtractionSelection::new(true, false));
 
-            assert!(matches!(result, Err(ExtractError::Plan(_))));
+            assert!(result.is_err());
             assert!(!target.exists());
         }
     }
@@ -2326,29 +2321,30 @@ Rows: #csv("data.csv").len()
         fs::create_dir(&target).unwrap();
         fs::write(target.join("z.txt"), b"external").unwrap();
 
-        let result = extract(&pack, &target, &ExtractOptions::default());
+        let plan = plan_pack_extraction(&pack, PackExtractionSelection::default()).unwrap();
+        let result = publish_pack_extraction_plan_to_filesystem(
+            &plan,
+            &target,
+            FilesystemMergePolicy::MergeCreateOnly,
+        );
 
         assert!(matches!(
             result,
-            Err(ExtractError::Publication(error))
-                if matches!(
-                    error.preflight_issues(),
-                    Some([FilesystemPublicationPreflightIssue::ExistingTarget { .. }, ..])
-                )
+            Err(error) if matches!(
+                error.preflight_issues(),
+                Some([FilesystemPublicationPreflightIssue::ExistingTarget { .. }, ..])
+            )
         ));
         assert!(!target.join("main.typ").exists());
         assert_eq!(fs::read(target.join("z.txt")).unwrap(), b"external");
 
-        let report = extract(
-            &pack,
+        let receipt = publish_pack_extraction_plan_to_filesystem(
+            &plan,
             &target,
-            &ExtractOptions {
-                force: true,
-                ..ExtractOptions::default()
-            },
+            FilesystemMergePolicy::MergeReplaceExactFiles,
         )
         .unwrap();
-        assert_eq!(report.written.len(), 2);
+        assert_eq!(receipt.progress().committed_files().len(), 2);
         assert_eq!(fs::read(target.join("z.txt")).unwrap(), b"packed");
 
         let blocked_target = dir.path().join("blocked");
@@ -2362,22 +2358,20 @@ Rows: #csv("data.csv").len()
             .build()
             .unwrap();
 
-        let result = extract(
-            &nested_pack,
+        let nested_plan =
+            plan_pack_extraction(&nested_pack, PackExtractionSelection::default()).unwrap();
+        let result = publish_pack_extraction_plan_to_filesystem(
+            &nested_plan,
             &blocked_target,
-            &ExtractOptions {
-                force: true,
-                ..ExtractOptions::default()
-            },
+            FilesystemMergePolicy::MergeReplaceExactFiles,
         );
 
         assert!(matches!(
             result,
-            Err(ExtractError::Publication(error))
-                if matches!(
-                    error.preflight_issues(),
-                    Some([FilesystemPublicationPreflightIssue::ConflictingAncestor { .. }, ..])
-                )
+            Err(error) if matches!(
+                error.preflight_issues(),
+                Some([FilesystemPublicationPreflightIssue::ConflictingAncestor { .. }, ..])
+            )
         ));
         assert!(!blocked_target.join("main.typ").exists());
         assert_eq!(fs::read(blocked_target.join("tree")).unwrap(), b"external");
@@ -2402,22 +2396,19 @@ Rows: #csv("data.csv").len()
         fs::create_dir(&outside).unwrap();
         symlink(&outside, target.join("assets")).unwrap();
 
-        let result = extract(
-            &pack,
+        let plan = plan_pack_extraction(&pack, PackExtractionSelection::default()).unwrap();
+        let result = publish_pack_extraction_plan_to_filesystem(
+            &plan,
             &target,
-            &ExtractOptions {
-                force: true,
-                ..ExtractOptions::default()
-            },
+            FilesystemMergePolicy::MergeReplaceExactFiles,
         );
 
         assert!(matches!(
             result,
-            Err(ExtractError::Publication(error))
-                if matches!(
-                    error.preflight_issues(),
-                    Some([FilesystemPublicationPreflightIssue::ConflictingAncestor { .. }, ..])
-                )
+            Err(error) if matches!(
+                error.preflight_issues(),
+                Some([FilesystemPublicationPreflightIssue::ConflictingAncestor { .. }, ..])
+            )
         ));
         assert!(!target.join("main.typ").exists());
         assert!(!outside.join("logo.txt").exists());
@@ -2447,17 +2438,9 @@ Rows: #csv("data.csv").len()
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("extracted");
 
-        let result = extract(
-            &pack,
-            &target,
-            &ExtractOptions {
-                packages: false,
-                fonts: true,
-                force: true,
-            },
-        );
+        let result = plan_pack_extraction(&pack, PackExtractionSelection::new(false, true));
 
-        assert!(matches!(result, Err(ExtractError::Plan(_))));
+        assert!(result.is_err());
         assert!(!target.exists());
     }
 
@@ -2482,18 +2465,15 @@ Rows: #csv("data.csv").len()
         let dir = tempfile::tempdir().unwrap();
         let target = dir.path().join("extracted");
 
-        let report = extract(
-            &pack,
+        let plan = plan_pack_extraction(&pack, PackExtractionSelection::new(false, true)).unwrap();
+        let receipt = publish_pack_extraction_plan_to_filesystem(
+            &plan,
             &target,
-            &ExtractOptions {
-                packages: false,
-                fonts: true,
-                force: false,
-            },
+            FilesystemMergePolicy::MergeCreateOnly,
         )
         .unwrap();
 
-        assert_eq!(report.written.len(), 2);
+        assert_eq!(receipt.progress().committed_files().len(), 2);
         assert!(target.join(pack_font_path(&pack.fonts()[0])).is_file());
     }
 }

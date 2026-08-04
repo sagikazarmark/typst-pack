@@ -441,7 +441,7 @@ fn resolvable(spec: &PackageSpec) -> CatalogEntry {
 }
 
 /// Drives the resume protocol to an issued Pack, returning it with the trees
-/// the loop resolved. Every round builds a fresh Creation Request from the same
+/// the loop resolved. Every round builds fresh Pack Creation input from the same
 /// values, as a caller resuming across a host request boundary must.
 fn resume(source: &str) -> (Created, Vec<CatalogEntry>) {
     let mut resolved: Vec<CatalogEntry> = Vec::new();

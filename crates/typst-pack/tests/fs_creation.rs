@@ -1,4 +1,4 @@
-//! Pack Creation through the reference Creation Adapter, the filesystem one.
+//! Pack Creation through the reference filesystem Pack Assembler.
 //!
 //! Every test here drives the public filesystem creation interface over a real
 //! project directory: what the adapter acquires — project files under the
@@ -115,7 +115,7 @@ fn structural_creation_packs_all_project_files_and_complete_packages() {
     assert!(report.pack().has_package(spec));
     assert!(report.pack().package_file(spec, "lib.typ").is_some());
     assert!(report.pack().package_file(spec, "typst.toml").is_some());
-    // The whole Complete Package Tree travels, not only what was read.
+    // The whole Package Tree travels, not only what was read.
     assert!(report.pack().package_file(spec, "unused.txt").is_some());
 
     let reread = decode_reference(encode_reference(report.pack()).unwrap()).unwrap();

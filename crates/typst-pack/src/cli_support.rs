@@ -35,7 +35,7 @@ pub struct CliCompilationExecution {
 
 /// The accepted terminal produced through the first-party timing adapter.
 pub enum CliCompilationOutcome {
-    Execution(CliCompilationExecution),
+    Execution(Box<CliCompilationExecution>),
     Operation(CompilationReport),
 }
 
@@ -114,16 +114,17 @@ pub fn compile_with_timing(
     let mut timer = typst_kit::timer::Timer::new_or_placeholder(timings);
     let mut execution = None;
     let timing_result = timer.record(&mut world, |world| {
-        execution = Some(compile_pack_kernel(world, kernel));
+        execution = Some(compile_pack_kernel(world, *kernel));
     });
     let outcome = execution.map(|outcome| match outcome {
         PackCompilationKernelOutcome::Execution(execution) => {
+            let execution = *execution;
             let file_dependencies = world.file_dependencies();
-            CliCompilationOutcome::Execution(CliCompilationExecution {
-                world,
+            CliCompilationOutcome::Execution(Box::new(CliCompilationExecution {
+                world: *world,
                 execution,
                 file_dependencies,
-            })
+            }))
         }
         PackCompilationKernelOutcome::Operation(report) => CliCompilationOutcome::Operation(report),
     });

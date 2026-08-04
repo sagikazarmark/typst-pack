@@ -8,7 +8,7 @@ use typst::syntax::VirtualPath;
 use typst::syntax::package::PackageSpec;
 use typst::text::{Font, FontInfo};
 
-use crate::manifest::{PackMetadata, PackageManifest};
+use crate::manifest::PackMetadata;
 use crate::payload::SharedBytes;
 use crate::{FontContainer, PackageTree};
 
@@ -134,7 +134,7 @@ impl PackageTreeIdentity {
     pub(crate) fn encode(self) -> String {
         format!("{:032x}", self.0)
     }
-    fn decode(value: &str) -> Option<Self> {
+    pub(crate) fn decode(value: &str) -> Option<Self> {
         (value.len() == 32)
             .then(|| u128::from_str_radix(value, 16).ok().map(Self))
             .flatten()
@@ -241,7 +241,7 @@ impl FontContainerIdentity {
         format!("{:032x}", self.0)
     }
 
-    fn decode(value: &str) -> Option<Self> {
+    pub(crate) fn decode(value: &str) -> Option<Self> {
         u128::from_str_radix(value, 16).ok().map(Self)
     }
 }
@@ -349,15 +349,28 @@ impl PackFont {
 
 #[derive(Debug, Clone)]
 pub(crate) struct PackFontInput {
-    pub(crate) path: Option<String>,
+    pub(crate) source: PackFontSourceInput,
     pub(crate) index: u32,
-    pub(crate) declared_container_digest: Option<String>,
-    pub(crate) declared_container_identity_kind: Option<String>,
-    pub(crate) declared_container_identity_schema: Option<String>,
-    pub(crate) declared_container_identity_algorithm: Option<String>,
-    pub(crate) declared_container_length: Option<u64>,
-    pub(crate) data: Option<SharedBytes>,
     pub(crate) embedded: bool,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) enum PackFontSourceInput {
+    ExactBytes(SharedBytes),
+    Declared {
+        label: String,
+        identity: DeclaredFontContainerIdentity,
+        length: Option<u64>,
+        data: Option<SharedBytes>,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DeclaredFontContainerIdentity {
+    Absent,
+    Partial(Option<FontContainerIdentity>),
+    Valid(FontContainerIdentity),
+    Invalid,
 }
 
 #[derive(Debug)]
@@ -376,8 +389,23 @@ pub(crate) struct PackageFileInput {
 
 #[derive(Debug)]
 pub(crate) struct PackageRequirementInput {
-    pub(crate) entry: PackageManifest,
+    pub(crate) spec: Result<PackageSpec, InvalidPackageSpecInput>,
+    pub(crate) tree: Option<PackageTreeIdentity>,
+    pub(crate) file_count: u64,
+    pub(crate) byte_length: u64,
     pub(crate) embedded: bool,
+}
+
+#[derive(Debug)]
+pub(crate) struct InvalidPackageSpecInput {
+    pub(crate) spec: String,
+    pub(crate) message: String,
+}
+
+#[derive(Debug)]
+pub(crate) enum PackageRequirementsInput {
+    Inferred,
+    Declared(Vec<PackageRequirementInput>),
 }
 
 #[derive(Debug)]
@@ -386,8 +414,7 @@ pub(crate) struct PackConstructionInput {
     pub(crate) metadata: Option<PackMetadata>,
     pub(crate) files: Vec<ProjectFileInput>,
     pub(crate) package_files: Vec<PackageFileInput>,
-    pub(crate) package_requirements: Vec<PackageRequirementInput>,
-    pub(crate) package_requirements_are_declared: bool,
+    pub(crate) package_requirements: PackageRequirementsInput,
     pub(crate) fonts: Vec<PackFontInput>,
 }
 
@@ -494,13 +521,17 @@ impl Pack {
             }
         }
 
-        let declarations_are_explicit = input.package_requirements_are_declared;
+        let declared_inputs = match input.package_requirements {
+            PackageRequirementsInput::Inferred => None,
+            PackageRequirementsInput::Declared(entries) => Some(entries),
+        };
+        let declarations_are_explicit = declared_inputs.is_some();
         let mut declared_requirements = BTreeMap::<(String, bool), Vec<PackageRequirement>>::new();
         let mut declared_requirement_roles = BTreeSet::new();
         let mut duplicate_requirements = BTreeSet::new();
-        for declaration in input.package_requirements {
-            let role = match declaration.entry.spec() {
-                Ok(spec) => (spec.to_string(), declaration.embedded),
+        for declaration in declared_inputs.unwrap_or_default() {
+            let spec = match declaration.spec {
+                Ok(spec) => spec,
                 Err(error) => {
                     issues.push(PackInvariantIssue::InvalidPackageSpec {
                         spec: error.spec,
@@ -509,18 +540,26 @@ impl Pack {
                     continue;
                 }
             };
+            let role = (spec.to_string(), declaration.embedded);
             if !declared_requirement_roles.insert(role.clone()) {
                 duplicate_requirements.insert(role.clone());
             }
-            match package_manifest_requirement(&declaration.entry, declaration.embedded) {
-                Ok((key, requirement)) => {
-                    declared_requirements
-                        .entry((key, declaration.embedded))
-                        .or_default()
-                        .push(requirement);
-                }
-                Err(issue) => issues.push(issue),
-            }
+            let Some(tree) = declaration.tree.filter(|_| declaration.file_count > 0) else {
+                issues.push(PackInvariantIssue::InvalidPackageRequirement {
+                    spec: spec.to_string(),
+                });
+                continue;
+            };
+            declared_requirements
+                .entry(role)
+                .or_default()
+                .push(PackageRequirement {
+                    spec,
+                    tree,
+                    file_count: declaration.file_count,
+                    byte_length: declaration.byte_length,
+                    embedded: declaration.embedded,
+                });
         }
         issues.extend(duplicate_requirements.into_iter().map(|(spec, embedded)| {
             PackInvariantIssue::DuplicatePackageRequirement { spec, embedded }
@@ -602,13 +641,24 @@ impl Pack {
         let mut font_requirements = Vec::<FontRequirement>::new();
         let mut font_faces = BTreeSet::new();
         for (position, entry) in input.fonts.into_iter().enumerate() {
-            let path = entry
-                .path
-                .clone()
-                .unwrap_or_else(|| format!("font input {position}"));
+            let (path, data, declared_identity, declared_length, exact_bytes) = match entry.source {
+                PackFontSourceInput::ExactBytes(data) => (
+                    format!("font input {position}"),
+                    Some(data),
+                    DeclaredFontContainerIdentity::Absent,
+                    None,
+                    true,
+                ),
+                PackFontSourceInput::Declared {
+                    label,
+                    identity,
+                    length,
+                    data,
+                } => (label, data, identity, length, false),
+            };
             let index = entry.index;
             let embedded = entry.embedded;
-            let parsed_data = entry.data.as_ref().and_then(|data| {
+            let parsed_data = data.as_ref().and_then(|data| {
                 Font::new(data.to_typst(), index).map(|font| {
                     let container = FontContainerIdentity::from_bytes(data.as_slice());
                     (data.clone(), font, container, data.len() as u64)
@@ -616,69 +666,47 @@ impl Pack {
             });
             let (data, parsed, container, length) = if embedded {
                 let Some((data, parsed, container, length)) = parsed_data else {
-                    issues.push(if entry.data.is_some() {
+                    issues.push(if data.is_some() {
                         PackInvariantIssue::InvalidFontData { path, index }
                     } else {
                         PackInvariantIssue::MissingFontData { path }
                     });
                     continue;
                 };
-                if entry
-                    .declared_container_digest
-                    .as_deref()
-                    .is_some_and(|digest| FontContainerIdentity::decode(digest) != Some(container))
-                    || entry
-                        .declared_container_length
-                        .is_some_and(|declared| declared != length)
-                    || entry
-                        .declared_container_identity_kind
-                        .as_deref()
-                        .is_some_and(|kind| kind != container.kind())
-                    || entry
-                        .declared_container_identity_schema
-                        .as_deref()
-                        .is_some_and(|schema| schema != container.schema())
-                    || entry
-                        .declared_container_identity_algorithm
-                        .as_deref()
-                        .is_some_and(|algorithm| algorithm != container.algorithm())
+                if matches!(declared_identity, DeclaredFontContainerIdentity::Invalid)
+                    || matches!(
+                        declared_identity,
+                        DeclaredFontContainerIdentity::Valid(declared)
+                            | DeclaredFontContainerIdentity::Partial(Some(declared))
+                            if declared != container
+                    )
+                    || declared_length.is_some_and(|declared| declared != length)
                 {
                     issues.push(PackInvariantIssue::MismatchedEmbeddedFontIdentity {
                         path: path.clone(),
                     });
                 }
                 (Some(data), Some(parsed), container, length)
-            } else if entry.path.is_none() {
+            } else if exact_bytes {
                 let Some((_, _, container, length)) = parsed_data else {
                     issues.push(PackInvariantIssue::InvalidFontData { path, index });
                     continue;
                 };
                 (None, None, container, length)
             } else {
-                if entry.data.is_some() {
+                if data.is_some() {
                     issues.push(PackInvariantIssue::ExternalFontHasContainedData {
                         path: path.clone(),
                     });
                 }
-                let valid_identity = entry.declared_container_identity_kind.as_deref()
-                    == Some("font-container")
-                    && entry.declared_container_identity_schema.as_deref()
-                        == Some("typst-pack-font-container-identity-v1")
-                    && entry.declared_container_identity_algorithm.as_deref()
-                        == Some("typst-hash128-0.15");
-                let container = entry
-                    .declared_container_digest
-                    .as_deref()
-                    .and_then(FontContainerIdentity::decode);
-                let length = entry.declared_container_length.filter(|length| *length > 0);
-                let (Some(container), Some(length)) = (container, length) else {
+                let DeclaredFontContainerIdentity::Valid(container) = declared_identity else {
                     issues.push(PackInvariantIssue::InvalidExternalFontIdentity { path });
                     continue;
                 };
-                if !valid_identity {
+                let Some(length) = declared_length.filter(|length| *length > 0) else {
                     issues.push(PackInvariantIssue::InvalidExternalFontIdentity { path });
                     continue;
-                }
+                };
                 (None, None, container, length)
             };
 
@@ -869,7 +897,7 @@ impl Pack {
         &self.fonts
     }
 
-    /// The exact candidate faces exposed to official Typst, in stable order.
+    /// The exact Pack Font Catalog faces exposed to official Typst, in stable order.
     pub fn font_catalog(&self) -> &[PackFontCatalogFace] {
         &self.font_catalog
     }
@@ -932,43 +960,6 @@ fn package_tree_identity(
     crate::package_catalog::derive_package_tree_identity(
         files.iter().map(|(path, data)| (path.as_str(), data)),
     )
-}
-
-fn package_manifest_requirement(
-    manifest: &PackageManifest,
-    embedded: bool,
-) -> Result<(String, PackageRequirement), PackInvariantIssue> {
-    let spec = manifest
-        .spec()
-        .map_err(|error| PackInvariantIssue::InvalidPackageSpec {
-            spec: error.spec,
-            message: error.message,
-        })?;
-    if manifest.tree_identity_kind() != PACKAGE_TREE_IDENTITY_KIND
-        || manifest.tree_identity_schema() != PACKAGE_TREE_IDENTITY_SCHEMA
-        || manifest.tree_identity_algorithm() != PACKAGE_TREE_IDENTITY_ALGORITHM
-        || manifest.file_count() == 0
-    {
-        return Err(PackInvariantIssue::InvalidPackageRequirement {
-            spec: spec.to_string(),
-        });
-    }
-    let tree = PackageTreeIdentity::decode(manifest.tree_digest()).ok_or_else(|| {
-        PackInvariantIssue::InvalidPackageRequirement {
-            spec: spec.to_string(),
-        }
-    })?;
-    let key = spec.to_string();
-    Ok((
-        key,
-        PackageRequirement {
-            spec,
-            tree,
-            file_count: manifest.file_count(),
-            byte_length: manifest.byte_length(),
-            embedded,
-        },
-    ))
 }
 
 /// Builds a [`Pack`] from in-memory data.
@@ -1082,14 +1073,8 @@ impl PackBuilder {
         index: u32,
     ) -> Result<Self, PackBuildError> {
         self.fonts.push(PackFontInput {
-            path: None,
+            source: PackFontSourceInput::ExactBytes(data),
             index,
-            declared_container_digest: None,
-            declared_container_identity_kind: None,
-            declared_container_identity_schema: None,
-            declared_container_identity_algorithm: None,
-            declared_container_length: None,
-            data: Some(data),
             embedded: true,
         });
         Ok(self)
@@ -1110,14 +1095,8 @@ impl PackBuilder {
         index: u32,
     ) -> Result<Self, PackBuildError> {
         self.fonts.push(PackFontInput {
-            path: None,
+            source: PackFontSourceInput::ExactBytes(data),
             index,
-            declared_container_digest: None,
-            declared_container_identity_kind: None,
-            declared_container_identity_schema: None,
-            declared_container_identity_algorithm: None,
-            declared_container_length: None,
-            data: Some(data),
             embedded: false,
         });
         Ok(self)
@@ -1136,8 +1115,7 @@ impl PackBuilder {
             metadata: self.metadata,
             files: self.files,
             package_files: self.package_files,
-            package_requirements: Vec::new(),
-            package_requirements_are_declared: false,
+            package_requirements: PackageRequirementsInput::Inferred,
             fonts: self.fonts,
         })?)
     }

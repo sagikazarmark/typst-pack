@@ -1,6 +1,7 @@
 //! One stabilized set of project files, assembled without a filesystem.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::fmt;
 
 use crate::pack::Pack;
 use crate::payload::SharedBytes;
@@ -63,51 +64,116 @@ impl ProjectSnapshotAssembly {
         &self,
         entries: impl IntoIterator<Item = (impl AsRef<str>, impl Into<Vec<u8>>)>,
     ) -> Result<ProjectSnapshot, ProjectSnapshotError> {
-        let entrypoint = canonical_project_path(&self.entrypoint)?;
+        let mut issues = Vec::new();
+        let entrypoint = match canonical_project_path(&self.entrypoint) {
+            Ok(path) => Some(path),
+            Err(issue) => {
+                issues.push(issue);
+                None
+            }
+        };
 
-        let entries = entries
-            .into_iter()
-            .map(|(path, data)| {
-                Ok((
-                    canonical_project_path(path.as_ref())?,
-                    SharedBytes::new(data.into()),
-                ))
-            })
-            .collect::<Result<Vec<_>, ProjectSnapshotError>>()?;
-
-        let mut paths = BTreeSet::new();
-        for (path, _) in &entries {
-            if !paths.insert(path.as_str()) {
-                return Err(ProjectSnapshotError::DuplicatePath { path: path.clone() });
+        let mut selected_entries = Vec::new();
+        for (path, data) in entries {
+            match canonical_project_path(path.as_ref()) {
+                Ok(path) => selected_entries.push((path, SharedBytes::new(data.into()))),
+                Err(issue) => issues.push(issue),
             }
         }
 
-        if !paths.contains(entrypoint.as_str()) {
-            return Err(ProjectSnapshotError::MissingEntrypoint(entrypoint));
+        let mut paths = BTreeSet::new();
+        let mut duplicate_paths = BTreeSet::new();
+        for (path, _) in &selected_entries {
+            if !paths.insert(path.as_str()) {
+                duplicate_paths.insert(path.clone());
+            }
         }
-        let files = entries.into_iter().collect::<BTreeMap<_, _>>();
-        Ok(ProjectSnapshot { entrypoint, files })
+        issues.extend(
+            duplicate_paths
+                .into_iter()
+                .map(|path| ProjectSnapshotIssue::DuplicatePath { path }),
+        );
+
+        if let Some(entrypoint) = &entrypoint
+            && !paths.contains(entrypoint.as_str())
+        {
+            issues.push(ProjectSnapshotIssue::MissingEntrypoint {
+                path: entrypoint.clone(),
+            });
+        }
+        issues.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
+        if !issues.is_empty() {
+            return Err(ProjectSnapshotError { issues });
+        }
+        let files = selected_entries.into_iter().collect::<BTreeMap<_, _>>();
+        Ok(ProjectSnapshot {
+            entrypoint: entrypoint.expect("a valid Project Snapshot has a canonical entrypoint"),
+            files,
+        })
     }
 }
 
 /// Canonicalizes a supplied path under the universal project membership rules.
-fn canonical_project_path(path: &str) -> Result<String, ProjectSnapshotError> {
-    Pack::canonical_project_path(path).map_err(|message| ProjectSnapshotError::InvalidPath {
+fn canonical_project_path(path: &str) -> Result<String, ProjectSnapshotIssue> {
+    Pack::canonical_project_path(path).map_err(|message| ProjectSnapshotIssue::InvalidPath {
         path: path.to_owned(),
         message,
     })
 }
 
-/// A failure while assembling a [`ProjectSnapshot`].
+/// One independently detectable issue while assembling a [`ProjectSnapshot`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-pub enum ProjectSnapshotError {
+#[non_exhaustive]
+pub enum ProjectSnapshotIssue {
     /// A supplied path cannot name a root-relative project file.
-    #[error("project path `{path}` cannot be represented: {message}")]
+    #[error("project path {path:?} cannot be represented: {message}")]
     InvalidPath { path: String, message: String },
     /// Two supplied entries name one canonical project file.
-    #[error("project path `{path}` is supplied more than once")]
+    #[error("project path {path:?} is supplied more than once")]
     DuplicatePath { path: String },
     /// The entrypoint is not among the supplied project files.
-    #[error("entrypoint `{0}` is not a supplied project file")]
-    MissingEntrypoint(String),
+    #[error("entrypoint {path:?} is not a supplied project file")]
+    MissingEntrypoint { path: String },
 }
+
+impl ProjectSnapshotIssue {
+    fn sort_key(&self) -> (&str, u8, &str) {
+        match self {
+            Self::InvalidPath { path, message } => (path, 0, message),
+            Self::DuplicatePath { path } => (path, 1, ""),
+            Self::MissingEntrypoint { path } => (path, 2, ""),
+        }
+    }
+}
+
+/// A failure while assembling a [`ProjectSnapshot`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProjectSnapshotError {
+    issues: Vec<ProjectSnapshotIssue>,
+}
+
+impl ProjectSnapshotError {
+    /// Every independently detectable issue in canonical path order.
+    pub fn issues(&self) -> &[ProjectSnapshotIssue] {
+        &self.issues
+    }
+}
+
+impl fmt::Display for ProjectSnapshotError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let [issue] = self.issues.as_slice() {
+            return issue.fmt(formatter);
+        }
+        write!(
+            formatter,
+            "Project Snapshot assembly failed with {} issue(s)",
+            self.issues.len()
+        )?;
+        for issue in &self.issues {
+            write!(formatter, ": {issue}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::error::Error for ProjectSnapshotError {}

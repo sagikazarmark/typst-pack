@@ -194,37 +194,10 @@ impl FileLoader for PackLoader {
                         .ok_or_else(|| FileError::NotFound(PathBuf::from(path)))
                 } else {
                     Err(FileError::Other(Some(
-                        format!("package {spec} has no verified Complete Package Tree").into(),
+                        format!("package {spec} has no verified Package Tree").into(),
                     )))
                 }
             }
         }
-    }
-}
-
-/// A package downloader that refuses to download.
-///
-/// Plug this into [`typst_kit::packages::UniversePackages`] to guarantee
-/// that package resolution never accesses the network: every download
-/// attempt fails as not found, so only local directories (or the pack
-/// itself) can satisfy dependencies.
-///
-/// This is a runtime guarantee, for a build that can reach the network. A build
-/// without the `egress` feature links no transport at all, so it resolves
-/// packages this way whatever its runtime configuration.
-#[cfg(feature = "fs")]
-pub struct OfflineDownloader;
-
-#[cfg(feature = "fs")]
-impl typst_kit::downloader::Downloader for OfflineDownloader {
-    fn stream(
-        &self,
-        _key: &dyn std::any::Any,
-        _url: &str,
-    ) -> std::io::Result<(Option<usize>, Box<dyn std::io::Read>)> {
-        Err(std::io::Error::new(
-            std::io::ErrorKind::NotFound,
-            "network access is disabled (offline mode)",
-        ))
     }
 }

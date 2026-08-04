@@ -18,8 +18,11 @@ use zip::write::SimpleFileOptions;
 use crate::manifest::PackManifest;
 pub use crate::manifest::{FORMAT_VERSION, MANIFEST_PATH, PackManifestError as ManifestError};
 use crate::pack::{
-    PackConstructionInput, PackFontInput, PackInvariantError, PackageFileInput,
-    PackageRequirementInput, ProjectFileInput, font_container_path,
+    DeclaredFontContainerIdentity, FontContainerIdentity, InvalidPackageSpecInput,
+    PACKAGE_TREE_IDENTITY_ALGORITHM, PACKAGE_TREE_IDENTITY_KIND, PACKAGE_TREE_IDENTITY_SCHEMA,
+    PackConstructionInput, PackFontInput, PackFontSourceInput, PackInvariantError,
+    PackageFileInput, PackageRequirementInput, PackageRequirementsInput, PackageTreeIdentity,
+    ProjectFileInput, font_container_path,
 };
 use crate::payload::SharedBytes;
 use crate::{Pack, PackArchiveBytes};
@@ -1091,20 +1094,14 @@ pub fn decode(archive: &PackArchiveBytes, limits: DecodeLimits) -> Result<Pack, 
         .vendored()
         .iter()
         .cloned()
-        .map(|entry| PackageRequirementInput {
-            entry,
-            embedded: true,
-        })
+        .map(|entry| package_requirement_input(entry, true))
         .chain(
             manifest
                 .packages()
                 .unvendored()
                 .iter()
                 .cloned()
-                .map(|entry| PackageRequirementInput {
-                    entry,
-                    embedded: false,
-                }),
+                .map(|entry| package_requirement_input(entry, false)),
         )
         .collect();
     let fonts = manifest
@@ -1113,20 +1110,13 @@ pub fn decode(archive: &PackArchiveBytes, limits: DecodeLimits) -> Result<Pack, 
         .map(|entry| {
             let canonical = canonical_archive_name(entry.path()).ok();
             PackFontInput {
-                path: Some(entry.path().to_owned()),
+                source: PackFontSourceInput::Declared {
+                    label: entry.path().to_owned(),
+                    identity: declared_font_container_identity(entry),
+                    length: entry.container_length(),
+                    data: canonical.and_then(|path| fonts_by_path.get(&path).cloned()),
+                },
                 index: entry.index(),
-                declared_container_digest: entry.container_digest().map(str::to_owned),
-                declared_container_identity_kind: entry
-                    .container_identity_kind()
-                    .map(str::to_owned),
-                declared_container_identity_schema: entry
-                    .container_identity_schema()
-                    .map(str::to_owned),
-                declared_container_identity_algorithm: entry
-                    .container_identity_algorithm()
-                    .map(str::to_owned),
-                declared_container_length: entry.container_length(),
-                data: canonical.and_then(|path| fonts_by_path.get(&path).cloned()),
                 embedded: !entry.is_external(),
             }
         })
@@ -1137,11 +1127,105 @@ pub fn decode(archive: &PackArchiveBytes, limits: DecodeLimits) -> Result<Pack, 
         metadata: manifest.metadata().cloned(),
         files,
         package_files,
-        package_requirements,
-        package_requirements_are_declared: true,
+        package_requirements: PackageRequirementsInput::Declared(package_requirements),
         fonts,
     })
     .map_err(DecodeError::InvalidPack)
+}
+
+fn package_requirement_input(
+    entry: crate::manifest::PackageManifest,
+    embedded: bool,
+) -> PackageRequirementInput {
+    let spec = entry.spec().map_err(|error| InvalidPackageSpecInput {
+        spec: error.spec,
+        message: error.message,
+    });
+    let tree = (entry.tree_identity_kind() == PACKAGE_TREE_IDENTITY_KIND
+        && entry.tree_identity_schema() == PACKAGE_TREE_IDENTITY_SCHEMA
+        && entry.tree_identity_algorithm() == PACKAGE_TREE_IDENTITY_ALGORITHM)
+        .then(|| PackageTreeIdentity::decode(entry.tree_digest()))
+        .flatten();
+    PackageRequirementInput {
+        spec,
+        tree,
+        file_count: entry.file_count(),
+        byte_length: entry.byte_length(),
+        embedded,
+    }
+}
+
+fn declared_font_container_identity(
+    entry: &crate::manifest::FontManifest,
+) -> DeclaredFontContainerIdentity {
+    let components = (
+        entry.container_digest(),
+        entry.container_identity_kind(),
+        entry.container_identity_schema(),
+        entry.container_identity_algorithm(),
+    );
+    if matches!(components, (None, None, None, None)) {
+        return DeclaredFontContainerIdentity::Absent;
+    }
+    let digest = match components.0.map(FontContainerIdentity::decode) {
+        Some(Some(identity)) => Some(identity),
+        Some(None) => return DeclaredFontContainerIdentity::Invalid,
+        None => None,
+    };
+    if components.1.is_some_and(|kind| kind != "font-container")
+        || components
+            .2
+            .is_some_and(|schema| schema != "typst-pack-font-container-identity-v1")
+        || components
+            .3
+            .is_some_and(|algorithm| algorithm != "typst-hash128-0.15")
+    {
+        return DeclaredFontContainerIdentity::Invalid;
+    }
+    if components.0.is_some()
+        && components.1.is_some()
+        && components.2.is_some()
+        && components.3.is_some()
+    {
+        DeclaredFontContainerIdentity::Valid(
+            digest.expect("a complete valid declaration has a parsed digest"),
+        )
+    } else {
+        DeclaredFontContainerIdentity::Partial(digest)
+    }
+}
+
+#[cfg(test)]
+mod semantic_input_tests {
+    use super::*;
+
+    #[test]
+    fn partial_embedded_font_identity_fields_remain_independently_validated() {
+        let identity = FontContainerIdentity::from_bytes(b"font bytes");
+        let digest = identity
+            .digest()
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+
+        let digest_only =
+            crate::manifest::FontManifest::with_identity_fields(Some(digest), None, None, None);
+        assert!(matches!(
+            declared_font_container_identity(&digest_only),
+            DeclaredFontContainerIdentity::Partial(Some(actual)) if actual == identity
+        ));
+
+        let kind_only = crate::manifest::FontManifest::with_identity_fields(
+            None,
+            Some("font-container".to_owned()),
+            None,
+            None,
+        );
+        assert!(matches!(
+            declared_font_container_identity(&kind_only),
+            DeclaredFontContainerIdentity::Partial(None)
+        ));
+    }
 }
 
 #[derive(Clone, Copy)]

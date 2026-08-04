@@ -37,6 +37,11 @@ impl CompilationArtifactPublicationEntry {
         u64::try_from(self.bytes.len()).unwrap_or(u64::MAX)
     }
 
+    /// Whether the exact payload is empty.
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
     /// The exact immutable payload bytes.
     pub fn bytes(&self) -> &[u8] {
         self.bytes.as_slice()

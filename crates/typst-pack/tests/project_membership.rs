@@ -5,7 +5,7 @@
 use proptest::prelude::*;
 use typst_pack::{
     Pack, PackBuildError, PackInvariantIssue, PackPathRole, ProjectSnapshotAssembly,
-    ProjectSnapshotError,
+    ProjectSnapshotIssue,
 };
 
 #[test]
@@ -58,7 +58,7 @@ fn assembly_rejects_entries_that_cannot_name_a_root_relative_project_file() {
             .unwrap_err();
 
         assert!(
-            matches!(&error, ProjectSnapshotError::InvalidPath { path: reported, .. } if reported == path),
+            matches!(error.issues(), [ProjectSnapshotIssue::InvalidPath { path: reported, .. }] if reported == path),
             "`{path}`: {error}"
         );
     }
@@ -70,8 +70,10 @@ fn assembly_requires_the_selected_entrypoint() {
         .assemble([("other.typ", b"Hello".to_vec())])
         .unwrap_err();
     assert_eq!(
-        error,
-        ProjectSnapshotError::MissingEntrypoint("main.typ".to_owned())
+        error.issues(),
+        [ProjectSnapshotIssue::MissingEntrypoint {
+            path: "main.typ".to_owned(),
+        }]
     );
 }
 
@@ -88,10 +90,46 @@ fn assembly_rejects_every_pack_path() {
             .unwrap_err();
 
         assert!(
-            matches!(&error, ProjectSnapshotError::InvalidPath { path: reported, .. } if reported == path),
+            matches!(error.issues(), [ProjectSnapshotIssue::InvalidPath { path: reported, .. }] if reported == path),
             "`{path}`: {error}"
         );
     }
+}
+
+#[test]
+fn assembly_aggregates_independent_issues_in_canonical_order() {
+    let error = ProjectSnapshotAssembly::new("main.typ")
+        .assemble([
+            ("z\\escape.typ", b"invalid".to_vec()),
+            ("./duplicate.typ", b"first".to_vec()),
+            ("duplicate.typ", b"second".to_vec()),
+            ("nested/../duplicate.typ", b"third".to_vec()),
+            ("/absolute.typ", b"invalid".to_vec()),
+        ])
+        .unwrap_err();
+
+    assert!(matches!(
+        error.issues(),
+        [
+            ProjectSnapshotIssue::InvalidPath { path: absolute, .. },
+            ProjectSnapshotIssue::DuplicatePath { path: duplicate },
+            ProjectSnapshotIssue::MissingEntrypoint { path: entrypoint },
+            ProjectSnapshotIssue::InvalidPath { path: escape, .. },
+        ] if absolute == "/absolute.typ"
+            && duplicate == "duplicate.typ"
+            && entrypoint == "main.typ"
+            && escape == "z\\escape.typ"
+    ));
+}
+
+#[test]
+fn snapshot_issue_display_escapes_source_control_characters() {
+    let error = ProjectSnapshotAssembly::new("main.typ")
+        .assemble([("/forged\npath.typ", b"invalid".to_vec())])
+        .unwrap_err();
+
+    assert!(error.to_string().contains(r#"/forged\npath.typ"#));
+    assert!(!error.to_string().contains("forged\npath"));
 }
 
 proptest! {
@@ -151,7 +189,10 @@ proptest! {
             ])
             .unwrap_err();
 
-        prop_assert_eq!(error, ProjectSnapshotError::DuplicatePath { path: canonical });
+        prop_assert_eq!(
+            error.issues(),
+            [ProjectSnapshotIssue::DuplicatePath { path: canonical }],
+        );
     }
 
     #[test]
@@ -164,8 +205,10 @@ proptest! {
             .unwrap_err();
 
         prop_assert_eq!(
-            error,
-            ProjectSnapshotError::MissingEntrypoint("main.typ".to_owned()),
+            error.issues(),
+            [ProjectSnapshotIssue::MissingEntrypoint {
+                path: "main.typ".to_owned(),
+            }],
         );
     }
 
@@ -183,8 +226,10 @@ proptest! {
             .assemble([("main.typ", b"main".to_vec()), (path.as_str(), b"pack".to_vec())])
             .unwrap_err();
 
-        let rejected =
-            matches!(error, ProjectSnapshotError::InvalidPath { path: reported, .. } if reported == path);
+        let rejected = matches!(
+            error.issues(),
+            [ProjectSnapshotIssue::InvalidPath { path: reported, .. }] if reported == path.as_str()
+        );
         prop_assert!(rejected);
     }
 }

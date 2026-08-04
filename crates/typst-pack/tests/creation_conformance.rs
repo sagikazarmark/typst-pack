@@ -611,10 +611,14 @@ fn create_on_filesystem(fixture: &Fixture, plan: &FilesystemPlan) -> Result<Crea
             })
         }
         Err(FilesystemPackAssemblyError::ProjectGather(
-            typst_pack::FilesystemProjectGatherError::Snapshot(
-                typst_pack::ProjectSnapshotError::MissingEntrypoint(_),
-            ),
-        )) => Err(Failure::ExcludedEntrypoint),
+            typst_pack::FilesystemProjectGatherError::Snapshot(error),
+        )) if matches!(
+            error.issues(),
+            [typst_pack::ProjectSnapshotIssue::MissingEntrypoint { .. }]
+        ) =>
+        {
+            Err(Failure::ExcludedEntrypoint)
+        }
         Err(
             FilesystemPackAssemblyError::Package { .. }
             | FilesystemPackAssemblyError::InvalidPackageCatalog(_),
