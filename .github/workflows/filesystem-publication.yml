@@ -21,4 +21,5 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.92.0
+      - run: cargo test --locked -p typst-pack --features fs --lib filesystem_plan_publication::tests
       - run: cargo test --locked -p typst-pack --features fs --test filesystem_plan_publication

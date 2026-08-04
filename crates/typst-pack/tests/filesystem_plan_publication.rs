@@ -24,6 +24,121 @@ fn temp_path(directory: &tempfile::TempDir) -> std::path::PathBuf {
 }
 
 #[test]
+fn publish_new_tree_exposes_the_complete_plan_through_one_root_commit() {
+    let directory = tempfile::tempdir().unwrap();
+    let destination = temp_path(&directory).join("published");
+    let plan = extraction_plan();
+
+    let receipt = publish_pack_extraction_plan_to_filesystem(
+        &plan,
+        &destination,
+        FilesystemMergePolicy::PublishNewTree,
+    )
+    .unwrap();
+
+    assert_eq!(receipt.commit_certainty(), CommitCertainty::Committed);
+    assert_eq!(
+        receipt.staging_residue_status(),
+        StagingResidueStatus::Absent
+    );
+    assert_eq!(
+        receipt.progress().committed_files(),
+        ["assets/data.txt", "main.typ"]
+    );
+    assert_eq!(
+        std::fs::read(destination.join("assets/data.txt")).unwrap(),
+        b"new data"
+    );
+    assert_eq!(
+        std::fs::read(destination.join("main.typ")).unwrap(),
+        b"new main"
+    );
+    assert_eq!(
+        std::fs::read_dir(directory.path()).unwrap().count(),
+        1,
+        "the sibling staging directory must be consumed by the root commit"
+    );
+}
+
+#[test]
+fn publish_new_tree_preflight_aggregates_an_existing_root_with_other_issues() {
+    let directory = tempfile::tempdir().unwrap();
+    let destination = temp_path(&directory).join("published");
+    std::fs::create_dir(&destination).unwrap();
+    std::fs::write(destination.join("main.typ"), b"existing").unwrap();
+    let plan = extraction_plan();
+
+    let error = publish_pack_extraction_plan_to_filesystem(
+        &plan,
+        &destination,
+        FilesystemMergePolicy::PublishNewTree,
+    )
+    .unwrap_err();
+    let issues = error.preflight_issues().unwrap();
+
+    assert_eq!(issues.len(), 2);
+    assert!(matches!(
+        &issues[0],
+        FilesystemPublicationPreflightIssue::ExistingDestinationRoot { path }
+            if path == &destination
+    ));
+    assert!(matches!(
+        &issues[1],
+        FilesystemPublicationPreflightIssue::ExistingTarget { relative_path }
+            if relative_path == "main.typ"
+    ));
+    assert_eq!(
+        error.phase(),
+        typst_pack::FilesystemPlanPublicationPhase::Preflight
+    );
+    assert_eq!(error.failed_target(), None);
+    assert_eq!(error.commit_certainty(), CommitCertainty::NotCommitted);
+    assert_eq!(error.staging_residue_status(), StagingResidueStatus::Absent);
+    assert_eq!(
+        std::fs::read_dir(directory.path()).unwrap().count(),
+        1,
+        "preflight must not create sibling staging"
+    );
+    assert_eq!(
+        std::fs::read(destination.join("main.typ")).unwrap(),
+        b"existing"
+    );
+}
+
+#[test]
+fn publish_new_tree_preflight_validates_destination_components_before_staging() {
+    let directory = tempfile::tempdir().unwrap();
+    let destination = temp_path(&directory).join("x".repeat(256));
+    let plan = extraction_plan();
+
+    let error = publish_pack_extraction_plan_to_filesystem(
+        &plan,
+        &destination,
+        FilesystemMergePolicy::PublishNewTree,
+    )
+    .unwrap_err();
+
+    assert!(error.preflight_issues().unwrap().iter().any(|issue| {
+        matches!(
+            issue,
+            FilesystemPublicationPreflightIssue::DestinationComponentTooLong { path, .. }
+                if path == &destination
+        )
+    }));
+    assert_eq!(
+        error.phase(),
+        typst_pack::FilesystemPlanPublicationPhase::Preflight
+    );
+    assert_eq!(error.staging_residue_status(), StagingResidueStatus::Absent);
+    assert!(
+        std::fs::read_dir(directory.path())
+            .unwrap()
+            .next()
+            .is_none()
+    );
+}
+
+#[test]
 fn merge_policies_remain_distinct_and_preserve_unrelated_content() {
     let directory = tempfile::tempdir().unwrap();
     let destination = temp_path(&directory).join("published");
@@ -172,7 +287,7 @@ fn artifact_plans_publish_with_workflow_specific_progress() {
     let receipt = publish_compilation_artifact_plan_to_filesystem(
         &plan,
         &destination,
-        FilesystemMergePolicy::MergeCreateOnly,
+        FilesystemMergePolicy::PublishNewTree,
     )
     .unwrap();
 
@@ -311,6 +426,34 @@ fn windows_reserved_names_are_aggregated_before_writes() {
 
     assert_eq!(reserved_count, 3);
     assert!(!destination.exists());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_reserved_destination_root_is_rejected_before_staging() {
+    let directory = tempfile::tempdir().unwrap();
+    let destination = temp_path(&directory).join("CON");
+
+    let error = publish_pack_extraction_plan_to_filesystem(
+        &extraction_plan(),
+        &destination,
+        FilesystemMergePolicy::PublishNewTree,
+    )
+    .unwrap_err();
+
+    assert!(error.preflight_issues().unwrap().iter().any(|issue| {
+        matches!(
+            issue,
+            FilesystemPublicationPreflightIssue::DestinationReservedName { path, component }
+                if path == &destination && component == "CON"
+        )
+    }));
+    assert!(
+        std::fs::read_dir(directory.path())
+            .unwrap()
+            .next()
+            .is_none()
+    );
 }
 
 #[cfg(target_os = "macos")]
