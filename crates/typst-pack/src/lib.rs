@@ -8,12 +8,11 @@ pub const VERSION: &str = concat!(
     ")"
 );
 
-mod compilation_artifact_publication;
 mod compile;
 mod creation;
 mod embedded;
 #[cfg(feature = "fs")]
-mod filesystem_plan_publication;
+mod filesystem_publication;
 mod font_catalog;
 #[cfg(feature = "fs")]
 mod fs_assembly;
@@ -40,11 +39,6 @@ mod world_trace;
 #[doc(hidden)]
 pub mod cli_support;
 
-pub use compilation_artifact_publication::{
-    ArtifactPublicationPlanError, ArtifactPublicationPlanIssue,
-    CompilationArtifactPublicationEntry, CompilationArtifactPublicationPlan,
-    plan_compilation_artifact_publication,
-};
 pub use compile::{
     CompilationAccessKind, CompilationAccessObservation, CompilationAccessOutcome,
     CompilationAccessTrace, CompilationArtifact, CompilationDiagnostic, CompilationDocumentSummary,
@@ -70,20 +64,18 @@ pub use creation::{
     PackCreationError, PackCreationInput, PackCreationOutcome, create,
 };
 #[cfg(feature = "fs")]
-pub use filesystem_plan_publication::{
-    CompilationArtifactPathIssue, CompilationArtifactPathPublicationError,
-    CompilationArtifactPublicationError, CompilationArtifactPublicationProgress,
+pub use filesystem_publication::{
+    CompilationArtifactPathPublicationError, CompilationArtifactPublicationError,
+    CompilationArtifactPublicationIssue, CompilationArtifactPublicationProgress,
     CompilationArtifactPublicationReceipt, FilesystemDestinationEntryKind, FilesystemMergePolicy,
-    FilesystemPlanPublicationErrorCause, FilesystemPlanPublicationPhase,
+    FilesystemPublicationErrorCause, FilesystemPublicationPhase,
     FilesystemPublicationPreflightIssue, PackExtractionPublicationError,
     PackExtractionPublicationProgress, PackExtractionPublicationReceipt,
-    publish_compilation_artifact_plan_to_filesystem,
-    publish_compilation_artifact_plan_to_filesystem_paths,
-    publish_pack_extraction_plan_to_filesystem,
+    publish_compilation_artifacts_to_filesystem_paths, publish_pack_extraction_plan_to_filesystem,
 };
 #[cfg(all(feature = "fs", fuzzing))]
 #[doc(hidden)]
-pub use filesystem_plan_publication::{
+pub use filesystem_publication::{
     FilesystemPublicationFaultProbe, publish_pack_extraction_plan_to_filesystem_with_fault_probe,
 };
 #[cfg(feature = "embedded-fonts")]

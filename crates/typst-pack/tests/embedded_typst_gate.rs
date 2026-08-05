@@ -145,7 +145,7 @@ fn final_evidence_matrix_covers_native_adapters_and_featureless_wasm() {
         "fs_creation",
         "pack_archive_acquisition",
         "pack_archive_publication",
-        "filesystem_plan_publication",
+        "filesystem_publication",
     ] {
         assert!(
             native.contains(suite),

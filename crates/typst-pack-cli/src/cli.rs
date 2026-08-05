@@ -35,8 +35,7 @@ use typst_pack::{
     DocumentTime, FontContainer, FontContainerFulfillment, HtmlOutputSpecification, OutputFormat,
     PackCompilationRequest, PackOverrideSet, PackageTreeFulfillment, PageRange, PageSelection,
     PdfOutputSpecification, PngOutputSpecification, SvgOutputSpecification, TypstTarget,
-    parse_page_selection, plan_compilation_artifact_publication,
-    publish_compilation_artifact_plan_to_filesystem_paths,
+    parse_page_selection, publish_compilation_artifacts_to_filesystem_paths,
 };
 use typst_pack::{
     FILE_EXTENSION, FilesystemMergePolicy, FilesystemPackAssembler, FilesystemPackAssemblerConfig,
@@ -1205,8 +1204,6 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
             let output = execution.result();
 
             let export_result = (|| {
-                let plan = plan_compilation_artifact_publication(output)
-                    .map_err(|error| error.to_string())?;
                 let default_output = args.pack.with_extension(format.extension());
                 let targets: Vec<PathBuf> = match &args.output {
                     Some(path) if path == Path::new("-") => vec![path.clone()],
@@ -1251,12 +1248,12 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
                     }
                     std::io::stdout()
                         .lock()
-                        .write_all(plan.entries()[0].bytes())
+                        .write_all(output.artifacts()[0].bytes())
                         .map_err(|err| format!("cannot write output to stdout: {err}"))?;
                 } else {
                     let (destination, relative_paths) = filesystem_publication_paths(&targets)?;
-                    publish_compilation_artifact_plan_to_filesystem_paths(
-                        &plan,
+                    publish_compilation_artifacts_to_filesystem_paths(
+                        output,
                         destination,
                         &relative_paths,
                         FilesystemMergePolicy::MergeReplaceExactFiles,

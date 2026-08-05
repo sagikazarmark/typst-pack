@@ -21,5 +21,5 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.92.0
-      - run: cargo test --locked -p typst-pack --features fs,embedded-fonts --lib filesystem_plan_publication::tests
-      - run: cargo test --locked -p typst-pack --features fs,embedded-fonts --test filesystem_project_gathering --test filesystem_font_catalog_gathering --test filesystem_package_acquisition --test filesystem_pack_assembly --test fs_creation --test pack_archive_acquisition --test pack_archive_publication --test filesystem_plan_publication
+      - run: cargo test --locked -p typst-pack --features fs,embedded-fonts --lib filesystem_publication::tests
+      - run: cargo test --locked -p typst-pack --features fs,embedded-fonts --test filesystem_project_gathering --test filesystem_font_catalog_gathering --test filesystem_package_acquisition --test filesystem_pack_assembly --test fs_creation --test pack_archive_acquisition --test pack_archive_publication --test filesystem_publication

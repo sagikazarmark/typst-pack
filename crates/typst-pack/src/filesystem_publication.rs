@@ -1,4 +1,4 @@
-//! Concrete filesystem publication for destination-independent plans.
+//! Concrete filesystem publication for Pack Extraction Plans and Compilation Results.
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -11,7 +11,7 @@ use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 
 use crate::pack_archive::{CommitCertainty, StagingResidueStatus};
-use crate::{CompilationArtifactPublicationPlan, PackExtractionPlan};
+use crate::{CompilationResult, CompilationStatus, PackExtractionPlan};
 
 /// An explicit policy for publishing planned files to the filesystem.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,7 +26,7 @@ pub enum FilesystemMergePolicy {
 
 /// The filesystem phase reached by a plan publication attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum FilesystemPlanPublicationPhase {
+pub enum FilesystemPublicationPhase {
     Policy,
     Preflight,
     DirectoryCreate,
@@ -172,7 +172,7 @@ impl FilesystemPublicationPreflightIssue {
 /// The concrete cause retained by a failed filesystem plan publication.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum FilesystemPlanPublicationErrorCause {
+pub enum FilesystemPublicationErrorCause {
     #[error("filesystem publication preflight rejected the destination")]
     Preflight,
     #[error("the platform cannot guarantee {0:?}")]
@@ -221,8 +221,8 @@ macro_rules! workflow_evidence {
         }
 
         impl $receipt {
-            pub const fn phase(&self) -> FilesystemPlanPublicationPhase {
-                FilesystemPlanPublicationPhase::Complete
+            pub const fn phase(&self) -> FilesystemPublicationPhase {
+                FilesystemPublicationPhase::Complete
             }
 
             pub fn destination(&self) -> &Path {
@@ -257,7 +257,7 @@ macro_rules! workflow_evidence {
         pub struct $error {
             destination: Box<Path>,
             policy: FilesystemMergePolicy,
-            phase: FilesystemPlanPublicationPhase,
+            phase: FilesystemPublicationPhase,
             failed_target: Option<Box<Path>>,
             staging_residue: Option<Box<Path>>,
             staging_residue_status: StagingResidueStatus,
@@ -265,7 +265,7 @@ macro_rules! workflow_evidence {
             progress: Box<$progress>,
             preflight_issues: Option<Box<[FilesystemPublicationPreflightIssue]>>,
             #[source]
-            source: Box<FilesystemPlanPublicationErrorCause>,
+            source: Box<FilesystemPublicationErrorCause>,
         }
 
         impl $error {
@@ -277,7 +277,7 @@ macro_rules! workflow_evidence {
                 self.policy
             }
 
-            pub const fn phase(&self) -> FilesystemPlanPublicationPhase {
+            pub const fn phase(&self) -> FilesystemPublicationPhase {
                 self.phase
             }
 
@@ -305,7 +305,7 @@ macro_rules! workflow_evidence {
                 self.preflight_issues.as_deref()
             }
 
-            pub fn cause(&self) -> &FilesystemPlanPublicationErrorCause {
+            pub fn cause(&self) -> &FilesystemPublicationErrorCause {
                 self.source.as_ref()
             }
         }
@@ -405,14 +405,14 @@ struct CoreReceipt {
 }
 
 struct CoreError {
-    phase: FilesystemPlanPublicationPhase,
+    phase: FilesystemPublicationPhase,
     failed_target: Option<PathBuf>,
     staging_residue: Option<PathBuf>,
     staging_residue_status: Option<StagingResidueStatus>,
     commit_certainty: CommitCertainty,
     committed_files: Vec<PathBuf>,
     preflight_issues: Option<Vec<FilesystemPublicationPreflightIssue>>,
-    source: FilesystemPlanPublicationErrorCause,
+    source: FilesystemPublicationErrorCause,
 }
 
 /// Publishes a Pack Extraction Plan under one explicit filesystem policy.
@@ -420,7 +420,7 @@ struct CoreError {
 /// [`FilesystemMergePolicy::PublishNewTree`] requires an absent destination,
 /// stages the complete plan in a sibling directory, and exposes it through one
 /// root commit where supported. Unsupported guarantees are returned as
-/// [`FilesystemPlanPublicationErrorCause::UnsupportedPolicy`] rather than
+/// [`FilesystemPublicationErrorCause::UnsupportedPolicy`] rather than
 /// weakened to a merge. Receipts and errors describe visibility and staging
 /// residue; they make no crash-durability guarantee.
 pub fn publish_pack_extraction_plan_to_filesystem(
@@ -484,35 +484,19 @@ pub fn publish_pack_extraction_plan_to_filesystem_with_fault_probe(
     }
 }
 
-/// Publishes an artifact plan under one explicit filesystem policy.
-///
-/// [`FilesystemMergePolicy::PublishNewTree`] requires an absent destination,
-/// stages the complete plan in a sibling directory, and exposes it through one
-/// root commit where supported. Unsupported guarantees are returned as
-/// [`FilesystemPlanPublicationErrorCause::UnsupportedPolicy`] rather than
-/// weakened to a merge. Receipts and errors describe visibility and staging
-/// residue; they make no crash-durability guarantee.
-pub fn publish_compilation_artifact_plan_to_filesystem(
-    plan: &CompilationArtifactPublicationPlan,
-    destination: impl AsRef<Path>,
-    policy: FilesystemMergePolicy,
-) -> Result<CompilationArtifactPublicationReceipt, CompilationArtifactPublicationError> {
-    let destination = destination.as_ref();
-    let files = plan
-        .entries()
-        .iter()
-        .map(|entry| PlannedFile {
-            relative_path: Path::new(entry.relative_path()),
-            bytes: entry.bytes(),
-        })
-        .collect::<Vec<_>>();
-    publish_compilation_artifact_files(&files, destination, policy)
-}
-
-/// One independently detectable caller-selected artifact path issue.
+/// One independently detectable issue before Compilation Output Artifact publication.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[non_exhaustive]
-pub enum CompilationArtifactPathIssue {
+pub enum CompilationArtifactPublicationIssue {
+    #[error("a rejected Compilation Result cannot be published")]
+    RejectedCompilationResult,
+    #[error(
+        "the Compilation Result has {artifact_count} artifact(s), but {path_count} output path(s) were supplied"
+    )]
+    PathCountMismatch {
+        artifact_count: usize,
+        path_count: usize,
+    },
     #[error("caller-selected artifact paths {first_path:?} and {second_path:?} conflict")]
     PathConflict {
         first_path: PathBuf,
@@ -522,36 +506,21 @@ pub enum CompilationArtifactPathIssue {
 
 #[derive(Debug)]
 enum CompilationArtifactPathPublicationErrorKind {
-    PathCountMismatch {
-        artifact_count: usize,
-        path_count: usize,
-    },
-    PathIssues(Box<[CompilationArtifactPathIssue]>),
+    Issues(Box<[CompilationArtifactPublicationIssue]>),
     Publication(CompilationArtifactPublicationError),
 }
 
-/// A failure while publishing an artifact plan to caller-selected paths.
+/// A failure while publishing Compilation Output Artifacts to caller-selected paths.
 #[derive(Debug)]
 pub struct CompilationArtifactPathPublicationError {
     kind: CompilationArtifactPathPublicationErrorKind,
 }
 
 impl CompilationArtifactPathPublicationError {
-    /// The supplied and required path counts when they differ.
-    pub fn path_count_mismatch(&self) -> Option<(usize, usize)> {
-        match self.kind {
-            CompilationArtifactPathPublicationErrorKind::PathCountMismatch {
-                artifact_count,
-                path_count,
-            } => Some((artifact_count, path_count)),
-            _ => None,
-        }
-    }
-
-    /// Every independently detectable caller-selected path issue.
-    pub fn issues(&self) -> Option<&[CompilationArtifactPathIssue]> {
+    /// Every independently detectable pre-publication issue.
+    pub fn issues(&self) -> Option<&[CompilationArtifactPublicationIssue]> {
         match &self.kind {
-            CompilationArtifactPathPublicationErrorKind::PathIssues(issues) => Some(issues),
+            CompilationArtifactPathPublicationErrorKind::Issues(issues) => Some(issues),
             _ => None,
         }
     }
@@ -568,17 +537,13 @@ impl CompilationArtifactPathPublicationError {
 impl fmt::Display for CompilationArtifactPathPublicationError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match &self.kind {
-            CompilationArtifactPathPublicationErrorKind::PathCountMismatch {
-                artifact_count,
-                path_count,
-            } => write!(
-                formatter,
-                "the artifact publication plan has {artifact_count} artifact(s), but {path_count} output path(s) were supplied"
-            ),
-            CompilationArtifactPathPublicationErrorKind::PathIssues(issues) => {
+            CompilationArtifactPathPublicationErrorKind::Issues(issues) => {
+                if let [issue] = issues.as_ref() {
+                    return issue.fmt(formatter);
+                }
                 write!(
                     formatter,
-                    "caller-selected artifact paths have {} issue(s)",
+                    "Compilation Output Artifact publication rejected with {} issue(s)",
                     issues.len()
                 )?;
                 for issue in issues {
@@ -606,54 +571,53 @@ impl From<CompilationArtifactPublicationError> for CompilationArtifactPathPublic
     }
 }
 
-/// Publishes an artifact plan through caller-selected destination-relative
-/// filesystem paths.
+/// Publishes a succeeded Compilation Result through caller-selected
+/// destination-relative filesystem paths.
 ///
 /// This concrete adapter supports platform paths used by CLI output templates
-/// while retaining the semantic artifact plan as the source of roles, order,
-/// and exact bytes.
-pub fn publish_compilation_artifact_plan_to_filesystem_paths(
-    plan: &CompilationArtifactPublicationPlan,
+/// while consuming artifact roles, canonical order, and exact bytes directly
+/// from the Compilation Result.
+pub fn publish_compilation_artifacts_to_filesystem_paths(
+    result: &CompilationResult,
     destination: impl AsRef<Path>,
     relative_paths: &[PathBuf],
     policy: FilesystemMergePolicy,
 ) -> Result<CompilationArtifactPublicationReceipt, CompilationArtifactPathPublicationError> {
     let destination = destination.as_ref();
-    if plan.entries().len() != relative_paths.len() {
-        return Err(CompilationArtifactPathPublicationError {
-            kind: CompilationArtifactPathPublicationErrorKind::PathCountMismatch {
-                artifact_count: plan.entries().len(),
-                path_count: relative_paths.len(),
-            },
+    let mut issues = Vec::new();
+    if result.status() != CompilationStatus::Succeeded {
+        issues.push(CompilationArtifactPublicationIssue::RejectedCompilationResult);
+    }
+    if result.artifacts().len() != relative_paths.len() {
+        issues.push(CompilationArtifactPublicationIssue::PathCountMismatch {
+            artifact_count: result.artifacts().len(),
+            path_count: relative_paths.len(),
         });
     }
     let mut ordered_paths = relative_paths.iter().collect::<Vec<_>>();
     ordered_paths.sort();
-    let mut conflicts = Vec::new();
     for (index, first) in ordered_paths.iter().enumerate() {
         for second in &ordered_paths[index + 1..] {
             if second.starts_with(first) {
-                conflicts.push(CompilationArtifactPathIssue::PathConflict {
+                issues.push(CompilationArtifactPublicationIssue::PathConflict {
                     first_path: (*first).to_owned(),
                     second_path: (*second).to_owned(),
                 });
             }
         }
     }
-    if !conflicts.is_empty() {
+    if !issues.is_empty() {
         return Err(CompilationArtifactPathPublicationError {
-            kind: CompilationArtifactPathPublicationErrorKind::PathIssues(
-                conflicts.into_boxed_slice(),
-            ),
+            kind: CompilationArtifactPathPublicationErrorKind::Issues(issues.into_boxed_slice()),
         });
     }
-    let files = plan
-        .entries()
+    let files = result
+        .artifacts()
         .iter()
         .zip(relative_paths)
-        .map(|(entry, relative_path)| PlannedFile {
+        .map(|(artifact, relative_path)| PlannedFile {
             relative_path,
-            bytes: entry.bytes(),
+            bytes: artifact.bytes(),
         })
         .collect::<Vec<_>>();
     publish_compilation_artifact_files(&files, destination, policy).map_err(Into::into)
@@ -772,26 +736,26 @@ fn publish_files_with_faults(
 ) -> Result<CoreReceipt, CoreError> {
     if !merge_policy_supported(policy) {
         return Err(CoreError {
-            phase: FilesystemPlanPublicationPhase::Policy,
+            phase: FilesystemPublicationPhase::Policy,
             failed_target: None,
             staging_residue: None,
             staging_residue_status: None,
             commit_certainty: CommitCertainty::NotCommitted,
             committed_files: Vec::new(),
             preflight_issues: None,
-            source: FilesystemPlanPublicationErrorCause::UnsupportedPolicy(policy),
+            source: FilesystemPublicationErrorCause::UnsupportedPolicy(policy),
         });
     }
     if policy == FilesystemMergePolicy::PublishNewTree && faults.new_tree_policy_unsupported {
         return Err(CoreError {
-            phase: FilesystemPlanPublicationPhase::Policy,
+            phase: FilesystemPublicationPhase::Policy,
             failed_target: None,
             staging_residue: None,
             staging_residue_status: None,
             commit_certainty: CommitCertainty::NotCommitted,
             committed_files: Vec::new(),
             preflight_issues: None,
-            source: FilesystemPlanPublicationErrorCause::UnsupportedPolicy(policy),
+            source: FilesystemPublicationErrorCause::UnsupportedPolicy(policy),
         });
     }
 
@@ -811,14 +775,14 @@ fn publish_files_with_faults(
     issues.dedup_by(|left, right| left.sort_key() == right.sort_key());
     if !issues.is_empty() {
         return Err(CoreError {
-            phase: FilesystemPlanPublicationPhase::Preflight,
+            phase: FilesystemPublicationPhase::Preflight,
             failed_target: None,
             staging_residue: None,
             staging_residue_status: None,
             commit_certainty: CommitCertainty::NotCommitted,
             committed_files: Vec::new(),
             preflight_issues: Some(issues),
-            source: FilesystemPlanPublicationErrorCause::Preflight,
+            source: FilesystemPublicationErrorCause::Preflight,
         });
     }
 
@@ -826,14 +790,14 @@ fn publish_files_with_faults(
         destination_anchor.expect("successful destination capture accompanies clean preflight");
     if !merge_policy_supported_for_plan(&destination_anchor, files, policy) {
         return Err(CoreError {
-            phase: FilesystemPlanPublicationPhase::Policy,
+            phase: FilesystemPublicationPhase::Policy,
             failed_target: None,
             staging_residue: None,
             staging_residue_status: None,
             commit_certainty: CommitCertainty::NotCommitted,
             committed_files: Vec::new(),
             preflight_issues: None,
-            source: FilesystemPlanPublicationErrorCause::UnsupportedPolicy(policy),
+            source: FilesystemPublicationErrorCause::UnsupportedPolicy(policy),
         });
     }
     if policy == FilesystemMergePolicy::PublishNewTree {
@@ -847,7 +811,7 @@ fn publish_files_with_faults(
     }
     let destination_dir = prepare_destination(destination_anchor).map_err(|source| {
         io_core_error(
-            FilesystemPlanPublicationPhase::DirectoryCreate,
+            FilesystemPublicationPhase::DirectoryCreate,
             Some(destination.to_owned()),
             None,
             CommitCertainty::NotCommitted,
@@ -868,7 +832,7 @@ fn publish_files_with_faults(
             Ok(parent) => parent,
             Err(source) => {
                 return Err(io_core_error(
-                    FilesystemPlanPublicationPhase::DirectoryCreate,
+                    FilesystemPublicationPhase::DirectoryCreate,
                     Some(target),
                     None,
                     CommitCertainty::NotCommitted,
@@ -882,7 +846,7 @@ fn publish_files_with_faults(
             Ok(staging) => staging,
             Err(source) => {
                 return Err(io_core_error(
-                    FilesystemPlanPublicationPhase::StagingCreate,
+                    FilesystemPublicationPhase::StagingCreate,
                     Some(target),
                     None,
                     CommitCertainty::NotCommitted,
@@ -938,7 +902,7 @@ fn publish_files_with_faults(
                 &writer,
                 &staging_name,
                 io_core_error(
-                    FilesystemPlanPublicationPhase::Commit,
+                    FilesystemPublicationPhase::Commit,
                     Some(target),
                     Some(staging),
                     CommitCertainty::NotCommitted,
@@ -953,7 +917,7 @@ fn publish_files_with_faults(
                 &writer,
                 &staging_name,
                 io_core_error(
-                    FilesystemPlanPublicationPhase::Commit,
+                    FilesystemPublicationPhase::Commit,
                     Some(target),
                     Some(staging),
                     CommitCertainty::NotCommitted,
@@ -982,7 +946,7 @@ fn publish_files_with_faults(
             validate_directory_binding(&parent, target.parent().expect("a target has a parent"))
         {
             return Err(io_core_error(
-                FilesystemPlanPublicationPhase::Commit,
+                FilesystemPublicationPhase::Commit,
                 Some(target),
                 None,
                 CommitCertainty::Committed,
@@ -1005,7 +969,7 @@ fn publish_new_tree(
 ) -> Result<CoreReceipt, CoreError> {
     let destination_name = anchor.missing.pop().ok_or_else(|| {
         io_core_error(
-            FilesystemPlanPublicationPhase::Commit,
+            FilesystemPublicationPhase::Commit,
             Some(destination.to_owned()),
             None,
             CommitCertainty::NotCommitted,
@@ -1019,7 +983,7 @@ fn publish_new_tree(
     for component in &anchor.missing {
         create_and_open_directory(&mut anchor.directory, component).map_err(|source| {
             io_core_error(
-                FilesystemPlanPublicationPhase::DirectoryCreate,
+                FilesystemPublicationPhase::DirectoryCreate,
                 Some(destination.to_owned()),
                 None,
                 CommitCertainty::NotCommitted,
@@ -1042,7 +1006,7 @@ fn publish_new_tree(
             commit_certainty: CommitCertainty::NotCommitted,
             committed_files: Vec::new(),
             preflight_issues: None,
-            source: FilesystemPlanPublicationErrorCause::Io(error.source),
+            source: FilesystemPublicationErrorCause::Io(error.source),
         })?;
 
     for (index, file) in files.iter().enumerate() {
@@ -1059,7 +1023,7 @@ fn publish_new_tree(
                     &staging_root,
                     &staging_name,
                     io_core_error(
-                        FilesystemPlanPublicationPhase::DirectoryCreate,
+                        FilesystemPublicationPhase::DirectoryCreate,
                         Some(target.clone()),
                         Some(staging_path.clone()),
                         CommitCertainty::NotCommitted,
@@ -1078,7 +1042,7 @@ fn publish_new_tree(
                     &staging_root,
                     &staging_name,
                     io_core_error(
-                        FilesystemPlanPublicationPhase::StagingCreate,
+                        FilesystemPublicationPhase::StagingCreate,
                         Some(target.clone()),
                         Some(staging_path.clone()),
                         CommitCertainty::NotCommitted,
@@ -1115,7 +1079,7 @@ fn publish_new_tree(
             &staging_root,
             &staging_name,
             io_core_error(
-                FilesystemPlanPublicationPhase::Commit,
+                FilesystemPublicationPhase::Commit,
                 Some(destination.to_owned()),
                 Some(staging_path),
                 CommitCertainty::NotCommitted,
@@ -1137,7 +1101,7 @@ fn publish_new_tree(
             &staging_root,
             &staging_name,
             io_core_error(
-                FilesystemPlanPublicationPhase::Commit,
+                FilesystemPublicationPhase::Commit,
                 Some(destination.to_owned()),
                 Some(staging_path),
                 commit_certainty,
@@ -1163,14 +1127,14 @@ fn publish_new_tree(
             Vec::new()
         };
         let source = if commit_policy_unsupported(&source) {
-            FilesystemPlanPublicationErrorCause::UnsupportedPolicy(
+            FilesystemPublicationErrorCause::UnsupportedPolicy(
                 FilesystemMergePolicy::PublishNewTree,
             )
         } else {
-            FilesystemPlanPublicationErrorCause::Io(source)
+            FilesystemPublicationErrorCause::Io(source)
         };
         let mut error = CoreError {
-            phase: FilesystemPlanPublicationPhase::Commit,
+            phase: FilesystemPublicationPhase::Commit,
             failed_target: Some(destination.to_owned()),
             staging_residue: Some(staging_path),
             staging_residue_status: None,
@@ -1191,7 +1155,7 @@ fn publish_new_tree(
     let committed_files = planned_file_paths(files);
     if let Err(source) = validate_directory_binding(&parent, parent_path) {
         return Err(io_core_error(
-            FilesystemPlanPublicationPhase::Commit,
+            FilesystemPublicationPhase::Commit,
             Some(destination.to_owned()),
             None,
             CommitCertainty::Committed,
@@ -1213,13 +1177,13 @@ fn planned_file_paths(files: &[PlannedFile<'_>]) -> Vec<PathBuf> {
 fn write_staging(
     writer: &mut impl Write,
     bytes: &[u8],
-) -> Result<(), (FilesystemPlanPublicationPhase, io::Error)> {
+) -> Result<(), (FilesystemPublicationPhase, io::Error)> {
     let mut written = 0;
     while written < bytes.len() {
         match writer.write(&bytes[written..]) {
             Ok(0) => {
                 return Err((
-                    FilesystemPlanPublicationPhase::StagingWrite,
+                    FilesystemPublicationPhase::StagingWrite,
                     io::Error::new(
                         io::ErrorKind::WriteZero,
                         "failed to write the complete staging file",
@@ -1229,13 +1193,13 @@ fn write_staging(
             Ok(count) => written += count,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(error) => {
-                return Err((FilesystemPlanPublicationPhase::StagingWrite, error));
+                return Err((FilesystemPublicationPhase::StagingWrite, error));
             }
         }
     }
     writer
         .flush()
-        .map_err(|error| (FilesystemPlanPublicationPhase::StagingFlush, error))
+        .map_err(|error| (FilesystemPublicationPhase::StagingFlush, error))
 }
 
 struct FaultInjectingWriter<'a, W> {
@@ -2058,7 +2022,7 @@ fn create_staging(
 }
 
 struct CreateTreeStagingError {
-    phase: FilesystemPlanPublicationPhase,
+    phase: FilesystemPublicationPhase,
     staging_residue: Option<PathBuf>,
     staging_residue_status: StagingResidueStatus,
     source: io::Error,
@@ -2097,7 +2061,7 @@ fn create_tree_staging(
                     } {
                         Ok(()) => {
                             return Err(CreateTreeStagingError {
-                                phase: FilesystemPlanPublicationPhase::StagingCreate,
+                                phase: FilesystemPublicationPhase::StagingCreate,
                                 staging_residue: None,
                                 staging_residue_status: StagingResidueStatus::Absent,
                                 source,
@@ -2105,7 +2069,7 @@ fn create_tree_staging(
                         }
                         Err(cleanup) if cleanup.kind() == io::ErrorKind::NotFound => {
                             return Err(CreateTreeStagingError {
-                                phase: FilesystemPlanPublicationPhase::StagingCreate,
+                                phase: FilesystemPublicationPhase::StagingCreate,
                                 staging_residue: None,
                                 staging_residue_status: StagingResidueStatus::Absent,
                                 source,
@@ -2113,7 +2077,7 @@ fn create_tree_staging(
                         }
                         Err(cleanup) => {
                             return Err(CreateTreeStagingError {
-                                phase: FilesystemPlanPublicationPhase::StagingCleanup,
+                                phase: FilesystemPublicationPhase::StagingCleanup,
                                 staging_residue: Some(staging_path),
                                 staging_residue_status: StagingResidueStatus::Indeterminate,
                                 source: cleanup,
@@ -2125,7 +2089,7 @@ fn create_tree_staging(
             Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
             Err(source) => {
                 return Err(CreateTreeStagingError {
-                    phase: FilesystemPlanPublicationPhase::StagingCreate,
+                    phase: FilesystemPublicationPhase::StagingCreate,
                     staging_residue: None,
                     staging_residue_status: StagingResidueStatus::Absent,
                     source,
@@ -2134,7 +2098,7 @@ fn create_tree_staging(
         }
     }
     Err(CreateTreeStagingError {
-        phase: FilesystemPlanPublicationPhase::StagingCreate,
+        phase: FilesystemPublicationPhase::StagingCreate,
         staging_residue: None,
         staging_residue_status: StagingResidueStatus::Absent,
         source: io::Error::new(
@@ -2181,7 +2145,7 @@ fn open_tree_staging_directory(parent: &Dir, name: &std::ffi::OsStr) -> io::Resu
 }
 
 struct CommitStagingError {
-    phase: FilesystemPlanPublicationPhase,
+    phase: FilesystemPublicationPhase,
     commit_certainty: CommitCertainty,
     source: io::Error,
 }
@@ -2206,7 +2170,7 @@ fn commit_staging(
     };
     if let Err(source) = result {
         return Err(CommitStagingError {
-            phase: FilesystemPlanPublicationPhase::Commit,
+            phase: FilesystemPublicationPhase::Commit,
             commit_certainty: observe_commit_certainty(
                 parent,
                 staging_file,
@@ -2663,7 +2627,7 @@ fn observe_tree_commit_certainty(
 }
 
 fn io_core_error(
-    phase: FilesystemPlanPublicationPhase,
+    phase: FilesystemPublicationPhase,
     failed_target: Option<PathBuf>,
     staging_residue: Option<PathBuf>,
     commit_certainty: CommitCertainty,
@@ -2678,7 +2642,7 @@ fn io_core_error(
         commit_certainty,
         committed_files,
         preflight_issues: None,
-        source: FilesystemPlanPublicationErrorCause::Io(source),
+        source: FilesystemPublicationErrorCause::Io(source),
     }
 }
 
@@ -2806,12 +2770,12 @@ mod tests {
 
         let mut write_fault = FaultWriter::new(3, Some(6), false);
         let (phase, _) = write_staging(&mut write_fault, b"complete bytes").unwrap_err();
-        assert_eq!(phase, FilesystemPlanPublicationPhase::StagingWrite);
+        assert_eq!(phase, FilesystemPublicationPhase::StagingWrite);
         assert_eq!(write_fault.bytes, b"comple");
 
         let mut flush_fault = FaultWriter::new(usize::MAX, None, true);
         let (phase, _) = write_staging(&mut flush_fault, b"complete bytes").unwrap_err();
-        assert_eq!(phase, FilesystemPlanPublicationPhase::StagingFlush);
+        assert_eq!(phase, FilesystemPublicationPhase::StagingFlush);
         assert_eq!(flush_fault.bytes, b"complete bytes");
     }
 
@@ -2847,7 +2811,7 @@ mod tests {
             core_error,
         );
 
-        assert_eq!(error.phase(), FilesystemPlanPublicationPhase::Commit);
+        assert_eq!(error.phase(), FilesystemPublicationPhase::Commit);
         assert_eq!(
             error.failed_target(),
             Some(destination.join("b.txt").as_path())
@@ -2857,7 +2821,7 @@ mod tests {
         assert_eq!(error.staging_residue_status(), StagingResidueStatus::Absent);
         assert!(matches!(
             error.cause(),
-            FilesystemPlanPublicationErrorCause::Io(source)
+            FilesystemPublicationErrorCause::Io(source)
                 if source.kind() == io::ErrorKind::NotFound
         ));
         assert_eq!(std::fs::read(destination.join("a.txt")).unwrap(), b"a");
@@ -2886,7 +2850,7 @@ mod tests {
             core_error,
         );
 
-        assert_eq!(error.phase(), FilesystemPlanPublicationPhase::Commit);
+        assert_eq!(error.phase(), FilesystemPublicationPhase::Commit);
         assert_eq!(error.failed_target(), Some(destination.as_path()));
         assert_eq!(error.commit_certainty(), CommitCertainty::Committed);
         assert_eq!(
@@ -2930,7 +2894,7 @@ mod tests {
             core_error,
         );
 
-        assert_eq!(error.phase(), FilesystemPlanPublicationPhase::Commit);
+        assert_eq!(error.phase(), FilesystemPublicationPhase::Commit);
         assert_eq!(error.failed_target(), Some(destination.as_path()));
         assert_eq!(error.commit_certainty(), CommitCertainty::NotCommitted);
         assert_eq!(
@@ -2968,7 +2932,7 @@ mod tests {
             core_error,
         );
 
-        assert_eq!(error.phase(), FilesystemPlanPublicationPhase::Commit);
+        assert_eq!(error.phase(), FilesystemPublicationPhase::Commit);
         assert_eq!(error.failed_target(), Some(destination.as_path()));
         assert_eq!(error.commit_certainty(), CommitCertainty::Indeterminate);
         assert_eq!(error.staging_residue_status(), StagingResidueStatus::Absent);
@@ -3002,11 +2966,11 @@ mod tests {
             core_error,
         );
 
-        assert_eq!(error.phase(), FilesystemPlanPublicationPhase::Commit);
+        assert_eq!(error.phase(), FilesystemPublicationPhase::Commit);
         assert_eq!(error.commit_certainty(), CommitCertainty::NotCommitted);
         assert!(matches!(
             error.cause(),
-            FilesystemPlanPublicationErrorCause::UnsupportedPolicy(
+            FilesystemPublicationErrorCause::UnsupportedPolicy(
                 FilesystemMergePolicy::PublishNewTree
             )
         ));
@@ -3043,12 +3007,12 @@ mod tests {
             core_error,
         );
 
-        assert_eq!(error.phase(), FilesystemPlanPublicationPhase::Policy);
+        assert_eq!(error.phase(), FilesystemPublicationPhase::Policy);
         assert_eq!(error.failed_target(), None);
         assert_eq!(error.commit_certainty(), CommitCertainty::NotCommitted);
         assert!(matches!(
             error.cause(),
-            FilesystemPlanPublicationErrorCause::UnsupportedPolicy(
+            FilesystemPublicationErrorCause::UnsupportedPolicy(
                 FilesystemMergePolicy::PublishNewTree
             )
         ));
@@ -3066,12 +3030,12 @@ mod tests {
         for (cleanup_fault, phase, residue_status) in [
             (
                 false,
-                FilesystemPlanPublicationPhase::StagingCreate,
+                FilesystemPublicationPhase::StagingCreate,
                 StagingResidueStatus::Absent,
             ),
             (
                 true,
-                FilesystemPlanPublicationPhase::StagingCleanup,
+                FilesystemPublicationPhase::StagingCleanup,
                 StagingResidueStatus::Indeterminate,
             ),
         ] {
@@ -3130,7 +3094,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert_eq!(error.phase, FilesystemPlanPublicationPhase::Commit);
+        assert_eq!(error.phase, FilesystemPublicationPhase::Commit);
         assert_eq!(error.commit_certainty, CommitCertainty::NotCommitted);
         assert!(error.committed_files.is_empty());
         assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
@@ -3167,7 +3131,7 @@ mod tests {
             core_error,
         );
 
-        assert_eq!(error.phase(), FilesystemPlanPublicationPhase::Commit);
+        assert_eq!(error.phase(), FilesystemPublicationPhase::Commit);
         assert_eq!(error.commit_certainty(), CommitCertainty::NotCommitted);
         assert_eq!(
             error.staging_residue_status(),
