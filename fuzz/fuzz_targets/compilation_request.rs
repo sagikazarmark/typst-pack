@@ -63,6 +63,21 @@ fuzz_target!(|data: &[u8]| {
         inputs.insert("adapter".into(), Value::Int(data.len() as i64));
         inputs
     };
+    if flags & 8 != 0 {
+        let report = compile(
+            PackCompilationRequest::new(
+                pack.clone(),
+                CompilationOutputSpecification::Svg(SvgOutputSpecification {
+                    pretty: reverse,
+                    ..SvgOutputSpecification::default()
+                }),
+            )
+            .inputs(caller_inputs.clone()),
+            typst_pack::CompilationLimits::reference_v1(),
+        )
+        .unwrap();
+        assert!(report.result().is_some());
+    }
     let invalid_output = CompilationOutputSpecification::Png(PngOutputSpecification {
         page_selection: typst_pack::PageSelection::new(vec![
             Some(NonZeroUsize::new(2).unwrap())..=Some(NonZeroUsize::new(1).unwrap()),

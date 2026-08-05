@@ -34,7 +34,7 @@ fuzz_target!(|data: &[u8]| {
     let planned = plan
         .entries()
         .iter()
-        .map(|entry| entry.relative_path())
+        .map(|entry| std::path::PathBuf::from(entry.relative_path()))
         .collect::<Vec<_>>();
     for (step, byte) in data.iter().copied().skip(1).take(16).enumerate() {
         let policy = match byte % 3 {
@@ -104,7 +104,7 @@ fuzz_target!(|data: &[u8]| {
             let entry = plan
                 .entries()
                 .iter()
-                .find(|entry| entry.relative_path() == relative_path)
+                .find(|entry| std::path::Path::new(entry.relative_path()) == relative_path)
                 .unwrap();
             match std::fs::read(publish_destination.join(relative_path)) {
                 Ok(bytes) => assert_eq!(bytes, entry.bytes()),

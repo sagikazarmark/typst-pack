@@ -1,5 +1,6 @@
 //! Frozen Pack, Compilation, and Compilation Result identity contracts.
 
+use proptest::prelude::*;
 use typst::foundations::{Datetime, Dict, Smart, Value};
 use typst_pack::{
     CompilationLimits, CompilationOutputSpecification, CompilationRequestRejection,
@@ -35,6 +36,37 @@ fn identity_pack() -> Pack {
         .unwrap()
         .build()
         .unwrap()
+}
+
+proptest! {
+    #[test]
+    fn pack_identity_binds_generated_project_bytes_and_excludes_metadata(
+        project_bytes in prop::collection::vec(any::<u8>(), 1..128),
+        mutation_index in any::<usize>(),
+        metadata_name in "[a-zA-Z0-9 ]{0,32}",
+        metadata_author in "[a-zA-Z0-9 ]{0,32}",
+    ) {
+        let plain = Pack::builder("main.typ")
+            .file("main.typ", project_bytes.clone()).unwrap()
+            .build().unwrap();
+        let described = Pack::builder("main.typ")
+            .file("main.typ", project_bytes.clone()).unwrap()
+            .metadata(
+                PackMetadata::new()
+                    .with_name(metadata_name)
+                    .with_author(metadata_author),
+            )
+            .build().unwrap();
+        let mut changed_bytes = project_bytes;
+        let mutation_index = mutation_index % changed_bytes.len();
+        changed_bytes[mutation_index] ^= u8::MAX;
+        let changed = Pack::builder("main.typ")
+            .file("main.typ", changed_bytes).unwrap()
+            .build().unwrap();
+
+        prop_assert_eq!(plain.identity(), described.identity());
+        prop_assert_ne!(plain.identity(), changed.identity());
+    }
 }
 
 #[test]

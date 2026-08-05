@@ -3703,37 +3703,47 @@ mod result_identity_tests {
         use std::sync::atomic::{AtomicUsize, Ordering};
         use std::sync::{Arc, Barrier};
 
-        let active = Arc::new(AtomicUsize::new(0));
-        let peak = Arc::new(AtomicUsize::new(0));
-        let barrier = Arc::new(Barrier::new(4));
-        let output =
-            export_artifacts_bounded((0u8..8).collect(), CompilationLimits::reference_v1(), {
-                let active = Arc::clone(&active);
-                let peak = Arc::clone(&peak);
-                let barrier = Arc::clone(&barrier);
-                move |item| {
-                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
-                    peak.fetch_max(now, Ordering::SeqCst);
-                    barrier.wait();
-                    let workers = rayon::current_num_threads();
-                    active.fetch_sub(1, Ordering::SeqCst);
-                    Ok(CompilationArtifact {
-                        format: OutputFormat::Svg,
-                        bytes: SharedBytes::new(vec![item, workers as u8]),
-                        source_page_number: None,
-                    })
-                }
-            })
+        for demand in [3u8, 4, 5] {
+            let expected_peak = usize::from(demand.min(4));
+            let active = Arc::new(AtomicUsize::new(0));
+            let peak = Arc::new(AtomicUsize::new(0));
+            let barrier = Arc::new(Barrier::new(expected_peak));
+            let output = export_artifacts_bounded(
+                (0u8..demand).collect(),
+                CompilationLimits::reference_v1(),
+                {
+                    let active = Arc::clone(&active);
+                    let peak = Arc::clone(&peak);
+                    let barrier = Arc::clone(&barrier);
+                    move |item| {
+                        let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                        peak.fetch_max(now, Ordering::SeqCst);
+                        if usize::from(item) < expected_peak {
+                            barrier.wait();
+                        }
+                        let workers = rayon::current_num_threads();
+                        active.fetch_sub(1, Ordering::SeqCst);
+                        Ok(CompilationArtifact {
+                            format: OutputFormat::Svg,
+                            bytes: SharedBytes::new(vec![item, workers as u8]),
+                            source_page_number: None,
+                        })
+                    }
+                },
+            )
             .unwrap();
 
-        assert_eq!(peak.load(Ordering::SeqCst), 4);
-        assert_eq!(
-            output
-                .iter()
-                .map(|artifact| artifact.bytes().to_vec())
-                .collect::<Vec<_>>(),
-            (0u8..8).map(|item| vec![item, 4]).collect::<Vec<_>>()
-        );
+            assert_eq!(peak.load(Ordering::SeqCst), expected_peak);
+            assert_eq!(
+                output
+                    .iter()
+                    .map(|artifact| artifact.bytes().to_vec())
+                    .collect::<Vec<_>>(),
+                (0u8..demand)
+                    .map(|item| vec![item, expected_peak as u8])
+                    .collect::<Vec<_>>()
+            );
+        }
     }
 
     #[cfg(feature = "parallel")]

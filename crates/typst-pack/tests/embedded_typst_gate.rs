@@ -85,6 +85,16 @@ fn official_cli_consumers_use_the_canonical_pin() {
             consumer.contains("install-official-typst.sh"),
             "{name} must install the official Typst oracle through the canonical script"
         );
+        for variable in [
+            "TYPST_PACK_OFFICIAL_TYPST",
+            "TYPST_PACK_REQUIRE_OFFICIAL_TYPST",
+            "TYPST_PACK_TEST_BINARY",
+        ] {
+            assert!(
+                consumer.contains(variable),
+                "{name} must set {variable} so the required oracle cannot silently skip"
+            );
+        }
     }
     assert!(
         dist.contains("host-jobs = [\"./verify-embedded-typst\"]"),
@@ -112,6 +122,44 @@ fn official_cli_consumers_use_the_canonical_pin() {
         assert!(
             installer.contains(&format!("read_pin {key}")),
             "the installer must consume the canonical `{key}`"
+        );
+    }
+}
+
+#[test]
+fn final_evidence_matrix_covers_native_adapters_and_featureless_wasm() {
+    let native = include_str!("../../../.github/workflows/filesystem-publication.yml");
+    let dagger = include_str!("../../../dagger.dang");
+
+    for runner in ["ubuntu-22.04", "windows-2025", "macos-14"] {
+        assert!(
+            native.contains(runner),
+            "native lifecycle evidence must run on {runner}"
+        );
+    }
+    for suite in [
+        "filesystem_project_gathering",
+        "filesystem_font_catalog_gathering",
+        "filesystem_package_acquisition",
+        "filesystem_pack_assembly",
+        "fs_creation",
+        "pack_archive_acquisition",
+        "pack_archive_publication",
+        "filesystem_plan_publication",
+    ] {
+        assert!(
+            native.contains(suite),
+            "native lifecycle evidence must run the {suite} suite"
+        );
+    }
+    for required in [
+        "noDefaultFeatures: true",
+        "wasm32-unknown-unknown",
+        "package: [\"typst-pack\"]",
+    ] {
+        assert!(
+            dagger.contains(required),
+            "featureless Wasm evidence must contain {required}"
         );
     }
 }

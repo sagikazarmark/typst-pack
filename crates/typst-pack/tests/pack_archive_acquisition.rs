@@ -36,12 +36,15 @@ fn stream_acquisition_handles_short_reads_and_preserves_exact_bytes() {
 
 #[test]
 fn stream_acquisition_accepts_the_boundary_and_probes_only_one_byte_past_it() {
-    let limits = AcquisitionLimits::new(5).unwrap();
-    let at_boundary = acquire(Cursor::new(b"12345"), limits).unwrap();
-    assert_eq!(at_boundary.as_slice(), b"12345");
+    let bytes = b"12345";
+    for ceiling in [bytes.len() as u64 + 1, bytes.len() as u64] {
+        let archive =
+            acquire(Cursor::new(bytes), AcquisitionLimits::new(ceiling).unwrap()).unwrap();
+        assert_eq!(archive.as_slice(), bytes);
+    }
 
     let mut one_over = ChunkedReader::new(b"123456789", 9);
-    let error = acquire(&mut one_over, limits).unwrap_err();
+    let error = acquire(&mut one_over, AcquisitionLimits::new(5).unwrap()).unwrap_err();
 
     assert!(matches!(
         error,

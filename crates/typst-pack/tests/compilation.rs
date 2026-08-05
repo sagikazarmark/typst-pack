@@ -167,26 +167,45 @@ fn compilation_limits_can_reduce_the_reference_worker_ceiling() {
 
 #[test]
 fn source_page_limit_is_an_accepted_operation_outcome() {
-    let limits = CompilationLimits::new(
-        4,
-        10,
-        1_000_000,
-        10_000_000,
-        1024 * 1024,
-        10 * 1024 * 1024,
-        1,
-    )
-    .unwrap();
-
-    let report = compile_with_limits(
+    let request = || {
         PackCompilationRequest::new(
             five_page_pack(),
             page_output(
                 OutputFormat::Svg,
                 typst_pack::parse_page_selection("5").unwrap(),
             ),
-        ),
-        limits,
+        )
+    };
+    for ceiling in [6, 5] {
+        let report = compile_with_limits(
+            request(),
+            CompilationLimits::new(
+                ceiling,
+                10,
+                1_000_000,
+                10_000_000,
+                1024 * 1024,
+                10 * 1024 * 1024,
+                1,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(report.result().is_some());
+    }
+
+    let report = compile_with_limits(
+        request(),
+        CompilationLimits::new(
+            4,
+            10,
+            1_000_000,
+            10_000_000,
+            1024 * 1024,
+            10 * 1024 * 1024,
+            1,
+        )
+        .unwrap(),
     )
     .unwrap();
 
@@ -212,20 +231,36 @@ fn source_page_limit_is_an_accepted_operation_outcome() {
 
 #[test]
 fn selected_artifact_count_is_bounded_before_export() {
-    let limits = CompilationLimits::new(
-        10,
-        4,
-        1_000_000,
-        10_000_000,
-        1024 * 1024,
-        10 * 1024 * 1024,
-        1,
-    )
-    .unwrap();
+    for ceiling in [6, 5] {
+        let report = compile_with_limits(
+            PackCompilationRequest::new(five_page_pack(), output(OutputFormat::Svg)),
+            CompilationLimits::new(
+                10,
+                ceiling,
+                1_000_000,
+                10_000_000,
+                1024 * 1024,
+                10 * 1024 * 1024,
+                1,
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(report.result().is_some());
+    }
 
     let report = compile_with_limits(
         PackCompilationRequest::new(five_page_pack(), output(OutputFormat::Svg)),
-        limits,
+        CompilationLimits::new(
+            10,
+            4,
+            1_000_000,
+            10_000_000,
+            1024 * 1024,
+            10 * 1024 * 1024,
+            1,
+        )
+        .unwrap(),
     )
     .unwrap();
 
@@ -245,15 +280,23 @@ fn selected_artifact_count_is_bounded_before_export() {
 
 #[test]
 fn png_pixels_per_artifact_are_bounded_before_rendering() {
-    let limits = CompilationLimits::new(1, 1, 99, 1_000, 1024 * 1024, 1024 * 1024, 1).unwrap();
     let specification = CompilationOutputSpecification::Png(PngOutputSpecification {
         pixels_per_inch: Some(72.0),
         ..PngOutputSpecification::default()
     });
 
+    for ceiling in [101, 100] {
+        let report = compile_with_limits(
+            PackCompilationRequest::new(fixed_size_page_pack(1), specification.clone()),
+            CompilationLimits::new(1, 1, ceiling, 1_000, 1024 * 1024, 1024 * 1024, 1).unwrap(),
+        )
+        .unwrap();
+        assert!(report.result().is_some());
+    }
+
     let report = compile_with_limits(
         PackCompilationRequest::new(fixed_size_page_pack(1), specification),
-        limits,
+        CompilationLimits::new(1, 1, 99, 1_000, 1024 * 1024, 1024 * 1024, 1).unwrap(),
     )
     .unwrap();
 
@@ -272,23 +315,24 @@ fn png_pixels_per_artifact_are_bounded_before_rendering() {
 
 #[test]
 fn total_png_pixels_use_checked_canonical_accounting() {
-    let exact_limits =
-        CompilationLimits::new(2, 2, 100, 200, 1024 * 1024, 2 * 1024 * 1024, 2).unwrap();
     let limits = CompilationLimits::new(2, 2, 100, 199, 1024 * 1024, 2 * 1024 * 1024, 2).unwrap();
     let specification = CompilationOutputSpecification::Png(PngOutputSpecification {
         pixels_per_inch: Some(72.0),
         ..PngOutputSpecification::default()
     });
 
-    assert!(
-        compile_with_limits(
-            PackCompilationRequest::new(fixed_size_page_pack(2), specification.clone()),
-            exact_limits,
-        )
-        .unwrap()
-        .result()
-        .is_some()
-    );
+    for ceiling in [201, 200] {
+        assert!(
+            compile_with_limits(
+                PackCompilationRequest::new(fixed_size_page_pack(2), specification.clone()),
+                CompilationLimits::new(2, 2, 100, ceiling, 1024 * 1024, 2 * 1024 * 1024, 2,)
+                    .unwrap(),
+            )
+            .unwrap()
+            .result()
+            .is_some()
+        );
+    }
 
     let report = compile_with_limits(
         PackCompilationRequest::new(fixed_size_page_pack(2), specification),
@@ -318,21 +362,22 @@ fn artifact_bytes_are_bounded_after_generation_without_a_partial_result() {
     ))
     .unwrap();
     let byte_length = u64::try_from(baseline.artifacts()[0].bytes().len()).unwrap();
-    let exact_limits =
-        CompilationLimits::new(1, 1, 1_000_000, 1_000_000, byte_length, byte_length, 1).unwrap();
     let limits =
         CompilationLimits::new(1, 1, 1_000_000, 1_000_000, byte_length - 1, byte_length, 1)
             .unwrap();
 
-    assert!(
-        compile_with_limits(
-            PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)),
-            exact_limits,
-        )
-        .unwrap()
-        .result()
-        .is_some()
-    );
+    for ceiling in [byte_length + 1, byte_length] {
+        assert!(
+            compile_with_limits(
+                PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)),
+                CompilationLimits::new(1, 1, 1_000_000, 1_000_000, ceiling, byte_length, 1,)
+                    .unwrap(),
+            )
+            .unwrap()
+            .result()
+            .is_some()
+        );
+    }
 
     let report = compile_with_limits(
         PackCompilationRequest::new(pack, output(OutputFormat::Svg)),
@@ -370,16 +415,6 @@ fn retained_artifact_bytes_use_checked_canonical_accounting() {
         .map(|artifact| u64::try_from(artifact.bytes().len()).unwrap())
         .collect::<Vec<_>>();
     let retained = byte_lengths.iter().sum::<u64>();
-    let exact_limits = CompilationLimits::new(
-        2,
-        2,
-        1_000_000,
-        1_000_000,
-        *byte_lengths.iter().max().unwrap(),
-        retained,
-        2,
-    )
-    .unwrap();
     let limits = CompilationLimits::new(
         2,
         2,
@@ -391,15 +426,26 @@ fn retained_artifact_bytes_use_checked_canonical_accounting() {
     )
     .unwrap();
 
-    assert!(
-        compile_with_limits(
-            PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)),
-            exact_limits,
-        )
-        .unwrap()
-        .result()
-        .is_some()
-    );
+    for ceiling in [retained + 1, retained] {
+        assert!(
+            compile_with_limits(
+                PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)),
+                CompilationLimits::new(
+                    2,
+                    2,
+                    1_000_000,
+                    1_000_000,
+                    *byte_lengths.iter().max().unwrap(),
+                    ceiling,
+                    2,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+            .result()
+            .is_some()
+        );
+    }
 
     let report = compile_with_limits(
         PackCompilationRequest::new(pack, output(OutputFormat::Svg)),
@@ -472,6 +518,50 @@ fn compilation_limits_and_worker_scheduling_do_not_change_canonical_results() {
             .map(|artifact| (artifact.source_page_number(), artifact.bytes()))
             .collect::<Vec<_>>()
     );
+}
+
+#[cfg(feature = "parallel")]
+proptest! {
+    #![proptest_config(ProptestConfig::with_cases(4))]
+
+    #[test]
+    fn generated_worker_schedules_preserve_export_determinism(
+        page_count in 1usize..=5,
+        workers in 1u64..=4,
+    ) {
+        let pack = fixed_size_page_pack(page_count);
+        let compile_with_workers = |workers| {
+            compile_with_limits(
+                PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)),
+                CompilationLimits::new(
+                    page_count as u64,
+                    page_count as u64,
+                    1_000_000,
+                    5_000_000,
+                    1024 * 1024,
+                    5 * 1024 * 1024,
+                    workers,
+                ).unwrap(),
+            ).unwrap().result().unwrap().clone()
+        };
+
+        let sequential = compile_with_workers(1);
+        let scheduled = compile_with_workers(workers);
+
+        prop_assert_eq!(
+            sequential.compilation_identity(),
+            scheduled.compilation_identity(),
+        );
+        prop_assert_eq!(sequential.result_identity(), scheduled.result_identity());
+        prop_assert_eq!(
+            sequential.artifacts().iter()
+                .map(|artifact| (artifact.source_page_number(), artifact.bytes()))
+                .collect::<Vec<_>>(),
+            scheduled.artifacts().iter()
+                .map(|artifact| (artifact.source_page_number(), artifact.bytes()))
+                .collect::<Vec<_>>(),
+        );
+    }
 }
 
 #[test]

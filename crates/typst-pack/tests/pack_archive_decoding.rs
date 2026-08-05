@@ -21,13 +21,81 @@ fn reference_v1_profile_has_every_required_ceiling() {
 
 #[test]
 fn decode_limits_reject_an_unprobeable_ceiling() {
-    assert!(matches!(
-        DecodeLimits::new(u64::MAX, 1, 1, 1, 1, 1),
-        Err(DecodeLimitsError::CannotProbe {
-            resource: DecodeResource::ArchiveBytes,
-            ceiling: u64::MAX,
-        })
-    ));
+    let resources = [
+        DecodeResource::ArchiveBytes,
+        DecodeResource::Members,
+        DecodeResource::RawMemberNameBytes,
+        DecodeResource::ManifestBytes,
+        DecodeResource::MemberBytes,
+        DecodeResource::TotalContentBytes,
+    ];
+
+    for (index, resource) in resources.into_iter().enumerate() {
+        let mut values = [1; 6];
+        values[index] = u64::MAX;
+        assert!(matches!(
+            DecodeLimits::new(values[0], values[1], values[2], values[3], values[4], values[5]),
+            Err(DecodeLimitsError::CannotProbe {
+                resource: reported,
+                ceiling: u64::MAX,
+            }) if reported == resource
+        ));
+    }
+}
+
+#[test]
+fn generated_boundaries_cover_every_pack_archive_decoding_resource() {
+    let archive = PackArchiveBytes::from_vec(ACCEPTED.to_vec());
+    let cases = [
+        (DecodeResource::ArchiveBytes, archive.len()),
+        (DecodeResource::Members, 6),
+        (DecodeResource::RawMemberNameBytes, 84),
+        (DecodeResource::ManifestBytes, 415),
+        (DecodeResource::MemberBytes, 18),
+        (DecodeResource::TotalContentBytes, 31),
+    ];
+
+    for (resource, observed) in cases {
+        for ceiling in [observed + 1, observed] {
+            decode(&archive, decode_limits_for(resource, ceiling)).unwrap_or_else(|error| {
+                panic!("{resource:?} rejected observed {observed} at ceiling {ceiling}: {error}")
+            });
+        }
+
+        let ceiling = observed - 1;
+        let error = decode(&archive, decode_limits_for(resource, ceiling)).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                DecodeError::Limit(DecodeLimitError::Exceeded {
+                    resource: reported,
+                    ceiling: reported_ceiling,
+                    observed_at_least,
+                }) if reported == resource
+                    && reported_ceiling == ceiling
+                    && observed_at_least == observed
+            ),
+            "unexpected {resource:?} boundary failure: {error}"
+        );
+    }
+}
+
+fn decode_limits_for(resource: DecodeResource, ceiling: u64) -> DecodeLimits {
+    let mut values = [10_000; 6];
+    let index = match resource {
+        DecodeResource::ArchiveBytes => 0,
+        DecodeResource::Members => 1,
+        DecodeResource::RawMemberNameBytes => 2,
+        DecodeResource::ManifestBytes => 3,
+        DecodeResource::MemberBytes => 4,
+        DecodeResource::TotalContentBytes => 5,
+        _ => panic!("boundary fixture does not cover a future decode resource"),
+    };
+    values[index] = ceiling;
+    DecodeLimits::new(
+        values[0], values[1], values[2], values[3], values[4], values[5],
+    )
+    .unwrap()
 }
 
 #[test]

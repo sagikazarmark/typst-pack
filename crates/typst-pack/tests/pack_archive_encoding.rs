@@ -49,13 +49,97 @@ fn reference_v1_profile_has_every_required_encode_ceiling() {
 
 #[test]
 fn encode_limits_reject_an_unprobeable_ceiling() {
-    assert!(matches!(
-        EncodeLimits::new(u64::MAX, 1, 1, 1, 1, 1),
-        Err(EncodeLimitsError::CannotProbe {
-            resource: EncodeResource::ArchiveBytes,
-            ceiling: u64::MAX,
-        })
-    ));
+    let resources = [
+        EncodeResource::ArchiveBytes,
+        EncodeResource::Members,
+        EncodeResource::GeneratedMemberNameBytes,
+        EncodeResource::ManifestBytes,
+        EncodeResource::MemberBytes,
+        EncodeResource::TotalContentBytes,
+    ];
+
+    for (index, resource) in resources.into_iter().enumerate() {
+        let mut values = [1; 6];
+        values[index] = u64::MAX;
+        assert!(matches!(
+            EncodeLimits::new(values[0], values[1], values[2], values[3], values[4], values[5]),
+            Err(EncodeLimitsError::CannotProbe {
+                resource: reported,
+                ceiling: u64::MAX,
+            }) if reported == resource
+        ));
+    }
+}
+
+#[test]
+fn generated_boundaries_cover_every_pack_archive_encoding_resource() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"12".to_vec())
+        .unwrap()
+        .file("other.typ", b"345".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let baseline = encode(&pack, EncodeLimits::reference_v1()).unwrap();
+    let (members, member_names, manifest_bytes) = {
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(baseline.as_slice())).unwrap();
+        let members = archive.len() as u64;
+        let member_names = (0..archive.len())
+            .map(|index| archive.by_index(index).unwrap().name_raw().len() as u64)
+            .sum();
+        let manifest_bytes = archive.by_name("typst-pack.toml").unwrap().size();
+        (members, member_names, manifest_bytes)
+    };
+    let cases = [
+        (EncodeResource::ArchiveBytes, baseline.len()),
+        (EncodeResource::Members, members),
+        (EncodeResource::GeneratedMemberNameBytes, member_names),
+        (EncodeResource::ManifestBytes, manifest_bytes),
+        (EncodeResource::MemberBytes, 3),
+        (EncodeResource::TotalContentBytes, 5),
+    ];
+
+    for (resource, observed) in cases {
+        for ceiling in [observed + 1, observed] {
+            encode(&pack, encode_limits_for(resource, ceiling)).unwrap_or_else(|error| {
+                panic!("{resource:?} rejected observed {observed} at ceiling {ceiling}: {error}")
+            });
+        }
+
+        let ceiling = observed - 1;
+        let error = encode(&pack, encode_limits_for(resource, ceiling)).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                EncodeError::Limit(EncodeLimitError::Exceeded {
+                    resource: reported,
+                    ceiling: reported_ceiling,
+                    observed_at_least,
+                }) if reported == resource
+                    && reported_ceiling == ceiling
+                    && observed_at_least == observed
+            ),
+            "unexpected {resource:?} boundary failure: {error}"
+        );
+    }
+}
+
+fn encode_limits_for(resource: EncodeResource, ceiling: u64) -> EncodeLimits {
+    let mut values = [10_000; 6];
+    let index = match resource {
+        EncodeResource::ArchiveBytes => 0,
+        EncodeResource::Members => 1,
+        EncodeResource::GeneratedMemberNameBytes => 2,
+        EncodeResource::ManifestBytes => 3,
+        EncodeResource::MemberBytes => 4,
+        EncodeResource::TotalContentBytes => 5,
+        _ => panic!("boundary fixture does not cover a future encode resource"),
+    };
+    values[index] = ceiling;
+    EncodeLimits::new(
+        values[0], values[1], values[2], values[3], values[4], values[5],
+    )
+    .unwrap()
 }
 
 #[test]

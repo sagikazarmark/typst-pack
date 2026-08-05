@@ -180,49 +180,28 @@ fn assert_limit(
 }
 
 #[test]
-fn every_project_source_limit_accepts_its_exact_boundary_and_rejects_one_over() {
+fn generated_boundaries_cover_every_project_source_resource() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     fs::write(root.join("main.typ"), b"main").unwrap();
+    fs::write(root.join(".typkignore"), b"x").unwrap();
+    let cases = [
+        (FilesystemProjectResource::VisitedEntries, 2),
+        (FilesystemProjectResource::SelectedFiles, 2),
+        (FilesystemProjectResource::RootPolicyBytes, 1),
+        (FilesystemProjectResource::SelectedFileBytes, 4),
+        (FilesystemProjectResource::TotalSelectedBytes, 5),
+    ];
+    let exact = [2, 2, 1, 4, 5];
 
-    gather_filesystem_project(root, "main.typ", limits([1, 1, 1024, 4, 4])).unwrap();
-    assert_limit(
-        root,
-        [0, 1, 1024, 4, 4],
-        FilesystemProjectResource::VisitedEntries,
-        0,
-        1,
-    );
-    assert_limit(
-        root,
-        [1, 0, 1024, 4, 4],
-        FilesystemProjectResource::SelectedFiles,
-        0,
-        1,
-    );
-    assert_limit(
-        root,
-        [1, 1, 1024, 3, 4],
-        FilesystemProjectResource::SelectedFileBytes,
-        3,
-        4,
-    );
-    assert_limit(
-        root,
-        [1, 1, 1024, 4, 3],
-        FilesystemProjectResource::TotalSelectedBytes,
-        3,
-        4,
-    );
-
-    let policy = b"x";
-    fs::write(root.join(".typkignore"), policy).unwrap();
-    gather_filesystem_project(root, "main.typ", limits([2, 2, 1, 4, 5])).unwrap();
-    assert_limit(
-        root,
-        [2, 2, 0, 4, 5],
-        FilesystemProjectResource::RootPolicyBytes,
-        0,
-        1,
-    );
+    for (index, (resource, observed)) in cases.into_iter().enumerate() {
+        for ceiling in [observed + 1, observed] {
+            let mut values = exact;
+            values[index] = ceiling;
+            gather_filesystem_project(root, "main.typ", limits(values)).unwrap();
+        }
+        let mut values = exact;
+        values[index] -= 1;
+        assert_limit(root, values, resource, values[index], observed);
+    }
 }

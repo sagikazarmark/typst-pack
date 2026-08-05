@@ -224,49 +224,40 @@ fn assert_limit(
 
 #[test]
 #[cfg(feature = "embedded-fonts")]
-fn every_font_source_limit_accepts_its_exact_boundary_and_rejects_one_over() {
+fn generated_boundaries_cover_every_font_source_resource() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let data = typst_container();
     fs::write(root.join("font.ttf"), &data).unwrap();
-    let size = data.len() as u64;
+    let mut second = data;
+    second.push(0);
+    fs::write(root.join("second.ttf"), &second).unwrap();
+    let size = second.len() as u64;
+    let cases = [
+        (FilesystemFontResource::VisitedEntries, 2),
+        (FilesystemFontResource::AcceptedContainers, 2),
+        (FilesystemFontResource::ContainerBytes, size),
+        (FilesystemFontResource::TotalAcceptedBytes, size * 2 - 1),
+    ];
+    let exact = [2, 2, size, size * 2 - 1];
 
-    gather_filesystem_font_catalog(
-        [FilesystemFontSource::directory(
-            root,
-            FontDisposition::External,
-        )],
-        limits([1, 1, size, size]),
-    )
-    .unwrap();
-    assert_limit(
-        root,
-        [0, 1, size, size],
-        FilesystemFontResource::VisitedEntries,
-        0,
-        1,
-    );
-    assert_limit(
-        root,
-        [1, 0, size, size],
-        FilesystemFontResource::AcceptedContainers,
-        0,
-        1,
-    );
-    assert_limit(
-        root,
-        [1, 1, size - 1, size],
-        FilesystemFontResource::ContainerBytes,
-        size - 1,
-        size,
-    );
-    assert_limit(
-        root,
-        [1, 1, size, size - 1],
-        FilesystemFontResource::TotalAcceptedBytes,
-        size - 1,
-        size,
-    );
+    for (index, (resource, observed)) in cases.into_iter().enumerate() {
+        for ceiling in [observed + 1, observed] {
+            let mut values = exact;
+            values[index] = ceiling;
+            gather_filesystem_font_catalog(
+                [FilesystemFontSource::directory(
+                    root,
+                    FontDisposition::External,
+                )],
+                limits(values),
+            )
+            .unwrap();
+        }
+        let mut values = exact;
+        values[index] -= 1;
+        assert_limit(root, values, resource, values[index], observed);
+    }
 }
 
 #[test]

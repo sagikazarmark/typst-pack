@@ -198,6 +198,40 @@ fn unknown_package_archive_size_is_incrementally_metered_with_a_plus_one_probe()
 }
 
 #[test]
+fn dishonest_known_package_archive_sizes_cannot_bypass_or_force_reads() {
+    let error = acquire_package_archive(
+        io::Cursor::new(b"12345-extra"),
+        Some(4),
+        limits(4, 10, 100, 100, 100),
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        PackageArchiveAcquisitionError::Limit(PackageExpansionLimitError::Exceeded {
+            resource: PackageExpansionResource::CompressedArchiveBytes,
+            ceiling: 4,
+            observed_at_least: 5,
+        })
+    ));
+
+    let reads = Rc::new(Cell::new(0));
+    let reader = ObservedReader {
+        bytes: io::Cursor::new(b"1234".to_vec()),
+        reads: Rc::clone(&reads),
+    };
+    let error = acquire_package_archive(reader, Some(5), limits(4, 10, 100, 100, 100)).unwrap_err();
+    assert_eq!(reads.get(), 0);
+    assert!(matches!(
+        error,
+        PackageArchiveAcquisitionError::Limit(PackageExpansionLimitError::Exceeded {
+            resource: PackageExpansionResource::CompressedArchiveBytes,
+            ceiling: 4,
+            observed_at_least: 5,
+        })
+    ));
+}
+
+#[test]
 fn generated_boundaries_cover_every_package_expansion_resource() {
     let compressed = archive(&[("a", b"x")]);
     let cases = [

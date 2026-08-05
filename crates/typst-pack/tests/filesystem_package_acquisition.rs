@@ -104,50 +104,29 @@ fn assert_limit(
 }
 
 #[test]
-fn every_package_source_limit_accepts_its_exact_boundary_and_rejects_one_over() {
+fn generated_boundaries_cover_every_package_source_resource() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     fs::write(root.join("lib.typ"), b"1234").unwrap();
-
-    gather_filesystem_package(root, limits([1, 1, 4, 4])).unwrap();
-    assert_limit(
-        root,
-        [0, 1, 4, 4],
-        FilesystemPackageResource::VisitedEntries,
-        0,
-        1,
-    );
-    assert_limit(
-        root,
-        [1, 0, 4, 4],
-        FilesystemPackageResource::SelectedFiles,
-        0,
-        1,
-    );
-    assert_limit(
-        root,
-        [1, 1, 3, 4],
-        FilesystemPackageResource::SelectedFileBytes,
-        3,
-        4,
-    );
-    assert_limit(
-        root,
-        [1, 1, 4, 3],
-        FilesystemPackageResource::PackageTreeBytes,
-        3,
-        4,
-    );
-
     fs::write(root.join("second.typ"), b"5").unwrap();
-    gather_filesystem_package(root, limits([2, 2, 4, 5])).unwrap();
-    assert_limit(
-        root,
-        [2, 2, 4, 4],
-        FilesystemPackageResource::PackageTreeBytes,
-        4,
-        5,
-    );
+    let cases = [
+        (FilesystemPackageResource::VisitedEntries, 2),
+        (FilesystemPackageResource::SelectedFiles, 2),
+        (FilesystemPackageResource::SelectedFileBytes, 4),
+        (FilesystemPackageResource::PackageTreeBytes, 5),
+    ];
+    let exact = [2, 2, 4, 5];
+
+    for (index, (resource, observed)) in cases.into_iter().enumerate() {
+        for ceiling in [observed + 1, observed] {
+            let mut values = exact;
+            values[index] = ceiling;
+            gather_filesystem_package(root, limits(values)).unwrap();
+        }
+        let mut values = exact;
+        values[index] -= 1;
+        assert_limit(root, values, resource, values[index], observed);
+    }
 }
 
 #[cfg(unix)]

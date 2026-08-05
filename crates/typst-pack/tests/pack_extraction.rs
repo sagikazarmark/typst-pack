@@ -282,6 +282,58 @@ proptest! {
     }
 
     #[test]
+    fn generated_collision_issue_order_is_invariant_under_input_permutation(
+        stems in prop::collection::btree_set("[a-z][a-z0-9]{0,12}", 2..8),
+    ) {
+        let entries = stems.into_iter().collect::<Vec<_>>();
+        let mut reversed = entries.clone();
+        reversed.reverse();
+        let build = |project_order: &[String], package_order: &[String]| {
+            let mut builder = Pack::builder("main.typ")
+                .file("main.typ", b"main".to_vec()).unwrap();
+            for stem in project_order {
+                builder = builder.file(
+                    format!("packages/local/example/1.0.0/{stem}"),
+                    format!("project {stem}").into_bytes(),
+                ).unwrap();
+            }
+            for stem in package_order {
+                builder = builder.package_file(
+                    package_spec(),
+                    stem,
+                    format!("package {stem}").into_bytes(),
+                ).unwrap();
+            }
+            builder.build().unwrap()
+        };
+        let forward = build(&entries, &reversed);
+        let backward = build(&reversed, &entries);
+        let project = |pack: &Pack| {
+            plan_pack_extraction(pack, PackExtractionSelection::new(true, false))
+                .unwrap_err()
+                .issues()
+                .iter()
+                .map(|issue| match issue {
+                    PackExtractionPlanIssue::PathConflict {
+                        first_path,
+                        first_role,
+                        second_path,
+                        second_role,
+                    } => (
+                        first_path.clone(),
+                        *first_role,
+                        second_path.clone(),
+                        *second_role,
+                    ),
+                    issue => panic!("unexpected generated plan issue: {issue:?}"),
+                })
+                .collect::<Vec<_>>()
+        };
+
+        prop_assert_eq!(project(&forward), project(&backward));
+    }
+
+    #[test]
     fn path_segment_prefixes_do_not_collide(
         stem in "[a-z][a-z0-9]{0,12}",
     ) {
