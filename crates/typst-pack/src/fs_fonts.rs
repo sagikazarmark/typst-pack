@@ -973,12 +973,7 @@ fn alias_error(path: &Path) -> FilesystemFontGatherError {
 fn font_eligible(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| {
-            extension.eq_ignore_ascii_case("ttf")
-                || extension.eq_ignore_ascii_case("ttc")
-                || extension.eq_ignore_ascii_case("otf")
-                || extension.eq_ignore_ascii_case("otc")
-        })
+        .is_some_and(crate::acquisition_layout::is_font_container_extension)
 }
 
 fn unsupported_kind(file_type: &std::fs::FileType) -> FilesystemFontEntryKind {

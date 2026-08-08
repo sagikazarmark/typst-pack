@@ -17,6 +17,7 @@ use typst::foundations::Bytes;
 use typst::syntax::package::PackageSpec;
 
 use crate::Pack;
+use crate::acquisition_layout;
 use crate::package_catalog::{PackageTree, PackageTreeError};
 
 /// A failure while acquiring exact Package Archive bytes from a stream.
@@ -32,12 +33,12 @@ pub enum PackageArchiveAcquisitionError {
 /// The URL of the package registry these helpers describe the layout of, the
 /// official Typst Universe registry. There is no standardized registry
 /// protocol, so the layout is this registry's own.
-pub const PACKAGE_REGISTRY_URL: &str = "https://packages.typst.org";
+pub const PACKAGE_REGISTRY_URL: &str = acquisition_layout::PACKAGE_REGISTRY_URL;
 
 /// The one package namespace the registry serves. A specification in any other
 /// namespace is resolved from wherever its namespace lives, which the registry
 /// layout says nothing about.
-pub const PACKAGE_REGISTRY_NAMESPACE: &str = "preview";
+pub const PACKAGE_REGISTRY_NAMESPACE: &str = acquisition_layout::PACKAGE_REGISTRY_NAMESPACE;
 
 /// A resource bounded during Package Archive Expansion.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -191,13 +192,8 @@ pub fn acquire_package_archive(
 /// specifications, because a Typst import specification always carries an exact
 /// version.
 pub fn package_archive_url(spec: &PackageSpec) -> Result<String, PackageAcquisitionError> {
-    if spec.namespace != PACKAGE_REGISTRY_NAMESPACE {
-        return Err(PackageAcquisitionError::UnservedNamespace { spec: spec.clone() });
-    }
-    Ok(format!(
-        "{PACKAGE_REGISTRY_URL}/{}/{}-{}.tar.gz",
-        spec.namespace, spec.name, spec.version
-    ))
+    acquisition_layout::official_registry_archive_url(spec)
+        .ok_or_else(|| PackageAcquisitionError::UnservedNamespace { spec: spec.clone() })
 }
 
 /// Expands the archive bytes served for one exact package specification into

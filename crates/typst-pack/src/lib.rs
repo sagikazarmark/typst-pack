@@ -8,6 +8,7 @@ pub const VERSION: &str = concat!(
     ")"
 );
 
+mod acquisition_layout;
 mod compile;
 mod creation;
 mod embedded;

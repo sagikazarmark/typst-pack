@@ -182,6 +182,39 @@ fn concrete_authority_makes_local_cache_and_offline_precedence_explicit() {
 }
 
 #[test]
+fn concrete_authority_finds_a_tree_under_its_namespace_name_and_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = dir.path().join("data");
+    let layouts = [
+        ("@local/example:1.0.0", "local/example/1.0.0"),
+        ("@local/example:2.3.4", "local/example/2.3.4"),
+        ("@local/nested-name:1.0.0", "local/nested-name/1.0.0"),
+        ("@preview/example:1.0.0", "preview/example/1.0.0"),
+    ];
+
+    for (_, key) in layouts {
+        let root = data.join(key);
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("marker.txt"), key.as_bytes()).unwrap();
+    }
+
+    for (text, key) in layouts {
+        let spec: PackageSpec = text.parse().unwrap();
+
+        let acquired = FilesystemPackageAuthority::new(Some(&data), Some(&data), true)
+            .acquire(&spec)
+            .unwrap();
+
+        assert_eq!(
+            acquired.tree().file("marker.txt"),
+            Some(key.as_bytes()),
+            "{text}"
+        );
+        assert_eq!(acquired.root(), Some(data.join(key).as_path()), "{text}");
+    }
+}
+
+#[test]
 fn concrete_authority_failure_retains_the_exact_specification() {
     let dir = tempfile::tempdir().unwrap();
     let spec: PackageSpec = "@local/missing:1.0.0".parse().unwrap();

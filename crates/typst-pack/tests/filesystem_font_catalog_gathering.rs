@@ -288,6 +288,59 @@ fn malformed_eligible_font_bytes_retain_the_container_validation_cause() {
     ));
 }
 
+#[test]
+fn only_supported_font_container_suffixes_are_selected_case_insensitively() {
+    let dir = tempfile::tempdir().unwrap();
+    let candidates = [
+        ("container.ttf", true),
+        ("container.TTF", true),
+        ("container.ttc", true),
+        ("container.Ttc", true),
+        ("container.otf", true),
+        ("container.OTF", true),
+        ("container.otc", true),
+        ("container.oTc", true),
+        ("ignored.woff", false),
+        ("ignored.woff2", false),
+        ("ignored.txt", false),
+        ("ignored.ttf.txt", false),
+        ("ignored", false),
+        (".ttf", false),
+    ];
+    for (name, _) in candidates {
+        fs::write(dir.path().join(name), b"not a font").unwrap();
+    }
+    let mut selected = candidates
+        .iter()
+        .filter(|(_, eligible)| *eligible)
+        .map(|(name, _)| dir.path().join(name))
+        .collect::<Vec<_>>();
+    selected.sort();
+
+    let error = gather_filesystem_font_catalog(
+        [FilesystemFontSource::directory(
+            dir.path(),
+            FontDisposition::External,
+        )],
+        FilesystemFontLimits::reference_v1(),
+    )
+    .unwrap_err();
+
+    // Every selected container holds bytes no Font Container accepts, so the
+    // validation issues name exactly what selection accepted.
+    let FilesystemFontGatherError::InvalidContainers(validation) = error else {
+        panic!("expected the selected containers to fail validation");
+    };
+    assert_eq!(
+        validation
+            .issues()
+            .iter()
+            .map(|issue| issue.path().to_owned())
+            .collect::<Vec<_>>(),
+        selected
+    );
+}
+
 #[cfg(unix)]
 #[test]
 fn aliases_remain_typed_survey_failures() {

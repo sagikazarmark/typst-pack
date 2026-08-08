@@ -303,24 +303,44 @@ fn generated_boundaries_cover_every_package_expansion_resource() {
 
 #[test]
 fn the_registry_url_of_a_specification_is_obtained_without_a_transport() {
-    let url = package_archive_url(&spec("@preview/example:1.2.3")).unwrap();
+    let layouts = [
+        (
+            "@preview/example:1.2.3",
+            "https://packages.typst.org/preview/example-1.2.3.tar.gz",
+        ),
+        (
+            "@preview/example:0.1.0",
+            "https://packages.typst.org/preview/example-0.1.0.tar.gz",
+        ),
+        (
+            "@preview/nested-name:10.0.1",
+            "https://packages.typst.org/preview/nested-name-10.0.1.tar.gz",
+        ),
+    ];
 
-    assert_eq!(
-        url,
-        "https://packages.typst.org/preview/example-1.2.3.tar.gz"
-    );
+    for (text, expected) in layouts {
+        let url = package_archive_url(&spec(text)).unwrap();
+
+        assert_eq!(url, expected, "{text}");
+    }
 }
 
 #[test]
 fn a_specification_the_registry_does_not_serve_has_no_url() {
-    let unserved = spec("@local/example:1.2.3");
+    for text in [
+        "@local/example:1.2.3",
+        "@custom/example:1.2.3",
+        "@Preview/example:1.2.3",
+    ] {
+        let unserved = spec(text);
 
-    let error = package_archive_url(&unserved).unwrap_err();
+        let error = package_archive_url(&unserved).unwrap_err();
 
-    assert!(
-        matches!(&error, PackageAcquisitionError::UnservedNamespace { spec } if spec == &unserved),
-        "{error}"
-    );
+        assert!(
+            matches!(&error, PackageAcquisitionError::UnservedNamespace { spec } if spec == &unserved),
+            "{text}: {error}"
+        );
+    }
 }
 
 #[test]

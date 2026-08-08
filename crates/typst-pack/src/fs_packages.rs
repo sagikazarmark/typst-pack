@@ -1037,7 +1037,7 @@ fn acquire_registry_tree(
 
 #[cfg(feature = "egress")]
 fn package_root(base: &Path, spec: &PackageSpec) -> PathBuf {
-    base.join(format!("{}/{}/{}", spec.namespace, spec.name, spec.version))
+    base.join(crate::acquisition_layout::package_tree_key(spec))
 }
 
 #[cfg(feature = "egress")]
