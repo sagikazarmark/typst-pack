@@ -479,9 +479,10 @@ publication attempt. Receipts are operational evidence and do not contribute to
 Pack, Compilation, or Compilation Result identity.
 
 **Publication Progress**:
-Workflow-specific ordered evidence of destination effects completed before an
-adapter error. It states commit certainty and retry-relevant residue rather than
-requiring callers to infer effects by inspecting the destination.
+Workflow-specific evidence of destination effects completed before an adapter
+error, with committed paths retained in publication-plan order. It states commit
+certainty and retry-relevant residue rather than requiring callers to infer
+effects by inspecting the destination.
 
 **Commit Certainty**:
 The adapter's knowledge that one attempted destination effect was Not Committed,

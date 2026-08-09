@@ -192,7 +192,8 @@ macro_rules! workflow_evidence {
         }
 
         impl $progress {
-            /// Planned relative paths committed before the attempt returned.
+            /// Planned relative paths committed before the attempt returned, in
+            /// publication-plan order.
             pub fn committed_files(&self) -> &[PathBuf] {
                 &self.committed_files
             }
@@ -2523,7 +2524,9 @@ fn commit_windows_handle(
     const FILE_RENAME_FLAG_REPLACE_IF_EXISTS: u32 = 0x1;
     const FILE_RENAME_FLAG_POSIX_SEMANTICS: u32 = 0x2;
     let name = target_name.encode_wide().collect::<Vec<_>>();
-    let bytes = offset_of!(FILE_RENAME_INFO, FileName) + name.len() * size_of::<u16>();
+    let name_bytes = name.len() * size_of::<u16>();
+    // FileNameLength excludes the trailing NUL, but the request buffer includes it.
+    let bytes = offset_of!(FILE_RENAME_INFO, FileName) + name_bytes + size_of::<u16>();
     let words = bytes.div_ceil(size_of::<usize>());
     let mut buffer = vec![0usize; words];
     let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
@@ -2537,7 +2540,7 @@ fn commit_windows_handle(
                 },
         };
         (*info).RootDirectory = parent.as_raw_handle().cast();
-        (*info).FileNameLength = u32::try_from(name.len() * size_of::<u16>())
+        (*info).FileNameLength = u32::try_from(name_bytes)
             .map_err(|_| io::Error::other("destination file name is too long"))?;
         std::ptr::copy_nonoverlapping(
             name.as_ptr(),
@@ -2761,6 +2764,11 @@ fn retained_residue(staging: Option<PathBuf>, status: StagingResidueStatus) -> O
 mod tests {
     use super::*;
 
+    fn temp_path(directory: &tempfile::TempDir) -> PathBuf {
+        // macOS temp paths can start with `/var`, a symlink to `/private/var`.
+        std::fs::canonicalize(directory.path()).unwrap()
+    }
+
     #[test]
     fn staging_handles_short_writes_and_reports_write_and_flush_faults() {
         let mut short = FaultWriter::new(2, None, false);
@@ -2782,7 +2790,7 @@ mod tests {
     #[test]
     fn later_commit_fault_retains_ordered_committed_file_progress() {
         let directory = tempfile::tempdir().unwrap();
-        let destination = directory.path().join("published");
+        let destination = temp_path(&directory).join("published");
         let files = [
             PlannedFile {
                 relative_path: Path::new("a.txt"),
@@ -2831,7 +2839,7 @@ mod tests {
     #[test]
     fn new_tree_commit_race_reports_when_the_staged_root_was_committed() {
         let directory = tempfile::tempdir().unwrap();
-        let destination = directory.path().join("published");
+        let destination = temp_path(&directory).join("published");
         let files = [PlannedFile {
             relative_path: Path::new("nested/file.txt"),
             bytes: b"complete",
@@ -2867,7 +2875,7 @@ mod tests {
     #[test]
     fn new_tree_target_race_preserves_the_complete_staging_residue() {
         let directory = tempfile::tempdir().unwrap();
-        let destination = directory.path().join("published");
+        let destination = temp_path(&directory).join("published");
         let files = [PlannedFile {
             relative_path: Path::new("nested/file.txt"),
             bytes: b"complete",
@@ -2913,7 +2921,7 @@ mod tests {
     #[test]
     fn new_tree_vanished_staging_reports_indeterminate_commit() {
         let directory = tempfile::tempdir().unwrap();
-        let destination = directory.path().join("published");
+        let destination = temp_path(&directory).join("published");
         let files = [PlannedFile {
             relative_path: Path::new("file.txt"),
             bytes: b"complete",
@@ -2943,7 +2951,7 @@ mod tests {
     #[test]
     fn new_tree_unsupported_commit_remains_typed_without_merge_fallback() {
         let directory = tempfile::tempdir().unwrap();
-        let destination = directory.path().join("published");
+        let destination = temp_path(&directory).join("published");
         let files = [PlannedFile {
             relative_path: Path::new("file.txt"),
             bytes: b"complete",
@@ -2984,7 +2992,8 @@ mod tests {
     #[test]
     fn new_tree_unsupported_policy_is_rejected_before_staging() {
         let directory = tempfile::tempdir().unwrap();
-        let destination = directory.path().join("published");
+        let root = temp_path(&directory);
+        let destination = root.join("published");
         let files = [PlannedFile {
             relative_path: Path::new("file.txt"),
             bytes: b"complete",
@@ -3017,12 +3026,7 @@ mod tests {
             )
         ));
         assert_eq!(error.staging_residue_status(), StagingResidueStatus::Absent);
-        assert!(
-            std::fs::read_dir(directory.path())
-                .unwrap()
-                .next()
-                .is_none()
-        );
+        assert!(std::fs::read_dir(root).unwrap().next().is_none());
     }
 
     #[test]
@@ -3040,7 +3044,7 @@ mod tests {
             ),
         ] {
             let directory = tempfile::tempdir().unwrap();
-            let destination = directory.path().join("published");
+            let destination = temp_path(&directory).join("published");
             let files = [PlannedFile {
                 relative_path: Path::new("file.txt"),
                 bytes: b"complete",
@@ -3078,8 +3082,9 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let directory = tempfile::tempdir().unwrap();
-        let destination = directory.path().join("published");
-        let outside = directory.path().join("outside.txt");
+        let root = temp_path(&directory);
+        let destination = root.join("published");
+        let outside = root.join("outside.txt");
         std::fs::write(&outside, b"outside").unwrap();
         let files = [PlannedFile {
             relative_path: Path::new("target.txt"),
@@ -3106,9 +3111,10 @@ mod tests {
         use std::os::unix::fs::symlink;
 
         let directory = tempfile::tempdir().unwrap();
-        let destination = directory.path().join("published");
-        let displaced = directory.path().join("displaced");
-        let outside = directory.path().join("outside");
+        let root = temp_path(&directory);
+        let destination = root.join("published");
+        let displaced = root.join("displaced");
+        let outside = root.join("outside");
         std::fs::create_dir(&outside).unwrap();
         let files = [PlannedFile {
             relative_path: Path::new("nested/target.txt"),
