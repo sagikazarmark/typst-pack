@@ -325,7 +325,10 @@ provide borrowed access plus consuming `into_parts` methods.
 
 Dropping an acquisition or publication future returns no receipt. Already-issued
 storage work may have occurred. A dropped multi-key publication future leaves
-the caller-owned progress value containing the contiguous completed prefix.
+the caller-owned progress value containing the contiguous completed prefix. The
+two multi-key entry points are synchronous future factories, not `async fn`
+declarations, so they clear progress before returning the future; dropping an
+unpolled future therefore cannot leave evidence from an earlier attempt.
 Full-operation replay from retained semantic input or exact bytes is the only
 library recovery contract. There is no rollback, retry, staging, resume token,
 transaction, or sub-plan API.
@@ -421,6 +424,11 @@ The canonical form is `binding:/decoded/root-relative/path`. Binding grammar is
 `binding:/`, stores `operation_path() == ""`, reports a trailing slash, and is
 dispatched to OpenDAL as `/`. Every non-root path is a fixed point under the
 vendored normalization predicate. Non-root trailing separators are preserved.
+
+`Location::from_operation_path` accepts a decoded root-relative OpenDAL
+operation path and applies the same path safety and normalization rules as
+parsing. It rejects a leading slash except for `"/"`, which is accepted as the
+root alias, and `Display` emits the canonical percent-encoded location form.
 
 RFC 3986 `pchar` characters are literal. Other decoded UTF-8 scalars are encoded
 bytewise using uppercase `%HH`. Parsing rejects encoded pchar, `/`, or `\`,
@@ -1272,6 +1280,7 @@ to emit `VersionNotFound`.
 ## Package insertion and cache safety
 
 ```rust
+#[cfg(feature = "package-acquisition")]
 pub fn insert_acquired_package(
     catalog: &mut PackageCatalog,
     failures: &mut PackageAcquisitionFailures,
@@ -1280,7 +1289,9 @@ pub fn insert_acquired_package(
     expansion_limits: PackageExpansionLimits,
 ) -> Result<Option<RegistryArchiveResidue>, AcquiredPackageInsertionError>;
 
+#[cfg(feature = "package-acquisition")]
 pub struct RegistryArchiveResidue { /* private spec, destination, Vec<u8> */ }
+#[cfg(feature = "package-acquisition")]
 impl RegistryArchiveResidue {
     pub fn spec(&self) -> &typst::syntax::package::PackageSpec;
     pub fn destination(&self) -> &Location;
@@ -1292,6 +1303,7 @@ impl RegistryArchiveResidue {
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
+#[cfg(feature = "package-acquisition")]
 pub enum AcquiredPackageInsertionTarget {
     PackageTree,
     CachedArchive,
@@ -1299,7 +1311,9 @@ pub enum AcquiredPackageInsertionTarget {
     PackageCatalog,
 }
 
+#[cfg(feature = "package-acquisition")]
 pub struct AcquiredPackageInsertionError { /* private */ }
+#[cfg(feature = "package-acquisition")]
 impl AcquiredPackageInsertionError {
     pub fn spec(&self) -> &typst::syntax::package::PackageSpec;
     pub fn failure(&self) -> &PackageAcquisitionFailure;
@@ -1309,12 +1323,17 @@ impl AcquiredPackageInsertionError {
 }
 
 #[non_exhaustive]
+#[cfg(feature = "package-acquisition")]
 pub enum AcquiredPackageInsertionErrorCause {
     PackageTree(PackageTreeError),
     ArchiveExpansion(crate::PackageAcquisitionError),
     PackageCatalog(PackageCatalogError),
 }
 ```
+
+`insert_acquired_package` and every insertion-only public type in this block are
+available only when both `opendal` and `package-acquisition` are enabled. Raw
+OpenDAL package acquisition remains available with `opendal` alone.
 
 Tree and catalog failures map to `Other`. Cache and registry expansion map
 `MalformedArchive` and `InvalidPackageTree` to `MalformedArchive`, and expansion
@@ -1824,12 +1843,17 @@ pub async fn publish_pack_archive<R: OperatorResolver + ?Sized>(
     archive: &PackArchiveBytes,
 ) -> Result<PackArchivePublicationReceipt, PackArchivePublicationError<R::Error>>;
 
-pub async fn publish_pack_extraction_plan<R: OperatorResolver + ?Sized>(
-    resolver: &R,
-    request: &PackExtractionPublicationRequest,
-    plan: &PackExtractionPlan,
-    progress: &mut PackExtractionPublicationProgress,
-) -> Result<PackExtractionPublicationReceipt, PackExtractionPublicationError<R::Error>>;
+pub fn publish_pack_extraction_plan<'a, R: OperatorResolver + ?Sized>(
+    resolver: &'a R,
+    request: &'a PackExtractionPublicationRequest,
+    plan: &'a PackExtractionPlan,
+    progress: &'a mut PackExtractionPublicationProgress,
+) -> impl std::future::Future<
+    Output = Result<
+        PackExtractionPublicationReceipt,
+        PackExtractionPublicationError<R::Error>,
+    >,
+> + 'a;
 
 pub async fn publish_package_cache_archive<R: OperatorResolver + ?Sized>(
     resolver: &R,
@@ -1837,18 +1861,23 @@ pub async fn publish_package_cache_archive<R: OperatorResolver + ?Sized>(
     archive: &[u8],
 ) -> Result<PackageCacheArchivePublicationReceipt, PackageCacheArchivePublicationError<R::Error>>;
 
-pub async fn publish_compilation_artifacts<R: OperatorResolver + ?Sized>(
-    resolver: &R,
-    request: &CompilationArtifactPublicationRequest,
-    result: &CompilationResult,
-    progress: &mut CompilationArtifactPublicationProgress,
-) -> Result<CompilationArtifactPublicationReceipt, CompilationArtifactPublicationError<R::Error>>;
+pub fn publish_compilation_artifacts<'a, R: OperatorResolver + ?Sized>(
+    resolver: &'a R,
+    request: &'a CompilationArtifactPublicationRequest,
+    result: &'a CompilationResult,
+    progress: &'a mut CompilationArtifactPublicationProgress,
+) -> impl std::future::Future<
+    Output = Result<
+        CompilationArtifactPublicationReceipt,
+        CompilationArtifactPublicationError<R::Error>,
+    >,
+> + 'a;
 ```
 
 The two mutable progress arguments are mandatory; no convenience overload
-exists. On first poll, the operation clears the supplied progress before
-validation/I/O. Callers normally pass a new value of the corresponding
-operation-specific progress type.
+exists. Each synchronous entry point clears the supplied progress before it
+constructs and returns the caller-polled future. This happens before validation
+or I/O and before the future can be dropped, including when it is never polled.
 
 <a id="publication-evidence"></a>
 ### Publication evidence
@@ -2420,11 +2449,23 @@ use typst_pack::opendal::publication::{
     publish_pack_archive,
 };
 
+pub enum PublishThenAcquireOutcome {
+    Matching {
+        published: PackArchiveBytes,
+        acquired: PackArchiveBytes,
+        decoded: Result<Pack, DecodeError>,
+    },
+    DestinationChanged {
+        published: PackArchiveBytes,
+        acquired: PackArchiveBytes,
+    },
+}
+
 pub async fn publish_then_acquire(
     bindings: &OperatorBindings,
     pack: &Pack,
     destination: Location,
-) -> Result<(PackArchiveBytes, Result<Pack, DecodeError>), Box<dyn Error>> {
+) -> Result<PublishThenAcquireOutcome, Box<dyn Error>> {
     let archive = encode(pack, EncodeLimits::reference_v1())?;
     let publish_request = PackArchivePublicationRequest::new(
         destination.clone(),
@@ -2444,12 +2485,24 @@ pub async fn publish_then_acquire(
         AcquisitionLimits::reference_v1(),
     )?;
     let acquired = acquire_pack_archive(bindings, &acquire_request).await?;
-    assert_eq!(archive.as_slice(), acquired.as_slice());
+
+    // Publication does not make a mutable destination stable. Preserve both
+    // exact values so the application can handle an intervening write.
+    if archive.as_slice() != acquired.as_slice() {
+        return Ok(PublishThenAcquireOutcome::DestinationChanged {
+            published: archive,
+            acquired,
+        });
+    }
 
     // Decode borrows acquired bytes, so the caller retains exact bytes even
     // when semantic decoding fails.
     let decoded = decode(&acquired, DecodeLimits::reference_v1());
-    Ok((acquired, decoded))
+    Ok(PublishThenAcquireOutcome::Matching {
+        published: archive,
+        acquired,
+        decoded,
+    })
 }
 ```
 
@@ -2542,6 +2595,16 @@ identities, semantic outcomes, rejections, receipts, progress, Commit Certainty,
 and observable destination state. Tests do not assert private stage structure,
 native message text, sleeps, ambient credentials, random chaos, or behavior
 outside appraised capabilities.
+
+Cross-adapter reuse consists of declarative operation-specific scenario records,
+public observation projections, and adapter-specific runners. These remain test
+assets and do not introduce a production conformance trait, generic storage
+interface, shared policy implementation, or lifecycle-wide result model.
+Evidence combines checked-in golden fixtures for stable interoperability and
+identity vectors, generated table cases for finite combinations and boundaries,
+property tests for canonicalization and determinism, and fuzz targets for every
+untrusted parser or structured constructor, with minimized regressions replayed
+in CI.
 
 Required evidence:
 
