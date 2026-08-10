@@ -137,6 +137,25 @@ fn final_evidence_matrix_covers_native_adapters_and_featureless_wasm() {
             "native lifecycle evidence must run on {runner}"
         );
     }
+    for target in [
+        "x86_64-unknown-linux-gnu",
+        "x86_64-pc-windows-msvc",
+        "aarch64-apple-darwin",
+    ] {
+        assert!(
+            native.contains(target),
+            "OpenDAL MSRV evidence must compile {target}"
+        );
+    }
+    for required in [
+        "dtolnay/rust-toolchain@1.92.0",
+        "--no-default-features --features opendal --target",
+    ] {
+        assert!(
+            native.contains(required),
+            "OpenDAL native evidence must contain {required}"
+        );
+    }
     for suite in [
         "filesystem_project_gathering",
         "filesystem_font_catalog_gathering",
@@ -160,6 +179,16 @@ fn final_evidence_matrix_covers_native_adapters_and_featureless_wasm() {
         assert!(
             dagger.contains(required),
             "featureless Wasm evidence must contain {required}"
+        );
+    }
+    for required in [
+        "scripts/check-opendal-compatibility.sh",
+        "\"--features\", \"opendal\"",
+        "\"--no-deps\"",
+    ] {
+        assert!(
+            dagger.contains(required),
+            "OpenDAL compatibility evidence must contain {required}"
         );
     }
 }
@@ -231,6 +260,7 @@ fn public_compilation_attests_the_approved_engine_and_exporters() {
             (cfg!(feature = "egress"), "egress"),
             (cfg!(feature = "embedded-fonts"), "embedded-fonts"),
             (cfg!(feature = "fs"), "fs"),
+            (cfg!(feature = "opendal"), "opendal"),
             (cfg!(feature = "package-acquisition"), "package-acquisition"),
             (cfg!(feature = "parallel"), "parallel"),
         ] {
@@ -245,6 +275,7 @@ fn public_compilation_attests_the_approved_engine_and_exporters() {
         };
         assert_eq!(result.engine_identity().feature_set(), expected_features);
         assert_eq!(result.exporter_identity().implementation(), exporter);
+        assert_eq!(result.exporter_identity().feature_set(), expected_features);
         assert_eq!(result.exporter_identity().version(), exporter_version);
         assert_eq!(
             result.exporter_identity().source_checksum(),

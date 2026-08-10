@@ -22,6 +22,98 @@ const TRANSPORT: &[&str] = &[
 ];
 
 #[test]
+fn opendal_selects_only_its_minimal_async_dependencies() {
+    let manifest = manifest();
+    let declared = manifest["features"]["opendal"]
+        .as_array()
+        .expect("the opendal feature must enable a list")
+        .iter()
+        .map(|entry| entry.as_str().expect("feature entries must be strings"))
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        declared,
+        BTreeSet::from(["dep:futures-util", "dep:opendal"])
+    );
+    assert!(
+        !feature_closure("opendal").contains("package-acquisition"),
+        "OpenDAL archive acquisition must not imply archive expansion"
+    );
+}
+
+#[test]
+fn opendal_dependencies_preserve_the_caller_owned_runtime_boundary() {
+    let manifest = manifest();
+    let dependencies = manifest["dependencies"]
+        .as_table()
+        .expect("Cargo.toml must declare dependencies");
+    let opendal = dependencies["opendal"]
+        .as_table()
+        .expect("OpenDAL must use a detailed dependency declaration");
+    let futures = dependencies["futures-util"]
+        .as_table()
+        .expect("futures-util must use a detailed dependency declaration");
+
+    assert_eq!(opendal["version"].as_str(), Some("0.58"));
+    assert_eq!(opendal["default-features"].as_bool(), Some(false));
+    assert_eq!(opendal["optional"].as_bool(), Some(true));
+    assert_eq!(futures["version"].as_str(), Some("0.3.31"));
+    assert_eq!(futures["default-features"].as_bool(), Some(false));
+    assert_eq!(futures["optional"].as_bool(), Some(true));
+    assert_eq!(
+        futures["features"]
+            .as_array()
+            .expect("futures-util must name its minimal features")
+            .iter()
+            .map(|feature| feature
+                .as_str()
+                .expect("dependency features must be strings"))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from(["alloc", "async-await"])
+    );
+    assert!(
+        !dependencies.contains_key("opendal-core"),
+        "opendal-core must remain transitive"
+    );
+    assert!(
+        !manifest
+            .get("build-dependencies")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|dependencies| dependencies.contains_key("opendal-core")),
+        "opendal-core must not be a direct build dependency"
+    );
+    for target in manifest
+        .get("target")
+        .and_then(toml::Value::as_table)
+        .into_iter()
+        .flat_map(toml::Table::values)
+    {
+        assert!(
+            !target
+                .get("dependencies")
+                .and_then(toml::Value::as_table)
+                .is_some_and(|dependencies| dependencies.contains_key("opendal-core")),
+            "opendal-core must not be a direct target dependency"
+        );
+    }
+}
+
+#[test]
+fn docs_rs_builds_the_opendal_namespace() {
+    let manifest = manifest();
+    let features = manifest["package"]["metadata"]["docs"]["rs"]["features"]
+        .as_array()
+        .expect("docs.rs metadata must select features");
+
+    assert!(
+        features
+            .iter()
+            .any(|feature| feature.as_str() == Some("opendal")),
+        "docs.rs must build the OpenDAL API"
+    );
+}
+
+#[test]
 fn egress_builds_on_the_filesystem_and_acquisition_features() {
     let enabled = feature_closure("egress");
 
@@ -128,10 +220,13 @@ fn feature_closure(feature: &str) -> BTreeSet<String> {
 }
 
 fn features() -> toml::Table {
-    let manifest: toml::Table =
-        toml::from_str(include_str!("../Cargo.toml")).expect("Cargo.toml must parse");
+    let manifest = manifest();
     manifest["features"]
         .as_table()
         .expect("Cargo.toml must declare features")
         .clone()
+}
+
+fn manifest() -> toml::Table {
+    toml::from_str(include_str!("../Cargo.toml")).expect("Cargo.toml must parse")
 }

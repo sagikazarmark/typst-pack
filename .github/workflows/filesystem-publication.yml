@@ -10,16 +10,25 @@ permissions:
 
 jobs:
   native:
-    name: ${{ matrix.os }}
+    name: ${{ matrix.target }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-22.04, windows-2025, macos-14]
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+          - os: macos-14
+            target: aarch64-apple-darwin
     steps:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@1.92.0
+        with:
+          targets: ${{ matrix.target }}
+      - run: cargo check --locked -p typst-pack --no-default-features --features opendal --target ${{ matrix.target }}
       - run: cargo test --locked -p typst-pack --features fs,embedded-fonts --lib filesystem_publication::tests
       - run: cargo test --locked -p typst-pack --features fs,embedded-fonts --test filesystem_project_gathering --test filesystem_font_catalog_gathering --test filesystem_package_acquisition --test filesystem_pack_assembly --test fs_creation --test pack_archive_acquisition --test pack_archive_publication --test filesystem_publication

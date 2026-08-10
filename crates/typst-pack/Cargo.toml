@@ -11,6 +11,9 @@ readme = "../../README.md"
 keywords = ["typst", "documents", "packaging", "archive", "fonts"]
 categories = ["command-line-utilities", "text-processing", "filesystem"]
 
+[package.metadata.docs.rs]
+features = ["opendal"]
+
 [features]
 default = []
 # Internal opt-in for controlled package downloader integration tests. It
@@ -25,6 +28,9 @@ embedded-fonts = ["typst-kit/embedded-fonts"]
 # bounded package archive expansion. Pulls compression and archive support but
 # no HTTP client, so a host supplies its own transport.
 package-acquisition = ["dep:flate2", "dep:tar"]
+# Caller-polled OpenDAL storage integration. Backend services, transports,
+# executors, runtimes, TLS, layers, and retry policy remain caller-selected.
+opendal = ["dep:opendal", "dep:futures-util"]
 # Export independent pages in parallel.
 parallel = ["dep:rayon"]
 # Filesystem-based packing: structural snapshot acquisition, local package
@@ -64,7 +70,9 @@ cap-std = { version = "4", optional = true }
 ecow = "0.2"
 env_proxy = { version = "0.4", optional = true }
 flate2 = { version = "1", optional = true }
+futures-util = { version = "0.3.31", default-features = false, features = ["alloc", "async-await"], optional = true }
 ignore = { version = "0.4", optional = true }
+opendal = { version = "0.58", default-features = false, optional = true }
 rayon = { workspace = true, optional = true }
 same-file = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"] }

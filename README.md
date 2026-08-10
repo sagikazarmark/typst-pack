@@ -192,6 +192,24 @@ no download capability compiled in at all: nothing in its dependency graph can
 reach the network. Add the `egress` feature to let filesystem creation download
 the packages a project imports.
 
+OpenDAL storage integration is separately opt-in. The application selects its
+service and runtime support on its own direct dependencies:
+
+```toml
+[dependencies]
+typst-pack = { version = "0.5", features = ["opendal"] }
+
+# Caller-selected backend and runtime support:
+opendal = { version = "0.58", default-features = false, features = ["services-s3"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+The application constructs and supplies each `opendal::Operator`. typst-pack
+enables no service, transport, TLS implementation, executor, runtime, layer, or
+retry policy; it owns no runtime and exposes no blocking facade. OpenDAL's
+`services-memory` feature is an empty no-op, and `opendal::services::Memory`
+compiles unconditionally, so in-memory conformance needs no service feature.
+
 ```rust,ignore
 use std::path::Path;
 
@@ -572,6 +590,9 @@ fields are removed in place. Old fields and aliases are not accepted.
 - `package-acquisition`: registry URL construction and bounded package archive
   expansion, for a caller that supplies its own transport. Pulls compression and
   archive support but no HTTP client.
+- `opendal`: caller-polled asynchronous storage integration over caller-supplied
+  Operators. Does not imply `package-acquisition` or select a backend, transport,
+  TLS implementation, executor, runtime, layer, retry policy, or blocking API.
 - `embedded-fonts`: make Typst's bundled fonts available as intentional
   creation and external-fulfillment sources.
 - `diagnostics`: retain source context for first-party diagnostic presentation
@@ -581,6 +602,11 @@ fields are removed in place. Old fields and aliases are not accepted.
 All library crate features are opt-in. Pack Creation over supplied inputs
 (`create`) and fixed timestamp conversion for `DocumentTime` are part of the
 featureless core and remain available on wasm targets.
+
+Every enabled crate feature is attested in Engine and Exporter identities.
+Enabling `opendal` therefore changes Compilation Identity and Compilation Result
+Identity even though storage locations, Operators, and acquisition/publication
+evidence remain operational rather than semantic values.
 
 ## Pack format
 
@@ -663,6 +689,11 @@ The containerized suite includes the
 official release used by the library. It also verifies the build configurations
 the crate features promise: the featureless core for `wasm32-unknown-unknown`,
 and a filesystem build whose resolved dependency graph contains no HTTP client.
+It also builds OpenDAL-only documentation and audits a fresh consumer of the
+packaged crate without the workspace lockfile. That audit inspects normal/build
+edges separately and proves the minimal OpenDAL/Tokio graph; behavioral tests
+necessarily run under Cargo's dev/test feature-unified superset graph and do not
+claim behavioral feature isolation.
 
 ## License
 

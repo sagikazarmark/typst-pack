@@ -1976,6 +1976,7 @@ fn invalid_document_timestamp_is_rejected_with_its_inventory() {
     feature = "diagnostics",
     feature = "embedded-fonts",
     feature = "fs",
+    feature = "opendal",
     feature = "parallel"
 )))]
 #[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]

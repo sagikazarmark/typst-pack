@@ -92,6 +92,7 @@ fn frozen_pack_identity_vector() {
     feature = "embedded-fonts",
     feature = "egress",
     feature = "fs",
+    feature = "opendal",
     feature = "package-acquisition",
     feature = "parallel"
 )))]
@@ -122,6 +123,76 @@ fn frozen_featureless_compilation_and_result_identity_vectors() {
             0x74, 0xf6,
         ]
     );
+}
+
+#[cfg(all(
+    feature = "opendal",
+    not(any(
+        feature = "_test-package-download-probe",
+        feature = "default",
+        feature = "diagnostics",
+        feature = "embedded-fonts",
+        feature = "egress",
+        feature = "fs",
+        feature = "package-acquisition",
+        feature = "parallel"
+    ))
+))]
+#[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
+#[test]
+fn frozen_opendal_compilation_and_result_identity_vectors() {
+    assert_implementation_attestation_vectors(
+        "opendal",
+        [
+            0xc8, 0xcb, 0x29, 0x92, 0xf4, 0xcf, 0x8a, 0x1b, 0xdd, 0x5d, 0x4b, 0x92, 0xa7, 0xf6,
+            0xcf, 0x6f,
+        ],
+        [
+            0x37, 0xd3, 0x7c, 0x48, 0xdc, 0xa6, 0xab, 0xb3, 0x66, 0x0e, 0xa6, 0xe9, 0x13, 0x48,
+            0x56, 0xf4,
+        ],
+    );
+}
+
+#[cfg(all(
+    feature = "_test-package-download-probe",
+    feature = "default",
+    feature = "diagnostics",
+    feature = "embedded-fonts",
+    feature = "egress",
+    feature = "fs",
+    feature = "opendal",
+    feature = "package-acquisition",
+    feature = "parallel"
+))]
+#[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
+#[test]
+fn frozen_all_feature_compilation_and_result_identity_vectors() {
+    assert_implementation_attestation_vectors(
+        "_test-package-download-probe,default,diagnostics,egress,embedded-fonts,fs,opendal,package-acquisition,parallel",
+        [
+            0xd0, 0x98, 0xec, 0x8b, 0xfb, 0x80, 0xf9, 0xdb, 0x26, 0xc8, 0x98, 0x71, 0x98, 0xe5,
+            0x8d, 0xd1,
+        ],
+        [
+            0x46, 0x75, 0xb7, 0x37, 0x63, 0x18, 0xe7, 0xfb, 0x71, 0xaa, 0x39, 0x7c, 0xe8, 0x9d,
+            0xf3, 0x53,
+        ],
+    );
+}
+
+#[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
+fn assert_implementation_attestation_vectors(
+    expected_features: &str,
+    expected_compilation: [u8; 16],
+    expected_result: [u8; 16],
+) {
+    let result = compile(PackCompilationRequest::new(identity_pack(), svg_output())).unwrap();
+
+    assert_eq!(result.engine_identity().feature_set(), expected_features);
+    assert_eq!(result.exporter_identity().feature_set(), expected_features);
+    assert_eq!(result.compilation_identity().digest(), expected_compilation);
+    assert_eq!(result.result_identity().digest(), expected_result);
 }
 
 #[test]

@@ -24,6 +24,8 @@ mod fs_packages;
 #[cfg(feature = "fs")]
 mod fs_project;
 mod manifest;
+#[cfg(feature = "opendal")]
+pub mod opendal;
 mod pack;
 pub mod pack_archive;
 mod pack_extraction;
