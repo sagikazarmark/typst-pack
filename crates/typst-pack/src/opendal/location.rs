@@ -361,6 +361,42 @@ pub trait OperatorResolver {
 }
 
 /// An immutable lexical map of caller-supplied Operators.
+///
+/// The caller constructs each Operator and may bind clones of one Operator to
+/// distinct names. Consumers can accept the map through [`OperatorResolver`]
+/// without knowing how any backend was configured.
+///
+/// ```
+/// use typst_pack::opendal::{
+///     OperatorBinding, OperatorBindings, OperatorResolver,
+/// };
+///
+/// fn resolve_for_consumer<R: OperatorResolver>(
+///     resolver: &R,
+///     binding: &OperatorBinding,
+/// ) -> Result<opendal::Operator, R::Error> {
+///     resolver.resolve(binding)
+/// }
+///
+/// let operator = opendal::Operator::new(opendal::services::Memory::default())?;
+/// let archive = OperatorBinding::new("archive")?;
+/// let project = OperatorBinding::new("project")?;
+/// let bindings = OperatorBindings::new([
+///     (project, operator.clone()),
+///     (archive.clone(), operator),
+/// ])?;
+///
+/// assert_eq!(
+///     bindings
+///         .bindings()
+///         .map(OperatorBinding::as_str)
+///         .collect::<Vec<_>>(),
+///     ["archive", "project"]
+/// );
+/// let _direct_operator = bindings.operator(&archive).expect("archive is configured");
+/// let _resolved_operator = resolve_for_consumer(&bindings, &archive)?;
+/// # Ok::<(), Box<dyn std::error::Error>>(())
+/// ```
 #[derive(Clone)]
 pub struct OperatorBindings {
     operators: BTreeMap<OperatorBinding, ::opendal::Operator>,

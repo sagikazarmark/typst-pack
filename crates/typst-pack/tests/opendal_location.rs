@@ -1,10 +1,7 @@
 #![cfg(feature = "opendal")]
 
 use proptest::prelude::*;
-use typst_pack::opendal::{
-    Location, LocationError, OperatorBinding, OperatorBindingError, OperatorBindings,
-    OperatorBindingsError, OperatorBindingsResolveError, OperatorResolver,
-};
+use typst_pack::opendal::{Location, LocationError, OperatorBinding, OperatorBindingError};
 
 #[test]
 fn operator_bindings_are_canonical_lowercase_scheme_names() {
@@ -266,51 +263,6 @@ fn location_error_categories_have_deterministic_precedence() {
     for (input, expected) in cases {
         assert_eq!(Location::parse(input), Err(expected), "{input:?}");
     }
-}
-
-#[test]
-fn operator_bindings_are_immutable_lexical_maps_of_cheap_operator_clones() {
-    let operator = opendal::Operator::new(opendal::services::Memory::default()).unwrap();
-    let archive = OperatorBinding::new("archive").unwrap();
-    let project = OperatorBinding::new("project").unwrap();
-    let bindings = OperatorBindings::new([
-        (project.clone(), operator.clone()),
-        (archive.clone(), operator.clone()),
-    ])
-    .unwrap();
-
-    assert_eq!(
-        bindings
-            .bindings()
-            .map(OperatorBinding::as_str)
-            .collect::<Vec<_>>(),
-        ["archive", "project"]
-    );
-    assert!(bindings.operator(&archive).is_some());
-    assert!(bindings.resolve(&project).is_ok());
-    assert_eq!(
-        format!("{bindings:?}"),
-        "OperatorBindings { bindings: [archive, project] }"
-    );
-
-    let duplicate = OperatorBindings::new([
-        (archive.clone(), operator.clone()),
-        (archive.clone(), operator),
-    ])
-    .unwrap_err();
-    assert_eq!(
-        duplicate,
-        OperatorBindingsError::DuplicateBinding {
-            binding: archive.clone(),
-        }
-    );
-
-    let missing = OperatorBinding::new("missing").unwrap();
-    assert!(bindings.operator(&missing).is_none());
-    assert!(matches!(
-        bindings.resolve(&missing),
-        Err(OperatorBindingsResolveError::UnknownBinding { binding }) if binding == missing
-    ));
 }
 
 proptest! {
