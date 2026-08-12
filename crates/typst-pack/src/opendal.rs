@@ -3,7 +3,15 @@
 //! Backend services, credentials, transports, TLS, executors, runtimes, layers,
 //! retry policy, and polling remain the caller's responsibility.
 
+#[allow(dead_code)]
+mod acquisition;
 pub mod location;
+
+#[cfg(test)]
+#[allow(dead_code)]
+#[allow(clippy::collapsible_if)]
+#[path = "../tests/support/opendal.rs"]
+mod scripted_service;
 
 pub use ::opendal::Operator;
 pub use location::{

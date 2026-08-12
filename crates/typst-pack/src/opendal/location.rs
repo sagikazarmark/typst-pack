@@ -184,7 +184,6 @@ impl Location {
         self.is_root() || self.operation_path.ends_with('/')
     }
 
-    #[allow(dead_code)]
     pub(crate) fn dispatch_path(&self) -> &str {
         if self.is_root() {
             "/"
@@ -193,7 +192,6 @@ impl Location {
         }
     }
 
-    #[allow(dead_code)]
     pub(crate) fn require_object(&self) -> Result<(), LocationRoleError> {
         if self.is_root() {
             Err(LocationRoleError::ObjectAtRoot)
