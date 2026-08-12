@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::future::poll_fn;
+use std::ops::Range;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Poll, Waker};
@@ -203,6 +204,7 @@ impl ReadScript {
 pub enum ScriptError {
     TooManyListEntries { declared: usize, scripted: usize },
     TooManyReadChunks { declared: usize, scripted: usize },
+    PublicationReadChunksExceeded { declared: usize, scripted: usize },
 }
 
 #[derive(Clone, Default)]
@@ -716,6 +718,987 @@ impl oio::Read for ScriptedReader {
 pub struct ScriptedReadStream {
     steps: VecDeque<ReadStep>,
     operation: Arc<OperationState>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PublicationCapabilities {
+    pub write: bool,
+    pub write_can_empty: bool,
+    pub write_with_if_not_exists: bool,
+    pub read: bool,
+    pub write_total_max_size: Option<usize>,
+}
+
+impl PublicationCapabilities {
+    pub const fn all() -> Self {
+        Self {
+            write: true,
+            write_can_empty: true,
+            write_with_if_not_exists: true,
+            read: true,
+            write_total_max_size: None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub enum WriteCondition {
+    Direct,
+    IfNotExists,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WriteStage {
+    Setup,
+    Write,
+    Close,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WriteEffect {
+    NoEffect,
+    Committed,
+    Indeterminate,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DestinationMutation {
+    Set { path: String, bytes: Vec<u8> },
+}
+
+impl DestinationMutation {
+    pub fn set(path: impl Into<String>, bytes: impl AsRef<[u8]>) -> Self {
+        Self::Set {
+            path: path.into(),
+            bytes: bytes.as_ref().to_vec(),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DestinationState {
+    objects: BTreeMap<String, Vec<u8>>,
+}
+
+impl DestinationState {
+    pub fn object(&self, path: &str) -> Option<&[u8]> {
+        self.objects.get(path).map(Vec::as_slice)
+    }
+    fn apply(&mut self, mutation: &DestinationMutation) {
+        match mutation {
+            DestinationMutation::Set { path, bytes } => {
+                self.objects.insert(path.clone(), bytes.clone());
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum PublicationReadStep {
+    Chunk(Range<usize>),
+    Pending(PendingPoint),
+    Mutate(DestinationMutation),
+    Failure(ErrorKind),
+}
+
+impl PublicationReadStep {
+    pub fn chunk(range: Range<usize>) -> Self {
+        Self::Chunk(range)
+    }
+
+    pub fn pending(point: PendingPoint) -> Self {
+        Self::Pending(point)
+    }
+
+    pub fn mutate(mutation: DestinationMutation) -> Self {
+        Self::Mutate(mutation)
+    }
+
+    pub const fn failure(kind: ErrorKind) -> Self {
+        Self::Failure(kind)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PublicationReadScript {
+    path: String,
+    steps: Vec<PublicationReadStep>,
+}
+
+impl PublicationReadScript {
+    pub fn new(
+        path: impl Into<String>,
+        declared_chunks: usize,
+        steps: impl IntoIterator<Item = PublicationReadStep>,
+    ) -> std::result::Result<Self, ScriptError> {
+        let steps = steps.into_iter().collect::<Vec<_>>();
+        let scripted = steps
+            .iter()
+            .filter(|step| matches!(step, PublicationReadStep::Chunk(_)))
+            .count();
+        if scripted > declared_chunks {
+            return Err(ScriptError::PublicationReadChunksExceeded {
+                declared: declared_chunks,
+                scripted,
+            });
+        }
+
+        Ok(Self {
+            path: path.into(),
+            steps,
+        })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum WriteStep {
+    Pending(PendingPoint),
+    Commit,
+    Failure(ErrorKind),
+}
+
+impl WriteStep {
+    pub fn pending(point: PendingPoint) -> Self {
+        Self::Pending(point)
+    }
+    pub const fn commit() -> Self {
+        Self::Commit
+    }
+
+    pub const fn failure(kind: ErrorKind) -> Self {
+        Self::Failure(kind)
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct WriteScript {
+    path: String,
+    condition: WriteCondition,
+    setup_failure: Option<ErrorKind>,
+    write_failure: Option<ErrorKind>,
+    close_steps: Vec<WriteStep>,
+}
+
+impl WriteScript {
+    pub fn new(
+        path: impl Into<String>,
+        condition: WriteCondition,
+        close_steps: impl IntoIterator<Item = WriteStep>,
+    ) -> Self {
+        Self {
+            path: path.into(),
+            condition,
+            setup_failure: None,
+            write_failure: None,
+            close_steps: close_steps.into_iter().collect(),
+        }
+    }
+
+    pub fn setup_failure(
+        path: impl Into<String>,
+        condition: WriteCondition,
+        kind: ErrorKind,
+    ) -> Self {
+        let mut script = Self::new(path, condition, []);
+        script.setup_failure = Some(kind);
+        script
+    }
+
+    pub fn write_failure(
+        path: impl Into<String>,
+        condition: WriteCondition,
+        kind: ErrorKind,
+    ) -> Self {
+        let mut script = Self::new(path, condition, []);
+        script.write_failure = Some(kind);
+        script
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PublicationOperationLogEntry {
+    ReadInvoked {
+        id: u64,
+        path: String,
+    },
+    ReadChunkYielded {
+        id: u64,
+        path: String,
+        bytes: Vec<u8>,
+        destination: DestinationState,
+    },
+    ReadCompleted {
+        id: u64,
+        path: String,
+        destination: DestinationState,
+    },
+    ReadFailed {
+        id: u64,
+        path: String,
+        kind: ErrorKind,
+        destination: DestinationState,
+    },
+    ReadDropped {
+        id: u64,
+        path: String,
+        destination: DestinationState,
+    },
+    WriteInvoked {
+        id: u64,
+        path: String,
+        condition: WriteCondition,
+    },
+    WriteAccepted {
+        id: u64,
+        path: String,
+        length: usize,
+        condition: WriteCondition,
+    },
+    WriteCompleted {
+        id: u64,
+        path: String,
+        length: usize,
+        condition: WriteCondition,
+        effect: WriteEffect,
+        destination: DestinationState,
+    },
+    WriteFailed {
+        id: u64,
+        path: String,
+        length: usize,
+        condition: WriteCondition,
+        kind: ErrorKind,
+        stage: WriteStage,
+        issued: bool,
+        effect: WriteEffect,
+        destination: DestinationState,
+    },
+    WriteDropped {
+        id: u64,
+        path: String,
+        length: usize,
+        condition: WriteCondition,
+        issued: bool,
+        effect: WriteEffect,
+        destination: DestinationState,
+    },
+    DestinationMutated {
+        mutation: DestinationMutation,
+        destination: DestinationState,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PublicationDroppedOperation {
+    Read {
+        id: u64,
+        path: String,
+    },
+    Write {
+        id: u64,
+        path: String,
+        length: usize,
+        condition: WriteCondition,
+        issued: bool,
+    },
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PublicationOperationLog {
+    entries: Vec<PublicationOperationLogEntry>,
+    omitted_entries: usize,
+}
+
+impl PublicationOperationLog {
+    pub fn entries(&self) -> &[PublicationOperationLogEntry] {
+        &self.entries
+    }
+
+    pub const fn omitted_entries(&self) -> usize {
+        self.omitted_entries
+    }
+}
+
+#[derive(Clone)]
+pub struct PublicationService {
+    shared: Arc<PublicationShared>,
+}
+
+impl PublicationService {
+    pub fn new(
+        capabilities: PublicationCapabilities,
+        initial_objects: impl IntoIterator<Item = (String, Vec<u8>)>,
+        read_scripts: impl IntoIterator<Item = PublicationReadScript>,
+        write_scripts: impl IntoIterator<Item = WriteScript>,
+        log_capacity: usize,
+    ) -> Self {
+        let mut reads = BTreeMap::<_, VecDeque<_>>::new();
+        for script in read_scripts {
+            reads
+                .entry(script.path.clone())
+                .or_default()
+                .push_back(script);
+        }
+        let mut writes = BTreeMap::<_, VecDeque<_>>::new();
+        for script in write_scripts {
+            writes
+                .entry((script.path.clone(), script.condition))
+                .or_default()
+                .push_back(script);
+        }
+
+        Self {
+            shared: Arc::new(PublicationShared {
+                capabilities,
+                destination: Mutex::new(DestinationState {
+                    objects: initial_objects.into_iter().collect(),
+                }),
+                reads: Mutex::new(reads),
+                writes: Mutex::new(writes),
+                next_id: AtomicU64::new(0),
+                log: Mutex::new(PublicationLogState {
+                    capacity: log_capacity,
+                    entries: Vec::with_capacity(log_capacity),
+                    omitted_entries: 0,
+                }),
+                cancellations: Mutex::new(Vec::new()),
+            }),
+        }
+    }
+
+    pub fn operator(&self) -> Operator {
+        Operator::from_parts(OperationContext::default(), Arc::new(self.clone()))
+    }
+
+    pub fn destination(&self) -> DestinationState {
+        self.shared.destination()
+    }
+
+    pub fn mutate(&self, mutation: DestinationMutation) {
+        self.shared.mutate(mutation);
+    }
+
+    pub fn log(&self) -> PublicationOperationLog {
+        let log = lock(&self.shared.log);
+        PublicationOperationLog {
+            entries: log.entries.clone(),
+            omitted_entries: log.omitted_entries,
+        }
+    }
+
+    pub fn cancellations(&self) -> Vec<PublicationDroppedOperation> {
+        lock(&self.shared.cancellations).clone()
+    }
+}
+
+impl fmt::Debug for PublicationService {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PublicationService")
+            .field("capabilities", &self.shared.capabilities)
+            .field("destination", &self.destination())
+            .finish_non_exhaustive()
+    }
+}
+
+impl Service for PublicationService {
+    type Reader = PublicationReader;
+    type Writer = PublicationWriter;
+    type Lister = ();
+    type Deleter = ();
+    type Copier = ();
+
+    fn info(&self) -> ServiceInfo {
+        ServiceInfo::with_scheme("scripted-publication-test")
+    }
+
+    fn capability(&self) -> Capability {
+        Capability {
+            write: self.shared.capabilities.write,
+            write_can_empty: self.shared.capabilities.write_can_empty,
+            write_with_if_not_exists: self.shared.capabilities.write_with_if_not_exists,
+            read: self.shared.capabilities.read,
+            write_total_max_size: self.shared.capabilities.write_total_max_size,
+            ..Capability::default()
+        }
+    }
+
+    async fn create_dir(
+        &self,
+        _: &OperationContext,
+        _: &str,
+        _: OpCreateDir,
+    ) -> Result<RpCreateDir> {
+        Err(publication_unsupported_operation())
+    }
+
+    async fn stat(&self, _: &OperationContext, _: &str, _: OpStat) -> Result<RpStat> {
+        Err(publication_unsupported_operation())
+    }
+
+    fn read(&self, _: &OperationContext, path: &str, _: OpRead) -> Result<Self::Reader> {
+        let id = self.shared.next_id.fetch_add(1, Ordering::SeqCst);
+        self.shared
+            .record(PublicationOperationLogEntry::ReadInvoked {
+                id,
+                path: path.to_owned(),
+            });
+        let script = lock(&self.shared.reads)
+            .get_mut(path)
+            .and_then(VecDeque::pop_front)
+            .ok_or_else(|| {
+                self.shared
+                    .record(PublicationOperationLogEntry::ReadFailed {
+                        id,
+                        path: path.to_owned(),
+                        kind: ErrorKind::NotFound,
+                        destination: self.shared.destination(),
+                    });
+                publication_error(ErrorKind::NotFound, "no publication read script remains")
+            })?;
+
+        Ok(PublicationReader {
+            script: Mutex::new(Some(script)),
+            operation: Arc::new(PublicationOperationState::new_read(
+                id,
+                path,
+                self.shared.clone(),
+            )),
+        })
+    }
+
+    fn write(&self, _: &OperationContext, path: &str, args: OpWrite) -> Result<Self::Writer> {
+        let condition = if args.if_not_exists() {
+            WriteCondition::IfNotExists
+        } else {
+            WriteCondition::Direct
+        };
+        let id = self.shared.next_id.fetch_add(1, Ordering::SeqCst);
+        self.shared
+            .record(PublicationOperationLogEntry::WriteInvoked {
+                id,
+                path: path.to_owned(),
+                condition,
+            });
+        let mut script = lock(&self.shared.writes)
+            .get_mut(&(path.to_owned(), condition))
+            .and_then(VecDeque::pop_front)
+            .ok_or_else(|| {
+                self.shared
+                    .record(PublicationOperationLogEntry::WriteFailed {
+                        id,
+                        path: path.to_owned(),
+                        length: 0,
+                        condition,
+                        kind: ErrorKind::Unexpected,
+                        stage: WriteStage::Setup,
+                        issued: false,
+                        effect: WriteEffect::NoEffect,
+                        destination: self.shared.destination(),
+                    });
+                publication_error(ErrorKind::Unexpected, "no publication write script remains")
+            })?;
+        if let Some(kind) = script.setup_failure.take() {
+            self.shared
+                .record(PublicationOperationLogEntry::WriteFailed {
+                    id,
+                    path: path.to_owned(),
+                    length: 0,
+                    condition,
+                    kind,
+                    stage: WriteStage::Setup,
+                    issued: false,
+                    effect: WriteEffect::NoEffect,
+                    destination: self.shared.destination(),
+                });
+            return Err(publication_error(
+                kind,
+                "scripted publication setup failure",
+            ));
+        }
+
+        Ok(PublicationWriter {
+            write_failure: script.write_failure,
+            close_steps: script.close_steps.into(),
+            payload: None,
+            committed: false,
+            operation: Arc::new(PublicationOperationState::new_write(
+                id,
+                path,
+                condition,
+                self.shared.clone(),
+            )),
+        })
+    }
+
+    fn delete(&self, _: &OperationContext) -> Result<Self::Deleter> {
+        Err(publication_unsupported_operation())
+    }
+
+    fn list(&self, _: &OperationContext, _: &str, _: OpList) -> Result<Self::Lister> {
+        Err(publication_unsupported_operation())
+    }
+
+    fn copy(
+        &self,
+        _: &OperationContext,
+        _: &str,
+        _: &str,
+        _: OpCopy,
+        _: OpCopier,
+    ) -> Result<Self::Copier> {
+        Err(publication_unsupported_operation())
+    }
+
+    async fn rename(
+        &self,
+        _: &OperationContext,
+        _: &str,
+        _: &str,
+        _: OpRename,
+    ) -> Result<RpRename> {
+        Err(publication_unsupported_operation())
+    }
+
+    async fn presign(&self, _: &OperationContext, _: &str, _: OpPresign) -> Result<RpPresign> {
+        Err(publication_unsupported_operation())
+    }
+}
+
+struct PublicationShared {
+    capabilities: PublicationCapabilities,
+    destination: Mutex<DestinationState>,
+    reads: Mutex<BTreeMap<String, VecDeque<PublicationReadScript>>>,
+    writes: Mutex<BTreeMap<(String, WriteCondition), VecDeque<WriteScript>>>,
+    next_id: AtomicU64,
+    log: Mutex<PublicationLogState>,
+    cancellations: Mutex<Vec<PublicationDroppedOperation>>,
+}
+
+impl PublicationShared {
+    fn destination(&self) -> DestinationState {
+        lock(&self.destination).clone()
+    }
+
+    fn mutate(&self, mutation: DestinationMutation) {
+        let destination = {
+            let mut destination = lock(&self.destination);
+            destination.apply(&mutation);
+            destination.clone()
+        };
+        self.record(PublicationOperationLogEntry::DestinationMutated {
+            mutation,
+            destination,
+        });
+    }
+
+    fn record(&self, entry: PublicationOperationLogEntry) {
+        let mut log = lock(&self.log);
+        if log.entries.len() < log.capacity {
+            log.entries.push(entry);
+        } else {
+            log.omitted_entries += 1;
+        }
+    }
+}
+
+struct PublicationLogState {
+    capacity: usize,
+    entries: Vec<PublicationOperationLogEntry>,
+    omitted_entries: usize,
+}
+
+enum PublicationOperationKind {
+    Read,
+    Write {
+        condition: WriteCondition,
+        length: AtomicU64,
+        issued: AtomicBool,
+    },
+}
+
+struct PublicationOperationState {
+    id: u64,
+    path: String,
+    kind: PublicationOperationKind,
+    terminal: AtomicBool,
+    shared: Arc<PublicationShared>,
+}
+
+impl PublicationOperationState {
+    fn new_read(id: u64, path: &str, shared: Arc<PublicationShared>) -> Self {
+        Self {
+            id,
+            path: path.to_owned(),
+            kind: PublicationOperationKind::Read,
+            terminal: AtomicBool::new(false),
+            shared,
+        }
+    }
+
+    fn new_write(
+        id: u64,
+        path: &str,
+        condition: WriteCondition,
+        shared: Arc<PublicationShared>,
+    ) -> Self {
+        Self {
+            id,
+            path: path.to_owned(),
+            kind: PublicationOperationKind::Write {
+                condition,
+                length: AtomicU64::new(0),
+                issued: AtomicBool::new(false),
+            },
+            terminal: AtomicBool::new(false),
+            shared,
+        }
+    }
+
+    fn accept_write(&self, length: usize) {
+        let PublicationOperationKind::Write {
+            condition,
+            length: stored_length,
+            issued,
+        } = &self.kind
+        else {
+            unreachable!("only write operations accept bytes")
+        };
+        stored_length.store(length as u64, Ordering::SeqCst);
+        issued.store(true, Ordering::SeqCst);
+        self.shared
+            .record(PublicationOperationLogEntry::WriteAccepted {
+                id: self.id,
+                path: self.path.clone(),
+                length,
+                condition: *condition,
+            });
+    }
+
+    fn complete_read(&self) {
+        if !self.terminal.swap(true, Ordering::SeqCst) {
+            self.shared
+                .record(PublicationOperationLogEntry::ReadCompleted {
+                    id: self.id,
+                    path: self.path.clone(),
+                    destination: self.shared.destination(),
+                });
+        }
+    }
+
+    fn fail_read(&self, kind: ErrorKind) {
+        if !self.terminal.swap(true, Ordering::SeqCst) {
+            self.shared
+                .record(PublicationOperationLogEntry::ReadFailed {
+                    id: self.id,
+                    path: self.path.clone(),
+                    kind,
+                    destination: self.shared.destination(),
+                });
+        }
+    }
+
+    fn complete_write(&self) {
+        if self.terminal.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let (condition, length, _) = self.write_state();
+        self.shared
+            .record(PublicationOperationLogEntry::WriteCompleted {
+                id: self.id,
+                path: self.path.clone(),
+                length,
+                condition,
+                effect: WriteEffect::Committed,
+                destination: self.shared.destination(),
+            });
+    }
+
+    fn fail_write(&self, kind: ErrorKind, stage: WriteStage, effect: WriteEffect) {
+        if self.terminal.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        let (condition, length, issued) = self.write_state();
+        self.shared
+            .record(PublicationOperationLogEntry::WriteFailed {
+                id: self.id,
+                path: self.path.clone(),
+                length,
+                condition,
+                kind,
+                stage,
+                issued,
+                effect,
+                destination: self.shared.destination(),
+            });
+    }
+
+    fn write_state(&self) -> (WriteCondition, usize, bool) {
+        let PublicationOperationKind::Write {
+            condition,
+            length,
+            issued,
+        } = &self.kind
+        else {
+            unreachable!("only write operations expose write state")
+        };
+        (
+            *condition,
+            length.load(Ordering::SeqCst) as usize,
+            issued.load(Ordering::SeqCst),
+        )
+    }
+}
+
+impl Drop for PublicationOperationState {
+    fn drop(&mut self) {
+        if self.terminal.swap(true, Ordering::SeqCst) {
+            return;
+        }
+        match &self.kind {
+            PublicationOperationKind::Read => {
+                self.shared
+                    .record(PublicationOperationLogEntry::ReadDropped {
+                        id: self.id,
+                        path: self.path.clone(),
+                        destination: self.shared.destination(),
+                    });
+                lock(&self.shared.cancellations).push(PublicationDroppedOperation::Read {
+                    id: self.id,
+                    path: self.path.clone(),
+                });
+            }
+            PublicationOperationKind::Write {
+                condition,
+                length,
+                issued,
+            } => {
+                let length = length.load(Ordering::SeqCst) as usize;
+                let issued = issued.load(Ordering::SeqCst);
+                self.shared
+                    .record(PublicationOperationLogEntry::WriteDropped {
+                        id: self.id,
+                        path: self.path.clone(),
+                        length,
+                        condition: *condition,
+                        issued,
+                        effect: if issued {
+                            WriteEffect::Indeterminate
+                        } else {
+                            WriteEffect::NoEffect
+                        },
+                        destination: self.shared.destination(),
+                    });
+                lock(&self.shared.cancellations).push(PublicationDroppedOperation::Write {
+                    id: self.id,
+                    path: self.path.clone(),
+                    length,
+                    condition: *condition,
+                    issued,
+                });
+            }
+        }
+    }
+}
+
+pub struct PublicationReader {
+    script: Mutex<Option<PublicationReadScript>>,
+    operation: Arc<PublicationOperationState>,
+}
+
+impl oio::Read for PublicationReader {
+    async fn open(&self, range: BytesRange) -> Result<(RpRead, Box<dyn oio::ReadStreamDyn>)> {
+        if !range.is_full() {
+            self.operation.fail_read(ErrorKind::Unsupported);
+            return Err(publication_error(
+                ErrorKind::Unsupported,
+                "scripted publication reads require the full range",
+            ));
+        }
+        let script = lock(&self.script).take().ok_or_else(|| {
+            publication_error(
+                ErrorKind::Unexpected,
+                "publication read script already opened",
+            )
+        })?;
+        let content_length = self
+            .operation
+            .shared
+            .destination()
+            .object(&self.operation.path)
+            .map_or(0, |bytes| bytes.len() as u64);
+        let metadata = Metadata::new(EntryMode::FILE).with_content_length(content_length);
+        Ok((
+            RpRead::new(metadata),
+            Box::new(PublicationReadStream {
+                steps: script.steps.into(),
+                operation: self.operation.clone(),
+            }),
+        ))
+    }
+
+    async fn read(&self, range: BytesRange) -> Result<(RpRead, Buffer)> {
+        let (response, mut stream) = self.open(range).await?;
+        let mut chunks = Vec::new();
+        loop {
+            let chunk = stream.read_dyn().await?;
+            if chunk.is_empty() {
+                break;
+            }
+            chunks.push(chunk);
+        }
+        Ok((response, chunks.into_iter().flatten().collect()))
+    }
+}
+
+pub struct PublicationReadStream {
+    steps: VecDeque<PublicationReadStep>,
+    operation: Arc<PublicationOperationState>,
+}
+
+impl oio::ReadStream for PublicationReadStream {
+    async fn read(&mut self) -> Result<Buffer> {
+        loop {
+            match self.steps.pop_front() {
+                Some(PublicationReadStep::Chunk(range)) => {
+                    let destination = self.operation.shared.destination();
+                    let bytes = destination
+                        .object(&self.operation.path)
+                        .and_then(|bytes| bytes.get(range.clone()))
+                        .ok_or_else(|| {
+                            self.operation.fail_read(ErrorKind::RangeNotSatisfied);
+                            publication_error(
+                                ErrorKind::RangeNotSatisfied,
+                                "publication read chunk is outside destination state",
+                            )
+                        })?
+                        .to_vec();
+                    self.operation
+                        .shared
+                        .record(PublicationOperationLogEntry::ReadChunkYielded {
+                            id: self.operation.id,
+                            path: self.operation.path.clone(),
+                            bytes: bytes.clone(),
+                            destination,
+                        });
+                    return Ok(Buffer::from(bytes));
+                }
+                Some(PublicationReadStep::Pending(point)) => point.wait().await,
+                Some(PublicationReadStep::Mutate(mutation)) => {
+                    self.operation.shared.mutate(mutation);
+                }
+                Some(PublicationReadStep::Failure(kind)) => {
+                    self.operation.fail_read(kind);
+                    return Err(publication_error(kind, "scripted publication read failure"));
+                }
+                None => {
+                    self.operation.complete_read();
+                    return Ok(Buffer::new());
+                }
+            }
+        }
+    }
+}
+
+pub struct PublicationWriter {
+    write_failure: Option<ErrorKind>,
+    close_steps: VecDeque<WriteStep>,
+    payload: Option<Vec<u8>>,
+    committed: bool,
+    operation: Arc<PublicationOperationState>,
+}
+
+impl PublicationWriter {
+    fn commit(&mut self) -> Result<()> {
+        let payload = self.payload.as_ref().cloned().unwrap_or_default();
+        let (condition, _, _) = self.operation.write_state();
+        let mut destination = lock(&self.operation.shared.destination);
+        if condition == WriteCondition::IfNotExists
+            && destination.objects.contains_key(&self.operation.path)
+        {
+            drop(destination);
+            self.operation.fail_write(
+                ErrorKind::ConditionNotMatch,
+                WriteStage::Close,
+                WriteEffect::NoEffect,
+            );
+            return Err(publication_error(
+                ErrorKind::ConditionNotMatch,
+                "conditional publication destination exists",
+            ));
+        }
+        destination
+            .objects
+            .insert(self.operation.path.clone(), payload);
+        self.committed = true;
+        Ok(())
+    }
+}
+
+impl oio::Write for PublicationWriter {
+    async fn write(&mut self, bytes: Buffer) -> Result<()> {
+        let bytes = bytes.to_vec();
+        self.operation.accept_write(bytes.len());
+        if let Some(kind) = self.write_failure.take() {
+            self.operation
+                .fail_write(kind, WriteStage::Write, WriteEffect::Indeterminate);
+            return Err(publication_error(
+                kind,
+                "scripted publication write failure",
+            ));
+        }
+        if self.payload.replace(bytes).is_some() {
+            self.operation.fail_write(
+                ErrorKind::Unsupported,
+                WriteStage::Write,
+                WriteEffect::Indeterminate,
+            );
+            return Err(publication_error(
+                ErrorKind::Unsupported,
+                "scripted publication supports one write buffer",
+            ));
+        }
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Result<Metadata> {
+        if !self.operation.write_state().2 {
+            self.operation.accept_write(0);
+        }
+        while let Some(step) = self.close_steps.pop_front() {
+            match step {
+                WriteStep::Pending(point) => point.wait().await,
+                WriteStep::Commit => self.commit()?,
+                WriteStep::Failure(kind) => {
+                    self.operation
+                        .fail_write(kind, WriteStage::Close, WriteEffect::Indeterminate);
+                    return Err(publication_error(
+                        kind,
+                        "scripted publication close failure",
+                    ));
+                }
+            }
+        }
+        if !self.committed {
+            self.commit()?;
+        }
+        self.operation.complete_write();
+        let length = self.operation.write_state().1 as u64;
+        Ok(Metadata::new(EntryMode::FILE).with_content_length(length))
+    }
+
+    async fn abort(&mut self) -> Result<()> {
+        self.payload = None;
+        Ok(())
+    }
+}
+
+fn publication_error(kind: ErrorKind, message: &'static str) -> Error {
+    Error::new(kind, message).with_operation("scripted-publication-test")
+}
+
+fn publication_unsupported_operation() -> Error {
+    publication_error(ErrorKind::Unsupported, "operation is not supported")
 }
 
 impl oio::ReadStream for ScriptedReadStream {

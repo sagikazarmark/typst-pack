@@ -11,8 +11,11 @@ use std::task::{Context, Poll, Wake, Waker};
 use futures_util::StreamExt;
 use opendal::ErrorKind;
 use scripted_opendal::{
-    Capabilities, DroppedOperation, ListEntry, ListEntryKind, ListScript, ListStep,
-    OperationLogEntry, PendingPoint, ReadScript, ReadStep, ScriptError, ScriptedService,
+    Capabilities, DestinationMutation, DroppedOperation, ListEntry, ListEntryKind, ListScript,
+    ListStep, OperationLogEntry, PendingPoint, PublicationCapabilities,
+    PublicationDroppedOperation, PublicationOperationLogEntry, PublicationReadScript,
+    PublicationReadStep, PublicationService, ReadScript, ReadStep, ScriptError, ScriptedService,
+    WriteCondition, WriteEffect, WriteScript, WriteStage, WriteStep,
 };
 
 #[test]
@@ -40,6 +43,21 @@ fn scripts_reject_records_beyond_their_declared_bounds() {
         )
         .unwrap_err(),
         ScriptError::TooManyReadChunks {
+            declared: 1,
+            scripted: 2,
+        }
+    );
+    assert_eq!(
+        PublicationReadScript::new(
+            "object.bin",
+            1,
+            [
+                PublicationReadStep::chunk(0..1),
+                PublicationReadStep::chunk(1..2),
+            ],
+        )
+        .unwrap_err(),
+        ScriptError::PublicationReadChunksExceeded {
             declared: 1,
             scripted: 2,
         }
@@ -477,6 +495,509 @@ fn operation_log_never_retains_more_than_its_capacity() {
         }]
     );
     assert_eq!(service.log().omitted_entries(), 1);
+}
+
+#[test]
+fn publication_capabilities_are_advertised_independently() {
+    let service = PublicationService::new(
+        PublicationCapabilities {
+            write: true,
+            write_can_empty: false,
+            write_with_if_not_exists: true,
+            read: false,
+            write_total_max_size: Some(17),
+        },
+        [],
+        [],
+        [],
+        1,
+    );
+    let capability = service.operator().info().capability();
+
+    assert!(capability.write);
+    assert!(!capability.write_can_empty);
+    assert!(capability.write_with_if_not_exists);
+    assert!(!capability.read);
+    assert_eq!(capability.write_total_max_size, Some(17));
+    assert!(!capability.write_can_multi);
+}
+
+#[test]
+fn publication_service_applies_direct_conditional_and_empty_writes() {
+    let service = PublicationService::new(
+        PublicationCapabilities::all(),
+        [("existing.bin".to_owned(), b"old".to_vec())],
+        [],
+        [
+            WriteScript::new("existing.bin", WriteCondition::Direct, []),
+            WriteScript::new("created.bin", WriteCondition::IfNotExists, []),
+            WriteScript::new("empty.bin", WriteCondition::Direct, []),
+        ],
+        32,
+    );
+    let operator = service.operator();
+
+    let mut direct = pin!(operator.write("existing.bin", b"new".to_vec()));
+    expect_ready(direct.as_mut()).unwrap();
+    let mut conditional = pin!(
+        operator
+            .write_with("created.bin", b"created".to_vec())
+            .if_not_exists(true)
+            .into_future()
+    );
+    expect_ready(conditional.as_mut()).unwrap();
+    let mut empty = pin!(operator.write("empty.bin", Vec::<u8>::new()));
+    expect_ready(empty.as_mut()).unwrap();
+
+    let destination = service.destination();
+    assert_eq!(destination.object("existing.bin"), Some(b"new".as_slice()));
+    assert_eq!(
+        destination.object("created.bin"),
+        Some(b"created".as_slice())
+    );
+    assert_eq!(destination.object("empty.bin"), Some(b"".as_slice()));
+    assert!(service.log().entries().iter().any(|entry| matches!(
+        entry,
+        PublicationOperationLogEntry::WriteCompleted {
+            path,
+            length: 7,
+            condition: WriteCondition::IfNotExists,
+            effect: WriteEffect::Committed,
+            ..
+        } if path == "created.bin"
+    )));
+}
+
+#[test]
+fn publication_write_failures_preserve_typed_kinds_and_known_no_effect() {
+    for kind in [ErrorKind::AlreadyExists, ErrorKind::ConditionNotMatch] {
+        let service = PublicationService::new(
+            PublicationCapabilities::all(),
+            [("object.bin".to_owned(), b"original".to_vec())],
+            [],
+            [WriteScript::setup_failure(
+                "object.bin",
+                WriteCondition::IfNotExists,
+                kind,
+            )],
+            8,
+        );
+        let operator = service.operator();
+        let mut write = pin!(
+            operator
+                .write_with("object.bin", b"replacement".to_vec())
+                .if_not_exists(true)
+                .into_future()
+        );
+        let error = expect_ready(write.as_mut()).unwrap_err();
+
+        assert_eq!(error.kind(), kind);
+        assert_eq!(
+            service.destination().object("object.bin"),
+            Some(b"original".as_slice())
+        );
+        assert!(matches!(
+            service.log().entries().last(),
+            Some(PublicationOperationLogEntry::WriteFailed {
+                kind: logged_kind,
+                stage: WriteStage::Setup,
+                issued: false,
+                effect: WriteEffect::NoEffect,
+                ..
+            }) if *logged_kind == kind
+        ));
+    }
+}
+
+#[test]
+fn direct_write_failures_after_issue_are_indeterminate_regardless_of_kind() {
+    for kind in [
+        ErrorKind::PermissionDenied,
+        ErrorKind::AlreadyExists,
+        ErrorKind::ConditionNotMatch,
+    ] {
+        let service = PublicationService::new(
+            PublicationCapabilities::all(),
+            [],
+            [],
+            [WriteScript::write_failure(
+                "object.bin",
+                WriteCondition::Direct,
+                kind,
+            )],
+            8,
+        );
+        let operator = service.operator();
+        let mut write = pin!(operator.write("object.bin", b"payload".to_vec()));
+        let error = expect_ready(write.as_mut()).unwrap_err();
+
+        assert_eq!(error.kind(), kind);
+        assert!(service.destination().object("object.bin").is_none());
+        assert!(matches!(
+            service.log().entries().last(),
+            Some(PublicationOperationLogEntry::WriteFailed {
+                length: 7,
+                kind: logged_kind,
+                stage: WriteStage::Write,
+                issued: true,
+                effect: WriteEffect::Indeterminate,
+                ..
+            }) if *logged_kind == kind
+        ));
+    }
+}
+
+#[test]
+fn publication_read_observes_mutation_between_chunks_not_a_snapshot() {
+    let read = PublicationReadScript::new(
+        "race.bin",
+        2,
+        [
+            PublicationReadStep::chunk(0..3),
+            PublicationReadStep::mutate(DestinationMutation::set("race.bin", b"abcXYZ")),
+            PublicationReadStep::chunk(3..6),
+        ],
+    )
+    .unwrap();
+    let service = PublicationService::new(
+        PublicationCapabilities::all(),
+        [("race.bin".to_owned(), b"abcdef".to_vec())],
+        [read],
+        [],
+        16,
+    );
+    let operator = service.operator();
+    let mut read = pin!(operator.read("race.bin"));
+
+    assert_eq!(expect_ready(read.as_mut()).unwrap().to_vec(), b"abcXYZ");
+    assert_eq!(
+        service.destination().object("race.bin"),
+        Some(b"abcXYZ".as_slice())
+    );
+    assert_eq!(
+        service
+            .log()
+            .entries()
+            .iter()
+            .filter(|entry| matches!(entry, PublicationOperationLogEntry::ReadChunkYielded { .. }))
+            .count(),
+        2
+    );
+}
+
+#[test]
+fn matching_publication_read_completes_without_a_write_effect() {
+    let read =
+        PublicationReadScript::new("matching.bin", 1, [PublicationReadStep::chunk(0..8)]).unwrap();
+    let service = PublicationService::new(
+        PublicationCapabilities::all(),
+        [("matching.bin".to_owned(), b"matching".to_vec())],
+        [read],
+        [],
+        8,
+    );
+    let operator = service.operator();
+    let mut read = pin!(operator.read("matching.bin"));
+
+    assert_eq!(expect_ready(read.as_mut()).unwrap().to_vec(), b"matching");
+    assert_eq!(
+        service.destination().object("matching.bin"),
+        Some(b"matching".as_slice())
+    );
+    assert!(service.log().entries().iter().all(|entry| !matches!(
+        entry,
+        PublicationOperationLogEntry::WriteInvoked { .. }
+            | PublicationOperationLogEntry::WriteAccepted { .. }
+            | PublicationOperationLogEntry::WriteCompleted { .. }
+            | PublicationOperationLogEntry::WriteFailed { .. }
+            | PublicationOperationLogEntry::WriteDropped { .. }
+    )));
+}
+
+#[test]
+fn publication_read_preserves_typed_failure_without_mutation() {
+    let read = PublicationReadScript::new(
+        "denied.bin",
+        0,
+        [PublicationReadStep::failure(ErrorKind::PermissionDenied)],
+    )
+    .unwrap();
+    let service = PublicationService::new(
+        PublicationCapabilities::all(),
+        [("denied.bin".to_owned(), b"original".to_vec())],
+        [read],
+        [],
+        8,
+    );
+    let operator = service.operator();
+    let mut read = pin!(operator.read("denied.bin"));
+    let error = expect_ready(read.as_mut()).unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::PermissionDenied);
+    assert_eq!(
+        service.destination().object("denied.bin"),
+        Some(b"original".as_slice())
+    );
+    assert!(matches!(
+        service.log().entries().last(),
+        Some(PublicationOperationLogEntry::ReadFailed {
+            kind: ErrorKind::PermissionDenied,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn dropping_a_pending_publication_write_records_issued_cancellation() {
+    let pending = PendingPoint::new();
+    let service = PublicationService::new(
+        PublicationCapabilities::all(),
+        [],
+        [],
+        [WriteScript::new(
+            "pending.bin",
+            WriteCondition::Direct,
+            [WriteStep::pending(pending.clone())],
+        )],
+        8,
+    );
+    let operator = service.operator();
+    {
+        let mut write = pin!(operator.write("pending.bin", b"payload".to_vec()));
+        assert!(matches!(poll_once(write.as_mut()), Poll::Pending));
+        assert!(pending.was_observed());
+    }
+
+    assert_eq!(
+        service.cancellations(),
+        [PublicationDroppedOperation::Write {
+            id: 0,
+            path: "pending.bin".to_owned(),
+            length: 7,
+            condition: WriteCondition::Direct,
+            issued: true,
+        }]
+    );
+    assert!(service.destination().object("pending.bin").is_none());
+}
+
+#[test]
+fn dropping_a_pending_publication_read_records_cancellation() {
+    let pending = PendingPoint::new();
+    let read = PublicationReadScript::new(
+        "pending.bin",
+        1,
+        [
+            PublicationReadStep::pending(pending.clone()),
+            PublicationReadStep::chunk(0..7),
+        ],
+    )
+    .unwrap();
+    let service = PublicationService::new(
+        PublicationCapabilities::all(),
+        [("pending.bin".to_owned(), b"payload".to_vec())],
+        [read],
+        [],
+        8,
+    );
+    let operator = service.operator();
+    {
+        let mut read = pin!(operator.read("pending.bin"));
+        assert!(matches!(poll_once(read.as_mut()), Poll::Pending));
+        assert!(pending.was_observed());
+    }
+
+    assert_eq!(
+        service.cancellations(),
+        [PublicationDroppedOperation::Read {
+            id: 0,
+            path: "pending.bin".to_owned(),
+        }]
+    );
+}
+
+#[test]
+fn caller_mutation_controls_a_conditional_create_race() {
+    let pending = PendingPoint::new();
+    let service = PublicationService::new(
+        PublicationCapabilities::all(),
+        [],
+        [],
+        [WriteScript::new(
+            "race.bin",
+            WriteCondition::IfNotExists,
+            [WriteStep::pending(pending.clone()), WriteStep::commit()],
+        )],
+        16,
+    );
+    let operator = service.operator();
+    let mut write = pin!(
+        operator
+            .write_with("race.bin", b"planned".to_vec())
+            .if_not_exists(true)
+            .into_future()
+    );
+    assert!(matches!(poll_once(write.as_mut()), Poll::Pending));
+
+    service.mutate(DestinationMutation::set("race.bin", b"racer"));
+    pending.release();
+    let error = expect_ready(write.as_mut()).unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::ConditionNotMatch);
+    assert_eq!(
+        service.destination().object("race.bin"),
+        Some(b"racer".as_slice())
+    );
+    assert!(matches!(
+        service.log().entries().last(),
+        Some(PublicationOperationLogEntry::WriteFailed {
+            stage: WriteStage::Close,
+            issued: true,
+            effect: WriteEffect::NoEffect,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn an_issued_write_can_commit_then_fail_with_indeterminate_evidence() {
+    let service = PublicationService::new(
+        PublicationCapabilities::all(),
+        [],
+        [],
+        [WriteScript::new(
+            "uncertain.bin",
+            WriteCondition::Direct,
+            [
+                WriteStep::commit(),
+                WriteStep::failure(ErrorKind::Unexpected),
+            ],
+        )],
+        16,
+    );
+    let operator = service.operator();
+    let mut write = pin!(operator.write("uncertain.bin", b"committed".to_vec()));
+    let error = expect_ready(write.as_mut()).unwrap_err();
+
+    assert_eq!(error.kind(), ErrorKind::Unexpected);
+    assert_eq!(
+        service.destination().object("uncertain.bin"),
+        Some(b"committed".as_slice())
+    );
+    assert!(matches!(
+        service.log().entries().last(),
+        Some(PublicationOperationLogEntry::WriteFailed {
+            stage: WriteStage::Close,
+            issued: true,
+            effect: WriteEffect::Indeterminate,
+            destination,
+            ..
+        }) if destination.object("uncertain.bin") == Some(b"committed".as_slice())
+    ));
+}
+
+#[test]
+fn dropping_a_pending_empty_write_records_issued_indeterminate_evidence() {
+    let pending = PendingPoint::new();
+    let service = PublicationService::new(
+        PublicationCapabilities::all(),
+        [],
+        [],
+        [WriteScript::new(
+            "empty.bin",
+            WriteCondition::Direct,
+            [WriteStep::pending(pending.clone())],
+        )],
+        8,
+    );
+    let operator = service.operator();
+    {
+        let mut write = pin!(operator.write("empty.bin", Vec::<u8>::new()));
+        assert!(matches!(poll_once(write.as_mut()), Poll::Pending));
+        assert!(pending.was_observed());
+    }
+
+    assert_eq!(
+        service.cancellations(),
+        [PublicationDroppedOperation::Write {
+            id: 0,
+            path: "empty.bin".to_owned(),
+            length: 0,
+            condition: WriteCondition::Direct,
+            issued: true,
+        }]
+    );
+    assert!(matches!(
+        service.log().entries().last(),
+        Some(PublicationOperationLogEntry::WriteDropped {
+            length: 0,
+            issued: true,
+            effect: WriteEffect::Indeterminate,
+            ..
+        })
+    ));
+}
+
+#[test]
+fn publication_completion_order_is_controlled_by_pending_points() {
+    let first = PendingPoint::new();
+    let second = PendingPoint::new();
+    let service = PublicationService::new(
+        PublicationCapabilities::all(),
+        [],
+        [],
+        [
+            WriteScript::new(
+                "first.bin",
+                WriteCondition::Direct,
+                [WriteStep::pending(first.clone())],
+            ),
+            WriteScript::new(
+                "second.bin",
+                WriteCondition::Direct,
+                [WriteStep::pending(second.clone())],
+            ),
+        ],
+        32,
+    );
+    let operator = service.operator();
+    let mut first_write = pin!(operator.write("first.bin", b"first".to_vec()));
+    let mut second_write = pin!(operator.write("second.bin", b"second".to_vec()));
+    assert!(matches!(poll_once(first_write.as_mut()), Poll::Pending));
+    assert!(matches!(poll_once(second_write.as_mut()), Poll::Pending));
+
+    second.release();
+    expect_ready(second_write.as_mut()).unwrap();
+    first.release();
+    expect_ready(first_write.as_mut()).unwrap();
+
+    let log = service.log();
+    let completed = log
+        .entries()
+        .iter()
+        .filter_map(|entry| match entry {
+            PublicationOperationLogEntry::WriteCompleted { path, .. } => Some(path.as_str()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(completed, ["second.bin", "first.bin"]);
+}
+
+#[test]
+fn publication_log_never_retains_more_than_its_capacity() {
+    let service = PublicationService::new(
+        PublicationCapabilities::all(),
+        [],
+        [],
+        [WriteScript::new("object.bin", WriteCondition::Direct, [])],
+        1,
+    );
+    let operator = service.operator();
+    let mut write = pin!(operator.write("object.bin", b"payload".to_vec()));
+    expect_ready(write.as_mut()).unwrap();
+
+    assert_eq!(service.log().entries().len(), 1);
+    assert_eq!(service.log().omitted_entries(), 2);
 }
 
 fn expect_ready<F: Future>(future: std::pin::Pin<&mut F>) -> F::Output {

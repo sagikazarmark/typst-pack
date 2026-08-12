@@ -31,6 +31,6 @@ jobs:
           targets: ${{ matrix.target }}
       - run: cargo check --locked -p typst-pack --no-default-features --features opendal --target ${{ matrix.target }}
       - run: cargo test --locked -p typst-pack --no-default-features --features opendal --target ${{ matrix.target }} --lib opendal::acquisition::tests
-      - run: cargo test --locked -p typst-pack --no-default-features --features opendal --target ${{ matrix.target }} --test opendal_location --test opendal_bindings
+      - run: cargo test --locked -p typst-pack --no-default-features --features opendal --target ${{ matrix.target }} --test opendal_location --test opendal_bindings --test opendal_scripted_service
       - run: cargo test --locked -p typst-pack --features fs,embedded-fonts --lib filesystem_publication::tests
       - run: cargo test --locked -p typst-pack --features fs,embedded-fonts --test filesystem_project_gathering --test filesystem_font_catalog_gathering --test filesystem_package_acquisition --test filesystem_pack_assembly --test fs_creation --test pack_archive_acquisition --test pack_archive_publication --test filesystem_publication
