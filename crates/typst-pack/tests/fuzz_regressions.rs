@@ -10,6 +10,30 @@ use typst_pack::{
     ProjectSnapshotIssue, compile,
 };
 
+#[cfg(feature = "opendal")]
+#[test]
+fn opendal_location_regressions_preserve_canonical_objects_and_alias_rejections() {
+    use typst_pack::opendal::{Location, LocationError, OperatorBinding};
+
+    let binding = OperatorBinding::new("fuzz").unwrap();
+    for path in ["", "/", "a/./b", "a\u{feff}", "a\u{200b}", "café/%"] {
+        let result = Location::from_operation_path(binding.clone(), path);
+        if path == "a/./b" {
+            assert_eq!(result, Err(LocationError::DotSegment { index: 2 }));
+        } else {
+            let location = result.unwrap();
+            assert_eq!(Location::parse(location.to_string()).unwrap(), location);
+        }
+    }
+
+    for (path, index) in [(" a", 0), ("a ", 1), ("a\u{00a0}", 1)] {
+        assert_eq!(
+            Location::from_operation_path(binding.clone(), path),
+            Err(LocationError::NormalizationAlias { index })
+        );
+    }
+}
+
 #[test]
 fn pack_archive_decoding_regressions_replay_through_the_public_decoder() {
     let cases: &[(&str, &[u8])] = &[
