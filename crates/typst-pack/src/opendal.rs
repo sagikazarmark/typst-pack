@@ -6,6 +6,7 @@
 #[allow(dead_code)]
 mod acquisition;
 pub mod location;
+pub mod pack_archive;
 
 #[cfg(test)]
 #[allow(dead_code)]
