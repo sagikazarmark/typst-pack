@@ -12,11 +12,123 @@ use futures_util::StreamExt;
 use opendal::ErrorKind;
 use scripted_opendal::{
     Capabilities, DestinationMutation, DroppedOperation, ListEntry, ListEntryKind, ListScript,
-    ListStep, OperationLogEntry, PendingPoint, PublicationCapabilities,
+    ListStep, OperationControls, OperationLogEntry, PendingPoint, PublicationCapabilities,
     PublicationDroppedOperation, PublicationOperationLogEntry, PublicationReadScript,
     PublicationReadStep, PublicationService, ReadScript, ReadStep, ScriptError, ScriptedService,
     WriteCondition, WriteEffect, WriteScript, WriteStage, WriteStep,
 };
+
+#[test]
+fn indexed_read_controls_choose_completion_and_cancellation_order() {
+    let controls = OperationControls::new();
+    let first = controls.hold_read(0);
+    let second = controls.hold_read(1);
+    let service = ScriptedService::new_controlled(
+        Capabilities::all(),
+        [],
+        [
+            ReadScript::new("first.bin", 1, [ReadStep::chunk(b"first")]).unwrap(),
+            ReadScript::new("second.bin", 1, [ReadStep::chunk(b"second")]).unwrap(),
+        ],
+        controls,
+        16,
+    );
+    let operator = service.operator();
+    let mut first_read = Box::pin(operator.read("first.bin"));
+    let mut second_read = Box::pin(operator.read("second.bin"));
+
+    assert!(matches!(poll_once(first_read.as_mut()), Poll::Pending));
+    assert!(matches!(poll_once(second_read.as_mut()), Poll::Pending));
+    assert!(first.was_observed());
+    assert!(second.was_observed());
+
+    second.release();
+    assert_eq!(
+        expect_ready(second_read.as_mut()).unwrap().to_vec(),
+        b"second"
+    );
+    drop(first_read);
+
+    assert_eq!(
+        service.cancellations(),
+        [DroppedOperation::Read {
+            id: 0,
+            path: "first.bin".to_owned(),
+        }]
+    );
+    assert_eq!(
+        service.log().entries(),
+        [
+            OperationLogEntry::ReadInvoked {
+                id: 0,
+                path: "first.bin".to_owned(),
+            },
+            OperationLogEntry::ReadInvoked {
+                id: 1,
+                path: "second.bin".to_owned(),
+            },
+            OperationLogEntry::ReadChunkYielded {
+                id: 1,
+                bytes: b"second".to_vec(),
+            },
+            OperationLogEntry::ReadCompleted { id: 1 },
+            OperationLogEntry::ReadDropped {
+                id: 0,
+                path: "first.bin".to_owned(),
+            },
+        ]
+    );
+}
+
+#[test]
+fn indexed_list_controls_release_operations_independently() {
+    let controls = OperationControls::new();
+    let first = controls.hold_list(0);
+    let second = controls.hold_list(1);
+    let service = ScriptedService::new_controlled(
+        Capabilities::all(),
+        [
+            ListScript::new("first/", 0, []).unwrap(),
+            ListScript::new("second/", 0, []).unwrap(),
+        ],
+        [],
+        controls,
+        8,
+    );
+    let operator = service.operator();
+    let mut first_open = pin!(operator.lister_with("first/").recursive(true).into_future());
+    let mut second_open = pin!(
+        operator
+            .lister_with("second/")
+            .recursive(true)
+            .into_future()
+    );
+    let mut first_lister = expect_ready(first_open.as_mut()).unwrap();
+    let mut second_lister = expect_ready(second_open.as_mut()).unwrap();
+    let mut first_next = pin!(first_lister.next());
+    let mut second_next = pin!(second_lister.next());
+
+    assert!(matches!(poll_once(first_next.as_mut()), Poll::Pending));
+    assert!(matches!(poll_once(second_next.as_mut()), Poll::Pending));
+    assert!(first.was_observed());
+    assert!(second.was_observed());
+
+    first.release();
+    assert!(expect_ready(first_next.as_mut()).is_none());
+    assert!(matches!(poll_once(second_next.as_mut()), Poll::Pending));
+    second.release();
+    assert!(expect_ready(second_next.as_mut()).is_none());
+
+    assert!(matches!(
+        service.log().entries(),
+        [
+            OperationLogEntry::ListInvoked { path: first, .. },
+            OperationLogEntry::ListInvoked { path: second, .. },
+            OperationLogEntry::ListCompleted { id: 0 },
+            OperationLogEntry::ListCompleted { id: 1 },
+        ] if first == "first/" && second == "second/"
+    ));
+}
 
 #[test]
 fn scripts_reject_records_beyond_their_declared_bounds() {

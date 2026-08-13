@@ -262,6 +262,58 @@ impl fmt::Debug for PendingPoint {
     }
 }
 
+#[derive(Clone, Default)]
+pub struct OperationControls {
+    state: Arc<OperationControlsState>,
+}
+
+impl OperationControls {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    pub fn hold_list(&self, index: u64) -> PendingPoint {
+        Self::hold(&self.state.lists, index)
+    }
+
+    pub fn hold_read(&self, index: u64) -> PendingPoint {
+        Self::hold(&self.state.reads, index)
+    }
+
+    fn hold(gates: &Mutex<BTreeMap<u64, PendingPoint>>, index: u64) -> PendingPoint {
+        let point = PendingPoint::new();
+        assert!(
+            lock(gates).insert(index, point.clone()).is_none(),
+            "operation index {index} is already held"
+        );
+        point
+    }
+
+    fn list_gate(&self, index: u64) -> Option<PendingPoint> {
+        lock(&self.state.lists).remove(&index)
+    }
+
+    fn read_gate(&self, index: u64) -> Option<PendingPoint> {
+        lock(&self.state.reads).remove(&index)
+    }
+}
+
+impl fmt::Debug for OperationControls {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("OperationControls")
+            .field("held_lists", &lock(&self.state.lists).keys())
+            .field("held_reads", &lock(&self.state.reads).keys())
+            .finish()
+    }
+}
+
+#[derive(Default)]
+struct OperationControlsState {
+    lists: Mutex<BTreeMap<u64, PendingPoint>>,
+    reads: Mutex<BTreeMap<u64, PendingPoint>>,
+}
+
 #[derive(Default)]
 struct PendingState {
     observed: AtomicBool,
@@ -351,6 +403,22 @@ impl ScriptedService {
         read_scripts: impl IntoIterator<Item = ReadScript>,
         log_capacity: usize,
     ) -> Self {
+        Self::new_controlled(
+            capabilities,
+            list_scripts,
+            read_scripts,
+            OperationControls::new(),
+            log_capacity,
+        )
+    }
+
+    pub fn new_controlled(
+        capabilities: Capabilities,
+        list_scripts: impl IntoIterator<Item = ListScript>,
+        read_scripts: impl IntoIterator<Item = ReadScript>,
+        controls: OperationControls,
+        log_capacity: usize,
+    ) -> Self {
         let mut lists = BTreeMap::<_, VecDeque<_>>::new();
         for script in list_scripts {
             lists
@@ -372,6 +440,9 @@ impl ScriptedService {
                 lists: Mutex::new(lists),
                 reads: Mutex::new(reads),
                 next_id: AtomicU64::new(0),
+                next_list_index: AtomicU64::new(0),
+                next_read_index: AtomicU64::new(0),
+                controls,
                 log: Mutex::new(LogState {
                     capacity: log_capacity,
                     entries: Vec::with_capacity(log_capacity),
@@ -443,6 +514,7 @@ impl Service for ScriptedService {
 
     fn read(&self, _: &OperationContext, path: &str, _: OpRead) -> Result<Self::Reader> {
         let id = self.shared.next_id.fetch_add(1, Ordering::SeqCst);
+        let index = self.shared.next_read_index.fetch_add(1, Ordering::SeqCst);
         self.shared.record(OperationLogEntry::ReadInvoked {
             id,
             path: path.to_owned(),
@@ -460,6 +532,7 @@ impl Service for ScriptedService {
 
         Ok(ScriptedReader {
             script: Mutex::new(Some(script)),
+            gate: Mutex::new(self.shared.controls.read_gate(index)),
             operation: Arc::new(OperationState::new(
                 id,
                 path,
@@ -479,6 +552,7 @@ impl Service for ScriptedService {
 
     fn list(&self, _: &OperationContext, path: &str, args: OpList) -> Result<Self::Lister> {
         let id = self.shared.next_id.fetch_add(1, Ordering::SeqCst);
+        let index = self.shared.next_list_index.fetch_add(1, Ordering::SeqCst);
         self.shared.record(OperationLogEntry::ListInvoked {
             id,
             path: path.to_owned(),
@@ -496,6 +570,7 @@ impl Service for ScriptedService {
             })?;
 
         Ok(ScriptedLister {
+            gate: self.shared.controls.list_gate(index),
             steps: script.steps.into(),
             page: None,
             operation: Arc::new(OperationState::new(
@@ -538,6 +613,9 @@ struct Shared {
     lists: Mutex<BTreeMap<String, VecDeque<ListScript>>>,
     reads: Mutex<BTreeMap<String, VecDeque<ReadScript>>>,
     next_id: AtomicU64,
+    next_list_index: AtomicU64,
+    next_read_index: AtomicU64,
+    controls: OperationControls,
     log: Mutex<LogState>,
     cancellations: Mutex<Vec<DroppedOperation>>,
 }
@@ -637,6 +715,7 @@ impl Drop for OperationState {
 }
 
 pub struct ScriptedLister {
+    gate: Option<PendingPoint>,
     steps: VecDeque<ListStep>,
     page: Option<ListPage>,
     operation: Arc<OperationState>,
@@ -649,6 +728,9 @@ struct ListPage {
 
 impl oio::List for ScriptedLister {
     async fn next(&mut self) -> Result<Option<oio::Entry>> {
+        if let Some(point) = self.gate.take() {
+            point.wait().await;
+        }
         loop {
             if let Some(page) = &mut self.page {
                 if let Some(entry) = page.remaining.pop_front() {
@@ -688,6 +770,7 @@ impl oio::List for ScriptedLister {
 
 pub struct ScriptedReader {
     script: Mutex<Option<ReadScript>>,
+    gate: Mutex<Option<PendingPoint>>,
     operation: Arc<OperationState>,
 }
 
@@ -699,6 +782,10 @@ impl oio::Read for ScriptedReader {
                 ErrorKind::Unsupported,
                 "scripted reads require the full range",
             ));
+        }
+        let gate = lock(&self.gate).take();
+        if let Some(point) = gate {
+            point.wait().await;
         }
         let script = lock(&self.script)
             .take()
