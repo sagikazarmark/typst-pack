@@ -72,5 +72,12 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "compilation_artifact_publication"
+path = "fuzz_targets/compilation_artifact_publication.rs"
+test = false
+doc = false
+bench = false
+
 [workspace]
 members = ["."]

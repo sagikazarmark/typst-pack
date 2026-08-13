@@ -34,6 +34,73 @@ fn opendal_location_regressions_preserve_canonical_objects_and_alias_rejections(
     }
 }
 
+#[cfg(feature = "opendal")]
+#[test]
+fn compilation_artifact_key_regressions_replay_through_request_construction() {
+    use typst_pack::opendal::Location;
+    use typst_pack::opendal::publication::{
+        CompilationArtifactKeyIssue, CompilationArtifactPublicationRequest,
+        CompilationArtifactPublicationRequestIssue, PublicationPolicy,
+    };
+
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"#pagebreak()".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let result = compile(
+        PackCompilationRequest::new(
+            pack,
+            CompilationOutputSpecification::Svg(Default::default()),
+        ),
+        CompilationLimits::reference_v1(),
+    )
+    .unwrap()
+    .result()
+    .unwrap()
+    .clone();
+    let destination: Location = "fuzz:/artifacts/".parse().unwrap();
+
+    for keys in [["tree%", "tree%/page%2F.svg"], ["a\u{feff}", "a\u{200b}"]] {
+        let request = CompilationArtifactPublicationRequest::new(
+            &result,
+            destination.clone(),
+            keys,
+            PublicationPolicy::CreateOrVerify,
+        )
+        .unwrap();
+        assert_eq!(request.artifact_keys(), keys);
+    }
+
+    for (key, reason) in [
+        ("", CompilationArtifactKeyIssue::Empty),
+        (
+            " a",
+            CompilationArtifactKeyIssue::NormalizationAlias { index: 0 },
+        ),
+        (
+            "a\u{00a0}",
+            CompilationArtifactKeyIssue::NormalizationAlias { index: 1 },
+        ),
+    ] {
+        let rejection = CompilationArtifactPublicationRequest::new(
+            &result,
+            destination.clone(),
+            [key, "valid.svg"],
+            PublicationPolicy::CreateOrVerify,
+        )
+        .unwrap_err();
+        assert!(matches!(
+            rejection.issues(),
+            [CompilationArtifactPublicationRequestIssue::InvalidArtifactKey {
+                artifact_index: 0,
+                reason: actual,
+                ..
+            }] if *actual == reason
+        ));
+    }
+}
+
 #[test]
 fn pack_archive_decoding_regressions_replay_through_the_public_decoder() {
     let cases: &[(&str, &[u8])] = &[

@@ -579,18 +579,9 @@ fn decode_uri_path(path: &str, path_offset: usize) -> Result<String, LocationErr
 }
 
 fn validate_decoded_operation_path(path: &str) -> Result<(), LocationError> {
-    if let Some((index, _)) = path
-        .char_indices()
-        .find(|(_, character)| character.is_control())
-    {
-        return Err(LocationError::ControlCharacter { index });
-    }
-    if let Some(index) = path.find('\\') {
-        return Err(LocationError::Backslash { index });
-    }
-    if let Some(index) = path.as_bytes().windows(2).position(|pair| pair == b"//") {
-        return Err(LocationError::RepeatedSeparator { index: index + 1 });
-    }
+    validate_path_controls(path)?;
+    validate_path_backslash(path)?;
+    validate_repeated_separator(path)?;
 
     let source_offsets = path
         .char_indices()
@@ -598,6 +589,42 @@ fn validate_decoded_operation_path(path: &str) -> Result<(), LocationError> {
         .collect::<Vec<_>>();
     validate_dot_segments(path, &source_offsets)?;
     validate_normalization(path, &source_offsets)
+}
+
+pub(crate) fn validate_decoded_artifact_key_path(path: &str) -> Result<(), LocationError> {
+    validate_repeated_separator(path)?;
+    let source_offsets = path
+        .char_indices()
+        .flat_map(|(index, character)| std::iter::repeat_n(index, character.len_utf8()))
+        .collect::<Vec<_>>();
+    validate_dot_segments(path, &source_offsets)?;
+    validate_path_backslash(path)?;
+    validate_path_controls(path)?;
+    validate_normalization(path, &source_offsets)
+}
+
+fn validate_path_controls(path: &str) -> Result<(), LocationError> {
+    if let Some((index, _)) = path
+        .char_indices()
+        .find(|(_, character)| character.is_control())
+    {
+        return Err(LocationError::ControlCharacter { index });
+    }
+    Ok(())
+}
+
+fn validate_path_backslash(path: &str) -> Result<(), LocationError> {
+    if let Some(index) = path.find('\\') {
+        return Err(LocationError::Backslash { index });
+    }
+    Ok(())
+}
+
+fn validate_repeated_separator(path: &str) -> Result<(), LocationError> {
+    if let Some(index) = path.as_bytes().windows(2).position(|pair| pair == b"//") {
+        return Err(LocationError::RepeatedSeparator { index: index + 1 });
+    }
+    Ok(())
 }
 
 fn decode_percent_bytes(path: &str, path_offset: usize) -> Result<DecodedPath, LocationError> {
