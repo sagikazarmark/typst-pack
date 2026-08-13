@@ -8,7 +8,7 @@ use opendal::ErrorKind;
 use super::location::validate_decoded_artifact_key_path;
 use super::{Location, LocationError, LocationRoleError, OperatorBinding, OperatorResolver};
 use crate::pack_archive::CommitCertainty;
-use crate::{CompilationResult, CompilationResultIdentity, CompilationStatus};
+use crate::{CompilationResult, CompilationResultIdentity, CompilationStatus, PackArchiveBytes};
 
 /// The exact-key conflict policy for an OpenDAL publication operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -52,6 +52,316 @@ pub enum OpenDalPublicationPhase {
     RaceVerification,
     DirectWrite,
     Complete,
+}
+
+/// A validated request to publish one exact Pack Archive object.
+#[derive(Clone, Debug)]
+pub struct PackArchivePublicationRequest {
+    destination: Location,
+    policy: PublicationPolicy,
+}
+
+impl PackArchivePublicationRequest {
+    /// Validates an exact-object destination and retains the explicit policy.
+    pub fn new(
+        destination: Location,
+        policy: PublicationPolicy,
+    ) -> Result<Self, PackArchivePublicationRequestError> {
+        destination.require_object().map_err(|source| {
+            PackArchivePublicationRequestError::InvalidDestinationRole {
+                location: destination.clone(),
+                source,
+            }
+        })?;
+
+        Ok(Self {
+            destination,
+            policy,
+        })
+    }
+
+    pub fn destination(&self) -> &Location {
+        &self.destination
+    }
+
+    pub const fn policy(&self) -> PublicationPolicy {
+        self.policy
+    }
+}
+
+/// A reason a Pack Archive publication request cannot be accepted.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum PackArchivePublicationRequestError {
+    #[error("Pack Archive destination {location} is not an exact object: {source}")]
+    InvalidDestinationRole {
+        location: Location,
+        #[source]
+        source: LocationRoleError,
+    },
+}
+
+/// Publishes exact borrowed Pack Archive bytes to one normalized object.
+///
+/// Dropping the returned future yields no receipt, and already-issued storage
+/// work may have occurred. The caller retains `archive`; full replay with the
+/// same exact bytes is the recovery contract.
+///
+/// ```no_run
+/// use typst_pack::{Pack, PackArchiveBytes};
+/// use typst_pack::opendal::{Location, OperatorBindings};
+/// use typst_pack::opendal::pack_archive::{
+///     PackArchiveAcquisitionRequest, acquire_pack_archive,
+/// };
+/// use typst_pack::opendal::publication::{
+///     PackArchivePublicationRequest, PublicationPolicy, publish_pack_archive,
+/// };
+/// use typst_pack::pack_archive::{AcquisitionLimits, DecodeError, DecodeLimits, decode};
+///
+/// enum PublishThenAcquireOutcome {
+///     Matching {
+///         acquired: PackArchiveBytes,
+///         decoded: Result<Pack, DecodeError>,
+///     },
+///     DestinationChanged {
+///         acquired: PackArchiveBytes,
+///     },
+/// }
+///
+/// async fn publish_replay_and_acquire(
+///     bindings: &OperatorBindings,
+///     destination: Location,
+///     archive: &PackArchiveBytes,
+/// ) -> Result<PublishThenAcquireOutcome, Box<dyn std::error::Error>> {
+///     let overwrite = PackArchivePublicationRequest::new(
+///         destination.clone(),
+///         PublicationPolicy::OverwriteExactKeys,
+///     )?;
+///     publish_pack_archive(bindings, &overwrite, archive).await?;
+///
+///     let replay = PackArchivePublicationRequest::new(
+///         destination.clone(),
+///         PublicationPolicy::CreateOrVerify,
+///     )?;
+///     publish_pack_archive(bindings, &replay, archive).await?;
+///     publish_pack_archive(bindings, &replay, archive).await?;
+///
+///     let acquisition = PackArchiveAcquisitionRequest::new(
+///         destination,
+///         AcquisitionLimits::reference_v1(),
+///     )?;
+///     let acquired = acquire_pack_archive(bindings, &acquisition).await?;
+///
+///     // The caller still owns `archive`; preserve the independently acquired
+///     // bytes and do not decode when the mutable destination changed.
+///     if archive.as_slice() != acquired.as_slice() {
+///         return Ok(PublishThenAcquireOutcome::DestinationChanged { acquired });
+///     }
+///
+///     let decoded = decode(&acquired, DecodeLimits::reference_v1());
+///     Ok(PublishThenAcquireOutcome::Matching { acquired, decoded })
+/// }
+/// ```
+pub async fn publish_pack_archive<R: OperatorResolver + ?Sized>(
+    resolver: &R,
+    request: &PackArchivePublicationRequest,
+    archive: &PackArchiveBytes,
+) -> Result<PackArchivePublicationReceipt, PackArchivePublicationError<R::Error>> {
+    let mut progress = PackArchivePublicationProgress::new();
+    let destination_path = request.destination().operation_path();
+    let keys = [ExactKey::new(destination_path, archive.as_slice())];
+    let execution = publish_exact_keys(
+        resolver,
+        request.destination().binding(),
+        request.policy(),
+        &keys,
+        |entry| {
+            progress.push(PackArchivePublicationEntry {
+                destination_path: destination_path.to_owned(),
+                outcome: entry.outcome,
+            });
+        },
+    )
+    .await;
+
+    match execution {
+        Ok(_) => Ok(PackArchivePublicationReceipt {
+            destination: request.destination().clone(),
+            policy: request.policy(),
+            progress,
+        }),
+        Err(error) => {
+            let phase = error.phase;
+            let failed_path = error.failed_path;
+            let commit_certainty = error.commit_certainty;
+            let cause = match *error.cause {
+                ExactKeyPublicationErrorCause::ResolveOperator(source) => {
+                    PackArchivePublicationErrorCause::ResolveOperator(source)
+                }
+                ExactKeyPublicationErrorCause::UnsupportedPolicy => {
+                    PackArchivePublicationErrorCause::UnsupportedPolicy {
+                        policy: request.policy(),
+                    }
+                }
+                ExactKeyPublicationErrorCause::UnsupportedObjectSize { byte_length } => {
+                    PackArchivePublicationErrorCause::UnsupportedObjectSize { byte_length }
+                }
+                ExactKeyPublicationErrorCause::PreflightRead(source) => {
+                    PackArchivePublicationErrorCause::PreflightRead(source)
+                }
+                ExactKeyPublicationErrorCause::ByteConflict {
+                    expected_byte_length,
+                    observed_byte_length_at_least,
+                } => PackArchivePublicationErrorCause::ByteConflict {
+                    expected_byte_length,
+                    observed_byte_length_at_least,
+                },
+                ExactKeyPublicationErrorCause::ConditionalCreate(source) => {
+                    PackArchivePublicationErrorCause::ConditionalCreate(source)
+                }
+                ExactKeyPublicationErrorCause::RaceVerification(source) => {
+                    PackArchivePublicationErrorCause::RaceVerification(source)
+                }
+                ExactKeyPublicationErrorCause::DirectWrite(source) => {
+                    PackArchivePublicationErrorCause::DirectWrite(source)
+                }
+            };
+            Err(PackArchivePublicationError {
+                destination: request.destination().clone(),
+                policy: request.policy(),
+                failed_path,
+                phase,
+                progress,
+                commit_certainty,
+                cause,
+            })
+        }
+    }
+}
+
+/// A failure while publishing exact Pack Archive bytes through OpenDAL.
+///
+/// This error's own `Display` and `Debug` output omits native resolver and
+/// OpenDAL messages. Rendering its source chain may disclose backend context.
+pub struct PackArchivePublicationError<E> {
+    destination: Location,
+    policy: PublicationPolicy,
+    failed_path: Option<String>,
+    phase: OpenDalPublicationPhase,
+    progress: PackArchivePublicationProgress,
+    commit_certainty: CommitCertainty,
+    cause: PackArchivePublicationErrorCause<E>,
+}
+
+impl<E> PackArchivePublicationError<E> {
+    pub fn destination(&self) -> &Location {
+        &self.destination
+    }
+
+    pub const fn policy(&self) -> PublicationPolicy {
+        self.policy
+    }
+
+    pub fn failed_path(&self) -> Option<&str> {
+        self.failed_path.as_deref()
+    }
+
+    pub const fn phase(&self) -> OpenDalPublicationPhase {
+        self.phase
+    }
+
+    pub fn progress(&self) -> &PackArchivePublicationProgress {
+        &self.progress
+    }
+
+    pub const fn commit_certainty(&self) -> CommitCertainty {
+        self.commit_certainty
+    }
+
+    pub fn cause(&self) -> &PackArchivePublicationErrorCause<E> {
+        &self.cause
+    }
+}
+
+impl<E> fmt::Display for PackArchivePublicationError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Pack Archive publication failed for binding {} at exact-object operation path {:?} during {:?}: {}",
+            self.destination.binding(),
+            self.destination.operation_path(),
+            self.phase,
+            self.cause.label(),
+        )
+    }
+}
+
+impl<E> fmt::Debug for PackArchivePublicationError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PackArchivePublicationError")
+            .field("binding", self.destination.binding())
+            .field("role", &"exact object")
+            .field("operation_path", &self.destination.operation_path())
+            .field("policy", &self.policy)
+            .field("failed_path", &self.failed_path)
+            .field("phase", &self.phase)
+            .field("progress", &self.progress)
+            .field("commit_certainty", &self.commit_certainty)
+            .field("cause", &self.cause.label())
+            .finish()
+    }
+}
+
+impl<E: Error + 'static> Error for PackArchivePublicationError<E> {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match &self.cause {
+            PackArchivePublicationErrorCause::ResolveOperator(source) => Some(source),
+            PackArchivePublicationErrorCause::PreflightRead(source)
+            | PackArchivePublicationErrorCause::ConditionalCreate(source)
+            | PackArchivePublicationErrorCause::RaceVerification(source)
+            | PackArchivePublicationErrorCause::DirectWrite(source) => Some(source),
+            PackArchivePublicationErrorCause::UnsupportedPolicy { .. }
+            | PackArchivePublicationErrorCause::UnsupportedObjectSize { .. }
+            | PackArchivePublicationErrorCause::ByteConflict { .. } => None,
+        }
+    }
+}
+
+/// The typed cause of an OpenDAL Pack Archive publication failure.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum PackArchivePublicationErrorCause<E> {
+    ResolveOperator(E),
+    UnsupportedPolicy {
+        policy: PublicationPolicy,
+    },
+    UnsupportedObjectSize {
+        byte_length: u64,
+    },
+    PreflightRead(::opendal::Error),
+    ByteConflict {
+        expected_byte_length: u64,
+        observed_byte_length_at_least: u64,
+    },
+    ConditionalCreate(::opendal::Error),
+    RaceVerification(::opendal::Error),
+    DirectWrite(::opendal::Error),
+}
+
+impl<E> PackArchivePublicationErrorCause<E> {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::ResolveOperator(_) => "operator resolution failed",
+            Self::UnsupportedPolicy { .. } => "the publication policy is unsupported",
+            Self::UnsupportedObjectSize { .. } => "the archive exceeds the advertised object size",
+            Self::PreflightRead(_) => "a preflight read failed",
+            Self::ByteConflict { .. } => "destination bytes conflict",
+            Self::ConditionalCreate(_) => "a conditional create failed",
+            Self::RaceVerification(_) => "race verification failed",
+            Self::DirectWrite(_) => "a direct write failed",
+        }
+    }
 }
 
 /// A validated request to publish one Pack Extraction Plan beneath a prefix.
