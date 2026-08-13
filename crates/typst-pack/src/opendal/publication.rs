@@ -54,6 +54,53 @@ pub enum OpenDalPublicationPhase {
     Complete,
 }
 
+/// A validated request to publish one Pack Extraction Plan beneath a prefix.
+#[derive(Clone, Debug)]
+pub struct PackExtractionPublicationRequest {
+    destination: Location,
+    policy: PublicationPolicy,
+}
+
+impl PackExtractionPublicationRequest {
+    /// Validates a normalized prefix destination and retains the explicit policy.
+    pub fn new(
+        destination: Location,
+        policy: PublicationPolicy,
+    ) -> Result<Self, PackExtractionPublicationRequestError> {
+        destination.require_prefix().map_err(|source| {
+            PackExtractionPublicationRequestError::InvalidDestinationRole {
+                location: destination.clone(),
+                source,
+            }
+        })?;
+
+        Ok(Self {
+            destination,
+            policy,
+        })
+    }
+
+    pub fn destination(&self) -> &Location {
+        &self.destination
+    }
+
+    pub const fn policy(&self) -> PublicationPolicy {
+        self.policy
+    }
+}
+
+/// A reason a Pack Extraction publication request cannot be accepted.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum PackExtractionPublicationRequestError {
+    #[error("Pack Extraction destination {location} is not a prefix: {source}")]
+    InvalidDestinationRole {
+        location: Location,
+        #[source]
+        source: LocationRoleError,
+    },
+}
+
 /// A validated request to publish every artifact in one succeeded Compilation Result.
 #[derive(Clone, Debug)]
 pub struct CompilationArtifactPublicationRequest {
@@ -274,6 +321,310 @@ fn validate_artifact_key(key: &str) -> Result<(), CompilationArtifactKeyIssue> {
         }
         _ => unreachable!("decoded operation-path validation returned an unrelated error"),
     })
+}
+
+/// Publishes every entry in one Pack Extraction Plan beneath the request's prefix.
+///
+/// The caller-owned progress is cleared synchronously before the returned future
+/// can be polled or dropped. Replaying the same plan with `CreateOrVerify`
+/// accepts objects whose bytes already match.
+///
+/// ```no_run
+/// use typst_pack::PackExtractionPlan;
+/// use typst_pack::opendal::OperatorBindings;
+/// use typst_pack::opendal::publication::{
+///     PackExtractionPublicationProgress, PackExtractionPublicationRequest,
+///     PublicationPolicy, publish_pack_extraction_plan,
+/// };
+///
+/// async fn publish_and_replay_partial_attempt(
+///     bindings: &OperatorBindings,
+///     plan: &PackExtractionPlan,
+/// ) -> Result<(), Box<dyn std::error::Error>> {
+///     let request = PackExtractionPublicationRequest::new(
+///         "project:/extracted/".parse()?,
+///         PublicationPolicy::CreateOrVerify,
+///     )?;
+///     let mut progress = PackExtractionPublicationProgress::new();
+///
+///     if let Err(error) =
+///         publish_pack_extraction_plan(bindings, &request, plan, &mut progress).await
+///     {
+///         // The caller retains the exact completed prefix after a partial attempt.
+///         assert_eq!(error.progress(), &progress);
+///         publish_pack_extraction_plan(bindings, &request, plan, &mut progress).await?;
+///     }
+///
+///     Ok(())
+/// }
+/// ```
+pub fn publish_pack_extraction_plan<'a, R: OperatorResolver + ?Sized>(
+    resolver: &'a R,
+    request: &'a PackExtractionPublicationRequest,
+    plan: &'a crate::PackExtractionPlan,
+    progress: &'a mut PackExtractionPublicationProgress,
+) -> impl Future<
+    Output = Result<PackExtractionPublicationReceipt, PackExtractionPublicationError<R::Error>>,
+> + 'a {
+    progress.clear();
+    async move {
+        let mut destinations = Vec::with_capacity(plan.entries().len());
+        for entry in plan.entries() {
+            let destination = request
+                .destination()
+                .compose(entry.relative_path())
+                .map_err(|_| {
+                    pack_extraction_publication_error(
+                        request,
+                        Some(entry.relative_path().to_owned()),
+                        None,
+                        OpenDalPublicationPhase::DestinationValidation,
+                        progress,
+                        CommitCertainty::NotCommitted,
+                        PackExtractionPublicationErrorCause::InvalidDestinationPath {
+                            relative_path: entry.relative_path().to_owned(),
+                        },
+                    )
+                })?;
+            destinations.push(destination);
+        }
+
+        let keys = destinations
+            .iter()
+            .zip(plan.entries())
+            .map(|(destination, entry)| ExactKey::new(destination.operation_path(), entry.bytes()))
+            .collect::<Vec<_>>();
+        let execution = publish_exact_keys(
+            resolver,
+            request.destination().binding(),
+            request.policy(),
+            &keys,
+            |entry| {
+                let index = entry.index;
+                progress.push(PackExtractionPublicationEntry {
+                    relative_path: plan.entries()[index].relative_path().to_owned(),
+                    destination_path: destinations[index].operation_path().to_owned(),
+                    outcome: entry.outcome,
+                });
+            },
+        )
+        .await;
+
+        match execution {
+            Ok(_) => Ok(PackExtractionPublicationReceipt {
+                destination: request.destination().clone(),
+                policy: request.policy(),
+                pack_identity: *plan.pack_identity(),
+                progress: progress.clone(),
+            }),
+            Err(error) => {
+                let failed_index = error.failed_index;
+                let failed_relative_path =
+                    failed_index.map(|index| plan.entries()[index].relative_path().to_owned());
+                let failed_destination_path = error.failed_path;
+                let phase = error.phase;
+                let commit_certainty = error.commit_certainty;
+                let cause = match *error.cause {
+                    ExactKeyPublicationErrorCause::ResolveOperator(source) => {
+                        PackExtractionPublicationErrorCause::ResolveOperator(source)
+                    }
+                    ExactKeyPublicationErrorCause::UnsupportedPolicy => {
+                        PackExtractionPublicationErrorCause::UnsupportedPolicy {
+                            policy: request.policy(),
+                        }
+                    }
+                    ExactKeyPublicationErrorCause::UnsupportedObjectSize { byte_length } => {
+                        PackExtractionPublicationErrorCause::UnsupportedObjectSize { byte_length }
+                    }
+                    ExactKeyPublicationErrorCause::PreflightRead(source) => {
+                        PackExtractionPublicationErrorCause::PreflightRead(source)
+                    }
+                    ExactKeyPublicationErrorCause::ByteConflict {
+                        expected_byte_length,
+                        observed_byte_length_at_least,
+                    } => PackExtractionPublicationErrorCause::ByteConflict {
+                        expected_byte_length,
+                        observed_byte_length_at_least,
+                    },
+                    ExactKeyPublicationErrorCause::ConditionalCreate(source) => {
+                        PackExtractionPublicationErrorCause::ConditionalCreate(source)
+                    }
+                    ExactKeyPublicationErrorCause::RaceVerification(source) => {
+                        PackExtractionPublicationErrorCause::RaceVerification(source)
+                    }
+                    ExactKeyPublicationErrorCause::DirectWrite(source) => {
+                        PackExtractionPublicationErrorCause::DirectWrite(source)
+                    }
+                };
+                Err(pack_extraction_publication_error(
+                    request,
+                    failed_relative_path,
+                    failed_destination_path,
+                    phase,
+                    progress,
+                    commit_certainty,
+                    cause,
+                ))
+            }
+        }
+    }
+}
+
+/// A failure while publishing a Pack Extraction Plan through OpenDAL.
+///
+/// This error's own `Display` and `Debug` output omits native resolver and
+/// OpenDAL messages. Rendering its source chain may disclose backend context.
+pub struct PackExtractionPublicationError<E> {
+    destination: Location,
+    policy: PublicationPolicy,
+    failed_relative_path: Option<String>,
+    failed_destination_path: Option<String>,
+    phase: OpenDalPublicationPhase,
+    progress: PackExtractionPublicationProgress,
+    commit_certainty: CommitCertainty,
+    cause: PackExtractionPublicationErrorCause<E>,
+}
+
+impl<E> PackExtractionPublicationError<E> {
+    pub fn destination(&self) -> &Location {
+        &self.destination
+    }
+
+    pub const fn policy(&self) -> PublicationPolicy {
+        self.policy
+    }
+
+    pub fn failed_relative_path(&self) -> Option<&str> {
+        self.failed_relative_path.as_deref()
+    }
+
+    pub fn failed_destination_path(&self) -> Option<&str> {
+        self.failed_destination_path.as_deref()
+    }
+
+    pub const fn phase(&self) -> OpenDalPublicationPhase {
+        self.phase
+    }
+
+    pub fn progress(&self) -> &PackExtractionPublicationProgress {
+        &self.progress
+    }
+
+    pub const fn commit_certainty(&self) -> CommitCertainty {
+        self.commit_certainty
+    }
+
+    pub fn cause(&self) -> &PackExtractionPublicationErrorCause<E> {
+        &self.cause
+    }
+}
+
+impl<E> fmt::Display for PackExtractionPublicationError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Pack Extraction publication failed for binding {} beneath prefix operation path {:?} during {:?}: {}",
+            self.destination.binding(),
+            self.destination.operation_path(),
+            self.phase,
+            self.cause.label(),
+        )
+    }
+}
+
+impl<E> fmt::Debug for PackExtractionPublicationError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PackExtractionPublicationError")
+            .field("binding", self.destination.binding())
+            .field("role", &"prefix")
+            .field("operation_path", &self.destination.operation_path())
+            .field("policy", &self.policy)
+            .field("failed_relative_path", &self.failed_relative_path)
+            .field("failed_destination_path", &self.failed_destination_path)
+            .field("phase", &self.phase)
+            .field("progress", &self.progress)
+            .field("commit_certainty", &self.commit_certainty)
+            .field("cause", &self.cause.label())
+            .finish()
+    }
+}
+
+impl<E: Error + 'static> Error for PackExtractionPublicationError<E> {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match &self.cause {
+            PackExtractionPublicationErrorCause::ResolveOperator(source) => Some(source),
+            PackExtractionPublicationErrorCause::PreflightRead(source)
+            | PackExtractionPublicationErrorCause::ConditionalCreate(source)
+            | PackExtractionPublicationErrorCause::RaceVerification(source)
+            | PackExtractionPublicationErrorCause::DirectWrite(source) => Some(source),
+            PackExtractionPublicationErrorCause::InvalidDestinationPath { .. }
+            | PackExtractionPublicationErrorCause::UnsupportedPolicy { .. }
+            | PackExtractionPublicationErrorCause::UnsupportedObjectSize { .. }
+            | PackExtractionPublicationErrorCause::ByteConflict { .. } => None,
+        }
+    }
+}
+
+/// The typed cause of an OpenDAL Pack Extraction publication failure.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum PackExtractionPublicationErrorCause<E> {
+    InvalidDestinationPath {
+        relative_path: String,
+    },
+    ResolveOperator(E),
+    UnsupportedPolicy {
+        policy: PublicationPolicy,
+    },
+    UnsupportedObjectSize {
+        byte_length: u64,
+    },
+    PreflightRead(::opendal::Error),
+    ByteConflict {
+        expected_byte_length: u64,
+        observed_byte_length_at_least: u64,
+    },
+    ConditionalCreate(::opendal::Error),
+    RaceVerification(::opendal::Error),
+    DirectWrite(::opendal::Error),
+}
+
+impl<E> PackExtractionPublicationErrorCause<E> {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::InvalidDestinationPath { .. } => "a composed destination path was invalid",
+            Self::ResolveOperator(_) => "operator resolution failed",
+            Self::UnsupportedPolicy { .. } => "the publication policy is unsupported",
+            Self::UnsupportedObjectSize { .. } => "an entry exceeds the advertised object size",
+            Self::PreflightRead(_) => "a preflight read failed",
+            Self::ByteConflict { .. } => "destination bytes conflict",
+            Self::ConditionalCreate(_) => "a conditional create failed",
+            Self::RaceVerification(_) => "race verification failed",
+            Self::DirectWrite(_) => "a direct write failed",
+        }
+    }
+}
+
+fn pack_extraction_publication_error<E>(
+    request: &PackExtractionPublicationRequest,
+    failed_relative_path: Option<String>,
+    failed_destination_path: Option<String>,
+    phase: OpenDalPublicationPhase,
+    progress: &PackExtractionPublicationProgress,
+    commit_certainty: CommitCertainty,
+    cause: PackExtractionPublicationErrorCause<E>,
+) -> PackExtractionPublicationError<E> {
+    PackExtractionPublicationError {
+        destination: request.destination().clone(),
+        policy: request.policy(),
+        failed_relative_path,
+        failed_destination_path,
+        phase,
+        progress: progress.clone(),
+        commit_certainty,
+        cause,
+    }
 }
 
 /// Publishes every canonical artifact beneath the request's normalized prefix.
