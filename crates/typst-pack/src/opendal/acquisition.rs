@@ -3,6 +3,8 @@ use opendal::ErrorKind;
 
 use super::location::{Location, LocationRoleError, OperatorResolver};
 
+pub(crate) mod recursive;
+
 /// A failure while acquiring one exact object's bytes through OpenDAL.
 #[derive(Debug)]
 pub(crate) enum ExactObjectAcquisitionError<E> {
@@ -22,6 +24,13 @@ pub(crate) enum ExactObjectLimitError {
         observed_at_least: u64,
     },
     AccountingOverflow,
+}
+
+#[derive(Debug)]
+pub(crate) enum ExactPathAcquisitionError {
+    ObjectAbsent(opendal::Error),
+    Read(opendal::Error),
+    Limit(ExactObjectLimitError),
 }
 
 /// Acquires one exact object's bytes while retaining at most `ceiling + 1` bytes.
@@ -44,31 +53,59 @@ pub(crate) async fn acquire_exact_object<R: OperatorResolver + ?Sized>(
         return Err(ExactObjectAcquisitionError::ReadUnsupported);
     }
 
-    let probe_end = ceiling
+    acquire_exact_path(&operator, location.dispatch_path(), ceiling, ceiling)
+        .await
+        .map_err(|error| match error {
+            ExactPathAcquisitionError::ObjectAbsent(source) => {
+                ExactObjectAcquisitionError::ObjectAbsent(source)
+            }
+            ExactPathAcquisitionError::Read(source) => ExactObjectAcquisitionError::Read(source),
+            ExactPathAcquisitionError::Limit(source) => ExactObjectAcquisitionError::Limit(source),
+        })
+}
+
+pub(crate) async fn acquire_exact_path(
+    operator: &opendal::Operator,
+    operation_path: &str,
+    retention_ceiling: u64,
+    observation_ceiling: u64,
+) -> Result<Vec<u8>, ExactPathAcquisitionError> {
+    debug_assert!(retention_ceiling <= observation_ceiling);
+    let probe_end = retention_ceiling
         .checked_add(1)
         .ok_or(ExactObjectLimitError::AccountingOverflow)
-        .map_err(ExactObjectAcquisitionError::Limit)?;
+        .map_err(ExactPathAcquisitionError::Limit)?;
+    let observation_end = observation_ceiling
+        .checked_add(1)
+        .ok_or(ExactObjectLimitError::AccountingOverflow)
+        .map_err(ExactPathAcquisitionError::Limit)?;
     let reader = operator
-        .reader(location.dispatch_path())
+        .reader(operation_path)
         .await
-        .map_err(classify_read_error)?;
-    let mut stream = reader.into_stream(..).await.map_err(classify_read_error)?;
+        .map_err(classify_path_read_error)?;
+    let mut stream = reader
+        .into_stream(..)
+        .await
+        .map_err(classify_path_read_error)?;
     let mut bytes = Vec::new();
     let mut observed = 0u64;
 
     while let Some(buffer) = stream.next().await {
-        let buffer = buffer.map_err(classify_read_error)?;
+        let buffer = buffer.map_err(classify_path_read_error)?;
         let buffer_len = u64::try_from(buffer.len()).map_err(|_| {
-            ExactObjectAcquisitionError::Limit(ExactObjectLimitError::AccountingOverflow)
+            ExactPathAcquisitionError::Limit(ExactObjectLimitError::AccountingOverflow)
+        })?;
+        let retained_so_far = u64::try_from(bytes.len()).map_err(|_| {
+            ExactPathAcquisitionError::Limit(ExactObjectLimitError::AccountingOverflow)
         })?;
         let retained = probe_end
-            .checked_sub(observed)
-            .ok_or(ExactObjectAcquisitionError::Limit(
+            .checked_sub(retained_so_far)
+            .ok_or(ExactPathAcquisitionError::Limit(
                 ExactObjectLimitError::AccountingOverflow,
             ))?
             .min(buffer_len);
         let retained = usize::try_from(retained).map_err(|_| {
-            ExactObjectAcquisitionError::Limit(ExactObjectLimitError::AccountingOverflow)
+            ExactPathAcquisitionError::Limit(ExactObjectLimitError::AccountingOverflow)
         })?;
 
         let mut remaining = retained;
@@ -80,31 +117,44 @@ pub(crate) async fn acquire_exact_object<R: OperatorResolver + ?Sized>(
                 break;
             }
         }
+        let observed_here = observation_end
+            .checked_sub(observed)
+            .ok_or(ExactPathAcquisitionError::Limit(
+                ExactObjectLimitError::AccountingOverflow,
+            ))?
+            .min(buffer_len);
         observed = observed
-            .checked_add(u64::try_from(retained).map_err(|_| {
-                ExactObjectAcquisitionError::Limit(ExactObjectLimitError::AccountingOverflow)
-            })?)
-            .ok_or(ExactObjectAcquisitionError::Limit(
+            .checked_add(observed_here)
+            .ok_or(ExactPathAcquisitionError::Limit(
                 ExactObjectLimitError::AccountingOverflow,
             ))?;
-        if observed > ceiling {
-            return Err(ExactObjectAcquisitionError::Limit(
+        if observed > observation_ceiling {
+            return Err(ExactPathAcquisitionError::Limit(
                 ExactObjectLimitError::Exceeded {
-                    ceiling,
-                    observed_at_least: probe_end,
+                    ceiling: retention_ceiling,
+                    observed_at_least: observation_end,
                 },
             ));
         }
     }
 
-    Ok(bytes)
+    if observed > retention_ceiling {
+        Err(ExactPathAcquisitionError::Limit(
+            ExactObjectLimitError::Exceeded {
+                ceiling: retention_ceiling,
+                observed_at_least: observed,
+            },
+        ))
+    } else {
+        Ok(bytes)
+    }
 }
 
-fn classify_read_error<E>(error: opendal::Error) -> ExactObjectAcquisitionError<E> {
+fn classify_path_read_error(error: opendal::Error) -> ExactPathAcquisitionError {
     if error.kind() == ErrorKind::NotFound {
-        ExactObjectAcquisitionError::ObjectAbsent(error)
+        ExactPathAcquisitionError::ObjectAbsent(error)
     } else {
-        ExactObjectAcquisitionError::Read(error)
+        ExactPathAcquisitionError::Read(error)
     }
 }
 

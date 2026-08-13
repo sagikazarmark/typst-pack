@@ -103,9 +103,12 @@ pub(crate) fn is_font_container_extension(extension: &str) -> bool {
 /// it is all that is asked. It selects the keys
 /// [`is_font_container_extension`] selects paths for, plus a key that is
 /// nothing but a suffix, such as `.ttf`.
-#[allow(
-    dead_code,
-    reason = "no shipped font source addresses containers by key yet; the rule is derived here so the first one cannot re-spell the suffix set"
+#[cfg_attr(
+    not(feature = "opendal"),
+    allow(
+        dead_code,
+        reason = "no enabled source addresses Font Containers by key"
+    )
 )]
 pub(crate) fn is_font_container_key(key: &str) -> bool {
     key.rsplit_once('.')

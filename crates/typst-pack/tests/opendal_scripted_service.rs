@@ -406,6 +406,41 @@ fn a_listed_object_can_disappear_before_read() {
 }
 
 #[test]
+fn a_listed_object_can_be_replaced_before_read() {
+    let replacement =
+        ReadScript::new("race/changing.typ", 1, [ReadStep::chunk(b"replacement")]).unwrap();
+    let list = ListScript::new(
+        "race/",
+        1,
+        [
+            ListStep::page([ListEntry::file("race/changing.typ")]),
+            ListStep::replace_read(replacement),
+        ],
+    )
+    .unwrap();
+    let original = ReadScript::new("race/changing.typ", 1, [ReadStep::chunk(b"original")]).unwrap();
+    let service = ScriptedService::new(Capabilities::all(), [list], [original], 8);
+    let operator = service.operator();
+    let mut open = pin!(operator.lister_with("race/").recursive(true).into_future());
+    let mut lister = expect_ready(open.as_mut()).unwrap();
+    let mut entry = pin!(lister.next());
+    assert_eq!(
+        expect_ready(entry.as_mut()).unwrap().unwrap().path(),
+        "race/changing.typ"
+    );
+    drop(entry);
+    let mut completed = pin!(lister.next());
+    assert!(expect_ready(completed.as_mut()).is_none());
+    drop(completed);
+
+    let mut read = pin!(operator.read("race/changing.typ"));
+    assert_eq!(
+        expect_ready(read.as_mut()).unwrap().to_vec(),
+        b"replacement"
+    );
+}
+
+#[test]
 fn dropping_a_pending_read_records_exact_cancellation_state() {
     let pending = PendingPoint::new();
     let script = ReadScript::new(

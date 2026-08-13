@@ -61,43 +61,19 @@ impl PackageTree {
     }
 
     fn from_shared_entries(entries: Vec<(String, SharedBytes)>) -> Result<Self, PackageTreeError> {
-        let mut canonical_entries = Vec::new();
-        let mut issues = Vec::new();
-        for (path, data) in entries {
-            match Pack::canonical_package_path(&path) {
-                Ok(canonical) => canonical_entries.push((canonical, data)),
-                Err(message) => issues.push(PackageTreeIssue::InvalidPath { path, message }),
-            }
-        }
-
-        let mut paths = BTreeSet::new();
-        let mut duplicate_paths = BTreeSet::new();
-        for (path, _) in &canonical_entries {
-            if !paths.insert(path.clone()) {
-                duplicate_paths.insert(path.clone());
-            }
-        }
-        issues.extend(
-            duplicate_paths
-                .into_iter()
-                .map(|path| PackageTreeIssue::DuplicatePath { path }),
-        );
-        for ancestor in &paths {
-            let prefix = format!("{ancestor}/");
-            for descendant in paths
-                .range(prefix.clone()..)
-                .take_while(|descendant| descendant.starts_with(&prefix))
-            {
-                issues.push(PackageTreeIssue::PathTreeConflict {
-                    ancestor: ancestor.clone(),
-                    descendant: descendant.clone(),
-                });
-            }
-        }
-        issues.sort_by_key(PackageTreeIssue::sort_key);
-        if !issues.is_empty() {
-            return Err(PackageTreeError { issues });
-        }
+        let canonical_paths =
+            preflight_package_tree_paths(entries.iter().map(|(path, _)| path), |_| true).map_err(
+                |error| match error {
+                    PackageTreePathPreflightError::Invalid(source) => source,
+                    PackageTreePathPreflightError::RetentionLimit => {
+                        unreachable!("unlimited Package Tree construction preflight cannot exhaust")
+                    }
+                },
+            )?;
+        let canonical_entries = canonical_paths
+            .into_iter()
+            .zip(entries.into_iter().map(|(_, data)| data))
+            .collect::<Vec<_>>();
 
         let files = canonical_entries.into_iter().collect::<BTreeMap<_, _>>();
         let (identity, file_count, byte_length) =
@@ -201,14 +177,14 @@ pub enum PackageTreeIssue {
 }
 
 impl PackageTreeIssue {
-    fn sort_key(&self) -> (String, u8, String) {
+    fn sort_key(&self) -> (&str, u8, &str) {
         match self {
-            Self::InvalidPath { path, .. } => (path.clone(), 0, String::new()),
-            Self::DuplicatePath { path } => (path.clone(), 1, String::new()),
+            Self::InvalidPath { path, .. } => (path, 0, ""),
+            Self::DuplicatePath { path } => (path, 1, ""),
             Self::PathTreeConflict {
                 ancestor,
                 descendant,
-            } => (ancestor.clone(), 2, descendant.clone()),
+            } => (ancestor, 2, descendant),
         }
     }
 }
@@ -224,6 +200,163 @@ impl PackageTreeError {
     /// Every independently detectable issue in canonical path and kind order.
     pub fn issues(&self) -> &[PackageTreeIssue] {
         &self.issues
+    }
+}
+
+pub(crate) enum PackageTreePathPreflightError {
+    Invalid(PackageTreeError),
+    RetentionLimit,
+}
+
+impl PackageTreePathPreflightError {
+    #[cfg(test)]
+    fn issues(&self) -> &[PackageTreeIssue] {
+        match self {
+            Self::Invalid(source) => source.issues(),
+            Self::RetentionLimit => &[],
+        }
+    }
+
+    #[cfg(test)]
+    fn is_retention_limit(&self) -> bool {
+        matches!(self, Self::RetentionLimit)
+    }
+}
+
+/// Validates Package Tree paths before payloads are acquired.
+///
+/// `retain` is called with the byte lengths of every path copy that would be
+/// kept by the plan or its error evidence. Returning `false` stops before those
+/// copies are retained.
+pub(crate) fn preflight_package_tree_paths(
+    paths: impl IntoIterator<Item = impl AsRef<str>>,
+    mut retain: impl FnMut(&[usize]) -> bool,
+) -> Result<Vec<String>, PackageTreePathPreflightError> {
+    let mut canonical_paths = Vec::new();
+    let mut issues = Vec::new();
+    for path in paths {
+        let path = path.as_ref();
+        match Pack::canonical_package_path(path) {
+            Ok(canonical) => {
+                if !retain(&[canonical.len()]) {
+                    return Err(PackageTreePathPreflightError::RetentionLimit);
+                }
+                canonical_paths.push(canonical);
+            }
+            Err(message) => {
+                if !retain(&[path.len()]) {
+                    return Err(PackageTreePathPreflightError::RetentionLimit);
+                }
+                issues.push(PackageTreeIssue::InvalidPath {
+                    path: path.to_owned(),
+                    message,
+                });
+            }
+        }
+    }
+
+    let mut ordered = canonical_paths
+        .iter()
+        .map(String::as_str)
+        .collect::<Vec<_>>();
+    ordered.sort_unstable();
+    let mut last_duplicate = None;
+    for path in ordered
+        .windows(2)
+        .filter(|pair| pair[0] == pair[1])
+        .map(|pair| pair[0])
+    {
+        if last_duplicate == Some(path) {
+            continue;
+        }
+        last_duplicate = Some(path);
+        if !retain(&[path.len()]) {
+            return Err(PackageTreePathPreflightError::RetentionLimit);
+        }
+        issues.push(PackageTreeIssue::DuplicatePath {
+            path: path.to_owned(),
+        });
+    }
+
+    ordered.dedup();
+    for (index, ancestor) in ordered.iter().enumerate() {
+        if !retain(&[ancestor.len() + 1]) {
+            return Err(PackageTreePathPreflightError::RetentionLimit);
+        }
+        let prefix = format!("{ancestor}/");
+        for descendant in ordered[index + 1..]
+            .iter()
+            .take_while(|descendant| descendant.starts_with(&prefix))
+        {
+            if !retain(&[ancestor.len(), descendant.len()]) {
+                return Err(PackageTreePathPreflightError::RetentionLimit);
+            }
+            issues.push(PackageTreeIssue::PathTreeConflict {
+                ancestor: (*ancestor).to_owned(),
+                descendant: (*descendant).to_owned(),
+            });
+        }
+    }
+
+    if issues.is_empty() {
+        Ok(canonical_paths)
+    } else {
+        issues.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
+        Err(PackageTreePathPreflightError::Invalid(PackageTreeError {
+            issues,
+        }))
+    }
+}
+
+#[cfg(test)]
+mod path_preflight_tests {
+    use super::{PackageTreeIssue, preflight_package_tree_paths};
+
+    #[test]
+    fn path_preflight_is_the_authority_for_canonical_package_tree_shape() {
+        let paths = [
+            "dir/second.typ",
+            "same.typ",
+            "../escape.typ",
+            "./same.typ",
+            "dir",
+        ];
+        let error = preflight_package_tree_paths(paths, |_| true).unwrap_err();
+
+        assert_eq!(error.issues().len(), 3);
+        assert!(matches!(
+            &error.issues()[0],
+            PackageTreeIssue::InvalidPath { path, .. } if path == "../escape.typ"
+        ));
+        assert_eq!(
+            &error.issues()[1..],
+            &[
+                PackageTreeIssue::PathTreeConflict {
+                    ancestor: "dir".to_owned(),
+                    descendant: "dir/second.typ".to_owned(),
+                },
+                PackageTreeIssue::DuplicatePath {
+                    path: "same.typ".to_owned(),
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn path_preflight_stops_before_retaining_unbudgeted_evidence() {
+        let mut retained = 0usize;
+        let error = preflight_package_tree_paths(["dir", "dir/file.typ"], |lengths| {
+            let requested = lengths.iter().sum::<usize>();
+            if retained + requested > 20 {
+                return false;
+            }
+            retained += requested;
+            true
+        })
+        .unwrap_err();
+
+        assert!(error.is_retention_limit());
+        assert_eq!(retained, 19);
     }
 }
 

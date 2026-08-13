@@ -1,0 +1,1457 @@
+use std::future::Future;
+
+use futures_util::StreamExt;
+use opendal::ErrorKind;
+
+use super::super::acquisition::{
+    ExactObjectLimitError, ExactPathAcquisitionError, acquire_exact_path,
+};
+use super::super::location::{Location, LocationRoleError, OperatorResolver};
+use crate::acquisition_layout;
+use crate::package_catalog::{
+    PackageTreeError, PackageTreePathPreflightError, preflight_package_tree_paths,
+};
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RecursiveAcquisitionResource {
+    ListedEntries,
+    ListedPathBytes,
+    TotalListedPathBytes,
+    SelectedObjects,
+    ObjectBytes,
+    TotalBytes,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct RecursiveAcquisitionLimits {
+    pub(crate) listed_entries: u64,
+    pub(crate) listed_path_bytes: u64,
+    pub(crate) total_listed_path_bytes: u64,
+    pub(crate) selected_objects: u64,
+    pub(crate) object_bytes: u64,
+    pub(crate) total_bytes: u64,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum RecursiveAcquisitionSelection {
+    AllFiles,
+    FontContainers,
+    PackageTree,
+}
+
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
+pub(crate) enum RecursiveSurveyIssueKind {
+    ListedPathOutsidePrefix,
+    PrefixMarkerWhereFileRequired,
+    EmptyRelativeOperationPath,
+    InvalidRelativeOperationPath,
+    DuplicateListedObject,
+    UnsupportedEntryKind,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct RecursiveSurveyIssue {
+    pub(crate) operation_path: String,
+    pub(crate) kind: RecursiveSurveyIssueKind,
+}
+
+#[derive(Debug)]
+pub(crate) struct RecursiveSurveyedObject {
+    pub(crate) operation_path: String,
+    pub(crate) relative_path: String,
+    pub(crate) bytes: Vec<u8>,
+}
+
+#[derive(Debug)]
+pub(crate) enum RecursiveAcquisitionError<E> {
+    InvalidLocationRole(LocationRoleError),
+    ResolveOperator(E),
+    UnsupportedCapabilities {
+        list: bool,
+        list_with_recursive: bool,
+        read: bool,
+    },
+    List(opendal::Error),
+    Read {
+        operation_path: String,
+        source: opendal::Error,
+    },
+    ListedObjectAbsent {
+        operation_path: String,
+        source: opendal::Error,
+    },
+    Structural(Vec<RecursiveSurveyIssue>),
+    InvalidPackageTree(PackageTreeError),
+    Limit {
+        resource: RecursiveAcquisitionResource,
+        ceiling: u64,
+        observed_at_least: u64,
+    },
+    AccountingOverflow {
+        resource: RecursiveAcquisitionResource,
+    },
+}
+
+/// The role-local hooks driven by composite compilation acquisition.
+///
+/// Implementations own canonical targets, in-flight reservations, exact raw
+/// results, and typed role-local failures. Cross-role scheduling, failure
+/// selection, cancellation, and final conversion remain with the composite
+/// caller rather than this protocol.
+pub(crate) trait AcquisitionRole {
+    /// One canonically ordered acquisition target and its diagnostic context.
+    type Target: Clone;
+    /// Role-total capacity held while one target is in flight.
+    type Reservation;
+    /// Exact owned bytes and operational metadata produced for one target.
+    type RawResult;
+    /// A typed failure attributed to one target within this role.
+    type Failure;
+    type Acquire<'a>: Future<Output = Result<Self::RawResult, Self::Failure>> + 'a
+    where
+        Self: 'a;
+
+    fn targets(&self) -> &[Self::Target];
+    fn reserve(&mut self, target: &Self::Target) -> Result<Self::Reservation, Self::Failure>;
+    fn acquire<'a>(
+        &'a self,
+        target: &'a Self::Target,
+        reservation: Self::Reservation,
+    ) -> Self::Acquire<'a>;
+}
+
+pub(crate) async fn acquire_recursive_prefix<R: OperatorResolver + ?Sized>(
+    resolver: &R,
+    location: &Location,
+    selection: RecursiveAcquisitionSelection,
+    limits: RecursiveAcquisitionLimits,
+) -> Result<Vec<RecursiveSurveyedObject>, RecursiveAcquisitionError<R::Error>> {
+    location
+        .require_prefix()
+        .map_err(RecursiveAcquisitionError::InvalidLocationRole)?;
+    let operator = resolver
+        .resolve(location.binding())
+        .map_err(RecursiveAcquisitionError::ResolveOperator)?;
+    let capabilities = operator.info().capability();
+    if !(capabilities.list && capabilities.list_with_recursive && capabilities.read) {
+        return Err(RecursiveAcquisitionError::UnsupportedCapabilities {
+            list: capabilities.list,
+            list_with_recursive: capabilities.list_with_recursive,
+            read: capabilities.read,
+        });
+    }
+
+    let mut lister = operator
+        .lister_with(location.dispatch_path())
+        .recursive(true)
+        .await
+        .map_err(RecursiveAcquisitionError::List)?;
+    let mut accounting = SurveyAccounting::new(limits);
+    let mut selected = Vec::new();
+    let mut issues = Vec::new();
+
+    while let Some(entry) = lister.next().await {
+        let entry = entry.map_err(RecursiveAcquisitionError::List)?;
+        let operation_path = entry.path();
+        let retain_entry_evidence = accounting.observe_entry(operation_path);
+
+        let relative = match location.relative_file_path(operation_path) {
+            Ok(relative) => relative,
+            Err(super::super::location::PrefixConfinementError::OutsidePrefix) => {
+                retain_issue(
+                    &mut accounting,
+                    &mut issues,
+                    operation_path,
+                    RecursiveSurveyIssueKind::ListedPathOutsidePrefix,
+                    retain_entry_evidence,
+                );
+                continue;
+            }
+            Err(super::super::location::PrefixConfinementError::PrefixMarker) => {
+                let mode = entry.metadata().mode();
+                if mode.is_file() {
+                    retain_issue(
+                        &mut accounting,
+                        &mut issues,
+                        operation_path,
+                        RecursiveSurveyIssueKind::PrefixMarkerWhereFileRequired,
+                        retain_entry_evidence,
+                    );
+                } else if !mode.is_dir() {
+                    retain_issue(
+                        &mut accounting,
+                        &mut issues,
+                        operation_path,
+                        RecursiveSurveyIssueKind::UnsupportedEntryKind,
+                        retain_entry_evidence,
+                    );
+                }
+                continue;
+            }
+            Err(super::super::location::PrefixConfinementError::EmptyPath) => {
+                retain_issue(
+                    &mut accounting,
+                    &mut issues,
+                    operation_path,
+                    RecursiveSurveyIssueKind::EmptyRelativeOperationPath,
+                    retain_entry_evidence,
+                );
+                continue;
+            }
+        };
+
+        if selection != RecursiveAcquisitionSelection::PackageTree
+            && Location::from_operation_path(location.binding().clone(), operation_path).is_err()
+        {
+            retain_issue(
+                &mut accounting,
+                &mut issues,
+                operation_path,
+                RecursiveSurveyIssueKind::InvalidRelativeOperationPath,
+                retain_entry_evidence,
+            );
+            continue;
+        }
+
+        let mode = entry.metadata().mode();
+        if mode.is_dir() {
+            continue;
+        }
+        if !mode.is_file() {
+            retain_issue(
+                &mut accounting,
+                &mut issues,
+                operation_path,
+                RecursiveSurveyIssueKind::UnsupportedEntryKind,
+                retain_entry_evidence,
+            );
+            continue;
+        }
+        if operation_path.ends_with('/') || relative.is_empty() {
+            retain_issue(
+                &mut accounting,
+                &mut issues,
+                operation_path,
+                RecursiveSurveyIssueKind::PrefixMarkerWhereFileRequired,
+                retain_entry_evidence,
+            );
+            continue;
+        }
+        if !selection.selects(relative) {
+            continue;
+        }
+
+        accounting.observe_selected();
+        if retain_entry_evidence
+            && accounting.can_retain_evidence()
+            && accounting.retain_paths(&[operation_path.len(), relative.len()])
+        {
+            selected.push(SurveyedPath {
+                operation_path: operation_path.to_owned(),
+                relative_path: relative.to_owned(),
+            });
+        }
+    }
+
+    selected.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    if selection != RecursiveAcquisitionSelection::PackageTree {
+        let mut last_duplicate = None;
+        for duplicate in selected
+            .windows(2)
+            .filter(|pair| pair[0].operation_path == pair[1].operation_path)
+        {
+            if last_duplicate == Some(duplicate[0].operation_path.as_str()) {
+                continue;
+            }
+            last_duplicate = Some(duplicate[0].operation_path.as_str());
+            retain_issue(
+                &mut accounting,
+                &mut issues,
+                &duplicate[0].operation_path,
+                RecursiveSurveyIssueKind::DuplicateListedObject,
+                true,
+            );
+        }
+    }
+    if let Some(error) = accounting.survey_error() {
+        return Err(error);
+    }
+    issues.sort_by(|left, right| {
+        left.operation_path
+            .cmp(&right.operation_path)
+            .then_with(|| issue_rank(left.kind).cmp(&issue_rank(right.kind)))
+    });
+    issues.dedup();
+    if !issues.is_empty() {
+        return Err(RecursiveAcquisitionError::Structural(issues));
+    }
+    if selection == RecursiveAcquisitionSelection::PackageTree {
+        let preflight = preflight_package_tree_paths(
+            selected.iter().map(|object| object.relative_path.as_str()),
+            |lengths| accounting.retain_paths(lengths),
+        );
+        match preflight {
+            Ok(canonical_paths) => {
+                for (path, canonical) in selected.iter_mut().zip(canonical_paths) {
+                    path.relative_path = canonical;
+                }
+                selected.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+            }
+            Err(PackageTreePathPreflightError::Invalid(source)) => {
+                return Err(RecursiveAcquisitionError::InvalidPackageTree(source));
+            }
+            Err(PackageTreePathPreflightError::RetentionLimit) => {
+                return Err(accounting
+                    .survey_error()
+                    .expect("path preflight retention failure records a survey limit"));
+            }
+        }
+    }
+
+    let mut retained_bytes = 0u64;
+    let mut objects = Vec::with_capacity(selected.len());
+    for path in selected {
+        let remaining = limits.total_bytes.checked_sub(retained_bytes).ok_or(
+            RecursiveAcquisitionError::AccountingOverflow {
+                resource: RecursiveAcquisitionResource::TotalBytes,
+            },
+        )?;
+        let ceiling = limits.object_bytes.min(remaining);
+        let bytes = acquire_exact_path(
+            &operator,
+            &path.operation_path,
+            ceiling,
+            limits.object_bytes,
+        )
+        .await
+        .map_err(|error| map_read_error(error, &path.operation_path, limits, remaining))?;
+        let length = u64::try_from(bytes.len()).map_err(|_| {
+            RecursiveAcquisitionError::AccountingOverflow {
+                resource: RecursiveAcquisitionResource::TotalBytes,
+            }
+        })?;
+        retained_bytes = retained_bytes.checked_add(length).ok_or(
+            RecursiveAcquisitionError::AccountingOverflow {
+                resource: RecursiveAcquisitionResource::TotalBytes,
+            },
+        )?;
+        objects.push(RecursiveSurveyedObject {
+            operation_path: path.operation_path,
+            relative_path: path.relative_path,
+            bytes,
+        });
+    }
+
+    Ok(objects)
+}
+
+#[derive(Debug)]
+struct SurveyedPath {
+    operation_path: String,
+    relative_path: String,
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Violation {
+    Exceeded {
+        ceiling: u64,
+        observed_at_least: u64,
+    },
+    Overflow,
+}
+
+struct SurveyAccounting {
+    limits: RecursiveAcquisitionLimits,
+    listed_entries: u64,
+    retained_path_bytes: u64,
+    selected_objects: u64,
+    violations: [Option<Violation>; 4],
+}
+
+impl SurveyAccounting {
+    fn new(limits: RecursiveAcquisitionLimits) -> Self {
+        Self {
+            limits,
+            listed_entries: 0,
+            retained_path_bytes: 0,
+            selected_objects: 0,
+            violations: [None; 4],
+        }
+    }
+
+    fn observe_entry(&mut self, operation_path: &str) -> bool {
+        let mut retain_entry_evidence = true;
+        self.listed_entries = match self.listed_entries.checked_add(1) {
+            Some(observed) => {
+                if observed > self.limits.listed_entries {
+                    self.record_exceeded(0, self.limits.listed_entries, observed);
+                    retain_entry_evidence = false;
+                }
+                observed
+            }
+            None => {
+                self.violations[0] = Some(Violation::Overflow);
+                retain_entry_evidence = false;
+                u64::MAX
+            }
+        };
+        match u64::try_from(operation_path.len()) {
+            Ok(observed) if observed > self.limits.listed_path_bytes => {
+                self.record_exceeded(
+                    1,
+                    self.limits.listed_path_bytes,
+                    self.limits.listed_path_bytes.saturating_add(1),
+                );
+                retain_entry_evidence = false;
+            }
+            Ok(_) => {}
+            Err(_) => {
+                self.violations[1] = Some(Violation::Overflow);
+                retain_entry_evidence = false;
+            }
+        }
+        retain_entry_evidence
+    }
+
+    fn observe_selected(&mut self) {
+        self.selected_objects = match self.selected_objects.checked_add(1) {
+            Some(observed) => {
+                if observed > self.limits.selected_objects {
+                    self.record_exceeded(3, self.limits.selected_objects, observed);
+                }
+                observed
+            }
+            None => {
+                self.violations[3] = Some(Violation::Overflow);
+                u64::MAX
+            }
+        };
+    }
+
+    fn retain_paths(&mut self, lengths: &[usize]) -> bool {
+        if self.violations[2].is_some() {
+            return false;
+        }
+        let mut observed = self.retained_path_bytes;
+        for length in lengths {
+            let Ok(length) = u64::try_from(*length) else {
+                self.violations[2] = Some(Violation::Overflow);
+                return false;
+            };
+            let Some(next) = observed.checked_add(length) else {
+                self.violations[2] = Some(Violation::Overflow);
+                return false;
+            };
+            observed = next;
+        }
+        if observed > self.limits.total_listed_path_bytes {
+            self.record_exceeded(
+                2,
+                self.limits.total_listed_path_bytes,
+                self.limits.total_listed_path_bytes.saturating_add(1),
+            );
+            return false;
+        }
+        self.retained_path_bytes = observed;
+        true
+    }
+
+    fn can_retain_evidence(&self) -> bool {
+        self.violations.iter().all(Option::is_none)
+    }
+
+    fn record_exceeded(&mut self, index: usize, ceiling: u64, observed_at_least: u64) {
+        if self.violations[index].is_none() {
+            self.violations[index] = Some(Violation::Exceeded {
+                ceiling,
+                observed_at_least,
+            });
+        }
+    }
+
+    fn survey_error<E>(&self) -> Option<RecursiveAcquisitionError<E>> {
+        let resources = [
+            RecursiveAcquisitionResource::ListedEntries,
+            RecursiveAcquisitionResource::ListedPathBytes,
+            RecursiveAcquisitionResource::TotalListedPathBytes,
+            RecursiveAcquisitionResource::SelectedObjects,
+        ];
+        self.violations
+            .iter()
+            .copied()
+            .zip(resources)
+            .find_map(|(violation, resource)| match violation? {
+                Violation::Exceeded {
+                    ceiling,
+                    observed_at_least,
+                } => Some(RecursiveAcquisitionError::Limit {
+                    resource,
+                    ceiling,
+                    observed_at_least,
+                }),
+                Violation::Overflow => {
+                    Some(RecursiveAcquisitionError::AccountingOverflow { resource })
+                }
+            })
+    }
+}
+
+impl RecursiveAcquisitionSelection {
+    fn selects(self, relative_path: &str) -> bool {
+        match self {
+            Self::AllFiles | Self::PackageTree => true,
+            Self::FontContainers => acquisition_layout::is_font_container_key(relative_path),
+        }
+    }
+}
+
+fn retain_issue(
+    accounting: &mut SurveyAccounting,
+    issues: &mut Vec<RecursiveSurveyIssue>,
+    operation_path: &str,
+    kind: RecursiveSurveyIssueKind,
+    retain_entry_evidence: bool,
+) {
+    if !retain_entry_evidence || !accounting.can_retain_evidence() {
+        return;
+    }
+    if accounting.retain_paths(&[operation_path.len()]) {
+        issues.push(RecursiveSurveyIssue {
+            operation_path: operation_path.to_owned(),
+            kind,
+        });
+    }
+}
+
+fn issue_rank(kind: RecursiveSurveyIssueKind) -> u8 {
+    match kind {
+        RecursiveSurveyIssueKind::ListedPathOutsidePrefix => 0,
+        RecursiveSurveyIssueKind::PrefixMarkerWhereFileRequired => 1,
+        RecursiveSurveyIssueKind::EmptyRelativeOperationPath => 2,
+        RecursiveSurveyIssueKind::InvalidRelativeOperationPath => 3,
+        RecursiveSurveyIssueKind::DuplicateListedObject => 4,
+        RecursiveSurveyIssueKind::UnsupportedEntryKind => 5,
+    }
+}
+
+fn map_read_error<E>(
+    error: ExactPathAcquisitionError,
+    operation_path: &str,
+    limits: RecursiveAcquisitionLimits,
+    remaining: u64,
+) -> RecursiveAcquisitionError<E> {
+    match error {
+        ExactPathAcquisitionError::ObjectAbsent(source) => {
+            debug_assert_eq!(source.kind(), ErrorKind::NotFound);
+            RecursiveAcquisitionError::ListedObjectAbsent {
+                operation_path: operation_path.to_owned(),
+                source,
+            }
+        }
+        ExactPathAcquisitionError::Read(source) => RecursiveAcquisitionError::Read {
+            operation_path: operation_path.to_owned(),
+            source,
+        },
+        ExactPathAcquisitionError::Limit(ExactObjectLimitError::AccountingOverflow) => {
+            RecursiveAcquisitionError::AccountingOverflow {
+                resource: if limits.object_bytes <= remaining {
+                    RecursiveAcquisitionResource::ObjectBytes
+                } else {
+                    RecursiveAcquisitionResource::TotalBytes
+                },
+            }
+        }
+        ExactPathAcquisitionError::Limit(ExactObjectLimitError::Exceeded {
+            observed_at_least,
+            ..
+        }) => {
+            let (resource, ceiling) = if observed_at_least > limits.object_bytes {
+                (
+                    RecursiveAcquisitionResource::ObjectBytes,
+                    limits.object_bytes,
+                )
+            } else {
+                (RecursiveAcquisitionResource::TotalBytes, limits.total_bytes)
+            };
+            RecursiveAcquisitionError::Limit {
+                resource,
+                ceiling,
+                observed_at_least: ceiling.saturating_add(1),
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::convert::Infallible;
+    use std::future::Future;
+    use std::pin::pin;
+    use std::task::{Context, Poll, Waker};
+
+    use crate::opendal::scripted_service::{
+        Capabilities, DroppedOperation, ListEntry, ListScript, ListStep, OperationLogEntry,
+        PendingPoint, ReadScript, ReadStep, ScriptedService,
+    };
+    use crate::opendal::{Location, OperatorBinding, OperatorResolver};
+
+    use super::*;
+
+    #[test]
+    fn one_role_can_be_driven_through_target_reservation_result_and_failure_hooks() {
+        let mut role = ExampleRole {
+            targets: vec!["object"],
+            remaining: 7,
+        };
+        let target = role.targets()[0];
+        let reservation = role.reserve(&target).unwrap();
+        let mut acquisition = pin!(role.acquire(&target, reservation));
+
+        assert_eq!(expect_ready(acquisition.as_mut()).unwrap(), ("object", 7));
+    }
+
+    #[test]
+    fn drains_root_survey_before_reading_and_returns_exact_bytes_in_path_order() {
+        let list = ListScript::new(
+            "/",
+            3,
+            [ListStep::page([
+                ListEntry::file("z.typ"),
+                ListEntry::directory("assets/"),
+                ListEntry::file("a.typ"),
+            ])],
+        )
+        .unwrap();
+        let reads = [
+            ReadScript::new("a.typ", 1, [ReadStep::chunk(b"a exact")]).unwrap(),
+            ReadScript::new("z.typ", 1, [ReadStep::chunk(b"z exact")]).unwrap(),
+        ];
+        let service = ScriptedService::new(Capabilities::all(), [list], reads, 16);
+        let resolver = DirectResolver(service.operator());
+        let location = location("");
+        let mut acquisition = pin!(acquire_recursive_prefix(
+            &resolver,
+            &location,
+            RecursiveAcquisitionSelection::AllFiles,
+            limits(),
+        ));
+
+        let objects = expect_ready(acquisition.as_mut()).unwrap();
+        assert_eq!(
+            objects
+                .iter()
+                .map(|object| (object.relative_path.as_str(), object.bytes.as_slice()))
+                .collect::<Vec<_>>(),
+            [
+                ("a.typ", b"a exact".as_slice()),
+                ("z.typ", b"z exact".as_slice())
+            ]
+        );
+        let log = service.log();
+        assert!(matches!(
+            log.entries(),
+            [
+                OperationLogEntry::ListInvoked { path, recursive: true, .. },
+                OperationLogEntry::ListPageYielded { .. },
+                OperationLogEntry::ListCompleted { .. },
+                OperationLogEntry::ReadInvoked { .. },
+                ..
+            ] if path == "/"
+        ));
+    }
+
+    #[test]
+    fn non_root_survey_reports_confined_structural_issues_in_canonical_order() {
+        let list = ListScript::new(
+            "project/",
+            5,
+            [ListStep::page([
+                ListEntry::unknown("project/z"),
+                ListEntry::file("project-sibling/a"),
+                ListEntry::file("project/a//b"),
+                ListEntry::file("project/good.typ"),
+                ListEntry::file("project/good.typ"),
+            ])],
+        )
+        .unwrap();
+        let service = ScriptedService::new(Capabilities::all(), [list], [], 16);
+        let resolver = DirectResolver(service.operator());
+        let location = location("project/");
+        let mut acquisition = pin!(acquire_recursive_prefix(
+            &resolver,
+            &location,
+            RecursiveAcquisitionSelection::AllFiles,
+            limits(),
+        ));
+
+        let error = expect_ready(acquisition.as_mut()).unwrap_err();
+        let RecursiveAcquisitionError::Structural(issues) = error else {
+            panic!("unexpected error: {error:?}");
+        };
+        assert_eq!(
+            issues,
+            [
+                issue(
+                    "project-sibling/a",
+                    RecursiveSurveyIssueKind::ListedPathOutsidePrefix
+                ),
+                issue(
+                    "project/a//b",
+                    RecursiveSurveyIssueKind::InvalidRelativeOperationPath
+                ),
+                issue(
+                    "project/good.typ",
+                    RecursiveSurveyIssueKind::DuplicateListedObject
+                ),
+                issue("project/z", RecursiveSurveyIssueKind::UnsupportedEntryKind),
+            ]
+        );
+        assert!(
+            service
+                .log()
+                .entries()
+                .iter()
+                .all(|entry| !matches!(entry, OperationLogEntry::ReadInvoked { .. }))
+        );
+    }
+
+    #[test]
+    fn listing_permutations_choose_fixed_limit_precedence() {
+        let entries = [
+            ListEntry::file("p/long-name.typ"),
+            ListEntry::file("p/a.typ"),
+            ListEntry::file("p/b.typ"),
+        ];
+        for entries in [
+            entries.clone().to_vec(),
+            entries.into_iter().rev().collect(),
+        ] {
+            let list = ListScript::new("p/", 3, [ListStep::page(entries)]).unwrap();
+            let service = ScriptedService::new(Capabilities::all(), [list], [], 8);
+            let resolver = DirectResolver(service.operator());
+            let mut constrained = limits();
+            constrained.listed_entries = 2;
+            constrained.listed_path_bytes = 6;
+            constrained.total_listed_path_bytes = 5;
+            constrained.selected_objects = 1;
+            let location = location("p/");
+            let mut acquisition = pin!(acquire_recursive_prefix(
+                &resolver,
+                &location,
+                RecursiveAcquisitionSelection::AllFiles,
+                constrained,
+            ));
+
+            assert!(matches!(
+                expect_ready(acquisition.as_mut()).unwrap_err(),
+                RecursiveAcquisitionError::Limit {
+                    resource: RecursiveAcquisitionResource::ListedEntries,
+                    ceiling: 2,
+                    observed_at_least: 3,
+                }
+            ));
+            assert!(matches!(
+                service.log().entries().last(),
+                Some(OperationLogEntry::ListCompleted { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn every_finite_survey_limit_accepts_exact_and_rejects_plus_one() {
+        let cases = [
+            (
+                RecursiveAcquisitionResource::ListedEntries,
+                RecursiveAcquisitionLimits {
+                    listed_entries: 1,
+                    ..limits()
+                },
+            ),
+            (
+                RecursiveAcquisitionResource::ListedPathBytes,
+                RecursiveAcquisitionLimits {
+                    listed_path_bytes: 6,
+                    ..limits()
+                },
+            ),
+            (
+                RecursiveAcquisitionResource::TotalListedPathBytes,
+                RecursiveAcquisitionLimits {
+                    total_listed_path_bytes: 4,
+                    ..limits()
+                },
+            ),
+            (
+                RecursiveAcquisitionResource::SelectedObjects,
+                RecursiveAcquisitionLimits {
+                    selected_objects: 1,
+                    ..limits()
+                },
+            ),
+        ];
+
+        for (resource, constrained) in cases {
+            let exact_entries = match resource {
+                RecursiveAcquisitionResource::ListedEntries => {
+                    vec![ListEntry::directory("p/dir/")]
+                }
+                RecursiveAcquisitionResource::ListedPathBytes => {
+                    vec![ListEntry::directory("p/dir/")]
+                }
+                RecursiveAcquisitionResource::TotalListedPathBytes
+                | RecursiveAcquisitionResource::SelectedObjects => {
+                    vec![ListEntry::file("p/a")]
+                }
+                _ => unreachable!(),
+            };
+            let exact_reads = matches!(
+                resource,
+                RecursiveAcquisitionResource::TotalListedPathBytes
+                    | RecursiveAcquisitionResource::SelectedObjects
+            )
+            .then(|| ReadScript::new("p/a", 1, [ReadStep::chunk(b"a")]).unwrap());
+            let exact_list =
+                ListScript::new("p/", exact_entries.len(), [ListStep::page(exact_entries)])
+                    .unwrap();
+            let exact_service =
+                ScriptedService::new(Capabilities::all(), [exact_list], exact_reads, 4);
+            let exact_resolver = DirectResolver(exact_service.operator());
+            let prefix = location("p/");
+            let mut exact = pin!(acquire_recursive_prefix(
+                &exact_resolver,
+                &prefix,
+                RecursiveAcquisitionSelection::AllFiles,
+                constrained,
+            ));
+            expect_ready(exact.as_mut()).unwrap();
+
+            let over_entries = match resource {
+                RecursiveAcquisitionResource::ListedEntries => {
+                    vec![ListEntry::directory("p/a/"), ListEntry::directory("p/b/")]
+                }
+                RecursiveAcquisitionResource::ListedPathBytes => {
+                    vec![ListEntry::directory("p/long/")]
+                }
+                RecursiveAcquisitionResource::TotalListedPathBytes => {
+                    vec![ListEntry::file("p/ab")]
+                }
+                RecursiveAcquisitionResource::SelectedObjects => {
+                    vec![ListEntry::file("p/a"), ListEntry::file("p/b")]
+                }
+                _ => unreachable!(),
+            };
+            let over_list =
+                ListScript::new("p/", over_entries.len(), [ListStep::page(over_entries)]).unwrap();
+            let over_service = ScriptedService::new(Capabilities::all(), [over_list], [], 4);
+            let over_resolver = DirectResolver(over_service.operator());
+            let prefix = location("p/");
+            let mut over = pin!(acquire_recursive_prefix(
+                &over_resolver,
+                &prefix,
+                RecursiveAcquisitionSelection::AllFiles,
+                constrained,
+            ));
+            assert!(matches!(
+                expect_ready(over.as_mut()).unwrap_err(),
+                RecursiveAcquisitionError::Limit {
+                    resource: actual,
+                    ..
+                } if actual == resource
+            ));
+        }
+    }
+
+    #[test]
+    fn payload_limits_use_per_object_before_total_and_preserve_exact_boundaries() {
+        for (name, object_bytes, total_bytes, expected) in [
+            ("exact", 4, 4, None),
+            (
+                "object",
+                3,
+                8,
+                Some(RecursiveAcquisitionResource::ObjectBytes),
+            ),
+            (
+                "both",
+                3,
+                3,
+                Some(RecursiveAcquisitionResource::ObjectBytes),
+            ),
+        ] {
+            let path = format!("p/{name}");
+            let list = ListScript::new("p/", 1, [ListStep::page([ListEntry::file(path.clone())])])
+                .unwrap();
+            let read = ReadScript::new(&path, 1, [ReadStep::chunk(b"four")]).unwrap();
+            let service = ScriptedService::new(Capabilities::all(), [list], [read], 8);
+            let resolver = DirectResolver(service.operator());
+            let location = location("p/");
+            let constrained = RecursiveAcquisitionLimits {
+                object_bytes,
+                total_bytes,
+                ..limits()
+            };
+            let mut acquisition = pin!(acquire_recursive_prefix(
+                &resolver,
+                &location,
+                RecursiveAcquisitionSelection::AllFiles,
+                constrained,
+            ));
+
+            match expected {
+                None => assert_eq!(
+                    expect_ready(acquisition.as_mut()).unwrap()[0].bytes,
+                    b"four"
+                ),
+                Some(resource) => assert!(matches!(
+                    expect_ready(acquisition.as_mut()).unwrap_err(),
+                    RecursiveAcquisitionError::Limit {
+                        resource: actual,
+                        observed_at_least: 4,
+                        ..
+                    } if actual == resource
+                )),
+            }
+        }
+    }
+
+    #[test]
+    fn later_payload_crossing_object_and_total_reports_object_bytes() {
+        let list = ListScript::new(
+            "p/",
+            2,
+            [ListStep::page([
+                ListEntry::file("p/a"),
+                ListEntry::file("p/b"),
+            ])],
+        )
+        .unwrap();
+        let reads = [
+            ReadScript::new("p/a", 1, [ReadStep::chunk(b"1234")]).unwrap(),
+            ReadScript::new("p/b", 1, [ReadStep::chunk(b"123456")]).unwrap(),
+        ];
+        let service = ScriptedService::new(Capabilities::all(), [list], reads, 16);
+        let resolver = DirectResolver(service.operator());
+        let location = location("p/");
+        let constrained = RecursiveAcquisitionLimits {
+            object_bytes: 5,
+            total_bytes: 7,
+            ..limits()
+        };
+        let mut acquisition = pin!(acquire_recursive_prefix(
+            &resolver,
+            &location,
+            RecursiveAcquisitionSelection::AllFiles,
+            constrained,
+        ));
+
+        assert!(matches!(
+            expect_ready(acquisition.as_mut()).unwrap_err(),
+            RecursiveAcquisitionError::Limit {
+                resource: RecursiveAcquisitionResource::ObjectBytes,
+                ceiling: 5,
+                observed_at_least: 6,
+            }
+        ));
+    }
+
+    #[test]
+    fn valid_multi_object_permutations_preserve_total_payload_boundaries() {
+        for entries in [
+            [ListEntry::file("p/a"), ListEntry::file("p/b")],
+            [ListEntry::file("p/b"), ListEntry::file("p/a")],
+        ] {
+            let list = ListScript::new("p/", 2, [ListStep::page(entries)]).unwrap();
+            let reads = [
+                ReadScript::new("p/a", 1, [ReadStep::chunk(b"1234")]).unwrap(),
+                ReadScript::new("p/b", 1, [ReadStep::chunk(b"5678")]).unwrap(),
+            ];
+            let service = ScriptedService::new(Capabilities::all(), [list], reads, 16);
+            let resolver = DirectResolver(service.operator());
+            let location = location("p/");
+            let constrained = RecursiveAcquisitionLimits {
+                object_bytes: 5,
+                total_bytes: 7,
+                ..limits()
+            };
+            let mut acquisition = pin!(acquire_recursive_prefix(
+                &resolver,
+                &location,
+                RecursiveAcquisitionSelection::AllFiles,
+                constrained,
+            ));
+
+            assert!(matches!(
+                expect_ready(acquisition.as_mut()).unwrap_err(),
+                RecursiveAcquisitionError::Limit {
+                    resource: RecursiveAcquisitionResource::TotalBytes,
+                    ceiling: 7,
+                    observed_at_least: 8,
+                }
+            ));
+        }
+
+        let list = ListScript::new(
+            "p/",
+            2,
+            [ListStep::page([
+                ListEntry::file("p/a"),
+                ListEntry::file("p/b"),
+            ])],
+        )
+        .unwrap();
+        let reads = [
+            ReadScript::new("p/a", 1, [ReadStep::chunk(b"1234")]).unwrap(),
+            ReadScript::new("p/b", 1, [ReadStep::chunk(b"5678")]).unwrap(),
+        ];
+        let service = ScriptedService::new(Capabilities::all(), [list], reads, 16);
+        let resolver = DirectResolver(service.operator());
+        let location = location("p/");
+        let exact = RecursiveAcquisitionLimits {
+            object_bytes: 5,
+            total_bytes: 8,
+            ..limits()
+        };
+        let mut acquisition = pin!(acquire_recursive_prefix(
+            &resolver,
+            &location,
+            RecursiveAcquisitionSelection::AllFiles,
+            exact,
+        ));
+        assert_eq!(
+            expect_ready(acquisition.as_mut())
+                .unwrap()
+                .iter()
+                .map(|object| object.bytes.len())
+                .sum::<usize>(),
+            8
+        );
+    }
+
+    #[test]
+    fn checked_accounting_overflow_names_the_resource() {
+        let mut accounting = SurveyAccounting::new(limits());
+        accounting.listed_entries = u64::MAX;
+        accounting.observe_entry("p/a");
+        assert!(matches!(
+            accounting.survey_error::<Infallible>(),
+            Some(RecursiveAcquisitionError::AccountingOverflow {
+                resource: RecursiveAcquisitionResource::ListedEntries,
+            })
+        ));
+
+        let mut accounting = SurveyAccounting::new(RecursiveAcquisitionLimits {
+            total_listed_path_bytes: u64::MAX,
+            ..limits()
+        });
+        accounting.retained_path_bytes = u64::MAX;
+        assert!(!accounting.retain_paths(&[1]));
+        assert!(matches!(
+            accounting.survey_error::<Infallible>(),
+            Some(RecursiveAcquisitionError::AccountingOverflow {
+                resource: RecursiveAcquisitionResource::TotalListedPathBytes,
+            })
+        ));
+    }
+
+    #[test]
+    fn capability_and_terminal_list_failures_precede_payload_reads() {
+        for capabilities in [
+            Capabilities {
+                list: false,
+                list_with_recursive: true,
+                read: true,
+            },
+            Capabilities {
+                list: true,
+                list_with_recursive: false,
+                read: true,
+            },
+            Capabilities {
+                list: true,
+                list_with_recursive: true,
+                read: false,
+            },
+        ] {
+            let service = ScriptedService::new(capabilities, [], [], 4);
+            let resolver = DirectResolver(service.operator());
+            let location = location("p/");
+            let mut acquisition = pin!(acquire_recursive_prefix(
+                &resolver,
+                &location,
+                RecursiveAcquisitionSelection::AllFiles,
+                limits(),
+            ));
+            assert!(matches!(
+                expect_ready(acquisition.as_mut()).unwrap_err(),
+                RecursiveAcquisitionError::UnsupportedCapabilities { .. }
+            ));
+            assert!(service.log().entries().is_empty());
+        }
+
+        let list = ListScript::new(
+            "p/",
+            1,
+            [
+                ListStep::page([ListEntry::file("p/a")]),
+                ListStep::failure(ErrorKind::PermissionDenied),
+            ],
+        )
+        .unwrap();
+        let read = ReadScript::new("p/a", 1, [ReadStep::chunk(b"unread")]).unwrap();
+        let service = ScriptedService::new(Capabilities::all(), [list], [read], 8);
+        let resolver = DirectResolver(service.operator());
+        let location = location("p/");
+        let mut acquisition = pin!(acquire_recursive_prefix(
+            &resolver,
+            &location,
+            RecursiveAcquisitionSelection::AllFiles,
+            limits(),
+        ));
+        assert!(matches!(
+            expect_ready(acquisition.as_mut()).unwrap_err(),
+            RecursiveAcquisitionError::List(source)
+                if source.kind() == ErrorKind::PermissionDenied
+        ));
+        assert!(
+            service
+                .log()
+                .entries()
+                .iter()
+                .all(|entry| !matches!(entry, OperationLogEntry::ReadInvoked { .. }))
+        );
+    }
+
+    #[test]
+    fn font_selection_is_ascii_case_insensitive_and_ignores_other_files() {
+        let list = ListScript::new(
+            "fonts/",
+            3,
+            [ListStep::page([
+                ListEntry::file("fonts/A.TTF"),
+                ListEntry::file("fonts/b.otc"),
+                ListEntry::file("fonts/readme.txt"),
+            ])],
+        )
+        .unwrap();
+        let reads = [
+            ReadScript::new("fonts/A.TTF", 1, [ReadStep::chunk(b"a")]).unwrap(),
+            ReadScript::new("fonts/b.otc", 1, [ReadStep::chunk(b"b")]).unwrap(),
+        ];
+        let service = ScriptedService::new(Capabilities::all(), [list], reads, 16);
+        let resolver = DirectResolver(service.operator());
+        let location = location("fonts/");
+        let mut acquisition = pin!(acquire_recursive_prefix(
+            &resolver,
+            &location,
+            RecursiveAcquisitionSelection::FontContainers,
+            limits(),
+        ));
+
+        assert_eq!(
+            expect_ready(acquisition.as_mut())
+                .unwrap()
+                .into_iter()
+                .map(|object| object.relative_path)
+                .collect::<Vec<_>>(),
+            ["A.TTF", "b.otc"]
+        );
+    }
+
+    #[test]
+    fn package_tree_results_use_core_canonical_relative_paths() {
+        let list = ListScript::new(
+            "package/",
+            1,
+            [ListStep::page([ListEntry::file("package/./lib.typ")])],
+        )
+        .unwrap();
+        let read = ReadScript::new("package/./lib.typ", 1, [ReadStep::chunk(b"library")]).unwrap();
+        let service = ScriptedService::new(Capabilities::all(), [list], [read], 8);
+        let resolver = DirectResolver(service.operator());
+        let location = location("package/");
+        let mut acquisition = pin!(acquire_recursive_prefix(
+            &resolver,
+            &location,
+            RecursiveAcquisitionSelection::PackageTree,
+            limits(),
+        ));
+
+        let objects = expect_ready(acquisition.as_mut()).unwrap();
+        assert_eq!(objects[0].operation_path, "package/./lib.typ");
+        assert_eq!(objects[0].relative_path, "lib.typ");
+        assert_eq!(objects[0].bytes, b"library");
+    }
+
+    #[test]
+    fn reads_exact_bytes_observed_after_the_completed_listing() {
+        let replacement = ReadScript::new(
+            "race/changing.typ",
+            1,
+            [ReadStep::chunk(b"value after listing")],
+        )
+        .unwrap();
+        let list = ListScript::new(
+            "race/",
+            1,
+            [
+                ListStep::page([ListEntry::file("race/changing.typ")]),
+                ListStep::replace_read(replacement),
+            ],
+        )
+        .unwrap();
+        let original = ReadScript::new(
+            "race/changing.typ",
+            1,
+            [ReadStep::chunk(b"value during listing")],
+        )
+        .unwrap();
+        let service = ScriptedService::new(Capabilities::all(), [list], [original], 8);
+        let resolver = DirectResolver(service.operator());
+        let location = location("race/");
+        let mut acquisition = pin!(acquire_recursive_prefix(
+            &resolver,
+            &location,
+            RecursiveAcquisitionSelection::AllFiles,
+            limits(),
+        ));
+
+        assert_eq!(
+            expect_ready(acquisition.as_mut()).unwrap()[0].bytes,
+            b"value after listing"
+        );
+        assert!(matches!(
+            service.log().entries(),
+            [
+                OperationLogEntry::ListInvoked { .. },
+                OperationLogEntry::ListPageYielded { .. },
+                OperationLogEntry::ListCompleted { .. },
+                OperationLogEntry::ReadInvoked { .. },
+                ..
+            ]
+        ));
+    }
+
+    #[test]
+    fn unretained_path_overage_reports_only_the_plus_one_bound() {
+        let list = ListScript::new(
+            "p/",
+            1,
+            [ListStep::page([ListEntry::file("p/a-very-long-path")])],
+        )
+        .unwrap();
+        let service = ScriptedService::new(Capabilities::all(), [list], [], 4);
+        let resolver = DirectResolver(service.operator());
+        let location = location("p/");
+        let constrained = RecursiveAcquisitionLimits {
+            listed_path_bytes: 4,
+            ..limits()
+        };
+        let mut acquisition = pin!(acquire_recursive_prefix(
+            &resolver,
+            &location,
+            RecursiveAcquisitionSelection::AllFiles,
+            constrained,
+        ));
+
+        assert!(matches!(
+            expect_ready(acquisition.as_mut()).unwrap_err(),
+            RecursiveAcquisitionError::Limit {
+                resource: RecursiveAcquisitionResource::ListedPathBytes,
+                ceiling: 4,
+                observed_at_least: 5,
+            }
+        ));
+    }
+
+    #[test]
+    fn memory_service_supports_root_and_non_root_surveys() {
+        for (prefix, path) in [("", "root.typ"), ("project/", "project/main.typ")] {
+            let operator = opendal::Operator::new(opendal::services::Memory::default()).unwrap();
+            {
+                let mut write = pin!(operator.write(path, b"memory bytes".to_vec()));
+                expect_ready(write.as_mut()).unwrap();
+            }
+            let resolver = DirectResolver(operator);
+            let location = location(prefix);
+            let mut acquisition = pin!(acquire_recursive_prefix(
+                &resolver,
+                &location,
+                RecursiveAcquisitionSelection::AllFiles,
+                limits(),
+            ));
+
+            let objects = expect_ready(acquisition.as_mut()).unwrap();
+            assert_eq!(objects.len(), 1);
+            assert_eq!(objects[0].bytes, b"memory bytes");
+        }
+    }
+
+    #[test]
+    fn package_tree_preflight_precedes_reads_and_preserves_typed_cause() {
+        let list = ListScript::new(
+            "package/",
+            2,
+            [ListStep::page([
+                ListEntry::file("package/assets"),
+                ListEntry::file("package/assets/logo.svg"),
+            ])],
+        )
+        .unwrap();
+        let service = ScriptedService::new(Capabilities::all(), [list], [], 8);
+        let resolver = DirectResolver(service.operator());
+        let location = location("package/");
+        let mut acquisition = pin!(acquire_recursive_prefix(
+            &resolver,
+            &location,
+            RecursiveAcquisitionSelection::PackageTree,
+            limits(),
+        ));
+
+        let error = expect_ready(acquisition.as_mut()).unwrap_err();
+        assert!(matches!(
+            error,
+            RecursiveAcquisitionError::InvalidPackageTree(source)
+                if source.issues().len() == 1
+        ));
+        assert!(
+            service
+                .log()
+                .entries()
+                .iter()
+                .all(|entry| !matches!(entry, OperationLogEntry::ReadInvoked { .. }))
+        );
+    }
+
+    #[test]
+    fn classifies_disappearance_after_a_completed_listing() {
+        let list = ListScript::new(
+            "race/",
+            1,
+            [ListStep::page([ListEntry::file("race/gone.typ")])],
+        )
+        .unwrap();
+        let service = ScriptedService::new(Capabilities::all(), [list], [], 8);
+        let resolver = DirectResolver(service.operator());
+        let location = location("race/");
+        let mut acquisition = pin!(acquire_recursive_prefix(
+            &resolver,
+            &location,
+            RecursiveAcquisitionSelection::AllFiles,
+            limits(),
+        ));
+
+        assert!(matches!(
+            expect_ready(acquisition.as_mut()).unwrap_err(),
+            RecursiveAcquisitionError::ListedObjectAbsent { operation_path, .. }
+                if operation_path == "race/gone.typ"
+        ));
+    }
+
+    #[test]
+    fn dropping_a_pending_survey_cancels_without_starting_reads() {
+        let pending = PendingPoint::new();
+        let list = ListScript::new(
+            "pending/",
+            1,
+            [
+                ListStep::page([ListEntry::file("pending/a.typ")]),
+                ListStep::pending(pending.clone()),
+            ],
+        )
+        .unwrap();
+        let read = ReadScript::new("pending/a.typ", 1, [ReadStep::chunk(b"never")]).unwrap();
+        let service = ScriptedService::new(Capabilities::all(), [list], [read], 8);
+        let resolver = DirectResolver(service.operator());
+        {
+            let location = location("pending/");
+            let mut acquisition = pin!(acquire_recursive_prefix(
+                &resolver,
+                &location,
+                RecursiveAcquisitionSelection::AllFiles,
+                limits(),
+            ));
+            assert!(matches!(poll_once(acquisition.as_mut()), Poll::Pending));
+            assert!(pending.was_observed());
+        }
+
+        assert_eq!(
+            service.cancellations(),
+            [DroppedOperation::List {
+                id: 0,
+                path: "pending/".to_owned(),
+            }]
+        );
+    }
+
+    fn limits() -> RecursiveAcquisitionLimits {
+        RecursiveAcquisitionLimits {
+            listed_entries: 32,
+            listed_path_bytes: 128,
+            total_listed_path_bytes: 1024,
+            selected_objects: 32,
+            object_bytes: 128,
+            total_bytes: 1024,
+        }
+    }
+
+    fn issue(path: &str, kind: RecursiveSurveyIssueKind) -> RecursiveSurveyIssue {
+        RecursiveSurveyIssue {
+            operation_path: path.to_owned(),
+            kind,
+        }
+    }
+
+    fn location(path: &str) -> Location {
+        Location::from_operation_path(OperatorBinding::new("store").unwrap(), path).unwrap()
+    }
+
+    fn expect_ready<F: Future>(future: std::pin::Pin<&mut F>) -> F::Output {
+        match poll_once(future) {
+            Poll::Ready(output) => output,
+            Poll::Pending => panic!("future unexpectedly pending"),
+        }
+    }
+
+    fn poll_once<F: Future>(future: std::pin::Pin<&mut F>) -> Poll<F::Output> {
+        future.poll(&mut Context::from_waker(Waker::noop()))
+    }
+
+    struct DirectResolver(opendal::Operator);
+
+    impl OperatorResolver for DirectResolver {
+        type Error = Infallible;
+
+        fn resolve(&self, _: &OperatorBinding) -> Result<opendal::Operator, Self::Error> {
+            Ok(self.0.clone())
+        }
+    }
+
+    struct ExampleRole {
+        targets: Vec<&'static str>,
+        remaining: u64,
+    }
+
+    impl AcquisitionRole for ExampleRole {
+        type Target = &'static str;
+        type Reservation = u64;
+        type RawResult = (&'static str, u64);
+        type Failure = Infallible;
+        type Acquire<'a> = std::future::Ready<Result<Self::RawResult, Self::Failure>>;
+
+        fn targets(&self) -> &[Self::Target] {
+            &self.targets
+        }
+
+        fn reserve(&mut self, _: &Self::Target) -> Result<Self::Reservation, Self::Failure> {
+            Ok(self.remaining)
+        }
+
+        fn acquire<'a>(
+            &'a self,
+            target: &'a Self::Target,
+            reservation: Self::Reservation,
+        ) -> Self::Acquire<'a> {
+            std::future::ready(Ok((*target, reservation)))
+        }
+    }
+}

@@ -88,6 +88,7 @@ impl ListEntry {
 pub enum ListStep {
     Page(Vec<ListEntry>),
     Pending(PendingPoint),
+    ReplaceRead(ReadScript),
     Failure(ErrorKind),
 }
 
@@ -98,6 +99,10 @@ impl ListStep {
 
     pub fn pending(point: PendingPoint) -> Self {
         Self::Pending(point)
+    }
+
+    pub fn replace_read(script: ReadScript) -> Self {
+        Self::ReplaceRead(script)
     }
 
     pub const fn failure(kind: ErrorKind) -> Self {
@@ -122,7 +127,7 @@ impl ListScript {
             .iter()
             .map(|step| match step {
                 ListStep::Page(entries) => entries.len(),
-                ListStep::Pending(_) | ListStep::Failure(_) => 0,
+                ListStep::Pending(_) | ListStep::ReplaceRead(_) | ListStep::Failure(_) => 0,
             })
             .sum();
         if scripted > declared_entries {
@@ -546,6 +551,10 @@ impl Shared {
             log.omitted_entries += 1;
         }
     }
+
+    fn replace_read(&self, script: ReadScript) {
+        lock(&self.reads).insert(script.path.clone(), VecDeque::from([script]));
+    }
 }
 
 struct LogState {
@@ -661,6 +670,9 @@ impl oio::List for ScriptedLister {
                     self.page = Some(ListPage { entries, remaining });
                 }
                 Some(ListStep::Pending(point)) => point.wait().await,
+                Some(ListStep::ReplaceRead(script)) => {
+                    self.operation.shared.replace_read(script);
+                }
                 Some(ListStep::Failure(kind)) => {
                     self.operation.fail(kind);
                     return Err(scripted_error(kind, "scripted list failure"));
