@@ -1,9 +1,56 @@
 use futures_util::StreamExt;
 use opendal::ErrorKind;
 
-use super::location::{Location, LocationRoleError, OperatorResolver};
+use super::location::{Location, LocationRoleError, OperatorBinding, OperatorResolver};
 
 pub(crate) mod recursive;
+
+#[derive(Clone)]
+pub(crate) struct ResolvedOperator {
+    pub(crate) operator: opendal::Operator,
+    pub(crate) list: bool,
+    pub(crate) list_with_recursive: bool,
+    pub(crate) read: bool,
+}
+
+/// Resolves and appraises each reached binding once for one composite operation.
+pub(crate) struct ResolvedOperators<'a, R: OperatorResolver + ?Sized> {
+    resolver: &'a R,
+    entries: Vec<(OperatorBinding, ResolvedOperator)>,
+}
+
+impl<'a, R: OperatorResolver + ?Sized> ResolvedOperators<'a, R> {
+    pub(crate) fn new(resolver: &'a R) -> Self {
+        Self {
+            resolver,
+            entries: Vec::new(),
+        }
+    }
+
+    pub(crate) fn resolve(
+        &mut self,
+        binding: &OperatorBinding,
+    ) -> Result<ResolvedOperator, R::Error> {
+        if let Some((_, resolved)) = self
+            .entries
+            .iter()
+            .find(|(candidate, _)| candidate == binding)
+        {
+            return Ok(resolved.clone());
+        }
+
+        let operator = self.resolver.resolve(binding)?;
+        let capabilities = operator.info().capability();
+        let resolved = ResolvedOperator {
+            operator,
+            list: capabilities.list,
+            list_with_recursive: capabilities.list_with_recursive,
+            read: capabilities.read,
+        };
+        self.entries.push((binding.clone(), resolved.clone()));
+        Ok(resolved)
+    }
+}
 
 /// A failure while acquiring one exact object's bytes through OpenDAL.
 #[derive(Debug)]
@@ -43,25 +90,39 @@ pub(crate) async fn acquire_exact_object<R: OperatorResolver + ?Sized>(
     location: &Location,
     ceiling: u64,
 ) -> Result<Vec<u8>, ExactObjectAcquisitionError<R::Error>> {
+    let mut resolved = ResolvedOperators::new(resolver);
+    acquire_exact_object_with_resolved(&mut resolved, location, ceiling).await
+}
+
+pub(crate) async fn acquire_exact_object_with_resolved<R: OperatorResolver + ?Sized>(
+    resolved: &mut ResolvedOperators<'_, R>,
+    location: &Location,
+    ceiling: u64,
+) -> Result<Vec<u8>, ExactObjectAcquisitionError<R::Error>> {
     location
         .require_object()
         .map_err(ExactObjectAcquisitionError::InvalidLocationRole)?;
-    let operator = resolver
+    let resolved = resolved
         .resolve(location.binding())
         .map_err(ExactObjectAcquisitionError::ResolveOperator)?;
-    if !operator.info().capability().read {
+    if !resolved.read {
         return Err(ExactObjectAcquisitionError::ReadUnsupported);
     }
 
-    acquire_exact_path(&operator, location.dispatch_path(), ceiling, ceiling)
-        .await
-        .map_err(|error| match error {
-            ExactPathAcquisitionError::ObjectAbsent(source) => {
-                ExactObjectAcquisitionError::ObjectAbsent(source)
-            }
-            ExactPathAcquisitionError::Read(source) => ExactObjectAcquisitionError::Read(source),
-            ExactPathAcquisitionError::Limit(source) => ExactObjectAcquisitionError::Limit(source),
-        })
+    acquire_exact_path(
+        &resolved.operator,
+        location.dispatch_path(),
+        ceiling,
+        ceiling,
+    )
+    .await
+    .map_err(|error| match error {
+        ExactPathAcquisitionError::ObjectAbsent(source) => {
+            ExactObjectAcquisitionError::ObjectAbsent(source)
+        }
+        ExactPathAcquisitionError::Read(source) => ExactObjectAcquisitionError::Read(source),
+        ExactPathAcquisitionError::Limit(source) => ExactObjectAcquisitionError::Limit(source),
+    })
 }
 
 pub(crate) async fn acquire_exact_path(
@@ -89,9 +150,17 @@ pub(crate) async fn acquire_exact_path(
         .map_err(classify_path_read_error)?;
     let mut bytes = Vec::new();
     let mut observed = 0u64;
+    let mut yielded_buffer = false;
 
     while let Some(buffer) = stream.next().await {
-        let buffer = buffer.map_err(classify_path_read_error)?;
+        let buffer = buffer.map_err(|error| {
+            if yielded_buffer {
+                ExactPathAcquisitionError::Read(error)
+            } else {
+                classify_path_read_error(error)
+            }
+        })?;
+        yielded_buffer = true;
         let buffer_len = u64::try_from(buffer.len()).map_err(|_| {
             ExactPathAcquisitionError::Limit(ExactObjectLimitError::AccountingOverflow)
         })?;
@@ -345,26 +414,24 @@ mod tests {
                 if source.kind() == ErrorKind::NotFound
         ));
 
-        let script = ReadScript::new(
-            "broken.bin",
-            1,
-            [
-                ReadStep::chunk(b"partial"),
-                ReadStep::failure(ErrorKind::PermissionDenied),
-            ],
-        )
-        .unwrap();
-        let broken_service = ScriptedService::new(Capabilities::all(), [], [script], 8);
-        let broken_resolver = CountingResolver::new(broken_service.operator());
-        let location = object_location("broken.bin");
-        let mut broken = pin!(acquire_exact_object(&broken_resolver, &location, 16));
+        for kind in [ErrorKind::PermissionDenied, ErrorKind::NotFound] {
+            let script = ReadScript::new(
+                "broken.bin",
+                1,
+                [ReadStep::chunk(b"partial"), ReadStep::failure(kind)],
+            )
+            .unwrap();
+            let broken_service = ScriptedService::new(Capabilities::all(), [], [script], 8);
+            let broken_resolver = CountingResolver::new(broken_service.operator());
+            let location = object_location("broken.bin");
+            let mut broken = pin!(acquire_exact_object(&broken_resolver, &location, 16));
 
-        let error = expect_ready(broken.as_mut()).unwrap_err();
-        assert!(matches!(
-            error,
-            ExactObjectAcquisitionError::Read(source)
-                if source.kind() == ErrorKind::PermissionDenied
-        ));
+            let error = expect_ready(broken.as_mut()).unwrap_err();
+            assert!(matches!(
+                error,
+                ExactObjectAcquisitionError::Read(source) if source.kind() == kind
+            ));
+        }
     }
 
     #[test]

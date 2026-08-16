@@ -5,24 +5,36 @@ use typst::syntax::package::PackageSpec;
 use super::super::acquisition::recursive::{
     RecursiveAcquisitionError, RecursiveAcquisitionLimits, RecursiveAcquisitionResource,
     RecursiveAcquisitionSelection, RecursiveSourcesAcquisitionError, RecursiveSurveyIssue,
-    RecursiveSurveyIssueKind, acquire_first_present_recursive_prefix,
+    RecursiveSurveyIssueKind, acquire_first_present_recursive_prefix_with_resolved,
+};
+use super::super::acquisition::{
+    ExactObjectAcquisitionError, ExactObjectLimitError, ResolvedOperators,
+    acquire_exact_object_with_resolved,
 };
 use super::super::{Location, LocationRoleError, OperatorResolver};
 use crate::acquisition_layout;
 use crate::package_catalog::PackageTreeError;
 
+/// Named finite ceilings for one OpenDAL Package Tree Acquisition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct PackageTreeAcquisitionCeilings {
-    pub(crate) listed_entries: u64,
-    pub(crate) listed_path_bytes: u64,
-    pub(crate) total_listed_path_bytes: u64,
-    pub(crate) selected_files: u64,
-    pub(crate) object_bytes: u64,
-    pub(crate) total_bytes: u64,
+pub struct PackageTreeAcquisitionCeilings {
+    /// Entries yielded by recursive listings across attempted tree sources.
+    pub listed_entries: u64,
+    /// Bytes in one yielded operation path.
+    pub listed_path_bytes: u64,
+    /// Bytes retained for paths and structural evidence across tree sources.
+    pub total_listed_path_bytes: u64,
+    /// File objects selected from one present tree source.
+    pub selected_files: u64,
+    /// Exact bytes retained for one selected file.
+    pub object_bytes: u64,
+    /// Exact file bytes retained for the selected Package Tree.
+    pub total_bytes: u64,
 }
 
 impl PackageTreeAcquisitionCeilings {
-    pub(crate) const fn reference_v1() -> Self {
+    /// The first-party version-1 Package Tree Acquisition profile.
+    pub const fn reference_v1() -> Self {
         Self {
             listed_entries: 100_000,
             listed_path_bytes: 64 * 1024,
@@ -34,34 +46,48 @@ impl PackageTreeAcquisitionCeilings {
     }
 }
 
+/// A resource bounded during OpenDAL Package Tree Acquisition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PackageTreeAcquisitionResource {
+#[non_exhaustive]
+pub enum PackageTreeAcquisitionResource {
+    /// Entries yielded by recursive listings.
     ListedEntries,
+    /// Bytes in one yielded operation path.
     ListedPathBytes,
+    /// Bytes retained for paths and structural evidence.
     TotalListedPathBytes,
+    /// Selected file objects.
     SelectedFiles,
+    /// Bytes retained for one selected file.
     ObjectBytes,
+    /// Bytes retained across the selected tree.
     TotalBytes,
 }
 
+/// A supplied Package Tree Acquisition ceiling is internally inconsistent.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub(crate) enum PackageTreeAcquisitionLimitsError {
+#[non_exhaustive]
+pub enum PackageTreeAcquisitionLimitsError {
+    /// A payload ceiling cannot accommodate the required plus-one probe.
     #[error("the {resource:?} ceiling must leave room for a plus-one probe")]
     CannotProbe {
         resource: PackageTreeAcquisitionResource,
         ceiling: u64,
     },
+    /// The per-object ceiling exceeds the aggregate payload ceiling.
     #[error("the ObjectBytes ceiling {object_bytes} exceeds the TotalBytes ceiling {total_bytes}")]
     ObjectBytesExceedTotalBytes { object_bytes: u64, total_bytes: u64 },
 }
 
+/// Mandatory finite limits for OpenDAL Package Tree Acquisition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct PackageTreeAcquisitionLimits {
+pub struct PackageTreeAcquisitionLimits {
     ceilings: PackageTreeAcquisitionCeilings,
 }
 
 impl PackageTreeAcquisitionLimits {
-    pub(crate) fn new(
+    /// Validates every named Package Tree Acquisition ceiling.
+    pub fn new(
         ceilings: PackageTreeAcquisitionCeilings,
     ) -> Result<Self, PackageTreeAcquisitionLimitsError> {
         for (resource, ceiling) in [
@@ -89,39 +115,49 @@ impl PackageTreeAcquisitionLimits {
         Ok(Self { ceilings })
     }
 
-    pub(crate) const fn reference_v1() -> Self {
+    /// The validated first-party version-1 limits.
+    pub const fn reference_v1() -> Self {
         Self {
             ceilings: PackageTreeAcquisitionCeilings::reference_v1(),
         }
     }
 
-    pub(crate) const fn listed_entries(&self) -> u64 {
+    /// The maximum number of entries yielded across attempted tree sources.
+    pub const fn listed_entries(&self) -> u64 {
         self.ceilings.listed_entries
     }
 
-    pub(crate) const fn listed_path_bytes(&self) -> u64 {
+    /// The maximum byte length of one yielded operation path.
+    pub const fn listed_path_bytes(&self) -> u64 {
         self.ceilings.listed_path_bytes
     }
 
-    pub(crate) const fn total_listed_path_bytes(&self) -> u64 {
+    /// The maximum retained bytes for paths and structural evidence.
+    pub const fn total_listed_path_bytes(&self) -> u64 {
         self.ceilings.total_listed_path_bytes
     }
 
-    pub(crate) const fn selected_files(&self) -> u64 {
+    /// The maximum selected file count.
+    pub const fn selected_files(&self) -> u64 {
         self.ceilings.selected_files
     }
 
-    pub(crate) const fn object_bytes(&self) -> u64 {
+    /// The maximum exact bytes retained for one selected file.
+    pub const fn object_bytes(&self) -> u64 {
         self.ceilings.object_bytes
     }
 
-    pub(crate) const fn total_bytes(&self) -> u64 {
+    /// The maximum exact bytes retained for the selected Package Tree.
+    pub const fn total_bytes(&self) -> u64 {
         self.ceilings.total_bytes
     }
 }
 
+/// Package Tree Acquisition exceeded or could not account for a mandatory limit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-pub(crate) enum PackageTreeAcquisitionLimitError {
+#[non_exhaustive]
+pub enum PackageTreeAcquisitionLimitError {
+    /// The observed resource exceeded its ceiling.
     #[error(
         "OpenDAL Package Tree Acquisition {resource:?} limit exceeded: ceiling {ceiling}, observed at least {observed_at_least}"
     )]
@@ -130,50 +166,366 @@ pub(crate) enum PackageTreeAcquisitionLimitError {
         ceiling: u64,
         observed_at_least: u64,
     },
+    /// Resource accounting could not be represented in `u64`.
     #[error("OpenDAL Package Tree Acquisition {resource:?} accounting overflowed")]
     AccountingOverflow {
         resource: PackageTreeAcquisitionResource,
     },
 }
 
+/// Named finite ceilings for one raw Package Archive Acquisition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PackageArchiveAcquisitionCeilings {
+    /// Exact raw archive bytes retained from one candidate.
+    pub archive_bytes: u64,
+}
+
+impl PackageArchiveAcquisitionCeilings {
+    /// The first-party 128 MiB archive profile.
+    pub const fn reference_v1() -> Self {
+        Self {
+            archive_bytes: 128 * 1024 * 1024,
+        }
+    }
+}
+
+/// A resource bounded while acquiring a raw Package Archive.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum PackageArchiveAcquisitionResource {
+    /// Exact raw Package Archive bytes.
+    ArchiveBytes,
+}
+
+/// A supplied Package Archive Acquisition ceiling is invalid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum PackageArchiveAcquisitionLimitsError {
+    /// The archive ceiling cannot accommodate the required plus-one probe.
+    #[error("the {resource:?} ceiling must leave room for a plus-one probe")]
+    CannotProbe {
+        resource: PackageArchiveAcquisitionResource,
+        ceiling: u64,
+    },
+}
+
+/// Mandatory finite limits for one raw Package Archive Acquisition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PackageArchiveAcquisitionLimits {
+    ceilings: PackageArchiveAcquisitionCeilings,
+}
+
+impl PackageArchiveAcquisitionLimits {
+    /// Validates the named raw archive ceiling.
+    pub fn new(
+        ceilings: PackageArchiveAcquisitionCeilings,
+    ) -> Result<Self, PackageArchiveAcquisitionLimitsError> {
+        if ceilings.archive_bytes == u64::MAX {
+            return Err(PackageArchiveAcquisitionLimitsError::CannotProbe {
+                resource: PackageArchiveAcquisitionResource::ArchiveBytes,
+                ceiling: ceilings.archive_bytes,
+            });
+        }
+        Ok(Self { ceilings })
+    }
+
+    /// The validated first-party version-1 limits.
+    pub const fn reference_v1() -> Self {
+        Self {
+            ceilings: PackageArchiveAcquisitionCeilings::reference_v1(),
+        }
+    }
+
+    /// The maximum exact raw archive bytes retained from one candidate.
+    pub const fn archive_bytes(&self) -> u64 {
+        self.ceilings.archive_bytes
+    }
+}
+
+/// A raw Package Archive exceeded or could not account for its limit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum PackageArchiveAcquisitionLimitError {
+    /// The observed archive length exceeded its ceiling.
+    #[error(
+        "OpenDAL Package Archive Acquisition {resource:?} limit exceeded: ceiling {ceiling}, observed at least {observed_at_least}"
+    )]
+    Exceeded {
+        resource: PackageArchiveAcquisitionResource,
+        ceiling: u64,
+        observed_at_least: u64,
+    },
+    /// Archive byte accounting could not be represented in `u64`.
+    #[error("OpenDAL Package Archive Acquisition {resource:?} accounting overflowed")]
+    AccountingOverflow {
+        resource: PackageArchiveAcquisitionResource,
+    },
+}
+
+/// Named finite ceilings for Package Acquisition fallback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PackageAcquisitionCeilings {
+    /// Ceilings shared across ordered Package Tree candidates.
+    pub trees: PackageTreeAcquisitionCeilings,
+    /// Ceilings applied independently to cache and registry candidates.
+    pub archives: PackageArchiveAcquisitionCeilings,
+}
+
+impl PackageAcquisitionCeilings {
+    /// The first-party version-1 composite profile.
+    pub const fn reference_v1() -> Self {
+        Self {
+            trees: PackageTreeAcquisitionCeilings::reference_v1(),
+            archives: PackageArchiveAcquisitionCeilings::reference_v1(),
+        }
+    }
+}
+
+/// A supplied Package Acquisition limit family is invalid.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum PackageAcquisitionLimitsError {
+    /// Invalid Package Tree Acquisition limits.
+    #[error("invalid Package Tree Acquisition limits: {0}")]
+    Trees(PackageTreeAcquisitionLimitsError),
+    /// Invalid raw Package Archive Acquisition limits.
+    #[error("invalid Package Archive Acquisition limits: {0}")]
+    Archives(PackageArchiveAcquisitionLimitsError),
+}
+
+/// Mandatory finite limits for Package Acquisition fallback.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct PackageAcquisitionLimits {
+    trees: PackageTreeAcquisitionLimits,
+    archives: PackageArchiveAcquisitionLimits,
+}
+
+impl PackageAcquisitionLimits {
+    /// Validates both Package Acquisition limit families.
+    pub fn new(
+        ceilings: PackageAcquisitionCeilings,
+    ) -> Result<Self, PackageAcquisitionLimitsError> {
+        Ok(Self {
+            trees: PackageTreeAcquisitionLimits::new(ceilings.trees)
+                .map_err(PackageAcquisitionLimitsError::Trees)?,
+            archives: PackageArchiveAcquisitionLimits::new(ceilings.archives)
+                .map_err(PackageAcquisitionLimitsError::Archives)?,
+        })
+    }
+
+    /// Limits shared across ordered Package Tree candidates.
+    pub const fn trees(&self) -> PackageTreeAcquisitionLimits {
+        self.trees
+    }
+
+    /// Limits applied independently to cache and registry candidates.
+    pub const fn archives(&self) -> PackageArchiveAcquisitionLimits {
+        self.archives
+    }
+
+    /// The validated first-party version-1 composite limits.
+    pub const fn reference_v1() -> Self {
+        Self {
+            trees: PackageTreeAcquisitionLimits::reference_v1(),
+            archives: PackageArchiveAcquisitionLimits::reference_v1(),
+        }
+    }
+}
+
+/// One explicitly configured prefix that may hold Package Trees.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PackageTreeSource {
+pub struct PackageTreeSource {
     source: Location,
 }
 
 impl PackageTreeSource {
-    pub(crate) fn new(source: Location) -> Self {
+    /// Configures one Package Tree prefix.
+    pub fn new(source: Location) -> Self {
         Self { source }
     }
 
-    pub(crate) fn source(&self) -> &Location {
+    /// The normalized configured prefix.
+    pub fn source(&self) -> &Location {
         &self.source
     }
 }
 
-pub(crate) struct PackageTreeAcquisitionEntry {
+/// A validated request to acquire one exact package from ordered sources.
+#[derive(Clone, Debug)]
+pub struct PackageAcquisitionRequest {
+    spec: PackageSpec,
+    tree_sources: Vec<PackageTreeSource>,
+    archive_cache: Option<Location>,
+    registry: Option<Location>,
+    limits: PackageAcquisitionLimits,
+}
+
+impl PackageAcquisitionRequest {
+    /// Validates every configured prefix role before accepting the request.
+    pub fn new(
+        spec: PackageSpec,
+        tree_sources: impl IntoIterator<Item = PackageTreeSource>,
+        archive_cache: Option<Location>,
+        registry: Option<Location>,
+        limits: PackageAcquisitionLimits,
+    ) -> Result<Self, PackageAcquisitionRequestRejection> {
+        let tree_sources = tree_sources.into_iter().collect::<Vec<_>>();
+        let mut issues = tree_sources
+            .iter()
+            .enumerate()
+            .filter_map(|(source_index, configured)| {
+                configured.source.require_prefix().err().map(|source| {
+                    PackageAcquisitionRequestIssue::InvalidTreeSourceRole {
+                        source_index,
+                        location: configured.source.clone(),
+                        source,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        if let Some(location) = &archive_cache
+            && let Err(source) = location.require_prefix()
+        {
+            issues.push(PackageAcquisitionRequestIssue::InvalidArchiveCacheRole {
+                location: location.clone(),
+                source,
+            });
+        }
+        if let Some(location) = &registry
+            && let Err(source) = location.require_prefix()
+        {
+            issues.push(PackageAcquisitionRequestIssue::InvalidRegistryRole {
+                location: location.clone(),
+                source,
+            });
+        }
+        if !issues.is_empty() {
+            return Err(PackageAcquisitionRequestRejection { spec, issues });
+        }
+        Ok(Self {
+            spec,
+            tree_sources,
+            archive_cache,
+            registry,
+            limits,
+        })
+    }
+
+    /// The exact package specification being acquired.
+    pub fn spec(&self) -> &PackageSpec {
+        &self.spec
+    }
+
+    /// Package Tree prefixes in caller precedence order.
+    pub fn tree_sources(&self) -> &[PackageTreeSource] {
+        &self.tree_sources
+    }
+
+    /// The optional raw Package Archive cache prefix.
+    pub fn archive_cache(&self) -> Option<&Location> {
+        self.archive_cache.as_ref()
+    }
+
+    /// The optional official Package Registry prefix.
+    pub fn registry(&self) -> Option<&Location> {
+        self.registry.as_ref()
+    }
+
+    /// Mandatory finite limits for this fallback operation.
+    pub const fn limits(&self) -> PackageAcquisitionLimits {
+        self.limits
+    }
+}
+
+/// Every invalid source role in a rejected Package Acquisition request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PackageAcquisitionRequestRejection {
+    spec: PackageSpec,
+    issues: Vec<PackageAcquisitionRequestIssue>,
+}
+
+impl PackageAcquisitionRequestRejection {
+    /// The exact package specification from the rejected request.
+    pub fn spec(&self) -> &PackageSpec {
+        &self.spec
+    }
+
+    /// Invalid source roles in request-field and caller-source order.
+    pub fn issues(&self) -> &[PackageAcquisitionRequestIssue] {
+        &self.issues
+    }
+}
+
+impl fmt::Display for PackageAcquisitionRequestRejection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Package Acquisition request for {} was rejected with {} issue(s)",
+            self.spec,
+            self.issues.len()
+        )
+    }
+}
+
+impl Error for PackageAcquisitionRequestRejection {}
+
+/// One invalid source role in a Package Acquisition request.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum PackageAcquisitionRequestIssue {
+    /// A configured Package Tree source is not a prefix.
+    #[error("Package Tree source {source_index} at {location} is not a prefix: {source}")]
+    InvalidTreeSourceRole {
+        source_index: usize,
+        location: Location,
+        #[source]
+        source: LocationRoleError,
+    },
+    /// The configured raw archive cache is not a prefix.
+    #[error("Package Archive cache at {location} is not a prefix: {source}")]
+    InvalidArchiveCacheRole {
+        location: Location,
+        #[source]
+        source: LocationRoleError,
+    },
+    /// The configured Package Registry is not a prefix.
+    #[error("Package Registry at {location} is not a prefix: {source}")]
+    InvalidRegistryRole {
+        location: Location,
+        #[source]
+        source: LocationRoleError,
+    },
+}
+
+/// One exact file acquired below a Package Tree candidate prefix.
+pub struct PackageTreeAcquisitionEntry {
     relative_path: String,
     bytes: Vec<u8>,
 }
 
 impl PackageTreeAcquisitionEntry {
-    pub(crate) fn relative_path(&self) -> &str {
+    /// The canonical package-relative file path.
+    pub fn relative_path(&self) -> &str {
         &self.relative_path
     }
 
-    pub(crate) fn bytes(&self) -> &[u8] {
+    /// The exact bytes observed by the completed object read.
+    pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
 
-    pub(crate) fn len(&self) -> u64 {
+    /// The exact acquired byte length.
+    pub fn len(&self) -> u64 {
         self.bytes.len() as u64
     }
 
-    pub(crate) fn is_empty(&self) -> bool {
+    /// Whether the acquired file was empty.
+    pub fn is_empty(&self) -> bool {
         self.bytes.is_empty()
     }
 
-    pub(crate) fn into_parts(self) -> (String, Vec<u8>) {
+    /// Recovers the owned path and exact bytes.
+    pub fn into_parts(self) -> (String, Vec<u8>) {
         (self.relative_path, self.bytes)
     }
 }
@@ -188,7 +540,8 @@ impl fmt::Debug for PackageTreeAcquisitionEntry {
     }
 }
 
-pub(crate) struct PackageTreeAcquisition {
+/// Exact files acquired from the first present Package Tree candidate.
+pub struct PackageTreeAcquisition {
     spec: PackageSpec,
     source_index: usize,
     configured_source: Location,
@@ -197,27 +550,33 @@ pub(crate) struct PackageTreeAcquisition {
 }
 
 impl PackageTreeAcquisition {
-    pub(crate) fn spec(&self) -> &PackageSpec {
+    /// The exact package specification acquired.
+    pub fn spec(&self) -> &PackageSpec {
         &self.spec
     }
 
-    pub(crate) fn source_index(&self) -> usize {
+    /// The caller-order index of the selected tree source.
+    pub fn source_index(&self) -> usize {
         self.source_index
     }
 
-    pub(crate) fn configured_source(&self) -> &Location {
+    /// The configured Package Tree prefix.
+    pub fn configured_source(&self) -> &Location {
         &self.configured_source
     }
 
-    pub(crate) fn candidate_location(&self) -> &Location {
+    /// The specification-derived candidate prefix.
+    pub fn candidate_location(&self) -> &Location {
         &self.candidate_location
     }
 
-    pub(crate) fn entries(&self) -> &[PackageTreeAcquisitionEntry] {
+    /// Acquired entries in canonical package-relative path order.
+    pub fn entries(&self) -> &[PackageTreeAcquisitionEntry] {
         &self.entries
     }
 
-    pub(crate) fn into_parts(
+    /// Recovers the specification, source evidence, and owned entries.
+    pub fn into_parts(
         self,
     ) -> (
         PackageSpec,
@@ -249,19 +608,892 @@ impl fmt::Debug for PackageTreeAcquisition {
     }
 }
 
+/// Exact raw Package Archive bytes acquired from a configured cache.
+pub struct CachedPackageArchiveAcquisition {
+    spec: PackageSpec,
+    configured_source: Location,
+    candidate_location: Location,
+    bytes: Vec<u8>,
+}
+
+impl CachedPackageArchiveAcquisition {
+    /// The exact package specification acquired.
+    pub fn spec(&self) -> &PackageSpec {
+        &self.spec
+    }
+
+    /// The configured raw archive cache prefix.
+    pub fn configured_source(&self) -> &Location {
+        &self.configured_source
+    }
+
+    /// The specification-derived exact cache object.
+    pub fn candidate_location(&self) -> &Location {
+        &self.candidate_location
+    }
+
+    /// The exact raw Package Archive bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The exact raw archive byte length.
+    pub fn len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    /// Whether the present raw archive object was empty.
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    /// Recovers the specification, source evidence, and exact bytes.
+    pub fn into_parts(self) -> (PackageSpec, Location, Location, Vec<u8>) {
+        (
+            self.spec,
+            self.configured_source,
+            self.candidate_location,
+            self.bytes,
+        )
+    }
+}
+
+impl fmt::Debug for CachedPackageArchiveAcquisition {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("CachedPackageArchiveAcquisition")
+            .field("spec", &self.spec)
+            .field("configured_source", &self.configured_source)
+            .field("candidate_location", &self.candidate_location)
+            .field("byte_length", &self.bytes.len())
+            .finish()
+    }
+}
+
+/// Exact raw Package Archive bytes acquired from the official registry.
+pub struct RegistryPackageArchiveAcquisition {
+    spec: PackageSpec,
+    configured_source: Location,
+    candidate_location: Location,
+    cache_destination: Option<Location>,
+    bytes: Vec<u8>,
+}
+
+impl RegistryPackageArchiveAcquisition {
+    /// The exact package specification acquired.
+    pub fn spec(&self) -> &PackageSpec {
+        &self.spec
+    }
+
+    /// The configured official Package Registry prefix.
+    pub fn configured_source(&self) -> &Location {
+        &self.configured_source
+    }
+
+    /// The specification-derived exact registry object.
+    pub fn candidate_location(&self) -> &Location {
+        &self.candidate_location
+    }
+
+    /// The derived cache object available for later optional publication.
+    pub fn cache_destination(&self) -> Option<&Location> {
+        self.cache_destination.as_ref()
+    }
+
+    /// The exact raw bytes returned by the registry.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The exact raw archive byte length.
+    pub fn len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    /// Whether the present registry object was empty.
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    /// Recovers the specification, source evidence, cache destination, and bytes.
+    pub fn into_parts(self) -> (PackageSpec, Location, Location, Option<Location>, Vec<u8>) {
+        (
+            self.spec,
+            self.configured_source,
+            self.candidate_location,
+            self.cache_destination,
+            self.bytes,
+        )
+    }
+}
+
+impl fmt::Debug for RegistryPackageArchiveAcquisition {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RegistryPackageArchiveAcquisition")
+            .field("spec", &self.spec)
+            .field("configured_source", &self.configured_source)
+            .field("candidate_location", &self.candidate_location)
+            .field("cache_destination", &self.cache_destination)
+            .field("byte_length", &self.bytes.len())
+            .finish()
+    }
+}
+
+/// Evidence that every applicable configured package source was absent.
+#[derive(Debug)]
+pub struct UnavailablePackageAcquisition {
+    spec: PackageSpec,
+    failure: crate::PackageAcquisitionFailure,
+}
+
+impl UnavailablePackageAcquisition {
+    /// The exact package specification that was unavailable.
+    pub fn spec(&self) -> &PackageSpec {
+        &self.spec
+    }
+
+    /// The stable failure to carry into resumed Pack Creation.
+    pub fn failure(&self) -> &crate::PackageAcquisitionFailure {
+        &self.failure
+    }
+
+    /// The stable reason the package was unavailable.
+    pub fn reason(&self) -> &crate::PackageAcquisitionFailureReason {
+        self.failure.reason()
+    }
+
+    /// Recovers the exact specification and owned failure.
+    pub fn into_parts(self) -> (PackageSpec, crate::PackageAcquisitionFailure) {
+        (self.spec, self.failure)
+    }
+}
+
+/// The raw result of acquiring one package through configured OpenDAL sources.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum PackageAcquisition {
+    /// A present Package Tree candidate and its exact files.
+    Tree(PackageTreeAcquisition),
+    /// A present raw Package Archive cache object.
+    CachedArchive(CachedPackageArchiveAcquisition),
+    /// A present official Package Registry object.
+    RegistryArchive(RegistryPackageArchiveAcquisition),
+    /// Every applicable configured candidate was definitely absent.
+    Unavailable(UnavailablePackageAcquisition),
+}
+
+impl PackageAcquisition {
+    /// The selected configured source, or `None` when unavailable.
+    pub fn configured_source(&self) -> Option<&Location> {
+        match self {
+            Self::Tree(value) => Some(value.configured_source()),
+            Self::CachedArchive(value) => Some(value.configured_source()),
+            Self::RegistryArchive(value) => Some(value.configured_source()),
+            Self::Unavailable(_) => None,
+        }
+    }
+
+    /// The selected derived candidate, or `None` when unavailable.
+    pub fn candidate_location(&self) -> Option<&Location> {
+        match self {
+            Self::Tree(value) => Some(value.candidate_location()),
+            Self::CachedArchive(value) => Some(value.candidate_location()),
+            Self::RegistryArchive(value) => Some(value.candidate_location()),
+            Self::Unavailable(_) => None,
+        }
+    }
+}
+
+/// Acquires one package from ordered trees, an optional cache, then an optional registry.
+///
+/// Only definite absence advances fallback. Registry lookup is skipped when the
+/// official registry does not serve the requested namespace. This operation
+/// returns exact raw values and performs no archive expansion or cache write.
+pub async fn acquire_package<R: OperatorResolver + ?Sized>(
+    resolver: &R,
+    request: &PackageAcquisitionRequest,
+) -> Result<PackageAcquisition, PackageAcquisitionError<R::Error>> {
+    let mut resolved = ResolvedOperators::new(resolver);
+    match acquire_package_tree_candidates_with_resolved(
+        &mut resolved,
+        request.spec(),
+        request.tree_sources(),
+        request.limits().trees(),
+    )
+    .await
+    {
+        Ok(Some(tree)) => return Ok(PackageAcquisition::Tree(tree)),
+        Ok(None) => {}
+        Err(error) => return Err(PackageAcquisitionError::from_tree(request.spec(), error)),
+    }
+
+    if let Some(configured_source) = request.archive_cache() {
+        let candidate_location = compose_candidate(
+            configured_source,
+            &acquisition_layout::package_archive_cache_key(request.spec()),
+        );
+        match acquire_exact_object_with_resolved(
+            &mut resolved,
+            &candidate_location,
+            request.limits().archives().archive_bytes(),
+        )
+        .await
+        {
+            Ok(bytes) => {
+                return Ok(PackageAcquisition::CachedArchive(
+                    CachedPackageArchiveAcquisition {
+                        spec: request.spec().clone(),
+                        configured_source: configured_source.clone(),
+                        candidate_location,
+                        bytes,
+                    },
+                ));
+            }
+            Err(ExactObjectAcquisitionError::ObjectAbsent(_)) => {}
+            Err(error) => {
+                return Err(PackageAcquisitionError::from_archive(
+                    request.spec(),
+                    configured_source.clone(),
+                    candidate_location,
+                    ArchiveSource::Cache,
+                    error,
+                ));
+            }
+        }
+    }
+
+    if let (Some(configured_source), Some(registry_key)) = (
+        request.registry(),
+        acquisition_layout::official_registry_archive_key(request.spec()),
+    ) {
+        let candidate_location = compose_candidate(configured_source, &registry_key);
+        match acquire_exact_object_with_resolved(
+            &mut resolved,
+            &candidate_location,
+            request.limits().archives().archive_bytes(),
+        )
+        .await
+        {
+            Ok(bytes) => {
+                let cache_destination = request.archive_cache().map(|cache| {
+                    compose_candidate(
+                        cache,
+                        &acquisition_layout::package_archive_cache_key(request.spec()),
+                    )
+                });
+                return Ok(PackageAcquisition::RegistryArchive(
+                    RegistryPackageArchiveAcquisition {
+                        spec: request.spec().clone(),
+                        configured_source: configured_source.clone(),
+                        candidate_location,
+                        cache_destination,
+                        bytes,
+                    },
+                ));
+            }
+            Err(ExactObjectAcquisitionError::ObjectAbsent(_)) => {}
+            Err(error) => {
+                return Err(PackageAcquisitionError::from_archive(
+                    request.spec(),
+                    configured_source.clone(),
+                    candidate_location,
+                    ArchiveSource::Registry,
+                    error,
+                ));
+            }
+        }
+    }
+
+    let failure = crate::PackageAcquisitionFailure::new(
+        request.spec().clone(),
+        crate::PackageAcquisitionFailureReason::NotFound,
+    );
+    Ok(PackageAcquisition::Unavailable(
+        UnavailablePackageAcquisition {
+            spec: request.spec().clone(),
+            failure,
+        },
+    ))
+}
+
+enum ArchiveSource {
+    Cache,
+    Registry,
+}
+
+/// A terminal failure while acquiring one package through OpenDAL.
+pub struct PackageAcquisitionError<E> {
+    spec: PackageSpec,
+    source_index: Option<usize>,
+    configured_source: Option<Location>,
+    candidate_location: Option<Location>,
+    failed_path: Option<String>,
+    failure: crate::PackageAcquisitionFailure,
+    cause: PackageAcquisitionErrorCause<E>,
+}
+
+impl<E> PackageAcquisitionError<E> {
+    /// The exact package specification whose acquisition failed.
+    pub fn spec(&self) -> &PackageSpec {
+        &self.spec
+    }
+
+    /// The caller-order tree source index, when failure occurred at a tree.
+    pub fn source_index(&self) -> Option<usize> {
+        self.source_index
+    }
+
+    /// The configured source reached when failure occurred.
+    pub fn configured_source(&self) -> Option<&Location> {
+        self.configured_source.as_ref()
+    }
+
+    /// The specification-derived candidate reached when available.
+    pub fn candidate_location(&self) -> Option<&Location> {
+        self.candidate_location.as_ref()
+    }
+
+    /// The listed tree object that failed to read, when applicable.
+    pub fn failed_path(&self) -> Option<&str> {
+        self.failed_path.as_deref()
+    }
+
+    /// The stable failure suitable for resumed Pack Creation.
+    pub fn failure(&self) -> &crate::PackageAcquisitionFailure {
+        &self.failure
+    }
+
+    /// The stable Package Acquisition Failure reason.
+    pub fn reason(&self) -> &crate::PackageAcquisitionFailureReason {
+        self.failure.reason()
+    }
+
+    /// The typed adapter cause retained by this failure.
+    pub fn cause(&self) -> &PackageAcquisitionErrorCause<E> {
+        &self.cause
+    }
+
+    fn from_tree(spec: &PackageSpec, error: PackageTreeSourceAcquisitionError<E>) -> Self {
+        let cause = match error.cause {
+            PackageTreeSourceAcquisitionErrorCause::InvalidSourceRole(_) => {
+                unreachable!("PackageAcquisitionRequest validates every tree prefix")
+            }
+            PackageTreeSourceAcquisitionErrorCause::ResolveOperator(source) => {
+                PackageAcquisitionErrorCause::ResolveOperator(source)
+            }
+            PackageTreeSourceAcquisitionErrorCause::UnsupportedCapabilities {
+                list,
+                list_with_recursive,
+                read,
+            } => PackageAcquisitionErrorCause::UnsupportedTreeCapabilities {
+                list,
+                list_with_recursive,
+                read,
+            },
+            PackageTreeSourceAcquisitionErrorCause::List(source) => {
+                PackageAcquisitionErrorCause::TreeList(source)
+            }
+            PackageTreeSourceAcquisitionErrorCause::Read(source) => {
+                PackageAcquisitionErrorCause::TreeRead(source)
+            }
+            PackageTreeSourceAcquisitionErrorCause::ListedObjectAbsent(source) => {
+                PackageAcquisitionErrorCause::ListedTreeObjectAbsent(source)
+            }
+            PackageTreeSourceAcquisitionErrorCause::Structural(source) => {
+                PackageAcquisitionErrorCause::TreeStructural(source)
+            }
+            PackageTreeSourceAcquisitionErrorCause::InvalidPackageTree(source) => {
+                PackageAcquisitionErrorCause::InvalidPackageTree(source)
+            }
+            PackageTreeSourceAcquisitionErrorCause::Limit(source) => {
+                PackageAcquisitionErrorCause::TreeLimit(source)
+            }
+        };
+        Self {
+            spec: spec.clone(),
+            source_index: Some(error.source_index),
+            configured_source: Some(error.configured_source),
+            candidate_location: error.candidate_location,
+            failed_path: error.failed_path,
+            failure: other_failure(spec),
+            cause,
+        }
+    }
+
+    fn from_archive(
+        spec: &PackageSpec,
+        configured_source: Location,
+        candidate_location: Location,
+        archive_source: ArchiveSource,
+        error: ExactObjectAcquisitionError<E>,
+    ) -> Self {
+        let cause = match error {
+            ExactObjectAcquisitionError::InvalidLocationRole(_) => {
+                unreachable!("a package archive key below a prefix is an exact object")
+            }
+            ExactObjectAcquisitionError::ResolveOperator(source) => {
+                PackageAcquisitionErrorCause::ResolveOperator(source)
+            }
+            ExactObjectAcquisitionError::ReadUnsupported => {
+                PackageAcquisitionErrorCause::UnsupportedArchiveRead
+            }
+            ExactObjectAcquisitionError::ObjectAbsent(_) => {
+                unreachable!("definite archive absence advances fallback")
+            }
+            ExactObjectAcquisitionError::Read(source) => match archive_source {
+                ArchiveSource::Cache => PackageAcquisitionErrorCause::CacheRead(source),
+                ArchiveSource::Registry => PackageAcquisitionErrorCause::RegistryRead(source),
+            },
+            ExactObjectAcquisitionError::Limit(source) => {
+                PackageAcquisitionErrorCause::ArchiveLimit(map_archive_limit(source))
+            }
+        };
+        Self {
+            spec: spec.clone(),
+            source_index: None,
+            configured_source: Some(configured_source),
+            candidate_location: Some(candidate_location),
+            failed_path: None,
+            failure: other_failure(spec),
+            cause,
+        }
+    }
+}
+
+impl<E> fmt::Display for PackageAcquisitionError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "Package Acquisition failed for {}", self.spec)?;
+        if let Some(source_index) = self.source_index {
+            write!(formatter, " at tree source {source_index}")?;
+        }
+        if let Some(candidate) = &self.candidate_location {
+            write!(formatter, " at candidate {candidate}")?;
+        }
+        write!(formatter, ": {}", self.cause.label())
+    }
+}
+
+impl<E> fmt::Debug for PackageAcquisitionError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PackageAcquisitionError")
+            .field("spec", &self.spec)
+            .field("source_index", &self.source_index)
+            .field("configured_source", &self.configured_source)
+            .field("candidate_location", &self.candidate_location)
+            .field("failed_path", &self.failed_path)
+            .field("reason", self.failure.reason())
+            .field("cause", &self.cause.label())
+            .finish()
+    }
+}
+
+impl<E: Error + 'static> Error for PackageAcquisitionError<E> {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match &self.cause {
+            PackageAcquisitionErrorCause::ResolveOperator(source) => Some(source),
+            PackageAcquisitionErrorCause::UnsupportedTreeCapabilities { .. }
+            | PackageAcquisitionErrorCause::UnsupportedArchiveRead => None,
+            PackageAcquisitionErrorCause::TreeList(source)
+            | PackageAcquisitionErrorCause::TreeRead(source)
+            | PackageAcquisitionErrorCause::ListedTreeObjectAbsent(source)
+            | PackageAcquisitionErrorCause::CacheRead(source)
+            | PackageAcquisitionErrorCause::RegistryRead(source) => Some(source),
+            PackageAcquisitionErrorCause::TreeStructural(source) => Some(source),
+            PackageAcquisitionErrorCause::InvalidPackageTree(source) => Some(source),
+            PackageAcquisitionErrorCause::TreeLimit(source) => Some(source),
+            PackageAcquisitionErrorCause::ArchiveLimit(source) => Some(source),
+        }
+    }
+}
+
+/// The typed cause of a terminal OpenDAL Package Acquisition failure.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum PackageAcquisitionErrorCause<E> {
+    /// The reached binding could not be resolved.
+    ResolveOperator(E),
+    /// A reached tree binding cannot recursively list or read selected files.
+    UnsupportedTreeCapabilities {
+        list: bool,
+        list_with_recursive: bool,
+        read: bool,
+    },
+    /// A reached raw archive binding cannot read objects.
+    UnsupportedArchiveRead,
+    /// A Package Tree recursive listing failed.
+    TreeList(::opendal::Error),
+    /// A listed Package Tree object read failed.
+    TreeRead(::opendal::Error),
+    /// A listed Package Tree object became absent when read.
+    ListedTreeObjectAbsent(::opendal::Error),
+    /// The raw Package Archive cache read failed.
+    CacheRead(::opendal::Error),
+    /// The official Package Registry read failed.
+    RegistryRead(::opendal::Error),
+    /// A completed Package Tree listing had envelope issues.
+    TreeStructural(PackageTreeAcquisitionSurveyError),
+    /// Listed paths do not form a valid Package Tree.
+    InvalidPackageTree(PackageTreeError),
+    /// Package Tree Acquisition exceeded a mandatory limit.
+    TreeLimit(PackageTreeAcquisitionLimitError),
+    /// Raw Package Archive Acquisition exceeded a mandatory limit.
+    ArchiveLimit(PackageArchiveAcquisitionLimitError),
+}
+
+impl<E> PackageAcquisitionErrorCause<E> {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::ResolveOperator(_) => "operator resolution failed",
+            Self::UnsupportedTreeCapabilities { .. } => {
+                "required Package Tree capabilities are unsupported"
+            }
+            Self::UnsupportedArchiveRead => "Package Archive read capability is unsupported",
+            Self::TreeList(_) => "the Package Tree listing failed",
+            Self::TreeRead(_) => "a Package Tree object read failed",
+            Self::ListedTreeObjectAbsent(_) => "a listed Package Tree object became absent",
+            Self::CacheRead(_) => "the Package Archive cache read failed",
+            Self::RegistryRead(_) => "the Package Registry read failed",
+            Self::TreeStructural(_) => "the Package Tree listing had structural issues",
+            Self::InvalidPackageTree(_) => "the listed objects do not form a Package Tree",
+            Self::TreeLimit(_) => "a Package Tree Acquisition limit failed",
+            Self::ArchiveLimit(_) => "a Package Archive Acquisition limit failed",
+        }
+    }
+}
+
+fn map_archive_limit(source: ExactObjectLimitError) -> PackageArchiveAcquisitionLimitError {
+    match source {
+        ExactObjectLimitError::Exceeded {
+            ceiling,
+            observed_at_least,
+        } => PackageArchiveAcquisitionLimitError::Exceeded {
+            resource: PackageArchiveAcquisitionResource::ArchiveBytes,
+            ceiling,
+            observed_at_least,
+        },
+        ExactObjectLimitError::AccountingOverflow => {
+            PackageArchiveAcquisitionLimitError::AccountingOverflow {
+                resource: PackageArchiveAcquisitionResource::ArchiveBytes,
+            }
+        }
+    }
+}
+
+fn other_failure(spec: &PackageSpec) -> crate::PackageAcquisitionFailure {
+    crate::PackageAcquisitionFailure::new(
+        spec.clone(),
+        crate::PackageAcquisitionFailureReason::Other { detail: None },
+    )
+}
+
+/// Exact registry bytes retained after successful validation and insertion.
+#[cfg(feature = "package-acquisition")]
+pub struct RegistryArchiveResidue {
+    spec: PackageSpec,
+    destination: Location,
+    bytes: Vec<u8>,
+}
+
+#[cfg(feature = "package-acquisition")]
+impl RegistryArchiveResidue {
+    /// The exact package specification validated and inserted.
+    pub fn spec(&self) -> &PackageSpec {
+        &self.spec
+    }
+
+    /// The derived exact cache object for optional publication.
+    pub fn destination(&self) -> &Location {
+        &self.destination
+    }
+
+    /// The exact original registry bytes.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The exact raw archive byte length.
+    pub fn len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    /// Whether the original registry object was empty.
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    /// Recovers the specification, cache destination, and exact registry bytes.
+    pub fn into_parts(self) -> (PackageSpec, Location, Vec<u8>) {
+        (self.spec, self.destination, self.bytes)
+    }
+}
+
+#[cfg(feature = "package-acquisition")]
+impl fmt::Debug for RegistryArchiveResidue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("RegistryArchiveResidue")
+            .field("spec", &self.spec)
+            .field("destination", &self.destination)
+            .field("byte_length", &self.bytes.len())
+            .finish()
+    }
+}
+
+/// The stage at which an acquired package could not be inserted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+#[cfg(feature = "package-acquisition")]
+pub enum AcquiredPackageInsertionTarget {
+    /// Construction of an acquired Package Tree failed.
+    PackageTree,
+    /// Expansion of cached raw archive bytes failed.
+    CachedArchive,
+    /// Expansion of registry raw archive bytes failed.
+    RegistryArchive,
+    /// Package Catalog validation or insertion failed.
+    PackageCatalog,
+}
+
+/// A failure while converting raw acquisition into Pack Creation inputs.
+#[cfg(feature = "package-acquisition")]
+pub struct AcquiredPackageInsertionError {
+    spec: PackageSpec,
+    failure: crate::PackageAcquisitionFailure,
+    target: AcquiredPackageInsertionTarget,
+    cause: AcquiredPackageInsertionErrorCause,
+}
+
+#[cfg(feature = "package-acquisition")]
+impl AcquiredPackageInsertionError {
+    /// The exact package specification that could not be inserted.
+    pub fn spec(&self) -> &PackageSpec {
+        &self.spec
+    }
+
+    /// The stable failure recorded for resumed Pack Creation.
+    pub fn failure(&self) -> &crate::PackageAcquisitionFailure {
+        &self.failure
+    }
+
+    /// The stable Package Acquisition Failure reason.
+    pub fn reason(&self) -> &crate::PackageAcquisitionFailureReason {
+        self.failure.reason()
+    }
+
+    /// The insertion stage that failed.
+    pub fn target(&self) -> &AcquiredPackageInsertionTarget {
+        &self.target
+    }
+
+    /// The typed core cause retained by this failure.
+    pub fn cause(&self) -> &AcquiredPackageInsertionErrorCause {
+        &self.cause
+    }
+}
+
+#[cfg(feature = "package-acquisition")]
+impl fmt::Display for AcquiredPackageInsertionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "failed to insert acquired package {} at {:?}",
+            self.spec, self.target
+        )
+    }
+}
+
+#[cfg(feature = "package-acquisition")]
+impl fmt::Debug for AcquiredPackageInsertionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("AcquiredPackageInsertionError")
+            .field("spec", &self.spec)
+            .field("reason", self.failure.reason())
+            .field("target", &self.target)
+            .field("cause", &self.cause)
+            .finish()
+    }
+}
+
+#[cfg(feature = "package-acquisition")]
+impl Error for AcquiredPackageInsertionError {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match &self.cause {
+            AcquiredPackageInsertionErrorCause::PackageTree(source) => Some(source),
+            AcquiredPackageInsertionErrorCause::ArchiveExpansion(source) => Some(source),
+            AcquiredPackageInsertionErrorCause::PackageCatalog(source) => Some(source),
+        }
+    }
+}
+
+/// The typed cause of an acquired-package insertion failure.
+#[derive(Debug)]
+#[non_exhaustive]
+#[cfg(feature = "package-acquisition")]
+pub enum AcquiredPackageInsertionErrorCause {
+    /// Acquired entries could not construct a Package Tree.
+    PackageTree(crate::PackageTreeError),
+    /// Raw archive bytes could not expand into a Package Tree.
+    ArchiveExpansion(crate::PackageAcquisitionError),
+    /// The Package Catalog rejected the constructed tree.
+    PackageCatalog(crate::PackageCatalogError),
+}
+
+/// Expands or constructs an acquired package, inserts it, and updates failures.
+///
+/// Registry residue is returned only after expansion, validation, and catalog
+/// insertion succeed. Publishing those exact bytes is a separate low-level
+/// operation; publishing before this function succeeds can poison a cache with
+/// terminal malformed bytes.
+#[cfg(feature = "package-acquisition")]
+#[allow(unreachable_patterns)]
+pub fn insert_acquired_package(
+    catalog: &mut crate::PackageCatalog,
+    failures: &mut crate::PackageAcquisitionFailures,
+    acquisition: PackageAcquisition,
+    disposition: crate::PackageDisposition,
+    expansion_limits: crate::PackageExpansionLimits,
+) -> Result<Option<RegistryArchiveResidue>, AcquiredPackageInsertionError> {
+    let (spec, tree, residue) = match acquisition {
+        PackageAcquisition::Tree(acquisition) => {
+            let (spec, _, _, _, entries) = acquisition.into_parts();
+            let tree = crate::PackageTree::from_owned_entries(
+                entries
+                    .into_iter()
+                    .map(PackageTreeAcquisitionEntry::into_parts),
+            )
+            .map_err(|source| {
+                insertion_error(
+                    &spec,
+                    AcquiredPackageInsertionTarget::PackageTree,
+                    AcquiredPackageInsertionErrorCause::PackageTree(source),
+                    crate::PackageAcquisitionFailureReason::Other { detail: None },
+                    failures,
+                )
+            })?;
+            (spec, tree, None)
+        }
+        PackageAcquisition::CachedArchive(acquisition) => {
+            let (spec, _, _, bytes) = acquisition.into_parts();
+            let tree = expand_acquired_archive(
+                &spec,
+                &bytes,
+                AcquiredPackageInsertionTarget::CachedArchive,
+                expansion_limits,
+                failures,
+            )?;
+            (spec, tree, None)
+        }
+        PackageAcquisition::RegistryArchive(acquisition) => {
+            let (spec, _, _, destination, bytes) = acquisition.into_parts();
+            let tree = expand_acquired_archive(
+                &spec,
+                &bytes,
+                AcquiredPackageInsertionTarget::RegistryArchive,
+                expansion_limits,
+                failures,
+            )?;
+            let residue = destination.map(|destination| RegistryArchiveResidue {
+                spec: spec.clone(),
+                destination,
+                bytes,
+            });
+            (spec, tree, residue)
+        }
+        PackageAcquisition::Unavailable(acquisition) => {
+            let (_, failure) = acquisition.into_parts();
+            failures.insert(failure);
+            return Ok(None);
+        }
+        _ => unreachable!("future Package Acquisition outcomes require explicit composition"),
+    };
+
+    catalog
+        .insert(spec.clone(), tree, disposition)
+        .map_err(|source| {
+            insertion_error(
+                &spec,
+                AcquiredPackageInsertionTarget::PackageCatalog,
+                AcquiredPackageInsertionErrorCause::PackageCatalog(source),
+                crate::PackageAcquisitionFailureReason::Other { detail: None },
+                failures,
+            )
+        })?;
+    failures.remove(&spec);
+    Ok(residue)
+}
+
+#[cfg(feature = "package-acquisition")]
+fn expand_acquired_archive(
+    spec: &PackageSpec,
+    bytes: &[u8],
+    target: AcquiredPackageInsertionTarget,
+    limits: crate::PackageExpansionLimits,
+    failures: &mut crate::PackageAcquisitionFailures,
+) -> Result<crate::PackageTree, AcquiredPackageInsertionError> {
+    crate::expand_package_archive(spec.clone(), bytes, limits).map_err(|source| {
+        let reason = match &source {
+            crate::PackageAcquisitionError::MalformedArchive { .. }
+            | crate::PackageAcquisitionError::InvalidPackageTree { .. } => {
+                crate::PackageAcquisitionFailureReason::MalformedArchive { detail: None }
+            }
+            crate::PackageAcquisitionError::UnservedNamespace { .. }
+            | crate::PackageAcquisitionError::ExpansionLimit { .. } => {
+                crate::PackageAcquisitionFailureReason::Other { detail: None }
+            }
+        };
+        insertion_error(
+            spec,
+            target,
+            AcquiredPackageInsertionErrorCause::ArchiveExpansion(source),
+            reason,
+            failures,
+        )
+    })
+}
+
+#[cfg(feature = "package-acquisition")]
+fn insertion_error(
+    spec: &PackageSpec,
+    target: AcquiredPackageInsertionTarget,
+    cause: AcquiredPackageInsertionErrorCause,
+    reason: crate::PackageAcquisitionFailureReason,
+    failures: &mut crate::PackageAcquisitionFailures,
+) -> AcquiredPackageInsertionError {
+    let failure = crate::PackageAcquisitionFailure::new(spec.clone(), reason);
+    failures.insert(failure.clone());
+    AcquiredPackageInsertionError {
+        spec: spec.clone(),
+        failure,
+        target,
+        cause,
+    }
+}
+
+/// An unsupported entry kind yielded by a Package Tree listing.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum PackageTreeAcquisitionEntryKind {
+#[non_exhaustive]
+pub enum PackageTreeAcquisitionEntryKind {
+    /// OpenDAL did not classify the entry as a file or directory.
     Unknown,
 }
 
+/// One storage-envelope issue found during a Package Tree survey.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-pub(crate) enum PackageTreeAcquisitionIssue {
+#[non_exhaustive]
+pub enum PackageTreeAcquisitionIssue {
+    /// A yielded path is outside the candidate prefix.
     #[error("listed operation path {operation_path:?} is outside the Package Tree prefix")]
     ListedPathOutsidePrefix { operation_path: String },
+    /// A yielded file names the candidate prefix itself or ends in a separator.
     #[error("listed operation path {operation_path:?} is a prefix marker where a file is required")]
     PrefixMarkerWhereFileRequired { operation_path: String },
+    /// A yielded path has no package-relative component.
     #[error("listed operation path {operation_path:?} has an empty relative path")]
     EmptyRelativeOperationPath { operation_path: String },
+    /// A yielded entry has an unsupported kind.
     #[error("listed operation path {operation_path:?} has unsupported kind {kind:?}")]
     UnsupportedEntryKind {
         operation_path: String,
@@ -269,13 +1501,15 @@ pub(crate) enum PackageTreeAcquisitionIssue {
     },
 }
 
+/// The nonempty canonical set of Package Tree survey envelope issues.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct PackageTreeAcquisitionSurveyError {
+pub struct PackageTreeAcquisitionSurveyError {
     issues: Vec<PackageTreeAcquisitionIssue>,
 }
 
 impl PackageTreeAcquisitionSurveyError {
-    pub(crate) fn issues(&self) -> &[PackageTreeAcquisitionIssue] {
+    /// Every independently detectable issue in canonical path and kind order.
+    pub fn issues(&self) -> &[PackageTreeAcquisitionIssue] {
         &self.issues
     }
 }
@@ -305,22 +1539,17 @@ pub(crate) struct PackageTreeSourceAcquisitionError<E> {
 }
 
 impl<E> PackageTreeSourceAcquisitionError<E> {
+    #[cfg(test)]
     pub(crate) fn source_index(&self) -> usize {
         self.source_index
     }
 
-    pub(crate) fn configured_source(&self) -> &Location {
-        &self.configured_source
-    }
-
-    pub(crate) fn candidate_location(&self) -> Option<&Location> {
-        self.candidate_location.as_ref()
-    }
-
+    #[cfg(test)]
     pub(crate) fn failed_path(&self) -> Option<&str> {
         self.failed_path.as_deref()
     }
 
+    #[cfg(test)]
     pub(crate) fn cause(&self) -> &PackageTreeSourceAcquisitionErrorCause<E> {
         &self.cause
     }
@@ -516,25 +1745,42 @@ impl<E> PackageTreeSourceAcquisitionErrorCause<E> {
     }
 }
 
+#[cfg(test)]
 pub(crate) async fn acquire_package_tree_candidates<R: OperatorResolver + ?Sized>(
     resolver: &R,
     spec: &PackageSpec,
     sources: &[PackageTreeSource],
     limits: PackageTreeAcquisitionLimits,
 ) -> Result<Option<PackageTreeAcquisition>, PackageTreeSourceAcquisitionError<R::Error>> {
+    let mut resolved = ResolvedOperators::new(resolver);
+    acquire_package_tree_candidates_with_resolved(&mut resolved, spec, sources, limits).await
+}
+
+async fn acquire_package_tree_candidates_with_resolved<R: OperatorResolver + ?Sized>(
+    resolved: &mut ResolvedOperators<'_, R>,
+    spec: &PackageSpec,
+    sources: &[PackageTreeSource],
+    limits: PackageTreeAcquisitionLimits,
+) -> Result<Option<PackageTreeAcquisition>, PackageTreeSourceAcquisitionError<R::Error>> {
     let child = format!("{}/", acquisition_layout::package_tree_key(spec));
-    let candidates = sources.iter().map(|source| {
-        source.source.require_prefix()?;
-        Ok(compose_candidate(&source.source, &child))
-    });
-    let Some((source_index, candidate_location, objects)) = acquire_first_present_recursive_prefix(
-        resolver,
-        candidates,
-        RecursiveAcquisitionSelection::PackageTree,
-        limits.into(),
-    )
-    .await
-    .map_err(|error| PackageTreeSourceAcquisitionError::from_recursive(sources, &child, error))?
+    let candidates = sources
+        .iter()
+        .map(|source| {
+            source.source.require_prefix()?;
+            Ok(compose_candidate(&source.source, &child))
+        })
+        .collect::<Vec<_>>();
+    let Some((source_index, candidate_location, objects)) =
+        acquire_first_present_recursive_prefix_with_resolved(
+            resolved,
+            candidates,
+            RecursiveAcquisitionSelection::PackageTree,
+            limits.into(),
+        )
+        .await
+        .map_err(|error| {
+            PackageTreeSourceAcquisitionError::from_recursive(sources, &child, error)
+        })?
     else {
         return Ok(None);
     };

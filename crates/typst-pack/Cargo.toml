@@ -12,7 +12,7 @@ keywords = ["typst", "documents", "packaging", "archive", "fonts"]
 categories = ["command-line-utilities", "text-processing", "filesystem"]
 
 [package.metadata.docs.rs]
-features = ["opendal"]
+features = ["opendal", "package-acquisition"]
 
 [features]
 default = []

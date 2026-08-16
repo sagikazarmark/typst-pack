@@ -1,7 +1,8 @@
 //! OpenDAL acquisition for Pack Assembly inputs.
 
-#[allow(dead_code)]
 mod package;
+
+pub use package::*;
 
 use std::{error::Error, fmt};
 

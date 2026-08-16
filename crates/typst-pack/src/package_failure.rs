@@ -39,7 +39,10 @@ impl PackageAcquisitionFailures {
     }
 
     /// Removes an older failed attempt after the specification is acquired.
-    #[cfg(feature = "fs")]
+    #[cfg(any(
+        feature = "fs",
+        all(feature = "opendal", feature = "package-acquisition")
+    ))]
     pub(crate) fn remove(&mut self, spec: &PackageSpec) -> Option<PackageAcquisitionFailure> {
         self.failures.remove(&spec.to_string())
     }

@@ -4,9 +4,9 @@ use futures_util::StreamExt;
 use opendal::ErrorKind;
 
 use super::super::acquisition::{
-    ExactObjectLimitError, ExactPathAcquisitionError, acquire_exact_path,
+    ExactObjectLimitError, ExactPathAcquisitionError, ResolvedOperators, acquire_exact_path,
 };
-use super::super::location::{Location, LocationRoleError, OperatorBinding, OperatorResolver};
+use super::super::location::{Location, LocationRoleError, OperatorResolver};
 use crate::acquisition_layout;
 use crate::package_catalog::{
     PackageTreeError, PackageTreePathPreflightError, preflight_package_tree_paths,
@@ -148,8 +148,28 @@ pub(crate) async fn acquire_first_present_recursive_prefix<R: OperatorResolver +
     Option<(usize, Location, Vec<RecursiveSurveyedObject>)>,
     RecursiveSourcesAcquisitionError<R::Error>,
 > {
+    let mut resolved = ResolvedOperators::new(resolver);
+    acquire_first_present_recursive_prefix_with_resolved(
+        &mut resolved,
+        locations,
+        selection,
+        limits,
+    )
+    .await
+}
+
+pub(crate) async fn acquire_first_present_recursive_prefix_with_resolved<
+    R: OperatorResolver + ?Sized,
+>(
+    resolved: &mut ResolvedOperators<'_, R>,
+    locations: impl IntoIterator<Item = Result<Location, LocationRoleError>>,
+    selection: RecursiveAcquisitionSelection,
+    limits: RecursiveAcquisitionLimits,
+) -> Result<
+    Option<(usize, Location, Vec<RecursiveSurveyedObject>)>,
+    RecursiveSourcesAcquisitionError<R::Error>,
+> {
     let mut accounting = SurveyAccounting::new(limits);
-    let mut resolved = Vec::new();
     let mut retained_bytes = 0u64;
 
     for (source_index, location) in locations.into_iter().enumerate() {
@@ -159,12 +179,11 @@ pub(crate) async fn acquire_first_present_recursive_prefix<R: OperatorResolver +
         })?;
         let mut issues = Vec::new();
         let mut plan = survey_recursive_prefix(
-            resolver,
+            resolved,
             &location,
             source_index,
             selection,
             &mut accounting,
-            &mut resolved,
             &mut issues,
         )
         .await?;
@@ -191,18 +210,17 @@ pub(crate) async fn acquire_recursive_prefixes<R: OperatorResolver + ?Sized>(
 ) -> Result<Vec<Vec<RecursiveSurveyedObject>>, RecursiveSourcesAcquisitionError<R::Error>> {
     let mut accounting = SurveyAccounting::new(limits);
     let mut issues = Vec::new();
-    let mut resolved = Vec::new();
+    let mut resolved = ResolvedOperators::new(resolver);
     let mut plans = Vec::with_capacity(locations.len());
 
     for (source_index, location) in locations.iter().copied().enumerate() {
         plans.push(
             survey_recursive_prefix(
-                resolver,
+                &mut resolved,
                 location,
                 source_index,
                 selection,
                 &mut accounting,
-                &mut resolved,
                 &mut issues,
             )
             .await?,
@@ -226,12 +244,11 @@ pub(crate) async fn acquire_recursive_prefixes<R: OperatorResolver + ?Sized>(
 }
 
 async fn survey_recursive_prefix<R: OperatorResolver + ?Sized>(
-    resolver: &R,
+    resolved: &mut ResolvedOperators<'_, R>,
     location: &Location,
     source_index: usize,
     selection: RecursiveAcquisitionSelection,
     accounting: &mut SurveyAccounting,
-    resolved: &mut Vec<(OperatorBinding, opendal::Operator)>,
     issues: &mut Vec<RecursiveSurveyIssue>,
 ) -> Result<SourcePlan, RecursiveSourcesAcquisitionError<R::Error>> {
     location
@@ -240,34 +257,25 @@ async fn survey_recursive_prefix<R: OperatorResolver + ?Sized>(
             source_index,
             source: RecursiveAcquisitionError::InvalidLocationRole(source),
         })?;
-    let operator = if let Some((_, operator)) = resolved
-        .iter()
-        .find(|(binding, _)| binding == location.binding())
-    {
-        operator.clone()
-    } else {
-        let operator = resolver.resolve(location.binding()).map_err(|source| {
-            RecursiveSourcesAcquisitionError {
-                source_index,
-                source: RecursiveAcquisitionError::ResolveOperator(source),
-            }
-        })?;
-        resolved.push((location.binding().clone(), operator.clone()));
-        operator
-    };
-    let capabilities = operator.info().capability();
-    if !(capabilities.list && capabilities.list_with_recursive && capabilities.read) {
+    let resolved = resolved.resolve(location.binding()).map_err(|source| {
+        RecursiveSourcesAcquisitionError {
+            source_index,
+            source: RecursiveAcquisitionError::ResolveOperator(source),
+        }
+    })?;
+    if !(resolved.list && resolved.list_with_recursive) {
         return Err(RecursiveSourcesAcquisitionError {
             source_index,
             source: RecursiveAcquisitionError::UnsupportedCapabilities {
-                list: capabilities.list,
-                list_with_recursive: capabilities.list_with_recursive,
-                read: capabilities.read,
+                list: resolved.list,
+                list_with_recursive: resolved.list_with_recursive,
+                read: resolved.read,
             },
         });
     }
 
-    let mut lister = operator
+    let mut lister = resolved
+        .operator
         .lister_with(location.dispatch_path())
         .recursive(true)
         .await
@@ -412,7 +420,11 @@ async fn survey_recursive_prefix<R: OperatorResolver + ?Sized>(
         }
     }
 
-    Ok(SourcePlan { operator, selected })
+    Ok(SourcePlan {
+        operator: resolved.operator,
+        read: resolved.read,
+        selected,
+    })
 }
 
 fn check_survey_limits_and_envelope_issues<E>(
@@ -485,6 +497,16 @@ async fn read_source_plan<E>(
     plan: SourcePlan,
     retained_bytes: &mut u64,
 ) -> Result<Vec<RecursiveSurveyedObject>, RecursiveSourcesAcquisitionError<E>> {
+    if !plan.selected.is_empty() && !plan.read {
+        return Err(RecursiveSourcesAcquisitionError {
+            source_index,
+            source: RecursiveAcquisitionError::UnsupportedCapabilities {
+                list: true,
+                list_with_recursive: true,
+                read: false,
+            },
+        });
+    }
     let mut objects = Vec::with_capacity(plan.selected.len());
     for path in plan.selected {
         let remaining = limits.total_bytes.checked_sub(*retained_bytes).ok_or(
@@ -539,6 +561,7 @@ struct SurveyedPath {
 
 struct SourcePlan {
     operator: opendal::Operator,
+    read: bool,
     selected: Vec<SurveyedPath>,
 }
 
@@ -1282,11 +1305,6 @@ mod tests {
                 list_with_recursive: false,
                 read: true,
             },
-            Capabilities {
-                list: true,
-                list_with_recursive: true,
-                read: false,
-            },
         ] {
             let service = ScriptedService::new(capabilities, [], [], 4);
             let resolver = DirectResolver(service.operator());
@@ -1303,6 +1321,40 @@ mod tests {
             ));
             assert!(service.log().entries().is_empty());
         }
+
+        let service = ScriptedService::new(
+            Capabilities {
+                list: true,
+                list_with_recursive: true,
+                read: false,
+            },
+            [ListScript::new("p/", 1, [ListStep::page([ListEntry::file("p/a")])]).unwrap()],
+            [],
+            4,
+        );
+        let resolver = DirectResolver(service.operator());
+        let source = location("p/");
+        let mut acquisition = pin!(acquire_recursive_prefix(
+            &resolver,
+            &source,
+            RecursiveAcquisitionSelection::AllFiles,
+            limits(),
+        ));
+        assert!(matches!(
+            expect_ready(acquisition.as_mut()).unwrap_err(),
+            RecursiveAcquisitionError::UnsupportedCapabilities {
+                list: true,
+                list_with_recursive: true,
+                read: false,
+            }
+        ));
+        assert!(
+            service
+                .log()
+                .entries()
+                .iter()
+                .all(|entry| !matches!(entry, OperationLogEntry::ReadInvoked { .. }))
+        );
 
         let list = ListScript::new(
             "p/",
