@@ -32,6 +32,7 @@ jobs:
       - run: cargo check --locked -p typst-pack --no-default-features --features opendal --target ${{ matrix.target }}
       - run: cargo check --locked -p typst-pack --no-default-features --features opendal,package-acquisition --target ${{ matrix.target }}
       - run: cargo test --locked -p typst-pack --no-default-features --features opendal --target ${{ matrix.target }} --lib opendal::acquisition::tests
+      - run: cargo test --locked -p typst-pack --no-default-features --features opendal --target ${{ matrix.target }} --lib opendal::compilation::tests
       - run: cargo test --locked -p typst-pack --no-default-features --features opendal --target ${{ matrix.target }} --lib opendal::pack_assembly::package::tests
       - run: cargo test --locked -p typst-pack --no-default-features --features opendal --target ${{ matrix.target }} --lib opendal::publication::tests
       - run: cargo test --locked -p typst-pack --no-default-features --features opendal --target ${{ matrix.target }} --test opendal_location --test opendal_bindings --test opendal_scripted_service --test opendal_scheduling_harness --test opendal_font_acquisition --test opendal_package_acquisition --test opendal_pack_archive_publication --test opendal_package_cache_archive_publication --test opendal_compilation_artifact_publication --test opendal_pack_extraction_publication
