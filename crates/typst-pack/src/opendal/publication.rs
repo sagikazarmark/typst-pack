@@ -364,6 +364,308 @@ impl<E> PackArchivePublicationErrorCause<E> {
     }
 }
 
+/// A validated request to publish caller-supplied bytes to one package-cache object.
+///
+/// This request fixes [`PublicationPolicy::CreateOrVerify`]. It does not offer a
+/// replacement mode and does not represent Package Archive Expansion or Package
+/// Catalog insertion.
+#[derive(Clone, Debug)]
+pub struct PackageCacheArchivePublicationRequest {
+    destination: Location,
+}
+
+impl PackageCacheArchivePublicationRequest {
+    /// Validates and retains a normalized exact-object cache destination.
+    pub fn new(destination: Location) -> Result<Self, PackageCacheArchivePublicationRequestError> {
+        destination.require_object().map_err(|source| {
+            PackageCacheArchivePublicationRequestError::InvalidDestinationRole {
+                location: destination.clone(),
+                source,
+            }
+        })?;
+
+        Ok(Self { destination })
+    }
+
+    pub fn destination(&self) -> &Location {
+        &self.destination
+    }
+
+    pub const fn policy(&self) -> PublicationPolicy {
+        PublicationPolicy::CreateOrVerify
+    }
+}
+
+/// A reason a package-cache archive publication request cannot be accepted.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum PackageCacheArchivePublicationRequestError {
+    #[error("package-cache archive destination {location} is not an exact object: {source}")]
+    InvalidDestinationRole {
+        location: Location,
+        #[source]
+        source: LocationRoleError,
+    },
+}
+
+/// Publishes caller-supplied exact archive bytes to one package-cache object.
+///
+/// This low-level operation does not expand the archive, validate a Package
+/// Tree, or insert it into a Package Catalog. Direct use with unvalidated bytes
+/// can poison a cache because a present malformed cache candidate is terminal.
+/// Callers should publish registry bytes only after successful expansion,
+/// validation, and insertion.
+///
+/// Dropping the returned future yields no receipt, and already-issued storage
+/// work may have occurred. The caller retains `archive`; full replay with the
+/// same exact bytes is the recovery contract.
+///
+/// ```no_run
+/// # #[cfg(feature = "package-acquisition")]
+/// # mod example {
+/// use std::error::Error;
+/// use typst_pack::{
+///     PackageAcquisitionFailures, PackageCatalog, PackageDisposition,
+///     PackageExpansionLimits,
+/// };
+/// use typst_pack::opendal::OperatorBindings;
+/// use typst_pack::opendal::pack_assembly::{
+///     PackageAcquisition, RegistryArchiveResidue, insert_acquired_package,
+/// };
+/// use typst_pack::opendal::publication::{
+///     PackageCacheArchivePublicationRequest, publish_package_cache_archive,
+/// };
+///
+/// async fn insert_then_publish_registry_archive(
+///     bindings: &OperatorBindings,
+///     catalog: &mut PackageCatalog,
+///     failures: &mut PackageAcquisitionFailures,
+///     acquisition: PackageAcquisition,
+/// ) -> Result<Option<RegistryArchiveResidue>, Box<dyn Error>> {
+///     let Some(residue) = insert_acquired_package(
+///         catalog,
+///         failures,
+///         acquisition,
+///         PackageDisposition::Embedded,
+///         PackageExpansionLimits::reference_v1(),
+///     )? else {
+///         return Ok(None);
+///     };
+///
+///     let request = PackageCacheArchivePublicationRequest::new(
+///         residue.destination().clone(),
+///     )?;
+///     if let Err(cache_failure) =
+///         publish_package_cache_archive(bindings, &request, residue.bytes()).await
+///     {
+///         // Insertion remains successful. The residue retains the exact bytes
+///         // and destination so the caller can report and replay independently.
+///         drop(cache_failure);
+///     }
+///
+///     Ok(Some(residue))
+/// }
+/// # }
+/// ```
+pub async fn publish_package_cache_archive<R: OperatorResolver + ?Sized>(
+    resolver: &R,
+    request: &PackageCacheArchivePublicationRequest,
+    archive: &[u8],
+) -> Result<PackageCacheArchivePublicationReceipt, PackageCacheArchivePublicationError<R::Error>> {
+    let mut progress = PackageCacheArchivePublicationProgress::new();
+    let destination_path = request.destination().operation_path();
+    let keys = [ExactKey::new(destination_path, archive)];
+    let execution = publish_exact_keys(
+        resolver,
+        request.destination().binding(),
+        request.policy(),
+        &keys,
+        |entry| {
+            progress.push(PackageCacheArchivePublicationEntry {
+                destination_path: destination_path.to_owned(),
+                outcome: entry.outcome,
+            });
+        },
+    )
+    .await;
+
+    match execution {
+        Ok(_) => Ok(PackageCacheArchivePublicationReceipt {
+            destination: request.destination().clone(),
+            policy: request.policy(),
+            progress,
+        }),
+        Err(error) => {
+            let phase = error.phase;
+            let failed_path = error.failed_path;
+            let commit_certainty = error.commit_certainty;
+            let cause = match *error.cause {
+                ExactKeyPublicationErrorCause::ResolveOperator(source) => {
+                    PackageCacheArchivePublicationErrorCause::ResolveOperator(source)
+                }
+                ExactKeyPublicationErrorCause::UnsupportedPolicy => {
+                    PackageCacheArchivePublicationErrorCause::UnsupportedPolicy {
+                        policy: request.policy(),
+                    }
+                }
+                ExactKeyPublicationErrorCause::UnsupportedObjectSize { byte_length } => {
+                    PackageCacheArchivePublicationErrorCause::UnsupportedObjectSize { byte_length }
+                }
+                ExactKeyPublicationErrorCause::PreflightRead(source) => {
+                    PackageCacheArchivePublicationErrorCause::PreflightRead(source)
+                }
+                ExactKeyPublicationErrorCause::ByteConflict {
+                    expected_byte_length,
+                    observed_byte_length_at_least,
+                } => PackageCacheArchivePublicationErrorCause::ByteConflict {
+                    expected_byte_length,
+                    observed_byte_length_at_least,
+                },
+                ExactKeyPublicationErrorCause::ConditionalCreate(source) => {
+                    PackageCacheArchivePublicationErrorCause::ConditionalCreate(source)
+                }
+                ExactKeyPublicationErrorCause::RaceVerification(source) => {
+                    PackageCacheArchivePublicationErrorCause::RaceVerification(source)
+                }
+                ExactKeyPublicationErrorCause::DirectWrite(_) => {
+                    unreachable!("package-cache publication fixes CreateOrVerify")
+                }
+            };
+            Err(PackageCacheArchivePublicationError {
+                destination: request.destination().clone(),
+                policy: request.policy(),
+                failed_path,
+                phase,
+                progress,
+                commit_certainty,
+                cause,
+            })
+        }
+    }
+}
+
+/// A failure while publishing caller-supplied package-cache archive bytes.
+///
+/// This error's own `Display` and `Debug` output omits native resolver and
+/// OpenDAL messages. Rendering its source chain may disclose backend context.
+pub struct PackageCacheArchivePublicationError<E> {
+    destination: Location,
+    policy: PublicationPolicy,
+    failed_path: Option<String>,
+    phase: OpenDalPublicationPhase,
+    progress: PackageCacheArchivePublicationProgress,
+    commit_certainty: CommitCertainty,
+    cause: PackageCacheArchivePublicationErrorCause<E>,
+}
+
+impl<E> PackageCacheArchivePublicationError<E> {
+    pub fn destination(&self) -> &Location {
+        &self.destination
+    }
+
+    pub const fn policy(&self) -> PublicationPolicy {
+        self.policy
+    }
+
+    pub fn failed_path(&self) -> Option<&str> {
+        self.failed_path.as_deref()
+    }
+
+    pub const fn phase(&self) -> OpenDalPublicationPhase {
+        self.phase
+    }
+
+    pub fn progress(&self) -> &PackageCacheArchivePublicationProgress {
+        &self.progress
+    }
+
+    pub const fn commit_certainty(&self) -> CommitCertainty {
+        self.commit_certainty
+    }
+
+    pub fn cause(&self) -> &PackageCacheArchivePublicationErrorCause<E> {
+        &self.cause
+    }
+}
+
+impl<E> fmt::Display for PackageCacheArchivePublicationError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "package-cache archive publication failed for binding {} at exact-object operation path {:?} during {:?}: {}",
+            self.destination.binding(),
+            self.destination.operation_path(),
+            self.phase,
+            self.cause.label(),
+        )
+    }
+}
+
+impl<E> fmt::Debug for PackageCacheArchivePublicationError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("PackageCacheArchivePublicationError")
+            .field("binding", self.destination.binding())
+            .field("role", &"exact object")
+            .field("operation_path", &self.destination.operation_path())
+            .field("policy", &self.policy)
+            .field("failed_path", &self.failed_path)
+            .field("phase", &self.phase)
+            .field("progress", &self.progress)
+            .field("commit_certainty", &self.commit_certainty)
+            .field("cause", &self.cause.label())
+            .finish()
+    }
+}
+
+impl<E: Error + 'static> Error for PackageCacheArchivePublicationError<E> {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match &self.cause {
+            PackageCacheArchivePublicationErrorCause::ResolveOperator(source) => Some(source),
+            PackageCacheArchivePublicationErrorCause::PreflightRead(source)
+            | PackageCacheArchivePublicationErrorCause::ConditionalCreate(source)
+            | PackageCacheArchivePublicationErrorCause::RaceVerification(source) => Some(source),
+            PackageCacheArchivePublicationErrorCause::UnsupportedPolicy { .. }
+            | PackageCacheArchivePublicationErrorCause::UnsupportedObjectSize { .. }
+            | PackageCacheArchivePublicationErrorCause::ByteConflict { .. } => None,
+        }
+    }
+}
+
+/// The typed cause of an OpenDAL package-cache archive publication failure.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum PackageCacheArchivePublicationErrorCause<E> {
+    ResolveOperator(E),
+    UnsupportedPolicy {
+        policy: PublicationPolicy,
+    },
+    UnsupportedObjectSize {
+        byte_length: u64,
+    },
+    PreflightRead(::opendal::Error),
+    ByteConflict {
+        expected_byte_length: u64,
+        observed_byte_length_at_least: u64,
+    },
+    ConditionalCreate(::opendal::Error),
+    RaceVerification(::opendal::Error),
+}
+
+impl<E> PackageCacheArchivePublicationErrorCause<E> {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::ResolveOperator(_) => "operator resolution failed",
+            Self::UnsupportedPolicy { .. } => "the publication policy is unsupported",
+            Self::UnsupportedObjectSize { .. } => "the archive exceeds the advertised object size",
+            Self::PreflightRead(_) => "a preflight read failed",
+            Self::ByteConflict { .. } => "destination bytes conflict",
+            Self::ConditionalCreate(_) => "a conditional create failed",
+            Self::RaceVerification(_) => "race verification failed",
+        }
+    }
+}
+
 /// A validated request to publish one Pack Extraction Plan beneath a prefix.
 #[derive(Clone, Debug)]
 pub struct PackExtractionPublicationRequest {
