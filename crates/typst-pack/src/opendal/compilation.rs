@@ -13,6 +13,7 @@ use super::acquisition::{
 use super::{Location, LocationRoleError, OperatorResolver};
 use crate::{Pack, PackIdentity, PackOverrideSet, PackOverrideSetError};
 
+mod font;
 mod package;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
