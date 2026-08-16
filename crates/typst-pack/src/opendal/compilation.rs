@@ -13,6 +13,8 @@ use super::acquisition::{
 use super::{Location, LocationRoleError, OperatorResolver};
 use crate::{Pack, PackIdentity, PackOverrideSet, PackOverrideSetError};
 
+mod package;
+
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct PackOverrideAcquisitionCeilings {
     pub(crate) objects: u64,

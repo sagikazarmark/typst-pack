@@ -4,7 +4,8 @@ use futures_util::StreamExt;
 use opendal::ErrorKind;
 
 use super::super::acquisition::{
-    ExactObjectLimitError, ExactPathAcquisitionError, ResolvedOperators, acquire_exact_path,
+    ExactObjectLimitError, ExactPathAcquisitionError, ResolvedOperator, ResolvedOperators,
+    acquire_exact_path,
 };
 use super::super::location::{Location, LocationRoleError, OperatorResolver};
 use crate::acquisition_layout;
@@ -243,6 +244,49 @@ pub(crate) async fn acquire_recursive_prefixes<R: OperatorResolver + ?Sized>(
     Ok(sources)
 }
 
+pub(crate) enum RequiredRecursiveSurvey {
+    Complete(Vec<RecursiveSurveyPlan>),
+    PrefixAbsent { source_index: usize },
+}
+
+pub(crate) async fn survey_required_recursive_prefixes_with_operators(
+    sources: &[(&Location, ResolvedOperator)],
+    limits: RecursiveAcquisitionLimits,
+) -> Result<RequiredRecursiveSurvey, RecursiveSourcesAcquisitionError<std::convert::Infallible>> {
+    let mut accounting = SurveyAccounting::new(limits);
+    let mut issues = Vec::new();
+    let mut plans = Vec::with_capacity(sources.len());
+
+    for (source_index, (location, resolved)) in sources.iter().enumerate() {
+        location
+            .require_prefix()
+            .map_err(|source| RecursiveSourcesAcquisitionError {
+                source_index,
+                source: RecursiveAcquisitionError::InvalidLocationRole(source),
+            })?;
+        plans.push(
+            survey_recursive_prefix_with_operator(
+                resolved.clone(),
+                location,
+                source_index,
+                RecursiveAcquisitionSelection::PackageTree,
+                &mut accounting,
+                &mut issues,
+            )
+            .await?,
+        );
+        if plans.last().is_some_and(|plan| plan.selected.is_empty()) {
+            check_survey_limits_and_envelope_issues(&accounting, &mut issues)?;
+            preflight_package_tree_plans(&mut accounting, &mut plans)?;
+            return Ok(RequiredRecursiveSurvey::PrefixAbsent { source_index });
+        }
+    }
+
+    check_survey_limits_and_envelope_issues(&accounting, &mut issues)?;
+    preflight_package_tree_plans(&mut accounting, &mut plans)?;
+    Ok(RequiredRecursiveSurvey::Complete(plans))
+}
+
 async fn survey_recursive_prefix<R: OperatorResolver + ?Sized>(
     resolved: &mut ResolvedOperators<'_, R>,
     location: &Location,
@@ -250,7 +294,7 @@ async fn survey_recursive_prefix<R: OperatorResolver + ?Sized>(
     selection: RecursiveAcquisitionSelection,
     accounting: &mut SurveyAccounting,
     issues: &mut Vec<RecursiveSurveyIssue>,
-) -> Result<SourcePlan, RecursiveSourcesAcquisitionError<R::Error>> {
+) -> Result<RecursiveSurveyPlan, RecursiveSourcesAcquisitionError<R::Error>> {
     location
         .require_prefix()
         .map_err(|source| RecursiveSourcesAcquisitionError {
@@ -263,6 +307,25 @@ async fn survey_recursive_prefix<R: OperatorResolver + ?Sized>(
             source: RecursiveAcquisitionError::ResolveOperator(source),
         }
     })?;
+    survey_recursive_prefix_with_operator(
+        resolved,
+        location,
+        source_index,
+        selection,
+        accounting,
+        issues,
+    )
+    .await
+}
+
+async fn survey_recursive_prefix_with_operator<E>(
+    resolved: ResolvedOperator,
+    location: &Location,
+    source_index: usize,
+    selection: RecursiveAcquisitionSelection,
+    accounting: &mut SurveyAccounting,
+    issues: &mut Vec<RecursiveSurveyIssue>,
+) -> Result<RecursiveSurveyPlan, RecursiveSourcesAcquisitionError<E>> {
     if !(resolved.list && resolved.list_with_recursive) {
         return Err(RecursiveSourcesAcquisitionError {
             source_index,
@@ -386,12 +449,13 @@ async fn survey_recursive_prefix<R: OperatorResolver + ?Sized>(
             continue;
         }
 
-        accounting.observe_selected(source_index);
+        let retain_selected = accounting.observe_selected(source_index);
         if retain_entry_evidence
             && accounting.can_retain_evidence()
             && accounting.retain_paths(source_index, &[operation_path.len(), relative.len()])
+            && retain_selected
         {
-            selected.push(SurveyedPath {
+            selected.push(RecursiveSurveyedPath {
                 operation_path: operation_path.to_owned(),
                 relative_path: relative.to_owned(),
             });
@@ -420,7 +484,7 @@ async fn survey_recursive_prefix<R: OperatorResolver + ?Sized>(
         }
     }
 
-    Ok(SourcePlan {
+    Ok(RecursiveSurveyPlan {
         operator: resolved.operator,
         read: resolved.read,
         selected,
@@ -456,7 +520,7 @@ fn check_survey_limits_and_envelope_issues<E>(
 fn preflight_package_tree_plan<E>(
     accounting: &mut SurveyAccounting,
     source_index: usize,
-    plan: &mut SourcePlan,
+    plan: &mut RecursiveSurveyPlan,
 ) -> Result<(), RecursiveSourcesAcquisitionError<E>> {
     let preflight = preflight_package_tree_paths(
         plan.selected
@@ -491,10 +555,34 @@ fn preflight_package_tree_plan<E>(
     }
 }
 
+fn preflight_package_tree_plans<E>(
+    accounting: &mut SurveyAccounting,
+    plans: &mut [RecursiveSurveyPlan],
+) -> Result<(), RecursiveSourcesAcquisitionError<E>> {
+    let mut first_error = None;
+    for (source_index, plan) in plans.iter_mut().enumerate() {
+        if let Err(error) = preflight_package_tree_plan(accounting, source_index, plan)
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
+    }
+    if let Some((source_index, source)) = accounting.survey_error() {
+        return Err(RecursiveSourcesAcquisitionError {
+            source_index,
+            source,
+        });
+    }
+    if let Some(error) = first_error {
+        return Err(error);
+    }
+    Ok(())
+}
+
 async fn read_source_plan<E>(
     limits: RecursiveAcquisitionLimits,
     source_index: usize,
-    plan: SourcePlan,
+    plan: RecursiveSurveyPlan,
     retained_bytes: &mut u64,
 ) -> Result<Vec<RecursiveSurveyedObject>, RecursiveSourcesAcquisitionError<E>> {
     if !plan.selected.is_empty() && !plan.read {
@@ -554,15 +642,16 @@ async fn read_source_plan<E>(
 }
 
 #[derive(Debug)]
-struct SurveyedPath {
-    operation_path: String,
-    relative_path: String,
+pub(crate) struct RecursiveSurveyedPath {
+    pub(crate) operation_path: String,
+    pub(crate) relative_path: String,
 }
 
-struct SourcePlan {
-    operator: opendal::Operator,
-    read: bool,
-    selected: Vec<SurveyedPath>,
+#[derive(Debug)]
+pub(crate) struct RecursiveSurveyPlan {
+    pub(crate) operator: opendal::Operator,
+    pub(crate) read: bool,
+    pub(crate) selected: Vec<RecursiveSurveyedPath>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -631,19 +720,23 @@ impl SurveyAccounting {
         retain_entry_evidence
     }
 
-    fn observe_selected(&mut self, source_index: usize) {
+    fn observe_selected(&mut self, source_index: usize) -> bool {
+        let mut within_limit = true;
         self.selected_objects = match self.selected_objects.checked_add(1) {
             Some(observed) => {
                 if observed > self.limits.selected_objects {
                     self.record_exceeded(3, source_index, self.limits.selected_objects, observed);
+                    within_limit = false;
                 }
                 observed
             }
             None => {
                 self.violations[3] = Some(Violation::Overflow { source_index });
+                within_limit = false;
                 u64::MAX
             }
         };
+        within_limit
     }
 
     fn retain_paths(&mut self, source_index: usize, lengths: &[usize]) -> bool {
@@ -676,7 +769,7 @@ impl SurveyAccounting {
     }
 
     fn can_retain_evidence(&self) -> bool {
-        self.violations.iter().all(Option::is_none)
+        self.violations[..3].iter().all(Option::is_none)
     }
 
     fn record_exceeded(
@@ -986,6 +1079,39 @@ mod tests {
             assert!(matches!(
                 service.log().entries().last(),
                 Some(OperationLogEntry::ListCompleted { .. })
+            ));
+        }
+    }
+
+    #[test]
+    fn retained_path_limit_precedes_an_already_observed_selected_object_limit() {
+        for entries in [
+            [ListEntry::file("p/a"), ListEntry::file("p/long")],
+            [ListEntry::file("p/long"), ListEntry::file("p/a")],
+        ] {
+            let list = ListScript::new("p/", 2, [ListStep::page(entries)]).unwrap();
+            let service = ScriptedService::new(Capabilities::all(), [list], [], 8);
+            let resolver = DirectResolver(service.operator());
+            let constrained = RecursiveAcquisitionLimits {
+                total_listed_path_bytes: 10,
+                selected_objects: 1,
+                ..limits()
+            };
+            let prefix = location("p/");
+            let mut acquisition = pin!(acquire_recursive_prefix(
+                &resolver,
+                &prefix,
+                RecursiveAcquisitionSelection::AllFiles,
+                constrained,
+            ));
+
+            assert!(matches!(
+                expect_ready(acquisition.as_mut()).unwrap_err(),
+                RecursiveAcquisitionError::Limit {
+                    resource: RecursiveAcquisitionResource::TotalListedPathBytes,
+                    ceiling: 10,
+                    observed_at_least: 11,
+                }
             ));
         }
     }
