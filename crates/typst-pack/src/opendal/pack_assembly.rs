@@ -4,10 +4,11 @@ use std::{error::Error, fmt};
 
 use super::acquisition::recursive::{
     RecursiveAcquisitionError, RecursiveAcquisitionLimits, RecursiveAcquisitionResource,
-    RecursiveAcquisitionSelection, RecursiveSurveyIssue, RecursiveSurveyIssueKind,
-    acquire_recursive_prefix,
+    RecursiveAcquisitionSelection, RecursiveSourcesAcquisitionError, RecursiveSurveyIssue,
+    RecursiveSurveyIssueKind, acquire_recursive_prefix, acquire_recursive_prefixes,
 };
 use super::{Location, LocationRoleError, OperatorResolver};
+use crate::FontDisposition;
 
 /// Named finite ceilings for one OpenDAL Project Acquisition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -614,6 +615,773 @@ fn map_issue(issue: RecursiveSurveyIssue) -> ProjectAcquisitionIssue {
             ProjectAcquisitionIssue::UnsupportedEntryKind {
                 operation_path,
                 kind: ProjectAcquisitionEntryKind::Unknown,
+            }
+        }
+    }
+}
+
+/// Named finite ceilings for one OpenDAL Font Acquisition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FontAcquisitionCeilings {
+    pub listed_entries: u64,
+    pub listed_path_bytes: u64,
+    pub total_listed_path_bytes: u64,
+    pub selected_containers: u64,
+    pub container_bytes: u64,
+    pub total_bytes: u64,
+}
+
+impl FontAcquisitionCeilings {
+    /// The first-party version-1 Font Acquisition profile.
+    pub const fn reference_v1() -> Self {
+        Self {
+            listed_entries: 100_000,
+            listed_path_bytes: 64 * 1024,
+            total_listed_path_bytes: 64 * 1024 * 1024,
+            selected_containers: 16_384,
+            container_bytes: 256 * 1024 * 1024,
+            total_bytes: 2 * 1024 * 1024 * 1024,
+        }
+    }
+}
+
+/// A resource bounded across one OpenDAL Font Acquisition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum FontAcquisitionResource {
+    ListedEntries,
+    ListedPathBytes,
+    TotalListedPathBytes,
+    SelectedContainers,
+    ContainerBytes,
+    TotalBytes,
+}
+
+/// A supplied Font Acquisition ceiling is internally inconsistent.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum FontAcquisitionLimitsError {
+    #[error("the {resource:?} ceiling must leave room for a plus-one probe")]
+    CannotProbe {
+        resource: FontAcquisitionResource,
+        ceiling: u64,
+    },
+    #[error(
+        "the ContainerBytes ceiling {container_bytes} exceeds the TotalBytes ceiling {total_bytes}"
+    )]
+    ContainerBytesExceedTotalBytes {
+        container_bytes: u64,
+        total_bytes: u64,
+    },
+}
+
+/// Mandatory finite limits for OpenDAL Font Acquisition.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct FontAcquisitionLimits {
+    ceilings: FontAcquisitionCeilings,
+}
+
+impl FontAcquisitionLimits {
+    /// Validates all named acquisition ceilings.
+    pub fn new(ceilings: FontAcquisitionCeilings) -> Result<Self, FontAcquisitionLimitsError> {
+        for (resource, ceiling) in [
+            (
+                FontAcquisitionResource::ContainerBytes,
+                ceilings.container_bytes,
+            ),
+            (FontAcquisitionResource::TotalBytes, ceilings.total_bytes),
+        ] {
+            if ceiling == u64::MAX {
+                return Err(FontAcquisitionLimitsError::CannotProbe { resource, ceiling });
+            }
+        }
+        if ceilings.container_bytes > ceilings.total_bytes {
+            return Err(FontAcquisitionLimitsError::ContainerBytesExceedTotalBytes {
+                container_bytes: ceilings.container_bytes,
+                total_bytes: ceilings.total_bytes,
+            });
+        }
+        Ok(Self { ceilings })
+    }
+
+    /// The validated first-party version-1 Font Acquisition limits.
+    pub const fn reference_v1() -> Self {
+        Self {
+            ceilings: FontAcquisitionCeilings::reference_v1(),
+        }
+    }
+
+    pub const fn listed_entries(&self) -> u64 {
+        self.ceilings.listed_entries
+    }
+
+    pub const fn listed_path_bytes(&self) -> u64 {
+        self.ceilings.listed_path_bytes
+    }
+
+    pub const fn total_listed_path_bytes(&self) -> u64 {
+        self.ceilings.total_listed_path_bytes
+    }
+
+    pub const fn selected_containers(&self) -> u64 {
+        self.ceilings.selected_containers
+    }
+
+    pub const fn container_bytes(&self) -> u64 {
+        self.ceilings.container_bytes
+    }
+
+    pub const fn total_bytes(&self) -> u64 {
+        self.ceilings.total_bytes
+    }
+}
+
+/// Font Acquisition exceeded or could not account for a mandatory limit.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum FontAcquisitionLimitError {
+    #[error(
+        "OpenDAL Font Acquisition {resource:?} limit exceeded: ceiling {ceiling}, observed at least {observed_at_least}"
+    )]
+    Exceeded {
+        resource: FontAcquisitionResource,
+        ceiling: u64,
+        observed_at_least: u64,
+    },
+    #[error("OpenDAL Font Acquisition {resource:?} accounting overflowed")]
+    AccountingOverflow { resource: FontAcquisitionResource },
+}
+
+/// One explicitly configured OpenDAL prefix of Font Containers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FontSource {
+    source: Location,
+    disposition: FontDisposition,
+}
+
+impl FontSource {
+    /// Associates one prefix with the disposition of every selected container.
+    pub fn new(source: Location, disposition: FontDisposition) -> Self {
+        Self {
+            source,
+            disposition,
+        }
+    }
+
+    /// The normalized Font Container prefix.
+    pub fn source(&self) -> &Location {
+        &self.source
+    }
+
+    /// The disposition every selected container from this source carries.
+    pub const fn disposition(&self) -> FontDisposition {
+        self.disposition
+    }
+}
+
+/// A validated request to acquire caller-ordered OpenDAL font prefixes.
+#[derive(Clone, Debug)]
+pub struct FontAcquisitionRequest {
+    sources: Vec<FontSource>,
+    limits: FontAcquisitionLimits,
+}
+
+impl FontAcquisitionRequest {
+    /// Validates every source role before accepting the request.
+    pub fn new(
+        sources: impl IntoIterator<Item = FontSource>,
+        limits: FontAcquisitionLimits,
+    ) -> Result<Self, FontAcquisitionRequestRejection> {
+        let sources = sources.into_iter().collect::<Vec<_>>();
+        let issues = sources
+            .iter()
+            .enumerate()
+            .filter_map(|(source_index, configured)| {
+                configured.source.require_prefix().err().map(|source| {
+                    FontAcquisitionRequestIssue::InvalidSourceRole {
+                        source_index,
+                        location: configured.source.clone(),
+                        source,
+                    }
+                })
+            })
+            .collect::<Vec<_>>();
+        if !issues.is_empty() {
+            return Err(FontAcquisitionRequestRejection { issues });
+        }
+        Ok(Self { sources, limits })
+    }
+
+    /// Font sources in caller order.
+    pub fn sources(&self) -> &[FontSource] {
+        &self.sources
+    }
+
+    /// The mandatory finite limits shared across every configured source.
+    pub const fn limits(&self) -> FontAcquisitionLimits {
+        self.limits
+    }
+}
+
+/// Every invalid source role in a rejected Font Acquisition request.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FontAcquisitionRequestRejection {
+    issues: Vec<FontAcquisitionRequestIssue>,
+}
+
+impl FontAcquisitionRequestRejection {
+    /// Invalid source roles in caller source order.
+    pub fn issues(&self) -> &[FontAcquisitionRequestIssue] {
+        &self.issues
+    }
+}
+
+impl fmt::Display for FontAcquisitionRequestRejection {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let [issue] = self.issues.as_slice() {
+            issue.fmt(formatter)
+        } else {
+            write!(
+                formatter,
+                "Font Acquisition request rejected with {} issue(s)",
+                self.issues.len()
+            )
+        }
+    }
+}
+
+impl Error for FontAcquisitionRequestRejection {}
+
+/// One invalid source role in a Font Acquisition request.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum FontAcquisitionRequestIssue {
+    #[error("font source {source_index} at {location} is not a prefix: {source}")]
+    InvalidSourceRole {
+        source_index: usize,
+        location: Location,
+        #[source]
+        source: LocationRoleError,
+    },
+}
+
+/// One exact Font Container selected and acquired from a configured source.
+pub struct FontAcquisitionEntry {
+    source_index: usize,
+    source: Location,
+    relative_path: String,
+    disposition: FontDisposition,
+    bytes: Vec<u8>,
+}
+
+impl FontAcquisitionEntry {
+    /// The configured source's caller-order index.
+    pub fn source_index(&self) -> usize {
+        self.source_index
+    }
+
+    /// The normalized prefix from which this entry was acquired.
+    pub fn source(&self) -> &Location {
+        &self.source
+    }
+
+    /// The selected operation path relative to its source prefix.
+    pub fn relative_path(&self) -> &str {
+        &self.relative_path
+    }
+
+    /// The explicit disposition inherited from the configured source.
+    pub const fn disposition(&self) -> FontDisposition {
+        self.disposition
+    }
+
+    /// The exact bytes observed by the completed object read.
+    pub fn bytes(&self) -> &[u8] {
+        &self.bytes
+    }
+
+    /// The acquired byte length.
+    pub fn len(&self) -> u64 {
+        self.bytes.len() as u64
+    }
+
+    /// Whether this acquired container is empty.
+    pub fn is_empty(&self) -> bool {
+        self.bytes.is_empty()
+    }
+
+    /// Recovers all owned source evidence and exact bytes.
+    pub fn into_parts(self) -> (usize, Location, String, FontDisposition, Vec<u8>) {
+        (
+            self.source_index,
+            self.source,
+            self.relative_path,
+            self.disposition,
+            self.bytes,
+        )
+    }
+}
+
+impl fmt::Debug for FontAcquisitionEntry {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FontAcquisitionEntry")
+            .field("source_index", &self.source_index)
+            .field("source", &self.source)
+            .field("relative_path", &self.relative_path)
+            .field("disposition", &self.disposition)
+            .field("byte_length", &self.bytes.len())
+            .finish()
+    }
+}
+
+/// Exact Font Containers acquired from caller-ordered sources.
+pub struct FontAcquisition {
+    sources: Vec<FontSource>,
+    entries: Vec<FontAcquisitionEntry>,
+}
+
+impl FontAcquisition {
+    /// Configured font sources in caller order.
+    pub fn sources(&self) -> &[FontSource] {
+        &self.sources
+    }
+
+    /// Acquired entries in source order, then relative operation-path order.
+    pub fn entries(&self) -> &[FontAcquisitionEntry] {
+        &self.entries
+    }
+
+    /// Recovers the configured sources and exact acquired entries.
+    pub fn into_parts(self) -> (Vec<FontSource>, Vec<FontAcquisitionEntry>) {
+        (self.sources, self.entries)
+    }
+}
+
+impl fmt::Debug for FontAcquisition {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FontAcquisition")
+            .field("sources", &self.sources)
+            .field("entries", &self.entries)
+            .finish()
+    }
+}
+
+/// An unsupported yielded OpenDAL entry kind.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum FontAcquisitionEntryKind {
+    Unknown,
+}
+
+/// One structural issue found while surveying configured font prefixes.
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[non_exhaustive]
+pub enum FontAcquisitionIssue {
+    #[error(
+        "font source {source_index} listed operation path {operation_path:?} outside its prefix"
+    )]
+    ListedPathOutsidePrefix {
+        source_index: usize,
+        operation_path: String,
+    },
+    #[error(
+        "font source {source_index} listed operation path {operation_path:?} as a prefix marker where a file is required"
+    )]
+    PrefixMarkerWhereFileRequired {
+        source_index: usize,
+        operation_path: String,
+    },
+    #[error(
+        "font source {source_index} listed operation path {operation_path:?} with an empty relative path"
+    )]
+    EmptyRelativeOperationPath {
+        source_index: usize,
+        operation_path: String,
+    },
+    #[error("font source {source_index} listed invalid relative operation path {operation_path:?}")]
+    InvalidRelativeOperationPath {
+        source_index: usize,
+        operation_path: String,
+    },
+    #[error("font source {source_index} listed object {operation_path:?} more than once")]
+    DuplicateListedObject {
+        source_index: usize,
+        operation_path: String,
+    },
+    #[error(
+        "font source {source_index} listed operation path {operation_path:?} with unsupported kind {kind:?}"
+    )]
+    UnsupportedEntryKind {
+        source_index: usize,
+        operation_path: String,
+        kind: FontAcquisitionEntryKind,
+    },
+}
+
+/// The nonempty canonical set of structural font survey issues.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FontAcquisitionSurveyError {
+    issues: Vec<FontAcquisitionIssue>,
+}
+
+impl FontAcquisitionSurveyError {
+    /// Every independently detectable issue in source and path order.
+    pub fn issues(&self) -> &[FontAcquisitionIssue] {
+        &self.issues
+    }
+}
+
+impl fmt::Display for FontAcquisitionSurveyError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if let [issue] = self.issues.as_slice() {
+            issue.fmt(formatter)
+        } else {
+            write!(
+                formatter,
+                "font survey failed with {} issue(s)",
+                self.issues.len()
+            )
+        }
+    }
+}
+
+impl Error for FontAcquisitionSurveyError {}
+
+/// Acquires suffix-selected Font Containers from caller-ordered prefixes.
+///
+/// `.ttf`, `.ttc`, `.otf`, and `.otc` suffixes are matched
+/// case-insensitively. Directory markers and non-font entries are ignored. All
+/// selected entries come only from completed listing observations; those
+/// observations make no storage snapshot or coexistence claim.
+///
+/// ```no_run
+/// use typst_pack::{
+///     DiscoverySpecification, FontCatalog, FontCatalogEntry, FontContainer,
+///     PackCreationInput, PackageAcquisitionFailures, PackageCatalog,
+///     ProjectSnapshot, create,
+/// };
+/// use typst_pack::opendal::OperatorBindings;
+/// use typst_pack::opendal::pack_assembly::{
+///     FontAcquisitionRequest, acquire_fonts,
+/// };
+///
+/// async fn acquire_fonts_and_create(
+///     bindings: &OperatorBindings,
+///     request: &FontAcquisitionRequest,
+///     project: &ProjectSnapshot,
+///     packages: &PackageCatalog,
+///     package_failures: &PackageAcquisitionFailures,
+///     discovery: &DiscoverySpecification,
+/// ) -> Result<(), Box<dyn std::error::Error>> {
+///     let (_, acquired) = acquire_fonts(bindings, request).await?.into_parts();
+///     let mut fonts = FontCatalog::new();
+///     for entry in acquired {
+///         let (_, _, _, disposition, bytes) = entry.into_parts();
+///         let container = FontContainer::new(bytes)?;
+///         fonts.push(FontCatalogEntry::new(container, disposition));
+///     }
+///     let _outcome = create(PackCreationInput {
+///         project,
+///         packages,
+///         fonts: &fonts,
+///         package_failures,
+///         discovery,
+///         metadata: None,
+///     })?;
+///     Ok(())
+/// }
+/// ```
+pub async fn acquire_fonts<R: OperatorResolver + ?Sized>(
+    resolver: &R,
+    request: &FontAcquisitionRequest,
+) -> Result<FontAcquisition, FontAcquisitionError<R::Error>> {
+    let locations = request
+        .sources()
+        .iter()
+        .map(FontSource::source)
+        .collect::<Vec<_>>();
+    let acquired = acquire_recursive_prefixes(
+        resolver,
+        &locations,
+        RecursiveAcquisitionSelection::FontContainers,
+        request.limits().into(),
+    )
+    .await
+    .map_err(|error| FontAcquisitionError::from_recursive(request.sources(), error))?;
+
+    let sources = request.sources().to_vec();
+    let entries = acquired
+        .into_iter()
+        .enumerate()
+        .flat_map(|(source_index, objects)| {
+            let source = sources[source_index].clone();
+            objects.into_iter().map(move |object| FontAcquisitionEntry {
+                source_index,
+                source: source.source.clone(),
+                relative_path: object.relative_path,
+                disposition: source.disposition,
+                bytes: object.bytes,
+            })
+        })
+        .collect();
+
+    Ok(FontAcquisition { sources, entries })
+}
+
+/// A failure while acquiring Font Containers through OpenDAL.
+///
+/// This error's own `Display` and `Debug` omit native resolver and OpenDAL
+/// messages. Rendering the complete source chain may disclose backend context.
+pub struct FontAcquisitionError<E> {
+    source_index: usize,
+    source_location: Location,
+    failed_path: Option<String>,
+    cause: FontAcquisitionErrorCause<E>,
+}
+
+impl<E> FontAcquisitionError<E> {
+    /// The caller-order index of the source at which acquisition failed.
+    pub fn source_index(&self) -> usize {
+        self.source_index
+    }
+
+    /// The normalized font prefix at which acquisition failed.
+    pub fn source_location(&self) -> &Location {
+        &self.source_location
+    }
+
+    /// The selected object's operation path when one object read failed.
+    pub fn failed_path(&self) -> Option<&str> {
+        self.failed_path.as_deref()
+    }
+
+    /// The typed cause of this failure.
+    pub fn cause(&self) -> &FontAcquisitionErrorCause<E> {
+        &self.cause
+    }
+
+    fn from_recursive(sources: &[FontSource], error: RecursiveSourcesAcquisitionError<E>) -> Self {
+        let source_index = error.source_index;
+        let source_location = sources[source_index].source.clone();
+        let (failed_path, cause) = match error.source {
+            RecursiveAcquisitionError::InvalidLocationRole(_) => {
+                unreachable!("FontAcquisitionRequest validates every prefix role")
+            }
+            RecursiveAcquisitionError::ResolveOperator(source) => {
+                (None, FontAcquisitionErrorCause::ResolveOperator(source))
+            }
+            RecursiveAcquisitionError::UnsupportedCapabilities {
+                list,
+                list_with_recursive,
+                read,
+            } => (
+                None,
+                FontAcquisitionErrorCause::UnsupportedCapabilities {
+                    list,
+                    list_with_recursive,
+                    read,
+                },
+            ),
+            RecursiveAcquisitionError::List(source) => {
+                (None, FontAcquisitionErrorCause::List(source))
+            }
+            RecursiveAcquisitionError::Read {
+                operation_path,
+                source,
+            } => (
+                Some(operation_path),
+                FontAcquisitionErrorCause::Read(source),
+            ),
+            RecursiveAcquisitionError::ListedObjectAbsent {
+                operation_path,
+                source,
+            } => (
+                Some(operation_path),
+                FontAcquisitionErrorCause::ListedObjectAbsent(source),
+            ),
+            RecursiveAcquisitionError::Structural(issues) => (
+                None,
+                FontAcquisitionErrorCause::Structural(FontAcquisitionSurveyError {
+                    issues: issues.into_iter().map(map_font_issue).collect(),
+                }),
+            ),
+            RecursiveAcquisitionError::InvalidPackageTree(_) => {
+                unreachable!("font acquisition does not run Package Tree preflight")
+            }
+            RecursiveAcquisitionError::Limit {
+                resource,
+                ceiling,
+                observed_at_least,
+            } => (
+                None,
+                FontAcquisitionErrorCause::Limit(FontAcquisitionLimitError::Exceeded {
+                    resource: map_font_resource(resource),
+                    ceiling,
+                    observed_at_least,
+                }),
+            ),
+            RecursiveAcquisitionError::AccountingOverflow { resource } => (
+                None,
+                FontAcquisitionErrorCause::Limit(FontAcquisitionLimitError::AccountingOverflow {
+                    resource: map_font_resource(resource),
+                }),
+            ),
+        };
+        Self {
+            source_index,
+            source_location,
+            failed_path,
+            cause,
+        }
+    }
+}
+
+impl<E> fmt::Display for FontAcquisitionError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "Font Acquisition failed at source {} for binding {} at prefix operation path {:?}",
+            self.source_index,
+            self.source_location.binding(),
+            self.source_location.operation_path(),
+        )?;
+        if let Some(path) = &self.failed_path {
+            write!(formatter, " while reading object operation path {path:?}")?;
+        }
+        write!(formatter, ": {}", self.cause.label())
+    }
+}
+
+impl<E> fmt::Debug for FontAcquisitionError<E> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("FontAcquisitionError")
+            .field("source_index", &self.source_index)
+            .field("binding", self.source_location.binding())
+            .field("role", &"prefix")
+            .field("operation_path", &self.source_location.operation_path())
+            .field("failed_path", &self.failed_path)
+            .field("cause", &self.cause.label())
+            .finish()
+    }
+}
+
+impl<E: Error + 'static> Error for FontAcquisitionError<E> {
+    fn source(&self) -> Option<&(dyn Error + 'static)> {
+        match &self.cause {
+            FontAcquisitionErrorCause::ResolveOperator(source) => Some(source),
+            FontAcquisitionErrorCause::UnsupportedCapabilities { .. } => None,
+            FontAcquisitionErrorCause::List(source)
+            | FontAcquisitionErrorCause::Read(source)
+            | FontAcquisitionErrorCause::ListedObjectAbsent(source) => Some(source),
+            FontAcquisitionErrorCause::Structural(source) => Some(source),
+            FontAcquisitionErrorCause::Limit(source) => Some(source),
+        }
+    }
+}
+
+/// The typed cause of an OpenDAL Font Acquisition failure.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum FontAcquisitionErrorCause<E> {
+    ResolveOperator(E),
+    UnsupportedCapabilities {
+        list: bool,
+        list_with_recursive: bool,
+        read: bool,
+    },
+    List(::opendal::Error),
+    Read(::opendal::Error),
+    ListedObjectAbsent(::opendal::Error),
+    Structural(FontAcquisitionSurveyError),
+    Limit(FontAcquisitionLimitError),
+}
+
+impl<E> FontAcquisitionErrorCause<E> {
+    fn label(&self) -> &'static str {
+        match self {
+            Self::ResolveOperator(_) => "operator resolution failed",
+            Self::UnsupportedCapabilities { .. } => {
+                "required listing or read capability is unsupported"
+            }
+            Self::List(_) => "a recursive listing failed",
+            Self::Read(_) => "a listed Font Container read failed",
+            Self::ListedObjectAbsent(_) => "a listed Font Container was absent when read",
+            Self::Structural(_) => "the completed listings had structural issues",
+            Self::Limit(_) => "a Font Acquisition limit failed",
+        }
+    }
+}
+
+impl From<FontAcquisitionLimits> for RecursiveAcquisitionLimits {
+    fn from(limits: FontAcquisitionLimits) -> Self {
+        Self {
+            listed_entries: limits.listed_entries(),
+            listed_path_bytes: limits.listed_path_bytes(),
+            total_listed_path_bytes: limits.total_listed_path_bytes(),
+            selected_objects: limits.selected_containers(),
+            object_bytes: limits.container_bytes(),
+            total_bytes: limits.total_bytes(),
+        }
+    }
+}
+
+fn map_font_resource(resource: RecursiveAcquisitionResource) -> FontAcquisitionResource {
+    match resource {
+        RecursiveAcquisitionResource::ListedEntries => FontAcquisitionResource::ListedEntries,
+        RecursiveAcquisitionResource::ListedPathBytes => FontAcquisitionResource::ListedPathBytes,
+        RecursiveAcquisitionResource::TotalListedPathBytes => {
+            FontAcquisitionResource::TotalListedPathBytes
+        }
+        RecursiveAcquisitionResource::SelectedObjects => {
+            FontAcquisitionResource::SelectedContainers
+        }
+        RecursiveAcquisitionResource::ObjectBytes => FontAcquisitionResource::ContainerBytes,
+        RecursiveAcquisitionResource::TotalBytes => FontAcquisitionResource::TotalBytes,
+    }
+}
+
+fn map_font_issue(issue: RecursiveSurveyIssue) -> FontAcquisitionIssue {
+    let source_index = issue.source_index;
+    let operation_path = issue.operation_path;
+    match issue.kind {
+        RecursiveSurveyIssueKind::ListedPathOutsidePrefix => {
+            FontAcquisitionIssue::ListedPathOutsidePrefix {
+                source_index,
+                operation_path,
+            }
+        }
+        RecursiveSurveyIssueKind::PrefixMarkerWhereFileRequired => {
+            FontAcquisitionIssue::PrefixMarkerWhereFileRequired {
+                source_index,
+                operation_path,
+            }
+        }
+        RecursiveSurveyIssueKind::EmptyRelativeOperationPath => {
+            FontAcquisitionIssue::EmptyRelativeOperationPath {
+                source_index,
+                operation_path,
+            }
+        }
+        RecursiveSurveyIssueKind::InvalidRelativeOperationPath => {
+            FontAcquisitionIssue::InvalidRelativeOperationPath {
+                source_index,
+                operation_path,
+            }
+        }
+        RecursiveSurveyIssueKind::DuplicateListedObject => {
+            FontAcquisitionIssue::DuplicateListedObject {
+                source_index,
+                operation_path,
+            }
+        }
+        RecursiveSurveyIssueKind::UnsupportedEntryKind => {
+            FontAcquisitionIssue::UnsupportedEntryKind {
+                source_index,
+                operation_path,
+                kind: FontAcquisitionEntryKind::Unknown,
             }
         }
     }
