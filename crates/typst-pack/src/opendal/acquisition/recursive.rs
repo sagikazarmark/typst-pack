@@ -6,7 +6,7 @@ use opendal::ErrorKind;
 use super::super::acquisition::{
     ExactObjectLimitError, ExactPathAcquisitionError, acquire_exact_path,
 };
-use super::super::location::{Location, LocationRoleError, OperatorResolver};
+use super::super::location::{Location, LocationRoleError, OperatorBinding, OperatorResolver};
 use crate::acquisition_layout;
 use crate::package_catalog::{
     PackageTreeError, PackageTreePathPreflightError, preflight_package_tree_paths,
@@ -139,6 +139,50 @@ pub(crate) async fn acquire_recursive_prefix<R: OperatorResolver + ?Sized>(
     Ok(sources.pop().expect("one requested prefix has one result"))
 }
 
+pub(crate) async fn acquire_first_present_recursive_prefix<R: OperatorResolver + ?Sized>(
+    resolver: &R,
+    locations: impl IntoIterator<Item = Result<Location, LocationRoleError>>,
+    selection: RecursiveAcquisitionSelection,
+    limits: RecursiveAcquisitionLimits,
+) -> Result<
+    Option<(usize, Location, Vec<RecursiveSurveyedObject>)>,
+    RecursiveSourcesAcquisitionError<R::Error>,
+> {
+    let mut accounting = SurveyAccounting::new(limits);
+    let mut resolved = Vec::new();
+    let mut retained_bytes = 0u64;
+
+    for (source_index, location) in locations.into_iter().enumerate() {
+        let location = location.map_err(|source| RecursiveSourcesAcquisitionError {
+            source_index,
+            source: RecursiveAcquisitionError::InvalidLocationRole(source),
+        })?;
+        let mut issues = Vec::new();
+        let mut plan = survey_recursive_prefix(
+            resolver,
+            &location,
+            source_index,
+            selection,
+            &mut accounting,
+            &mut resolved,
+            &mut issues,
+        )
+        .await?;
+        check_survey_limits_and_envelope_issues(&accounting, &mut issues)?;
+        if selection == RecursiveAcquisitionSelection::PackageTree {
+            preflight_package_tree_plan(&mut accounting, source_index, &mut plan)?;
+        }
+        if plan.selected.is_empty() {
+            continue;
+        }
+
+        let objects = read_source_plan(limits, source_index, plan, &mut retained_bytes).await?;
+        return Ok(Some((source_index, location, objects)));
+    }
+
+    Ok(None)
+}
+
 pub(crate) async fn acquire_recursive_prefixes<R: OperatorResolver + ?Sized>(
     resolver: &R,
     locations: &[&Location],
@@ -151,187 +195,230 @@ pub(crate) async fn acquire_recursive_prefixes<R: OperatorResolver + ?Sized>(
     let mut plans = Vec::with_capacity(locations.len());
 
     for (source_index, location) in locations.iter().copied().enumerate() {
-        location
-            .require_prefix()
-            .map_err(|source| RecursiveSourcesAcquisitionError {
+        plans.push(
+            survey_recursive_prefix(
+                resolver,
+                location,
                 source_index,
-                source: RecursiveAcquisitionError::InvalidLocationRole(source),
-            })?;
-        let operator = if let Some((_, operator)) = resolved
-            .iter()
-            .find(|(binding, _): &&(_, opendal::Operator)| binding == location.binding())
-        {
-            operator.clone()
-        } else {
-            let operator = resolver.resolve(location.binding()).map_err(|source| {
-                RecursiveSourcesAcquisitionError {
-                    source_index,
-                    source: RecursiveAcquisitionError::ResolveOperator(source),
-                }
-            })?;
-            resolved.push((location.binding().clone(), operator.clone()));
-            operator
-        };
-        let capabilities = operator.info().capability();
-        if !(capabilities.list && capabilities.list_with_recursive && capabilities.read) {
-            return Err(RecursiveSourcesAcquisitionError {
-                source_index,
-                source: RecursiveAcquisitionError::UnsupportedCapabilities {
-                    list: capabilities.list,
-                    list_with_recursive: capabilities.list_with_recursive,
-                    read: capabilities.read,
-                },
-            });
-        }
-
-        let mut lister = operator
-            .lister_with(location.dispatch_path())
-            .recursive(true)
-            .await
-            .map_err(|source| RecursiveSourcesAcquisitionError {
-                source_index,
-                source: RecursiveAcquisitionError::List(source),
-            })?;
-        let mut selected = Vec::new();
-
-        while let Some(entry) = lister.next().await {
-            let entry = entry.map_err(|source| RecursiveSourcesAcquisitionError {
-                source_index,
-                source: RecursiveAcquisitionError::List(source),
-            })?;
-            let operation_path = entry.path();
-            let retain_entry_evidence = accounting.observe_entry(source_index, operation_path);
-
-            let relative = match location.relative_file_path(operation_path) {
-                Ok(relative) => relative,
-                Err(super::super::location::PrefixConfinementError::OutsidePrefix) => {
-                    retain_issue(
-                        &mut accounting,
-                        &mut issues,
-                        source_index,
-                        operation_path,
-                        RecursiveSurveyIssueKind::ListedPathOutsidePrefix,
-                        retain_entry_evidence,
-                    );
-                    continue;
-                }
-                Err(super::super::location::PrefixConfinementError::PrefixMarker) => {
-                    let mode = entry.metadata().mode();
-                    if mode.is_file() {
-                        retain_issue(
-                            &mut accounting,
-                            &mut issues,
-                            source_index,
-                            operation_path,
-                            RecursiveSurveyIssueKind::PrefixMarkerWhereFileRequired,
-                            retain_entry_evidence,
-                        );
-                    } else if !mode.is_dir() {
-                        retain_issue(
-                            &mut accounting,
-                            &mut issues,
-                            source_index,
-                            operation_path,
-                            RecursiveSurveyIssueKind::UnsupportedEntryKind,
-                            retain_entry_evidence,
-                        );
-                    }
-                    continue;
-                }
-                Err(super::super::location::PrefixConfinementError::EmptyPath) => {
-                    retain_issue(
-                        &mut accounting,
-                        &mut issues,
-                        source_index,
-                        operation_path,
-                        RecursiveSurveyIssueKind::EmptyRelativeOperationPath,
-                        retain_entry_evidence,
-                    );
-                    continue;
-                }
-            };
-
-            if selection != RecursiveAcquisitionSelection::PackageTree
-                && Location::from_operation_path(location.binding().clone(), operation_path)
-                    .is_err()
-            {
-                retain_issue(
-                    &mut accounting,
-                    &mut issues,
-                    source_index,
-                    operation_path,
-                    RecursiveSurveyIssueKind::InvalidRelativeOperationPath,
-                    retain_entry_evidence,
-                );
-                continue;
-            }
-
-            let mode = entry.metadata().mode();
-            if mode.is_dir() {
-                continue;
-            }
-            if !mode.is_file() {
-                retain_issue(
-                    &mut accounting,
-                    &mut issues,
-                    source_index,
-                    operation_path,
-                    RecursiveSurveyIssueKind::UnsupportedEntryKind,
-                    retain_entry_evidence,
-                );
-                continue;
-            }
-            if operation_path.ends_with('/') || relative.is_empty() {
-                retain_issue(
-                    &mut accounting,
-                    &mut issues,
-                    source_index,
-                    operation_path,
-                    RecursiveSurveyIssueKind::PrefixMarkerWhereFileRequired,
-                    retain_entry_evidence,
-                );
-                continue;
-            }
-            if !selection.selects(relative) {
-                continue;
-            }
-
-            accounting.observe_selected(source_index);
-            if retain_entry_evidence
-                && accounting.can_retain_evidence()
-                && accounting.retain_paths(source_index, &[operation_path.len(), relative.len()])
-            {
-                selected.push(SurveyedPath {
-                    operation_path: operation_path.to_owned(),
-                    relative_path: relative.to_owned(),
-                });
-            }
-        }
-
-        selected.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-        if selection != RecursiveAcquisitionSelection::PackageTree {
-            let mut last_duplicate = None;
-            for duplicate in selected
-                .windows(2)
-                .filter(|pair| pair[0].operation_path == pair[1].operation_path)
-            {
-                if last_duplicate == Some(duplicate[0].operation_path.as_str()) {
-                    continue;
-                }
-                last_duplicate = Some(duplicate[0].operation_path.as_str());
-                retain_issue(
-                    &mut accounting,
-                    &mut issues,
-                    source_index,
-                    &duplicate[0].operation_path,
-                    RecursiveSurveyIssueKind::DuplicateListedObject,
-                    true,
-                );
-            }
-        }
-        plans.push(SourcePlan { operator, selected });
+                selection,
+                &mut accounting,
+                &mut resolved,
+                &mut issues,
+            )
+            .await?,
+        );
     }
 
+    check_survey_limits_and_envelope_issues(&accounting, &mut issues)?;
+    if selection == RecursiveAcquisitionSelection::PackageTree {
+        for (source_index, plan) in plans.iter_mut().enumerate() {
+            preflight_package_tree_plan(&mut accounting, source_index, plan)?;
+        }
+    }
+
+    let mut retained_bytes = 0u64;
+    let mut sources = Vec::with_capacity(plans.len());
+    for (source_index, plan) in plans.into_iter().enumerate() {
+        sources.push(read_source_plan(limits, source_index, plan, &mut retained_bytes).await?);
+    }
+
+    Ok(sources)
+}
+
+async fn survey_recursive_prefix<R: OperatorResolver + ?Sized>(
+    resolver: &R,
+    location: &Location,
+    source_index: usize,
+    selection: RecursiveAcquisitionSelection,
+    accounting: &mut SurveyAccounting,
+    resolved: &mut Vec<(OperatorBinding, opendal::Operator)>,
+    issues: &mut Vec<RecursiveSurveyIssue>,
+) -> Result<SourcePlan, RecursiveSourcesAcquisitionError<R::Error>> {
+    location
+        .require_prefix()
+        .map_err(|source| RecursiveSourcesAcquisitionError {
+            source_index,
+            source: RecursiveAcquisitionError::InvalidLocationRole(source),
+        })?;
+    let operator = if let Some((_, operator)) = resolved
+        .iter()
+        .find(|(binding, _)| binding == location.binding())
+    {
+        operator.clone()
+    } else {
+        let operator = resolver.resolve(location.binding()).map_err(|source| {
+            RecursiveSourcesAcquisitionError {
+                source_index,
+                source: RecursiveAcquisitionError::ResolveOperator(source),
+            }
+        })?;
+        resolved.push((location.binding().clone(), operator.clone()));
+        operator
+    };
+    let capabilities = operator.info().capability();
+    if !(capabilities.list && capabilities.list_with_recursive && capabilities.read) {
+        return Err(RecursiveSourcesAcquisitionError {
+            source_index,
+            source: RecursiveAcquisitionError::UnsupportedCapabilities {
+                list: capabilities.list,
+                list_with_recursive: capabilities.list_with_recursive,
+                read: capabilities.read,
+            },
+        });
+    }
+
+    let mut lister = operator
+        .lister_with(location.dispatch_path())
+        .recursive(true)
+        .await
+        .map_err(|source| RecursiveSourcesAcquisitionError {
+            source_index,
+            source: RecursiveAcquisitionError::List(source),
+        })?;
+    let mut selected = Vec::new();
+
+    while let Some(entry) = lister.next().await {
+        let entry = entry.map_err(|source| RecursiveSourcesAcquisitionError {
+            source_index,
+            source: RecursiveAcquisitionError::List(source),
+        })?;
+        let operation_path = entry.path();
+        let retain_entry_evidence = accounting.observe_entry(source_index, operation_path);
+
+        let relative = match location.relative_file_path(operation_path) {
+            Ok(relative) => relative,
+            Err(super::super::location::PrefixConfinementError::OutsidePrefix) => {
+                retain_issue(
+                    accounting,
+                    issues,
+                    source_index,
+                    operation_path,
+                    RecursiveSurveyIssueKind::ListedPathOutsidePrefix,
+                    retain_entry_evidence,
+                );
+                continue;
+            }
+            Err(super::super::location::PrefixConfinementError::PrefixMarker) => {
+                let mode = entry.metadata().mode();
+                if mode.is_file() {
+                    retain_issue(
+                        accounting,
+                        issues,
+                        source_index,
+                        operation_path,
+                        RecursiveSurveyIssueKind::PrefixMarkerWhereFileRequired,
+                        retain_entry_evidence,
+                    );
+                } else if !mode.is_dir() {
+                    retain_issue(
+                        accounting,
+                        issues,
+                        source_index,
+                        operation_path,
+                        RecursiveSurveyIssueKind::UnsupportedEntryKind,
+                        retain_entry_evidence,
+                    );
+                }
+                continue;
+            }
+            Err(super::super::location::PrefixConfinementError::EmptyPath) => {
+                retain_issue(
+                    accounting,
+                    issues,
+                    source_index,
+                    operation_path,
+                    RecursiveSurveyIssueKind::EmptyRelativeOperationPath,
+                    retain_entry_evidence,
+                );
+                continue;
+            }
+        };
+
+        if selection != RecursiveAcquisitionSelection::PackageTree
+            && Location::from_operation_path(location.binding().clone(), operation_path).is_err()
+        {
+            retain_issue(
+                accounting,
+                issues,
+                source_index,
+                operation_path,
+                RecursiveSurveyIssueKind::InvalidRelativeOperationPath,
+                retain_entry_evidence,
+            );
+            continue;
+        }
+
+        let mode = entry.metadata().mode();
+        if mode.is_dir() {
+            continue;
+        }
+        if !mode.is_file() {
+            retain_issue(
+                accounting,
+                issues,
+                source_index,
+                operation_path,
+                RecursiveSurveyIssueKind::UnsupportedEntryKind,
+                retain_entry_evidence,
+            );
+            continue;
+        }
+        if operation_path.ends_with('/') || relative.is_empty() {
+            retain_issue(
+                accounting,
+                issues,
+                source_index,
+                operation_path,
+                RecursiveSurveyIssueKind::PrefixMarkerWhereFileRequired,
+                retain_entry_evidence,
+            );
+            continue;
+        }
+        if !selection.selects(relative) {
+            continue;
+        }
+
+        accounting.observe_selected(source_index);
+        if retain_entry_evidence
+            && accounting.can_retain_evidence()
+            && accounting.retain_paths(source_index, &[operation_path.len(), relative.len()])
+        {
+            selected.push(SurveyedPath {
+                operation_path: operation_path.to_owned(),
+                relative_path: relative.to_owned(),
+            });
+        }
+    }
+
+    selected.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    if selection != RecursiveAcquisitionSelection::PackageTree {
+        let mut last_duplicate = None;
+        for duplicate in selected
+            .windows(2)
+            .filter(|pair| pair[0].operation_path == pair[1].operation_path)
+        {
+            if last_duplicate == Some(duplicate[0].operation_path.as_str()) {
+                continue;
+            }
+            last_duplicate = Some(duplicate[0].operation_path.as_str());
+            retain_issue(
+                accounting,
+                issues,
+                source_index,
+                &duplicate[0].operation_path,
+                RecursiveSurveyIssueKind::DuplicateListedObject,
+                true,
+            );
+        }
+    }
+
+    Ok(SourcePlan { operator, selected })
+}
+
+fn check_survey_limits_and_envelope_issues<E>(
+    accounting: &SurveyAccounting,
+    issues: &mut Vec<RecursiveSurveyIssue>,
+) -> Result<(), RecursiveSourcesAcquisitionError<E>> {
     if let Some((source_index, source)) = accounting.survey_error() {
         return Err(RecursiveSourcesAcquisitionError {
             source_index,
@@ -348,95 +435,100 @@ pub(crate) async fn acquire_recursive_prefixes<R: OperatorResolver + ?Sized>(
     if let Some(first) = issues.first() {
         return Err(RecursiveSourcesAcquisitionError {
             source_index: first.source_index,
-            source: RecursiveAcquisitionError::Structural(issues),
+            source: RecursiveAcquisitionError::Structural(std::mem::take(issues)),
         });
     }
-    if selection == RecursiveAcquisitionSelection::PackageTree {
-        for (source_index, plan) in plans.iter_mut().enumerate() {
-            let preflight = preflight_package_tree_paths(
-                plan.selected
-                    .iter()
-                    .map(|object| object.relative_path.as_str()),
-                |lengths| accounting.retain_paths(source_index, lengths),
-            );
-            match preflight {
-                Ok(canonical_paths) => {
-                    for (path, canonical) in plan.selected.iter_mut().zip(canonical_paths) {
-                        path.relative_path = canonical;
-                    }
-                    plan.selected
-                        .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-                }
-                Err(PackageTreePathPreflightError::Invalid(source)) => {
-                    return Err(RecursiveSourcesAcquisitionError {
-                        source_index,
-                        source: RecursiveAcquisitionError::InvalidPackageTree(source),
-                    });
-                }
-                Err(PackageTreePathPreflightError::RetentionLimit) => {
-                    let (source_index, source) = accounting
-                        .survey_error()
-                        .expect("path preflight retention failure records a survey limit");
-                    return Err(RecursiveSourcesAcquisitionError {
-                        source_index,
-                        source,
-                    });
-                }
+    Ok(())
+}
+
+fn preflight_package_tree_plan<E>(
+    accounting: &mut SurveyAccounting,
+    source_index: usize,
+    plan: &mut SourcePlan,
+) -> Result<(), RecursiveSourcesAcquisitionError<E>> {
+    let preflight = preflight_package_tree_paths(
+        plan.selected
+            .iter()
+            .map(|object| object.relative_path.as_str()),
+        |lengths| accounting.retain_paths(source_index, lengths),
+    );
+    match preflight {
+        Ok(canonical_paths) => {
+            for (path, canonical) in plan.selected.iter_mut().zip(canonical_paths) {
+                path.relative_path = canonical;
             }
+            plan.selected
+                .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+            Ok(())
+        }
+        Err(PackageTreePathPreflightError::Invalid(source)) => {
+            Err(RecursiveSourcesAcquisitionError {
+                source_index,
+                source: RecursiveAcquisitionError::InvalidPackageTree(source),
+            })
+        }
+        Err(PackageTreePathPreflightError::RetentionLimit) => {
+            let (source_index, source) = accounting
+                .survey_error()
+                .expect("path preflight retention failure records a survey limit");
+            Err(RecursiveSourcesAcquisitionError {
+                source_index,
+                source,
+            })
         }
     }
+}
 
-    let mut retained_bytes = 0u64;
-    let mut sources = Vec::with_capacity(plans.len());
-    for (source_index, plan) in plans.into_iter().enumerate() {
-        let mut objects = Vec::with_capacity(plan.selected.len());
-        for path in plan.selected {
-            let remaining = limits.total_bytes.checked_sub(retained_bytes).ok_or(
-                RecursiveSourcesAcquisitionError {
-                    source_index,
-                    source: RecursiveAcquisitionError::AccountingOverflow {
-                        resource: RecursiveAcquisitionResource::TotalBytes,
-                    },
-                },
-            )?;
-            let ceiling = limits.object_bytes.min(remaining);
-            let bytes = acquire_exact_path(
-                &plan.operator,
-                &path.operation_path,
-                ceiling,
-                limits.object_bytes,
-            )
-            .await
-            .map_err(|error| RecursiveSourcesAcquisitionError {
+async fn read_source_plan<E>(
+    limits: RecursiveAcquisitionLimits,
+    source_index: usize,
+    plan: SourcePlan,
+    retained_bytes: &mut u64,
+) -> Result<Vec<RecursiveSurveyedObject>, RecursiveSourcesAcquisitionError<E>> {
+    let mut objects = Vec::with_capacity(plan.selected.len());
+    for path in plan.selected {
+        let remaining = limits.total_bytes.checked_sub(*retained_bytes).ok_or(
+            RecursiveSourcesAcquisitionError {
                 source_index,
-                source: map_read_error(error, &path.operation_path, limits, remaining),
-            })?;
-            let length =
-                u64::try_from(bytes.len()).map_err(|_| RecursiveSourcesAcquisitionError {
+                source: RecursiveAcquisitionError::AccountingOverflow {
+                    resource: RecursiveAcquisitionResource::TotalBytes,
+                },
+            },
+        )?;
+        let ceiling = limits.object_bytes.min(remaining);
+        let bytes = acquire_exact_path(
+            &plan.operator,
+            &path.operation_path,
+            ceiling,
+            limits.object_bytes,
+        )
+        .await
+        .map_err(|error| RecursiveSourcesAcquisitionError {
+            source_index,
+            source: map_read_error(error, &path.operation_path, limits, remaining),
+        })?;
+        let length = u64::try_from(bytes.len()).map_err(|_| RecursiveSourcesAcquisitionError {
+            source_index,
+            source: RecursiveAcquisitionError::AccountingOverflow {
+                resource: RecursiveAcquisitionResource::TotalBytes,
+            },
+        })?;
+        *retained_bytes =
+            retained_bytes
+                .checked_add(length)
+                .ok_or(RecursiveSourcesAcquisitionError {
                     source_index,
                     source: RecursiveAcquisitionError::AccountingOverflow {
                         resource: RecursiveAcquisitionResource::TotalBytes,
                     },
                 })?;
-            retained_bytes =
-                retained_bytes
-                    .checked_add(length)
-                    .ok_or(RecursiveSourcesAcquisitionError {
-                        source_index,
-                        source: RecursiveAcquisitionError::AccountingOverflow {
-                            resource: RecursiveAcquisitionResource::TotalBytes,
-                        },
-                    })?;
-            objects.push(RecursiveSurveyedObject {
-                operation_path: path.operation_path,
-                relative_path: path.relative_path,
-                bytes,
-            });
-        }
-        sources.push(objects);
+        objects.push(RecursiveSurveyedObject {
+            operation_path: path.operation_path,
+            relative_path: path.relative_path,
+            bytes,
+        });
     }
-
-    Ok(sources)
+    Ok(objects)
 }
 
 #[derive(Debug)]

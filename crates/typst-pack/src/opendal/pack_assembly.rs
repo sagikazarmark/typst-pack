@@ -1,5 +1,8 @@
 //! OpenDAL acquisition for Pack Assembly inputs.
 
+#[allow(dead_code)]
+mod package;
+
 use std::{error::Error, fmt};
 
 use super::acquisition::recursive::{
