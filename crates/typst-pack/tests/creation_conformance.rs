@@ -1,40 +1,46 @@
 //! The cross-adapter creation conformance corpus.
 //!
-//! One corpus of fixtures expressed as bytes — project files, ignore files,
-//! package trees, font containers — driven through two Pack Assemblers: the
-//! reference filesystem one over a temporary directory, and an in-memory one
-//! that assembles a Project Snapshot directly and drives the resume protocol.
-//! Both must issue a Pack with the same Pack Identity, which is the property
-//! ADR-0008 promises: identity stays free of host facts whichever adapter
-//! obtained the bytes. That equality is deliberately strict, so an adapter that
-//! diverges is caught here rather than in production.
+//! Source-neutral scenarios are expressed as selected project bytes, Package
+//! Trees or raw archives, and ordered Font Containers. Concrete runners drive
+//! those records through direct core composition, OpenDAL Memory, and, where
+//! the source model is intentionally equivalent, the reference filesystem Pack
+//! Assembler. This is the operation-specific conformance shape required by
+//! ADR-0014; it introduces no production conformance trait or storage policy.
+//!
+//! Project membership is already selected in shared scenarios. ADR-0011 leaves
+//! that selection to each gatherer, so filesystem-only `.typkignore` behavior
+//! belongs in `fs_creation.rs` and is deliberately absent here. Equivalent
+//! selected bytes must issue the same semantic Pack promised by ADR-0008.
 //!
 //! Every assertion stays on the public library surface: contained project
-//! paths, requirement dispositions, Pack Font Catalog order, Pack Identity,
-//! representative-compile warnings, and the typed outcomes and failures.
-//! Nothing here observes loader structure, store internals, how many resume
-//! rounds a fixture took, or the order in which files were requested.
+//! bytes, requirements, Pack Font Catalog order, Pack Identity,
+//! representative-compile warnings, Missing Package Specifications, and
+//! corrected Package Acquisition Failures. Nothing here observes loader
+//! structure, store internals, archive encoding, or file request order.
 //!
-//! A fixture the reference adapter cannot express runs through
-//! [`conform_in_memory`] instead, which asserts that the reference adapter
-//! really cannot express it, so a fixture never loses cross-adapter coverage
-//! silently.
+//! Scenario applicability states whether the filesystem source can intentionally
+//! express the same inputs. OpenDAL and direct composition run every scenario.
 
 #[cfg(feature = "embedded-fonts")]
 #[path = "support/fonts.rs"]
 mod font_bytes;
 
+#[cfg(all(feature = "opendal", feature = "package-acquisition"))]
+#[allow(dead_code, clippy::collapsible_if)]
+#[path = "support/opendal.rs"]
+mod scripted_opendal;
+
 use std::str::FromStr;
 
 use typst::syntax::package::PackageSpec;
 use typst_pack::{
-    DiscoverySpecification, DocumentTime, FontCatalog, FontCatalogEntry, FontContainer,
-    FontContainerIdentity, FontDisposition, Pack, PackCreationError, PackCreationInput,
-    PackCreationOutcome, PackageAcquisitionFailures, PackageCatalog, PackageCatalogIssue,
-    PackageDisposition, PackageTree, ProjectSnapshotAssembly, TypstTarget, create,
+    DependencyDiscoveryRejection, DiscoverySpecification, DocumentTime, FontCatalog,
+    FontCatalogEntry, FontContainer, FontContainerIdentity, FontDisposition, Pack,
+    PackCreationError, PackCreationInput, PackCreationOutcome, PackIdentity, PackMetadata,
+    PackageAcquisitionFailure, PackageAcquisitionFailureReason, PackageAcquisitionFailures,
+    PackageCatalog, PackageCatalogIssue, PackageDisposition, PackageTree, PackageTreeIdentity,
+    ProjectSnapshotAssembly, TypstTarget, create,
 };
-
-const IGNORE_FILE: &str = ".typkignore";
 
 /// 2023-11-14T22:13:20Z, the Document Time every representative request in the
 /// corpus is fixed to, so that no adapter's host clock reaches a Pack.
@@ -44,7 +50,7 @@ const CREATION_TIMESTAMP: i64 = 1_700_000_000;
 const PACKAGE_VERSION: &str = "1.0.0";
 
 /// How many resume rounds a fixture may take before the corpus calls the loop
-/// stuck. The number of rounds one actually takes is not asserted.
+/// stuck. Scenarios may separately declare their exact public missing trace.
 const RESUME_BOUND: usize = 8;
 
 // ---------------------------------------------------------------------------
@@ -65,19 +71,24 @@ struct PackageFixture {
     spec: PackageSpec,
     source: PackageSource,
     disposition: PackageDisposition,
+    corrects_failure: bool,
 }
 
 /// How an adapter obtains the tree for one specification.
 enum PackageSource {
     /// The tree's files, as bytes: what a package directory holds, and what an
-    /// in-memory host supplies directly.
+    /// already-acquired source-neutral input supplies directly.
     Files(Vec<(&'static str, Vec<u8>)>),
     /// The archive a registry serves, which a caller supplying its own
-    /// transport fetches and expands under a required ceiling. The reference
-    /// adapter never expands one, so a fixture offering it is driven in memory
-    /// alone.
+    /// transport fetches and expands under a required ceiling.
     #[cfg(feature = "package-acquisition")]
-    Archive {
+    CachedArchive {
+        bytes: Vec<u8>,
+        limits: typst_pack::PackageExpansionLimits,
+    },
+    /// The exact archive bytes returned by an official registry.
+    #[cfg(feature = "package-acquisition")]
+    RegistryArchive {
         bytes: Vec<u8>,
         limits: typst_pack::PackageExpansionLimits,
     },
@@ -118,11 +129,6 @@ impl Fixture {
         self
     }
 
-    /// Adds the root Project Ignore Policy file, as bytes.
-    fn ignore_file(self, rules: &str) -> Self {
-        self.file(IGNORE_FILE, rules.as_bytes().to_vec())
-    }
-
     /// Offers a `@local` package tree whose `lib.typ` holds `body`, plus a file
     /// the representative request never reads, so that whole-tree containment
     /// is observable.
@@ -142,6 +148,37 @@ impl Fixture {
             spec: local_spec(name),
             source: PackageSource::Files(files),
             disposition,
+            corrects_failure: false,
+        });
+        self
+    }
+
+    /// Offers a Package Tree after a stale acquisition failure for the same
+    /// specification, proving successful insertion corrects assembly state.
+    fn corrected_package(
+        mut self,
+        name: &'static str,
+        disposition: PackageDisposition,
+        body: &str,
+    ) -> Self {
+        self = self.package(name, disposition, body);
+        self.packages.last_mut().unwrap().corrects_failure = true;
+        self
+    }
+
+    /// Offers exact raw archive bytes from an OpenDAL cache.
+    #[cfg(feature = "package-acquisition")]
+    fn cached_archive(
+        mut self,
+        name: &'static str,
+        bytes: Vec<u8>,
+        limits: typst_pack::PackageExpansionLimits,
+    ) -> Self {
+        self.packages.push(PackageFixture {
+            spec: registry_spec(name),
+            source: PackageSource::CachedArchive { bytes, limits },
+            disposition: PackageDisposition::Embedded,
+            corrects_failure: false,
         });
         self
     }
@@ -158,8 +195,9 @@ impl Fixture {
     ) -> Self {
         self.packages.push(PackageFixture {
             spec: registry_spec(name),
-            source: PackageSource::Archive { bytes, limits },
+            source: PackageSource::RegistryArchive { bytes, limits },
             disposition: PackageDisposition::Embedded,
+            corrects_failure: false,
         });
         self
     }
@@ -171,17 +209,6 @@ impl Fixture {
             disposition,
         });
         self
-    }
-
-    /// The Project Ignore Policy an adapter derives from the fixture's listing,
-    /// which is the root ignore file's bytes and nothing else.
-    fn policy(&self) -> FixturePolicy {
-        FixturePolicy::new(
-            self.project
-                .iter()
-                .find(|(path, _)| *path == IGNORE_FILE)
-                .map_or(&[][..], |(_, rules)| rules.as_slice()),
-        )
     }
 
     /// The Font Catalog the fixture's containers compose, in declaration order.
@@ -207,8 +234,7 @@ impl Fixture {
         catalog
     }
 
-    /// The tree an in-memory host resolves for one reported specification,
-    /// standing in for whatever acquisition that host allows.
+    /// The tree direct composition resolves for one reported specification.
     fn resolve(
         &self,
         spec: &PackageSpec,
@@ -228,80 +254,24 @@ impl Fixture {
                 package.disposition,
             )),
             #[cfg(feature = "package-acquisition")]
-            PackageSource::Archive { limits, .. } => {
-                // The core names where the registry serves the specification,
-                // the host fetches it with whatever primitive it has, and
-                // expansion needs no transport at all.
-                let url = typst_pack::package_archive_url(spec)
-                    .expect("the registry serves the reported specification");
-                let bytes = self
-                    .serve(&url)
-                    .expect("the stand-in registry serves that URL");
+            PackageSource::CachedArchive { bytes, limits }
+            | PackageSource::RegistryArchive { bytes, limits } => {
+                // Acquisition has completed; archive expansion is a
+                // source-neutral core transformation.
                 typst_pack::expand_package_archive(spec.clone(), bytes, *limits)
                     .map(|tree| (spec.clone(), tree, package.disposition))
                     .map_err(|error| match error {
                         typst_pack::PackageAcquisitionError::ExpansionLimit { .. } => {
-                            Failure::ExpansionCeiling
+                            Failure::PackageAcquisition {
+                                spec: spec.to_string(),
+                                reason: PackageAcquisitionFailureReason::Other { detail: None },
+                                rejection: None,
+                            }
                         }
                         error => panic!("the fixture archive failed to expand: {error}"),
                     })
             }
         }
-    }
-
-    /// The archive the fixture's stand-in registry serves at one URL.
-    #[cfg(feature = "package-acquisition")]
-    fn serve(&self, url: &str) -> Option<&[u8]> {
-        self.packages
-            .iter()
-            .find_map(|package| match &package.source {
-                PackageSource::Archive { bytes, .. }
-                    if typst_pack::package_archive_url(&package.spec)
-                        .ok()
-                        .as_deref()
-                        == Some(url) =>
-                {
-                    Some(bytes.as_slice())
-                }
-                _ => None,
-            })
-    }
-}
-
-/// The expected filesystem selection used by this test-only scenario runner.
-struct FixturePolicy(ignore::gitignore::Gitignore);
-
-impl FixturePolicy {
-    fn new(bytes: &[u8]) -> Self {
-        let contents = std::str::from_utf8(bytes).expect("the fixture's ignore file is UTF-8");
-        let mut builder = ignore::gitignore::GitignoreBuilder::new(".");
-        for line in contents.lines() {
-            builder
-                .add_line(None, line)
-                .expect("the fixture's ignore rule parses");
-        }
-        Self(builder.build().expect("the fixture policy builds"))
-    }
-
-    fn excludes_file(&self, path: &str) -> bool {
-        if path == IGNORE_FILE {
-            return false;
-        }
-        if path
-            .split('/')
-            .any(|component| component.ends_with(".typk"))
-        {
-            return true;
-        }
-        let mut ancestor_end = 0;
-        while let Some(offset) = path[ancestor_end..].find('/') {
-            ancestor_end += offset;
-            if self.0.matched(&path[..ancestor_end], true).is_ignore() {
-                return true;
-            }
-            ancestor_end += 1;
-        }
-        self.0.matched(path, false).is_ignore()
     }
 }
 
@@ -344,50 +314,41 @@ fn package_files(name: &str, body: &str) -> Vec<(&'static str, Vec<u8>)> {
 /// What one Pack Assembler produced for a fixture.
 struct Created {
     pack: Pack,
-    warnings: Vec<String>,
+    warnings: Vec<typst::diag::SourceDiagnostic>,
+    missing_rounds: Vec<Vec<String>>,
+    failure_states: Vec<Vec<(String, PackageAcquisitionFailureReason)>>,
 }
 
 /// The failure kinds the corpus holds adapters to. Each reports in its own
 /// vocabulary, and conformance is that both reach the same kind.
 #[derive(Debug, PartialEq, Eq)]
 enum Failure {
-    /// The Project Ignore Policy excludes the entrypoint.
-    ExcludedEntrypoint,
-    /// No tree satisfying a reported specification could be supplied. The
-    /// filesystem adapter reports every package acquisition failure in one
-    /// vocabulary, so a tree that does not declare the specification it was
-    /// supplied under reaches this kind there too.
-    UnsatisfiedPackage,
-    /// An archive claims to expand past the ceiling it was expanded under.
-    #[cfg(feature = "package-acquisition")]
-    ExpansionCeiling,
+    /// One exact Package Acquisition Failure retained for resumed creation.
+    PackageAcquisition {
+        spec: String,
+        reason: PackageAcquisitionFailureReason,
+        rejection: Option<DependencyDiscoveryRejection>,
+    },
     /// The representative request did not compile, so no Pack was issued.
-    Compile,
+    Compile(DependencyDiscoveryRejection),
 }
 
 // ---------------------------------------------------------------------------
-// The in-memory Pack Assembler
+// Direct core composition
 // ---------------------------------------------------------------------------
 
-/// Pack Assembly for a host with no filesystem: the fixture's bytes are
-/// already held, so the adapter derives the policy from them, assembles the
-/// Project Snapshot, composes the catalog, and drives the resume protocol.
-fn create_in_memory(fixture: &Fixture) -> Result<Created, Failure> {
-    let policy = fixture.policy();
-    if policy.excludes_file(fixture.entrypoint) {
-        return Err(Failure::ExcludedEntrypoint);
-    }
+/// Direct core composition from already selected source-neutral values.
+fn create_directly(fixture: &Fixture) -> Result<Created, Failure> {
     let snapshot = ProjectSnapshotAssembly::new(fixture.entrypoint)
         .assemble(
             fixture
                 .project
                 .iter()
-                .filter(|(path, _)| !policy.excludes_file(path))
                 .map(|(path, data)| (*path, data.clone())),
         )
         .unwrap();
     let catalog = fixture.font_catalog();
-    let package_failures = PackageAcquisitionFailures::new();
+    let mut package_failures = PackageAcquisitionFailures::new();
     let discovery = DiscoverySpecification::new(
         TypstTarget::Paged,
         typst::foundations::Dict::new(),
@@ -397,18 +358,34 @@ fn create_in_memory(fixture: &Fixture) -> Result<Created, Failure> {
     .unwrap();
 
     let mut resolved: Vec<(PackageSpec, PackageTree, PackageDisposition)> = Vec::new();
+    let mut missing_rounds = Vec::new();
+    let mut failure_states = Vec::new();
+    let mut terminal_package_failure = None;
     for _ in 0..RESUME_BOUND {
         // Every round builds the request afresh from the same values, as a
         // caller resuming across a host request boundary must.
-        let packages =
-            PackageCatalog::from_entries(resolved.iter().cloned()).map_err(|error| {
+        let packages = match PackageCatalog::from_entries(resolved.iter().cloned()) {
+            Ok(packages) => packages,
+            Err(error) => {
                 if error.issues().iter().any(|issue| {
                     matches!(issue, PackageCatalogIssue::DuplicateSpecification { .. })
                 }) {
                     panic!("the adapter resolved one specification twice");
                 }
-                Failure::UnsatisfiedPackage
-            })?;
+                let spec = resolved
+                    .pop()
+                    .map(|(spec, _, _)| spec.to_string())
+                    .unwrap_or_default();
+                let reason = PackageAcquisitionFailureReason::Other { detail: None };
+                package_failures.insert(PackageAcquisitionFailure::new(
+                    spec.parse().unwrap(),
+                    reason.clone(),
+                ));
+                failure_states.push(project_failures(&package_failures));
+                terminal_package_failure = Some((spec, reason));
+                PackageCatalog::new()
+            }
+        };
         match create(PackCreationInput {
             project: &snapshot,
             packages: &packages,
@@ -420,7 +397,9 @@ fn create_in_memory(fixture: &Fixture) -> Result<Created, Failure> {
             Ok(PackCreationOutcome::Created { pack, warnings }) => {
                 return Ok(Created {
                     pack,
-                    warnings: messages(&warnings),
+                    warnings: warnings.to_vec(),
+                    missing_rounds,
+                    failure_states,
                 });
             }
             Ok(PackCreationOutcome::MissingPackageSpecifications(missing)) => {
@@ -428,26 +407,303 @@ fn create_in_memory(fixture: &Fixture) -> Result<Created, Failure> {
                     !missing.is_empty(),
                     "a missing outcome names a specification"
                 );
+                missing_rounds.push(missing.iter().map(ToString::to_string).collect());
                 for spec in &missing {
-                    resolved.push(fixture.resolve(spec)?);
+                    let corrects_failure = fixture
+                        .packages
+                        .iter()
+                        .find(|package| &package.spec == spec)
+                        .is_some_and(|package| package.corrects_failure);
+                    if corrects_failure {
+                        package_failures.insert(PackageAcquisitionFailure::new(
+                            spec.clone(),
+                            PackageAcquisitionFailureReason::NotFound,
+                        ));
+                        failure_states.push(project_failures(&package_failures));
+                    }
+                    match fixture.resolve(spec) {
+                        Ok(package) => resolved.push(package),
+                        Err(Failure::PackageAcquisition { spec, reason, .. }) => {
+                            package_failures.insert(PackageAcquisitionFailure::new(
+                                spec.parse().unwrap(),
+                                reason.clone(),
+                            ));
+                            failure_states.push(project_failures(&package_failures));
+                            terminal_package_failure = Some((spec, reason));
+                        }
+                        Err(Failure::Compile(_)) => unreachable!(),
+                    }
+                    if corrects_failure {
+                        // Pack Assembly owns this request value and reconstructs
+                        // it without a corrected stale failure before resuming.
+                        package_failures = PackageAcquisitionFailures::new();
+                        failure_states.push(project_failures(&package_failures));
+                    }
                 }
             }
-            Err(PackCreationError::DependencyDiscoveryRejected(_)) => {
-                return Err(Failure::Compile);
+            Err(PackCreationError::DependencyDiscoveryRejected(rejection)) => {
+                return Err(match terminal_package_failure {
+                    Some((spec, reason)) => Failure::PackageAcquisition {
+                        spec,
+                        reason,
+                        rejection: Some(rejection),
+                    },
+                    None => Failure::Compile(rejection),
+                });
             }
-            Err(error) => panic!("in-memory creation failed unexpectedly: {error}"),
+            Err(error) => panic!("direct creation failed unexpectedly: {error}"),
         }
     }
-    panic!("in-memory creation issued no Pack within {RESUME_BOUND} resume rounds");
+    panic!("direct creation issued no Pack within {RESUME_BOUND} resume rounds");
 }
 
-/// The messages of representative-compile warnings, which is as much of a
-/// diagnostic as the corpus compares.
-fn messages(warnings: &[typst::diag::SourceDiagnostic]) -> Vec<String> {
-    warnings
-        .iter()
-        .map(|warning| warning.message.to_string())
+fn project_failures(
+    failures: &PackageAcquisitionFailures,
+) -> Vec<(String, PackageAcquisitionFailureReason)> {
+    failures
+        .entries()
+        .map(|failure| (failure.spec().to_string(), failure.reason().clone()))
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// The OpenDAL Memory Pack Assembler
+// ---------------------------------------------------------------------------
+
+/// Acquires every Pack Assembly input through one real OpenDAL Memory backend,
+/// then drives the existing synchronous Pack Creation resume protocol.
+#[cfg(all(feature = "opendal", feature = "package-acquisition"))]
+fn create_on_opendal(
+    fixture: &Fixture,
+    reverse_declaration_order: bool,
+) -> Result<Created, Failure> {
+    use std::pin::pin;
+
+    use typst_pack::opendal::pack_assembly::{
+        FontAcquisitionEntry, FontAcquisitionLimits, FontAcquisitionRequest,
+        FontSource as OpenDalFontSource, PackageAcquisitionLimits, PackageAcquisitionRequest,
+        PackageTreeSource, ProjectAcquisitionEntry, ProjectAcquisitionLimits,
+        ProjectAcquisitionRequest, acquire_fonts, acquire_package, acquire_project,
+        insert_acquired_package,
+    };
+    use typst_pack::opendal::{OperatorBinding, OperatorBindings};
+
+    let operator = opendal::Operator::new(opendal::services::Memory::default()).unwrap();
+    let binding = OperatorBinding::new("assembly").unwrap();
+    let bindings = OperatorBindings::new([(binding.clone(), operator.clone())]).unwrap();
+    let mut objects = fixture
+        .project
+        .iter()
+        .map(|(path, bytes)| (format!("project/{path}"), bytes.clone()))
+        .collect::<Vec<_>>();
+    let mut font_sources = Vec::new();
+
+    for (source_index, font) in fixture.fonts.iter().enumerate() {
+        let prefix = format!("fonts/{source_index:06}/");
+        font_sources.push(OpenDalFontSource::new(
+            typst_pack::opendal::Location::from_operation_path(binding.clone(), &prefix).unwrap(),
+            font.disposition,
+        ));
+        match &font.source {
+            FontSource::Scanned(bytes) => {
+                objects.push((format!("{prefix}000000.ttf"), bytes.clone()));
+            }
+            #[cfg(feature = "embedded-fonts")]
+            FontSource::TypstEmbedded => {
+                for (container_index, container) in
+                    typst_pack::typst_embedded_font_containers().enumerate()
+                {
+                    objects.push((
+                        format!("{prefix}{container_index:06}.ttf"),
+                        container.data().to_vec(),
+                    ));
+                }
+            }
+        }
+    }
+
+    for package in &fixture.packages {
+        match &package.source {
+            PackageSource::Files(files) => {
+                let prefix = format!(
+                    "trees/{}/{}/{}/",
+                    package.spec.namespace, package.spec.name, package.spec.version
+                );
+                objects.extend(
+                    files
+                        .iter()
+                        .map(|(path, bytes)| (format!("{prefix}{path}"), bytes.clone())),
+                );
+            }
+            PackageSource::CachedArchive { bytes, .. } => objects.push((
+                format!(
+                    "cache/{}/{}/{}.tar.gz",
+                    package.spec.namespace, package.spec.name, package.spec.version
+                ),
+                bytes.clone(),
+            )),
+            PackageSource::RegistryArchive { bytes, .. } => objects.push((
+                format!(
+                    "registry/{}/{}-{}.tar.gz",
+                    package.spec.namespace, package.spec.name, package.spec.version
+                ),
+                bytes.clone(),
+            )),
+        }
+    }
+    if reverse_declaration_order {
+        objects.reverse();
+    }
+    for (path, bytes) in objects {
+        expect_memory_ready(pin!(operator.write(&path, bytes))).unwrap();
+    }
+
+    let project_request = ProjectAcquisitionRequest::new(
+        "assembly:/project/".parse().unwrap(),
+        ProjectAcquisitionLimits::reference_v1(),
+    )
+    .unwrap();
+    let (_, project_entries) =
+        expect_memory_ready(pin!(acquire_project(&bindings, &project_request)))
+            .unwrap()
+            .into_parts();
+    let snapshot = ProjectSnapshotAssembly::new(fixture.entrypoint)
+        .assemble(
+            project_entries
+                .into_iter()
+                .map(ProjectAcquisitionEntry::into_parts),
+        )
+        .unwrap();
+
+    let font_request =
+        FontAcquisitionRequest::new(font_sources, FontAcquisitionLimits::reference_v1()).unwrap();
+    let (_, font_entries) = expect_memory_ready(pin!(acquire_fonts(&bindings, &font_request)))
+        .unwrap()
+        .into_parts();
+    let mut fonts = FontCatalog::new();
+    for entry in font_entries {
+        let (_, _, _, disposition, bytes) = FontAcquisitionEntry::into_parts(entry);
+        fonts.push(FontCatalogEntry::new(
+            FontContainer::new(bytes).unwrap(),
+            disposition,
+        ));
+    }
+
+    let discovery = DiscoverySpecification::new(
+        TypstTarget::Paged,
+        typst::foundations::Dict::new(),
+        DocumentTime::UnixTimestamp(CREATION_TIMESTAMP),
+        [],
+    )
+    .unwrap();
+    let mut packages = PackageCatalog::new();
+    let mut package_failures = PackageAcquisitionFailures::new();
+    let mut missing_rounds = Vec::new();
+    let mut failure_states = Vec::new();
+    let mut terminal_package_failure = None;
+
+    for _ in 0..RESUME_BOUND {
+        match create(PackCreationInput {
+            project: &snapshot,
+            packages: &packages,
+            fonts: &fonts,
+            package_failures: &package_failures,
+            discovery: &discovery,
+            metadata: None,
+        }) {
+            Ok(PackCreationOutcome::Created { pack, warnings }) => {
+                return Ok(Created {
+                    pack,
+                    warnings: warnings.to_vec(),
+                    missing_rounds,
+                    failure_states,
+                });
+            }
+            Ok(PackCreationOutcome::MissingPackageSpecifications(missing)) => {
+                missing_rounds.push(missing.iter().map(ToString::to_string).collect());
+                let mut pending = missing.into_iter().collect::<Vec<_>>();
+                if reverse_declaration_order {
+                    pending.reverse();
+                }
+                for spec in pending {
+                    let package = fixture
+                        .packages
+                        .iter()
+                        .find(|package| package.spec == spec)
+                        .unwrap_or_else(|| panic!("the fixture offers no source for `{spec}`"));
+                    if package.corrects_failure {
+                        package_failures.insert(PackageAcquisitionFailure::new(
+                            spec.clone(),
+                            PackageAcquisitionFailureReason::NotFound,
+                        ));
+                        failure_states.push(project_failures(&package_failures));
+                    }
+                    let request = PackageAcquisitionRequest::new(
+                        spec,
+                        [PackageTreeSource::new("assembly:/trees/".parse().unwrap())],
+                        Some("assembly:/cache/".parse().unwrap()),
+                        Some("assembly:/registry/".parse().unwrap()),
+                        PackageAcquisitionLimits::reference_v1(),
+                    )
+                    .unwrap();
+                    let acquisition =
+                        expect_memory_ready(pin!(acquire_package(&bindings, &request))).unwrap();
+                    let expansion_limits = match package.source {
+                        PackageSource::Files(_) => {
+                            typst_pack::PackageExpansionLimits::reference_v1()
+                        }
+                        PackageSource::CachedArchive { limits, .. }
+                        | PackageSource::RegistryArchive { limits, .. } => limits,
+                    };
+                    if let Err(error) = insert_acquired_package(
+                        &mut packages,
+                        &mut package_failures,
+                        acquisition,
+                        package.disposition,
+                        expansion_limits,
+                    ) {
+                        failure_states.push(project_failures(&package_failures));
+                        terminal_package_failure =
+                            Some((error.spec().to_string(), error.reason().clone()));
+                    }
+                    if package.corrects_failure {
+                        failure_states.push(project_failures(&package_failures));
+                    }
+                }
+            }
+            Err(PackCreationError::DependencyDiscoveryRejected(rejection)) => {
+                return Err(match terminal_package_failure {
+                    Some((spec, reason)) => Failure::PackageAcquisition {
+                        spec,
+                        reason,
+                        rejection: Some(rejection),
+                    },
+                    None => Failure::Compile(rejection),
+                });
+            }
+            Err(error) => panic!("OpenDAL creation failed unexpectedly: {error}"),
+        }
+    }
+    panic!("OpenDAL creation issued no Pack within {RESUME_BOUND} resume rounds");
+}
+
+#[cfg(all(feature = "opendal", feature = "package-acquisition"))]
+fn expect_memory_ready<F: std::future::Future>(mut future: std::pin::Pin<&mut F>) -> F::Output {
+    use std::task::Poll;
+
+    match poll_memory_once(future.as_mut()) {
+        Poll::Ready(output) => output,
+        Poll::Pending => panic!("OpenDAL Memory future unexpectedly pending"),
+    }
+}
+
+#[cfg(all(feature = "opendal", feature = "package-acquisition"))]
+fn poll_memory_once<F: std::future::Future>(
+    future: std::pin::Pin<&mut F>,
+) -> std::task::Poll<F::Output> {
+    use std::task::{Context, Waker};
+
+    future.poll(&mut Context::from_waker(Waker::noop()))
 }
 
 // ---------------------------------------------------------------------------
@@ -505,7 +761,9 @@ impl Fixture {
             match &package.source {
                 PackageSource::Files(_) => {}
                 #[cfg(feature = "package-acquisition")]
-                PackageSource::Archive { .. } => return None,
+                PackageSource::CachedArchive { .. } | PackageSource::RegistryArchive { .. } => {
+                    return None;
+                }
             }
             let embedded = package.disposition.is_embedded();
             if *vendor_packages.get_or_insert(embedded) != embedded {
@@ -607,30 +865,37 @@ fn create_on_filesystem(fixture: &Fixture, plan: &FilesystemPlan) -> Result<Crea
             let (pack, warnings) = report.into_parts();
             Ok(Created {
                 pack,
-                warnings: messages(&warnings),
+                warnings: warnings.to_vec(),
+                missing_rounds: Vec::new(),
+                failure_states: Vec::new(),
             })
         }
-        Err(FilesystemPackAssemblyError::ProjectGather(
-            typst_pack::FilesystemProjectGatherError::Snapshot(error),
-        )) if matches!(
-            error.issues(),
-            [typst_pack::ProjectSnapshotIssue::MissingEntrypoint { .. }]
-        ) =>
-        {
-            Err(Failure::ExcludedEntrypoint)
+        Err(FilesystemPackAssemblyError::Package { spec, .. }) => {
+            Err(Failure::PackageAcquisition {
+                spec: spec.to_string(),
+                reason: PackageAcquisitionFailureReason::Other { detail: None },
+                rejection: None,
+            })
         }
-        Err(
-            FilesystemPackAssemblyError::Package { .. }
-            | FilesystemPackAssemblyError::InvalidPackageCatalog(_),
-        ) => Err(Failure::UnsatisfiedPackage),
-        Err(FilesystemPackAssemblyError::Creation(error))
-            if matches!(
-                error.error(),
-                PackCreationError::DependencyDiscoveryRejected(_)
-            ) =>
-        {
-            Err(Failure::Compile)
+        Err(FilesystemPackAssemblyError::InvalidPackageCatalog(_)) => {
+            let spec = fixture
+                .packages
+                .first()
+                .expect("an invalid Package Catalog contains a fixture package")
+                .spec
+                .to_string();
+            Err(Failure::PackageAcquisition {
+                spec,
+                reason: PackageAcquisitionFailureReason::Other { detail: None },
+                rejection: None,
+            })
         }
+        Err(FilesystemPackAssemblyError::Creation(error)) => match error.error() {
+            PackCreationError::DependencyDiscoveryRejected(rejection) => {
+                Err(Failure::Compile(rejection.clone()))
+            }
+            error => panic!("filesystem creation failed unexpectedly: {error}"),
+        },
         Err(error) => panic!("filesystem creation failed unexpectedly: {error}"),
     }
 }
@@ -658,107 +923,228 @@ fn write_file(path: &std::path::Path, data: &[u8]) {
 // Conformance
 // ---------------------------------------------------------------------------
 
-/// Runs one fixture through the in-memory adapter, and through the reference
-/// filesystem adapter when `filesystem` says the corpus expects that one to
-/// express it.
-///
-/// Whether the reference adapter can express a fixture is declared by which
-/// entry point the fixture uses and asserted here rather than inferred, so a
-/// fixture never loses cross-adapter coverage silently.
-///
-/// Pack Identity equality is the strict assertion; the projection compared
-/// first exists so that a divergence names what differs instead of two hashes.
-fn run(fixture: &Fixture, filesystem: bool) -> Result<Created, Failure> {
-    let memory = create_in_memory(fixture);
+/// Which configured sources intentionally express one declarative scenario.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ScenarioApplicability {
+    /// Direct values, OpenDAL, and the reference filesystem select equal inputs.
+    Shared,
+    /// Direct values and OpenDAL express source behavior the filesystem does not.
+    ObjectStorage,
+}
+
+/// Runs one fixture through every applicable concrete scenario runner.
+fn run(fixture: &Fixture, applicability: ScenarioApplicability) -> Result<Created, Failure> {
+    let direct = create_directly(fixture);
+
+    #[cfg(all(feature = "opendal", feature = "package-acquisition"))]
+    {
+        let opendal = create_on_opendal(fixture, false);
+        let reordered = create_on_opendal(fixture, true);
+        assert_results_equal(
+            &opendal,
+            &reordered,
+            "OpenDAL declaration and Memory hash order changed observations",
+            true,
+        );
+        assert_results_equal(
+            &direct,
+            &opendal,
+            "direct and OpenDAL Pack Assembly produced different observations",
+            true,
+        );
+    }
 
     #[cfg(feature = "fs")]
     {
         let plan = fixture.filesystem_plan();
         assert_eq!(
             plan.is_some(),
-            filesystem,
+            applicability == ScenarioApplicability::Shared,
             "the fixture's declared adapter coverage is not what the reference adapter can express"
         );
         if let Some(plan) = plan {
             let filesystem = create_on_filesystem(fixture, &plan);
-            match (&filesystem, &memory) {
-                (Ok(filesystem), Ok(memory)) => {
-                    assert_eq!(
-                        projection(&filesystem.pack),
-                        projection(&memory.pack),
-                        "the filesystem and in-memory adapters describe different Packs"
-                    );
-                    assert_eq!(
-                        filesystem.warnings, memory.warnings,
-                        "the adapters returned different representative-compile warnings"
-                    );
-                    assert_eq!(
-                        filesystem.pack.identity(),
-                        memory.pack.identity(),
-                        "identical project bytes produced different Pack Identities"
-                    );
-                }
-                (Err(filesystem), Err(memory)) => assert_eq!(
-                    filesystem, memory,
-                    "the adapters failed the same fixture differently"
-                ),
-                _ => panic!("one adapter issued a Pack for a fixture the other failed"),
-            }
+            assert_results_equal(
+                &direct,
+                &filesystem,
+                "filesystem and direct Pack Assembly produced different terminal observations",
+                false,
+            );
         }
     }
     #[cfg(not(feature = "fs"))]
-    let _ = filesystem;
+    let _ = applicability;
 
-    memory
+    direct
+}
+
+fn assert_results_equal(
+    expected: &Result<Created, Failure>,
+    actual: &Result<Created, Failure>,
+    context: &str,
+    compare_resume_evidence: bool,
+) {
+    match (expected, actual) {
+        (Ok(expected), Ok(actual)) => {
+            assert_eq!(
+                projection(&expected.pack),
+                projection(&actual.pack),
+                "{context}"
+            );
+            assert_eq!(expected.warnings, actual.warnings, "{context}");
+            if compare_resume_evidence {
+                assert_eq!(expected.missing_rounds, actual.missing_rounds, "{context}");
+                assert_eq!(expected.failure_states, actual.failure_states, "{context}");
+            }
+        }
+        (Err(expected), Err(actual)) if compare_resume_evidence => {
+            assert_eq!(expected, actual, "{context}");
+        }
+        (
+            Err(Failure::PackageAcquisition {
+                spec: expected_spec,
+                reason: expected_reason,
+                ..
+            }),
+            Err(Failure::PackageAcquisition {
+                spec: actual_spec,
+                reason: actual_reason,
+                ..
+            }),
+        ) => {
+            assert_eq!(expected_spec, actual_spec, "{context}");
+            assert_eq!(expected_reason, actual_reason, "{context}");
+        }
+        (Err(expected), Err(actual)) => assert_eq!(expected, actual, "{context}"),
+        _ => panic!("{context}: one runner issued a Pack while the other failed"),
+    }
 }
 
 /// Runs one fixture through every adapter and returns the Pack they agreed on.
 fn conform(fixture: &Fixture) -> Created {
-    run(fixture, true).unwrap_or_else(|failure| panic!("creation issued no Pack: {failure:?}"))
+    run(fixture, ScenarioApplicability::Shared)
+        .unwrap_or_else(|failure| panic!("creation issued no Pack: {failure:?}"))
 }
 
 /// Runs one fixture through every adapter and returns the failure kind they
 /// agreed on.
 fn conform_failure(fixture: &Fixture) -> Failure {
-    run(fixture, true)
+    run(fixture, ScenarioApplicability::Shared)
         .err()
         .expect("creation issued a Pack for a fixture that must fail")
 }
 
-/// Runs a fixture the reference adapter cannot express through the in-memory
-/// adapter alone.
-fn conform_in_memory(fixture: &Fixture) -> Created {
-    run(fixture, false).unwrap_or_else(|failure| panic!("creation issued no Pack: {failure:?}"))
+fn assert_package_acquisition_failure(
+    failure: Failure,
+    expected_spec: &str,
+    expected_reason: PackageAcquisitionFailureReason,
+) {
+    let Failure::PackageAcquisition {
+        spec,
+        reason,
+        rejection: Some(rejection),
+    } = failure
+    else {
+        panic!("expected a Package Acquisition Failure carried by Dependency Discovery");
+    };
+    assert_eq!(spec, expected_spec);
+    assert_eq!(reason, expected_reason);
+    assert!(
+        rejection
+            .diagnostics()
+            .iter()
+            .any(|diagnostic| diagnostic.message == "failed to load package"),
+        "{:#?}",
+        rejection.diagnostics()
+    );
 }
 
-/// Runs a fixture the reference adapter cannot express through the in-memory
-/// adapter alone, returning the failure kind it reached.
+/// Runs a source-neutral fixture whose source behavior the filesystem adapter
+/// cannot express.
+fn conform_object_storage(fixture: &Fixture) -> Created {
+    run(fixture, ScenarioApplicability::ObjectStorage)
+        .unwrap_or_else(|failure| panic!("creation issued no Pack: {failure:?}"))
+}
+
+/// Runs an object-storage fixture that must fail, returning its failure kind.
 #[cfg(feature = "package-acquisition")]
-fn conform_failure_in_memory(fixture: &Fixture) -> Failure {
-    run(fixture, false)
+fn conform_failure_object_storage(fixture: &Fixture) -> Failure {
+    run(fixture, ScenarioApplicability::ObjectStorage)
         .err()
         .expect("creation issued a Pack for a fixture that must fail")
 }
 
 /// Everything about a Pack the corpus asserts on, as one comparable value.
-#[cfg(feature = "fs")]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 struct Projection {
+    identity: PackIdentity,
     entrypoint: String,
-    project_paths: Vec<String>,
-    packages: Vec<(String, bool)>,
+    metadata: Option<PackMetadata>,
+    project: Vec<(String, Vec<u8>)>,
+    embedded_packages: Vec<(String, Vec<(String, Vec<u8>)>)>,
+    packages: Vec<(String, PackageTreeIdentity, u64, u64, bool)>,
+    embedded_fonts: Vec<(FontContainerIdentity, u32, Vec<u8>)>,
     font_catalog: Vec<(FontContainerIdentity, u32, bool)>,
-    font_requirements: Vec<(FontContainerIdentity, bool)>,
+    font_requirements: Vec<(FontContainerIdentity, u64, Vec<u32>, bool)>,
 }
 
-#[cfg(feature = "fs")]
 fn projection(pack: &Pack) -> Projection {
     Projection {
+        identity: pack.identity(),
         entrypoint: pack.entrypoint().to_owned(),
-        project_paths: project_paths(pack).into_iter().map(str::to_owned).collect(),
-        packages: package_dispositions(pack),
+        metadata: pack.metadata().cloned(),
+        project: pack
+            .files()
+            .map(|(path, bytes)| (path.to_owned(), bytes.to_vec()))
+            .collect(),
+        embedded_packages: pack
+            .packages()
+            .map(|(spec, files)| {
+                (
+                    spec.to_string(),
+                    files
+                        .map(|(path, bytes)| (path.to_owned(), bytes.to_vec()))
+                        .collect(),
+                )
+            })
+            .collect(),
+        packages: pack
+            .package_requirements()
+            .iter()
+            .map(|requirement| {
+                (
+                    requirement.spec().to_string(),
+                    requirement.tree_identity(),
+                    requirement.file_count(),
+                    requirement.byte_length(),
+                    requirement.is_embedded(),
+                )
+            })
+            .collect(),
+        embedded_fonts: pack
+            .fonts()
+            .iter()
+            .map(|font| {
+                (
+                    font.identity().container(),
+                    font.identity().index(),
+                    font.data().to_vec(),
+                )
+            })
+            .collect(),
         font_catalog: font_catalog(pack),
-        font_requirements: font_requirements(pack),
+        font_requirements: pack
+            .font_requirements()
+            .iter()
+            .map(|requirement| {
+                (
+                    requirement.container_identity(),
+                    requirement.container_length(),
+                    requirement.face_indices().to_vec(),
+                    requirement.is_embedded(),
+                )
+            })
+            .collect(),
     }
 }
 
@@ -803,99 +1189,85 @@ fn font_requirements(pack: &Pack) -> Vec<(FontContainerIdentity, bool)> {
 // Project membership
 // ---------------------------------------------------------------------------
 
+#[cfg(all(feature = "opendal", feature = "package-acquisition"))]
 #[test]
-fn an_ignore_file_with_negation_and_last_match_precedence_decides_membership() {
+fn pagination_and_hash_order_preserve_pack_observations() {
+    use std::collections::HashMap;
+    use std::pin::pin;
+
+    use scripted_opendal::{
+        Capabilities, ListEntry, ListScript, ListStep, ReadScript, ReadStep, ScriptedService,
+    };
+    use typst_pack::opendal::pack_assembly::{
+        ProjectAcquisitionEntry, ProjectAcquisitionLimits, ProjectAcquisitionRequest,
+        acquire_project,
+    };
+    use typst_pack::opendal::{OperatorBinding, OperatorBindings};
+
     let fixture = Fixture::document("#rect(width: 10pt, height: 10pt)")
-        .ignore_file(
-            "ignored/**\n\
-             !ignored/reincluded/\n\
-             !ignored/reincluded/keep.txt\n\
-             *.secret\n\
-             !keep.secret\n",
-        )
-        .file("ignored/drop.txt", b"drop".to_vec())
-        .file("ignored/reincluded/keep.txt", b"keep".to_vec())
-        .file("private.secret", b"drop".to_vec())
-        .file("keep.secret", b"keep".to_vec())
-        .file("notes.txt", b"keep".to_vec());
+        .file("data/first.txt", b"first".to_vec())
+        .file("data/second.txt", b"second".to_vec());
+    let direct = create_directly(&fixture).unwrap();
+    // Build the backend listing from hash iteration, with one object per page.
+    // Neither iteration nor page order may reach the semantic projection.
+    let hash_objects = HashMap::from([
+        ("project/data/second.txt", b"second".as_slice()),
+        (
+            "project/main.typ",
+            b"#rect(width: 10pt, height: 10pt)".as_slice(),
+        ),
+        ("project/data/first.txt", b"first".as_slice()),
+    ]);
+    let list = ListScript::new(
+        "project/",
+        hash_objects.len(),
+        hash_objects
+            .keys()
+            .map(|path| ListStep::page([ListEntry::file(*path)])),
+    )
+    .unwrap();
+    let reads = hash_objects
+        .iter()
+        .map(|(path, bytes)| ReadScript::new(*path, 1, [ReadStep::chunk(bytes)]).unwrap());
+    let service = ScriptedService::new(Capabilities::all(), [list], reads, 16);
+    let bindings =
+        OperatorBindings::new([(OperatorBinding::new("project").unwrap(), service.operator())])
+            .unwrap();
+    let request = ProjectAcquisitionRequest::new(
+        "project:/project/".parse().unwrap(),
+        ProjectAcquisitionLimits::reference_v1(),
+    )
+    .unwrap();
+    let (_, entries) = expect_memory_ready(pin!(acquire_project(&bindings, &request)))
+        .unwrap()
+        .into_parts();
+    let project = ProjectSnapshotAssembly::new("main.typ")
+        .assemble(entries.into_iter().map(ProjectAcquisitionEntry::into_parts))
+        .unwrap();
+    let packages = PackageCatalog::new();
+    let fonts = FontCatalog::new();
+    let failures = PackageAcquisitionFailures::new();
+    let discovery = DiscoverySpecification::new(
+        TypstTarget::Paged,
+        typst::foundations::Dict::new(),
+        DocumentTime::UnixTimestamp(CREATION_TIMESTAMP),
+        [],
+    )
+    .unwrap();
+    let PackCreationOutcome::Created { pack, warnings } = create(PackCreationInput {
+        project: &project,
+        packages: &packages,
+        fonts: &fonts,
+        package_failures: &failures,
+        discovery: &discovery,
+        metadata: None,
+    })
+    .unwrap() else {
+        panic!("the package-free fixture must complete in one invocation");
+    };
 
-    let created = conform(&fixture);
-
-    assert_eq!(
-        project_paths(&created.pack),
-        [
-            IGNORE_FILE,
-            "ignored/reincluded/keep.txt",
-            "keep.secret",
-            "main.typ",
-            "notes.txt",
-        ]
-    );
-}
-
-#[test]
-fn a_nested_ignore_file_is_an_ordinary_project_file() {
-    let fixture = Fixture::document("#rect(width: 10pt, height: 10pt)")
-        .ignore_file("*.tmp\n")
-        .file("nested/.typkignore", b"*.typ\n*.txt\n".to_vec())
-        .file("nested/chapter.typ", b"= Nested".to_vec())
-        .file("nested/ordinary.txt", b"keep".to_vec())
-        .file("drop.tmp", b"drop".to_vec());
-
-    let created = conform(&fixture);
-
-    // Only the root policy decides membership, so the nested ignore file is
-    // contained like any other file and excludes nothing beside it.
-    assert_eq!(
-        project_paths(&created.pack),
-        [
-            IGNORE_FILE,
-            "main.typ",
-            "nested/.typkignore",
-            "nested/chapter.typ",
-            "nested/ordinary.txt",
-        ]
-    );
-}
-
-#[test]
-fn a_nested_pack_path_is_excluded_by_a_rule_no_policy_overrides() {
-    let fixture = Fixture::document("#rect(width: 10pt, height: 10pt)")
-        .ignore_file("!*.typk\n")
-        .file("nested/old.typk", b"drop".to_vec())
-        .file("bundle.typk/main.typ", b"drop".to_vec())
-        .file("keep.txt", b"keep".to_vec());
-
-    let created = conform(&fixture);
-
-    assert_eq!(
-        project_paths(&created.pack),
-        [IGNORE_FILE, "keep.txt", "main.typ"]
-    );
-}
-
-#[test]
-fn an_entrypoint_a_policy_would_otherwise_exclude_survives_its_negation() {
-    let fixture = Fixture::document("#rect(width: 10pt, height: 10pt)")
-        .ignore_file("*.typ\n!main.typ\n")
-        .file("chapter.typ", b"= Excluded".to_vec())
-        .file("notes.txt", b"keep".to_vec());
-
-    let created = conform(&fixture);
-
-    assert_eq!(
-        project_paths(&created.pack),
-        [IGNORE_FILE, "main.typ", "notes.txt"]
-    );
-}
-
-#[test]
-fn an_entrypoint_the_policy_excludes_fails_every_adapter() {
-    let fixture = Fixture::document("#rect(width: 10pt, height: 10pt)")
-        .ignore_file("*.typ\n")
-        .file("notes.txt", b"keep".to_vec());
-
-    assert_eq!(conform_failure(&fixture), Failure::ExcludedEntrypoint);
+    assert_eq!(projection(&pack), projection(&direct.pack));
+    assert_eq!(warnings.to_vec(), direct.warnings);
 }
 
 // ---------------------------------------------------------------------------
@@ -922,7 +1294,7 @@ fn a_project_requiring_several_packages_completes_over_repeated_invocation() {
     let fixture = Fixture::document(
         "#import \"@local/outer:1.0.0\": mark\n#rect(width: mark * 1pt, height: 1pt)",
     )
-    .package(
+    .corrected_package(
         "outer",
         PackageDisposition::Embedded,
         "#import \"@local/inner:1.0.0\": inner\n#let mark = inner + 1",
@@ -946,10 +1318,27 @@ fn a_project_requiring_several_packages_completes_over_repeated_invocation() {
             .package_file(&local_spec("outer"), "unread.txt")
             .is_some()
     );
+    assert_eq!(
+        created.missing_rounds,
+        [
+            vec!["@local/outer:1.0.0".to_owned()],
+            vec!["@local/inner:1.0.0".to_owned()],
+        ]
+    );
+    assert_eq!(
+        created.failure_states,
+        [
+            vec![(
+                "@local/outer:1.0.0".to_owned(),
+                PackageAcquisitionFailureReason::NotFound,
+            )],
+            vec![],
+        ]
+    );
 }
 
-/// The reference adapter vendors every tree under one choice, so this fixture
-/// is driven in memory alone.
+/// The reference adapter vendors every tree under one choice, so this scenario
+/// is intentionally direct-and-OpenDAL only.
 #[test]
 fn mixed_package_dispositions_travel_per_tree() {
     let fixture = Fixture::document(
@@ -960,7 +1349,7 @@ fn mixed_package_dispositions_travel_per_tree() {
     .package("embedded", PackageDisposition::Embedded, "#let one = 1")
     .package("external", PackageDisposition::External, "#let two = 2");
 
-    let created = conform_in_memory(&fixture);
+    let created = conform_object_storage(&fixture);
 
     assert_eq!(
         package_dispositions(&created.pack),
@@ -984,11 +1373,15 @@ fn a_supplied_tree_that_does_not_satisfy_its_specification_fails_every_adapter()
 
     // A diagnosis rather than a loop that never progresses: a caller told the
     // same specification is missing forever would have nothing to act on.
-    assert_eq!(conform_failure(&fixture), Failure::UnsatisfiedPackage);
+    assert_package_acquisition_failure(
+        conform_failure(&fixture),
+        "@local/declared:1.0.0",
+        PackageAcquisitionFailureReason::Other { detail: None },
+    );
 }
 
 /// The expansion ceiling is a value only a caller supplying its own transport
-/// chooses, so this fixture is driven in memory alone.
+/// chooses, so this scenario is intentionally direct-and-OpenDAL only.
 #[cfg(feature = "package-acquisition")]
 #[test]
 fn an_archive_beyond_the_expansion_ceiling_fails_the_resume_loop() {
@@ -1003,10 +1396,60 @@ fn an_archive_beyond_the_expansion_ceiling_fails_the_resume_loop() {
             typst_pack::PackageExpansionLimits::new(1 << 20, 10, 1 << 20, 4096, 4096).unwrap(),
         );
 
-    assert_eq!(
-        conform_failure_in_memory(&fixture),
-        Failure::ExpansionCeiling
+    assert_package_acquisition_failure(
+        conform_failure_object_storage(&fixture),
+        "@preview/oversized:1.0.0",
+        PackageAcquisitionFailureReason::Other { detail: None },
     );
+}
+
+#[cfg(feature = "package-acquisition")]
+#[test]
+fn cache_and_registry_archives_compose_into_the_same_semantic_pack() {
+    let fixture = Fixture::document(
+        "#import \"@preview/cached:1.0.0\": cached\n\
+         #import \"@preview/registered:1.0.0\": registered\n\
+         #rect(width: (cached + registered) * 1pt, height: 1pt)",
+    )
+    .cached_archive(
+        "cached",
+        valid_archive("cached", "#let cached = 1"),
+        typst_pack::PackageExpansionLimits::reference_v1(),
+    )
+    .registry_archive(
+        "registered",
+        valid_archive("registered", "#let registered = 2"),
+        typst_pack::PackageExpansionLimits::reference_v1(),
+    );
+
+    let created = conform_object_storage(&fixture);
+
+    assert_eq!(
+        package_dispositions(&created.pack),
+        [
+            ("@preview/cached:1.0.0".to_owned(), true),
+            ("@preview/registered:1.0.0".to_owned(), true),
+        ]
+    );
+    assert_eq!(
+        created.missing_rounds,
+        [
+            vec!["@preview/cached:1.0.0".to_owned()],
+            vec!["@preview/registered:1.0.0".to_owned()],
+        ]
+    );
+}
+
+#[cfg(feature = "package-acquisition")]
+fn valid_archive(name: &str, body: &str) -> Vec<u8> {
+    let manifest = format!(
+        "[package]\nname = \"{name}\"\nversion = \"{PACKAGE_VERSION}\"\nentrypoint = \"lib.typ\"\n"
+    );
+    archive(&[
+        ("typst.toml", manifest.len() as u64, manifest.as_bytes()),
+        ("lib.typ", body.len() as u64, body.as_bytes()),
+        ("unread.txt", 8, b"included"),
+    ])
 }
 
 /// The gzip-compressed tar a registry serves for one package, written from a
@@ -1038,7 +1481,7 @@ fn archive(members: &[(&str, u64, &[u8])]) -> Vec<u8> {
 fn a_representative_request_that_does_not_compile_fails_every_adapter() {
     let fixture = Fixture::document("#import \"missing.typ\": value\n#value");
 
-    assert_eq!(conform_failure(&fixture), Failure::Compile);
+    assert!(matches!(conform_failure(&fixture), Failure::Compile(_)));
 }
 
 #[test]
@@ -1051,7 +1494,7 @@ fn representative_compile_warnings_are_returned_by_every_adapter() {
         created
             .warnings
             .iter()
-            .any(|warning| warning.contains("unknown font family")),
+            .any(|warning| warning.message.contains("unknown font family")),
         "{:?}",
         created.warnings
     );
@@ -1065,6 +1508,9 @@ fn representative_compile_warnings_are_returned_by_every_adapter() {
 /// ships with the `embedded-fonts` feature.
 #[cfg(feature = "embedded-fonts")]
 mod fonts {
+    #[cfg(all(feature = "opendal", feature = "package-acquisition"))]
+    use std::pin::pin;
+
     use typst_pack::{FontContainerIdentity, FontDisposition};
 
     use crate::font_bytes::{family_of, font_collection, renamed_family, typst_container};
@@ -1083,6 +1529,155 @@ mod fonts {
     fn alternate_family(prefix: char) -> String {
         let original = family_of(&typst_container());
         format!("{prefix}{}", &original[1..])
+    }
+
+    #[cfg(all(feature = "opendal", feature = "package-acquisition"))]
+    #[test]
+    fn project_and_font_completion_order_preserves_pack_observations() {
+        use crate::scripted_opendal::{
+            Capabilities, ListEntry, ListScript, ListStep, PendingPoint, ReadScript, ReadStep,
+            ScriptedService,
+        };
+        use crate::{
+            CREATION_TIMESTAMP, PackageAcquisitionFailures, PackageCatalog,
+            ProjectSnapshotAssembly, create_directly, expect_memory_ready, poll_memory_once,
+            projection,
+        };
+        use typst_pack::opendal::pack_assembly::{
+            FontAcquisitionEntry, FontAcquisitionLimits, FontAcquisitionRequest,
+            FontSource as OpenDalFontSource, ProjectAcquisitionEntry, ProjectAcquisitionLimits,
+            ProjectAcquisitionRequest, acquire_fonts, acquire_project,
+        };
+        use typst_pack::opendal::{OperatorBinding, OperatorBindings};
+        use typst_pack::{
+            DiscoverySpecification, DocumentTime, FontCatalog, FontCatalogEntry, FontContainer,
+            PackCreationInput, PackCreationOutcome, TypstTarget, create,
+        };
+
+        let font = typst_container();
+        let family = family_of(&font);
+        let source = format!("#set text(font: \"{family}\")\nCompletion order");
+        let fixture = Fixture::document(&source)
+            .font(FontSource::Scanned(font.clone()), FontDisposition::Embedded);
+        let direct = create_directly(&fixture).unwrap();
+
+        for project_finishes_first in [true, false] {
+            let project_pending = PendingPoint::new();
+            let font_pending = PendingPoint::new();
+            let service = ScriptedService::new(
+                Capabilities::all(),
+                [
+                    ListScript::new(
+                        "project/",
+                        1,
+                        [ListStep::page([ListEntry::file("project/main.typ")])],
+                    )
+                    .unwrap(),
+                    ListScript::new(
+                        "fonts/",
+                        1,
+                        [ListStep::page([ListEntry::file("fonts/font.ttf")])],
+                    )
+                    .unwrap(),
+                ],
+                [
+                    ReadScript::new(
+                        "project/main.typ",
+                        1,
+                        [
+                            ReadStep::pending(project_pending.clone()),
+                            ReadStep::chunk(source.as_bytes()),
+                        ],
+                    )
+                    .unwrap(),
+                    ReadScript::new(
+                        "fonts/font.ttf",
+                        1,
+                        [
+                            ReadStep::pending(font_pending.clone()),
+                            ReadStep::chunk(&font),
+                        ],
+                    )
+                    .unwrap(),
+                ],
+                16,
+            );
+            let binding = OperatorBinding::new("storage").unwrap();
+            let bindings = OperatorBindings::new([(binding.clone(), service.operator())]).unwrap();
+            let project_request = ProjectAcquisitionRequest::new(
+                "storage:/project/".parse().unwrap(),
+                ProjectAcquisitionLimits::reference_v1(),
+            )
+            .unwrap();
+            let font_request = FontAcquisitionRequest::new(
+                [OpenDalFontSource::new(
+                    "storage:/fonts/".parse().unwrap(),
+                    FontDisposition::Embedded,
+                )],
+                FontAcquisitionLimits::reference_v1(),
+            )
+            .unwrap();
+            let mut project_acquisition = pin!(acquire_project(&bindings, &project_request));
+            let mut font_acquisition = pin!(acquire_fonts(&bindings, &font_request));
+            assert!(poll_memory_once(project_acquisition.as_mut()).is_pending());
+            assert!(poll_memory_once(font_acquisition.as_mut()).is_pending());
+
+            let (project_acquisition, font_acquisition) = if project_finishes_first {
+                project_pending.release();
+                let project = expect_memory_ready(project_acquisition.as_mut()).unwrap();
+                assert!(poll_memory_once(font_acquisition.as_mut()).is_pending());
+                font_pending.release();
+                let fonts = expect_memory_ready(font_acquisition.as_mut()).unwrap();
+                (project, fonts)
+            } else {
+                font_pending.release();
+                let fonts = expect_memory_ready(font_acquisition.as_mut()).unwrap();
+                assert!(poll_memory_once(project_acquisition.as_mut()).is_pending());
+                project_pending.release();
+                let project = expect_memory_ready(project_acquisition.as_mut()).unwrap();
+                (project, fonts)
+            };
+            let (_, project_entries) = project_acquisition.into_parts();
+            let project = ProjectSnapshotAssembly::new("main.typ")
+                .assemble(
+                    project_entries
+                        .into_iter()
+                        .map(ProjectAcquisitionEntry::into_parts),
+                )
+                .unwrap();
+            let (_, font_entries) = font_acquisition.into_parts();
+            let mut fonts = FontCatalog::new();
+            for entry in font_entries {
+                let (_, _, _, disposition, bytes) = FontAcquisitionEntry::into_parts(entry);
+                fonts.push(FontCatalogEntry::new(
+                    FontContainer::new(bytes).unwrap(),
+                    disposition,
+                ));
+            }
+            let packages = PackageCatalog::new();
+            let failures = PackageAcquisitionFailures::new();
+            let discovery = DiscoverySpecification::new(
+                TypstTarget::Paged,
+                typst::foundations::Dict::new(),
+                DocumentTime::UnixTimestamp(CREATION_TIMESTAMP),
+                [],
+            )
+            .unwrap();
+            let PackCreationOutcome::Created { pack, warnings } = create(PackCreationInput {
+                project: &project,
+                packages: &packages,
+                fonts: &fonts,
+                package_failures: &failures,
+                discovery: &discovery,
+                metadata: None,
+            })
+            .unwrap() else {
+                panic!("the package-free fixture must complete in one invocation");
+            };
+
+            assert_eq!(projection(&pack), projection(&direct.pack));
+            assert_eq!(warnings.to_vec(), direct.warnings);
+        }
     }
 
     #[test]

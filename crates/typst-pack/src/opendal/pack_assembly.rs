@@ -1,4 +1,125 @@
 //! OpenDAL acquisition for Pack Assembly inputs.
+//!
+//! # Complete Pack Assembly
+//!
+//! The storage operations are caller-polled async operations. Their completed,
+//! owned values compose through the existing synchronous Pack Creation loop:
+//!
+//! ```no_run
+//! # #[cfg(feature = "package-acquisition")]
+//! # mod complete {
+//! use std::collections::HashSet;
+//!
+//! use typst::foundations::Dict;
+//! use typst_pack::opendal::{Location, OperatorBindings};
+//! use typst_pack::opendal::pack_assembly::{
+//!     FontAcquisitionEntry, FontAcquisitionLimits, FontAcquisitionRequest, FontSource,
+//!     PackageAcquisitionLimits, PackageAcquisitionRequest, PackageTreeSource,
+//!     ProjectAcquisitionEntry, ProjectAcquisitionLimits, ProjectAcquisitionRequest,
+//!     acquire_fonts, acquire_package, acquire_project, insert_acquired_package,
+//! };
+//! use typst_pack::opendal::publication::{
+//!     PackageCacheArchivePublicationRequest, publish_package_cache_archive,
+//! };
+//! use typst_pack::{
+//!     DiscoverySpecification, DocumentTime, FontCatalog, FontCatalogEntry, FontContainer,
+//!     FontDisposition, Pack, PackCreationInput, PackCreationOutcome,
+//!     PackageAcquisitionFailures, PackageCatalog, PackageDisposition,
+//!     PackageExpansionLimits, ProjectSnapshotAssembly, TypstTarget, create,
+//! };
+//!
+//! async fn assemble(bindings: &OperatorBindings) -> Result<Pack, Box<dyn std::error::Error>> {
+//!     let project_request = ProjectAcquisitionRequest::new(
+//!         "project:/sources/document/".parse::<Location>()?,
+//!         ProjectAcquisitionLimits::reference_v1(),
+//!     )?;
+//!     let (_, project_entries) = acquire_project(bindings, &project_request).await?.into_parts();
+//!     let project = ProjectSnapshotAssembly::new("main.typ").assemble(
+//!         project_entries.into_iter().map(ProjectAcquisitionEntry::into_parts),
+//!     )?;
+//!
+//!     let font_request = FontAcquisitionRequest::new(
+//!         [FontSource::new(
+//!             "fonts:/catalog/".parse::<Location>()?,
+//!             FontDisposition::Embedded,
+//!         )],
+//!         FontAcquisitionLimits::reference_v1(),
+//!     )?;
+//!     let (_, font_entries) = acquire_fonts(bindings, &font_request).await?.into_parts();
+//!     let mut fonts = FontCatalog::new();
+//!     for entry in font_entries {
+//!         let (_, _, _, disposition, bytes) = FontAcquisitionEntry::into_parts(entry);
+//!         fonts.push(FontCatalogEntry::new(FontContainer::new(bytes)?, disposition));
+//!     }
+//!
+//!     let tree_source = PackageTreeSource::new("packages:/trees/".parse::<Location>()?);
+//!     let archive_cache = "packages:/cache/".parse::<Location>()?;
+//!     let registry = "registry:/packages/".parse::<Location>()?;
+//!     let discovery = DiscoverySpecification::new(
+//!         TypstTarget::Paged,
+//!         Dict::new(),
+//!         DocumentTime::Absent,
+//!         [],
+//!     )?;
+//!     let mut packages = PackageCatalog::new();
+//!     let mut failures = PackageAcquisitionFailures::new();
+//!     let mut attempted = HashSet::new();
+//!
+//!     loop {
+//!         match create(PackCreationInput {
+//!             project: &project,
+//!             packages: &packages,
+//!             fonts: &fonts,
+//!             package_failures: &failures,
+//!             discovery: &discovery,
+//!             metadata: None,
+//!         })? {
+//!             PackCreationOutcome::Created { pack, warnings: _ } => return Ok(pack),
+//!             PackCreationOutcome::MissingPackageSpecifications(missing) => {
+//!                 for spec in missing {
+//!                     if !attempted.insert(spec.to_string()) {
+//!                         return Err("Pack Creation repeated an attempted specification".into());
+//!                     }
+//!                     let request = PackageAcquisitionRequest::new(
+//!                         spec,
+//!                         [tree_source.clone()],
+//!                         Some(archive_cache.clone()),
+//!                         Some(registry.clone()),
+//!                         PackageAcquisitionLimits::reference_v1(),
+//!                     )?;
+//!                     let acquisition = acquire_package(bindings, &request).await?;
+//!                     let insertion = insert_acquired_package(
+//!                         &mut packages,
+//!                         &mut failures,
+//!                         acquisition,
+//!                         PackageDisposition::Embedded,
+//!                         PackageExpansionLimits::reference_v1(),
+//!                     );
+//!                     match insertion {
+//!                         Ok(Some(residue)) => {
+//!                             let publication = PackageCacheArchivePublicationRequest::new(
+//!                                 residue.destination().clone(),
+//!                             )?;
+//!                             let _cache_result = publish_package_cache_archive(
+//!                                 bindings,
+//!                                 &publication,
+//!                                 residue.bytes(),
+//!                             ).await;
+//!                             // Cache failure is separate evidence and does not
+//!                             // invalidate the inserted Package Tree.
+//!                         }
+//!                         Ok(None) => {}
+//!                         // Insertion retained the mapped Package Acquisition Failure.
+//!                         // Resume so Dependency Discovery can attach it to the import.
+//!                         Err(_error) => {}
+//!                     }
+//!                 }
+//!             }
+//!         }
+//!     }
+//! }
+//! # }
+//! ```
 
 mod package;
 
