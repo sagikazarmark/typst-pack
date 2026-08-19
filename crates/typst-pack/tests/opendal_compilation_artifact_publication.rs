@@ -25,7 +25,7 @@ use typst_pack::opendal::{
 use typst_pack::pack_archive::CommitCertainty;
 use typst_pack::{
     CompilationLimits, CompilationOutputSpecification, CompilationResult, CompilationStatus, Pack,
-    PackCompilationRequest, SvgOutputSpecification, compile,
+    PackCompilationRequest, SvgOutputSpecification, compile_with_limits,
 };
 
 #[test]
@@ -947,7 +947,7 @@ fn empty_result() -> CompilationResult {
         .unwrap()
         .build()
         .unwrap();
-    compile(
+    compile_with_limits(
         PackCompilationRequest::new(
             pack,
             CompilationOutputSpecification::Svg(SvgOutputSpecification {
@@ -969,7 +969,7 @@ fn compilation_result(source: &str) -> CompilationResult {
         .unwrap()
         .build()
         .unwrap();
-    compile(
+    compile_with_limits(
         PackCompilationRequest::new(
             pack,
             CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),

@@ -13,6 +13,7 @@ use super::super::acquisition::{
 };
 use super::super::{Location, LocationRoleError, OperatorResolver};
 use crate::acquisition_layout;
+use crate::limits::{LimitError, Limits, LimitsError, ResourceKind};
 use crate::package_catalog::PackageTreeError;
 use crate::redacted_error::RedactedError;
 
@@ -48,63 +49,48 @@ impl PackageTreeAcquisitionCeilings {
 }
 
 /// A resource bounded during OpenDAL Package Tree Acquisition.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum PackageTreeAcquisitionResource {
+pub type PackageTreeAcquisitionResource = ResourceKind<11>;
+
+#[allow(non_upper_case_globals)]
+impl ResourceKind<11> {
     /// Entries yielded by recursive listings.
-    ListedEntries,
+    pub const ListedEntries: Self = Self::new(0);
     /// Bytes in one yielded operation path.
-    ListedPathBytes,
+    pub const ListedPathBytes: Self = Self::new(1);
     /// Bytes retained for paths and structural evidence.
-    TotalListedPathBytes,
+    pub const TotalListedPathBytes: Self = Self::new(2);
     /// Selected file objects.
-    SelectedFiles,
+    pub const SelectedFiles: Self = Self::new(3);
     /// Bytes retained for one selected file.
-    ObjectBytes,
+    pub const ObjectBytes: Self = Self::new(4);
     /// Bytes retained across the selected tree.
-    TotalBytes,
+    pub const TotalBytes: Self = Self::new(5);
 }
 
 /// A supplied Package Tree Acquisition ceiling is internally inconsistent.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum PackageTreeAcquisitionLimitsError {
-    /// A payload ceiling cannot accommodate the required plus-one probe.
-    #[error("the {resource:?} ceiling must leave room for a plus-one probe")]
-    CannotProbe {
-        resource: PackageTreeAcquisitionResource,
-        ceiling: u64,
-    },
-    /// The per-object ceiling exceeds the aggregate payload ceiling.
-    #[error("the ObjectBytes ceiling {object_bytes} exceeds the TotalBytes ceiling {total_bytes}")]
-    ObjectBytesExceedTotalBytes { object_bytes: u64, total_bytes: u64 },
-}
+pub type PackageTreeAcquisitionLimitsError = LimitsError<PackageTreeAcquisitionResource>;
 
 /// Mandatory finite limits for OpenDAL Package Tree Acquisition.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PackageTreeAcquisitionLimits {
-    ceilings: PackageTreeAcquisitionCeilings,
-}
+pub type PackageTreeAcquisitionLimits = Limits<PackageTreeAcquisitionResource>;
 
-impl PackageTreeAcquisitionLimits {
+impl Limits<PackageTreeAcquisitionResource> {
     /// Validates every named Package Tree Acquisition ceiling.
     pub fn new(
         ceilings: PackageTreeAcquisitionCeilings,
     ) -> Result<Self, PackageTreeAcquisitionLimitsError> {
-        for (resource, ceiling) in [
-            (
-                PackageTreeAcquisitionResource::ObjectBytes,
-                ceilings.object_bytes,
-            ),
-            (
-                PackageTreeAcquisitionResource::TotalBytes,
-                ceilings.total_bytes,
-            ),
-        ] {
-            if ceiling == u64::MAX {
-                return Err(PackageTreeAcquisitionLimitsError::CannotProbe { resource, ceiling });
-            }
-        }
+        let limits = Self::from_ceilings([
+            ceilings.listed_entries,
+            ceilings.listed_path_bytes,
+            ceilings.total_listed_path_bytes,
+            ceilings.selected_files,
+            ceilings.object_bytes,
+            ceilings.total_bytes,
+            0,
+        ])
+        .validate_probe_resources([
+            PackageTreeAcquisitionResource::ObjectBytes,
+            PackageTreeAcquisitionResource::TotalBytes,
+        ])?;
         if ceilings.object_bytes > ceilings.total_bytes {
             return Err(
                 PackageTreeAcquisitionLimitsError::ObjectBytesExceedTotalBytes {
@@ -113,66 +99,55 @@ impl PackageTreeAcquisitionLimits {
                 },
             );
         }
-        Ok(Self { ceilings })
+        Ok(limits)
     }
 
     /// The validated first-party version-1 limits.
     pub const fn reference_v1() -> Self {
-        Self {
-            ceilings: PackageTreeAcquisitionCeilings::reference_v1(),
-        }
+        Self::from_ceilings([
+            100_000,
+            64 * 1024,
+            64 * 1024 * 1024,
+            50_000,
+            64 * 1024 * 1024,
+            512 * 1024 * 1024,
+            0,
+        ])
     }
 
     /// The maximum number of entries yielded across attempted tree sources.
     pub const fn listed_entries(&self) -> u64 {
-        self.ceilings.listed_entries
+        self.ceilings[0]
     }
 
     /// The maximum byte length of one yielded operation path.
     pub const fn listed_path_bytes(&self) -> u64 {
-        self.ceilings.listed_path_bytes
+        self.ceilings[1]
     }
 
     /// The maximum retained bytes for paths and structural evidence.
     pub const fn total_listed_path_bytes(&self) -> u64 {
-        self.ceilings.total_listed_path_bytes
+        self.ceilings[2]
     }
 
     /// The maximum selected file count.
     pub const fn selected_files(&self) -> u64 {
-        self.ceilings.selected_files
+        self.ceilings[3]
     }
 
     /// The maximum exact bytes retained for one selected file.
     pub const fn object_bytes(&self) -> u64 {
-        self.ceilings.object_bytes
+        self.ceilings[4]
     }
 
     /// The maximum exact bytes retained for the selected Package Tree.
     pub const fn total_bytes(&self) -> u64 {
-        self.ceilings.total_bytes
+        self.ceilings[5]
     }
 }
 
 /// Package Tree Acquisition exceeded or could not account for a mandatory limit.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum PackageTreeAcquisitionLimitError {
-    /// The observed resource exceeded its ceiling.
-    #[error(
-        "OpenDAL Package Tree Acquisition {resource:?} limit exceeded: ceiling {ceiling}, observed at least {observed_at_least}"
-    )]
-    Exceeded {
-        resource: PackageTreeAcquisitionResource,
-        ceiling: u64,
-        observed_at_least: u64,
-    },
-    /// Resource accounting could not be represented in `u64`.
-    #[error("OpenDAL Package Tree Acquisition {resource:?} accounting overflowed")]
-    AccountingOverflow {
-        resource: PackageTreeAcquisitionResource,
-    },
-}
+pub type PackageTreeAcquisitionLimitError = LimitError<PackageTreeAcquisitionResource>;
 
 /// Named finite ceilings for one raw Package Archive Acquisition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -191,77 +166,42 @@ impl PackageArchiveAcquisitionCeilings {
 }
 
 /// A resource bounded while acquiring a raw Package Archive.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum PackageArchiveAcquisitionResource {
+pub type PackageArchiveAcquisitionResource = ResourceKind<12>;
+
+#[allow(non_upper_case_globals)]
+impl ResourceKind<12> {
     /// Exact raw Package Archive bytes.
-    ArchiveBytes,
+    pub const ArchiveBytes: Self = Self::new(0);
 }
 
 /// A supplied Package Archive Acquisition ceiling is invalid.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum PackageArchiveAcquisitionLimitsError {
-    /// The archive ceiling cannot accommodate the required plus-one probe.
-    #[error("the {resource:?} ceiling must leave room for a plus-one probe")]
-    CannotProbe {
-        resource: PackageArchiveAcquisitionResource,
-        ceiling: u64,
-    },
-}
+pub type PackageArchiveAcquisitionLimitsError = LimitsError<PackageArchiveAcquisitionResource>;
 
 /// Mandatory finite limits for one raw Package Archive Acquisition.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PackageArchiveAcquisitionLimits {
-    ceilings: PackageArchiveAcquisitionCeilings,
-}
+pub type PackageArchiveAcquisitionLimits = Limits<PackageArchiveAcquisitionResource>;
 
-impl PackageArchiveAcquisitionLimits {
+impl Limits<PackageArchiveAcquisitionResource> {
     /// Validates the named raw archive ceiling.
     pub fn new(
         ceilings: PackageArchiveAcquisitionCeilings,
     ) -> Result<Self, PackageArchiveAcquisitionLimitsError> {
-        if ceilings.archive_bytes == u64::MAX {
-            return Err(PackageArchiveAcquisitionLimitsError::CannotProbe {
-                resource: PackageArchiveAcquisitionResource::ArchiveBytes,
-                ceiling: ceilings.archive_bytes,
-            });
-        }
-        Ok(Self { ceilings })
+        Self::from_ceilings([ceilings.archive_bytes, 0, 0, 0, 0, 0, 0])
+            .validate_probe_resources([PackageArchiveAcquisitionResource::ArchiveBytes])
     }
 
     /// The validated first-party version-1 limits.
     pub const fn reference_v1() -> Self {
-        Self {
-            ceilings: PackageArchiveAcquisitionCeilings::reference_v1(),
-        }
+        Self::from_ceilings([128 * 1024 * 1024, 0, 0, 0, 0, 0, 0])
     }
 
     /// The maximum exact raw archive bytes retained from one candidate.
     pub const fn archive_bytes(&self) -> u64 {
-        self.ceilings.archive_bytes
+        self.ceilings[0]
     }
 }
 
 /// A raw Package Archive exceeded or could not account for its limit.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum PackageArchiveAcquisitionLimitError {
-    /// The observed archive length exceeded its ceiling.
-    #[error(
-        "OpenDAL Package Archive Acquisition {resource:?} limit exceeded: ceiling {ceiling}, observed at least {observed_at_least}"
-    )]
-    Exceeded {
-        resource: PackageArchiveAcquisitionResource,
-        ceiling: u64,
-        observed_at_least: u64,
-    },
-    /// Archive byte accounting could not be represented in `u64`.
-    #[error("OpenDAL Package Archive Acquisition {resource:?} accounting overflowed")]
-    AccountingOverflow {
-        resource: PackageArchiveAcquisitionResource,
-    },
-}
+pub type PackageArchiveAcquisitionLimitError = LimitError<PackageArchiveAcquisitionResource>;
 
 /// Named finite ceilings for Package Acquisition fallback.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -282,54 +222,131 @@ impl PackageAcquisitionCeilings {
     }
 }
 
-/// A supplied Package Acquisition limit family is invalid.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum PackageAcquisitionLimitsError {
-    /// Invalid Package Tree Acquisition limits.
-    #[error("invalid Package Tree Acquisition limits: {0}")]
-    Trees(PackageTreeAcquisitionLimitsError),
-    /// Invalid raw Package Archive Acquisition limits.
-    #[error("invalid Package Archive Acquisition limits: {0}")]
-    Archives(PackageArchiveAcquisitionLimitsError),
+/// A resource bounded across Package Acquisition fallback.
+pub type PackageAcquisitionResource = ResourceKind<13>;
+
+#[allow(non_upper_case_globals)]
+impl ResourceKind<13> {
+    pub const TreeListedEntries: Self = Self::new(0);
+    pub const TreeListedPathBytes: Self = Self::new(1);
+    pub const TreeTotalListedPathBytes: Self = Self::new(2);
+    pub const TreeSelectedFiles: Self = Self::new(3);
+    pub const TreeObjectBytes: Self = Self::new(4);
+    pub const TreeTotalBytes: Self = Self::new(5);
+    pub const ArchiveBytes: Self = Self::new(6);
 }
+
+/// A supplied Package Acquisition limit family is invalid.
+pub type PackageAcquisitionLimitsError = LimitsError<PackageAcquisitionResource>;
 
 /// Mandatory finite limits for Package Acquisition fallback.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct PackageAcquisitionLimits {
-    trees: PackageTreeAcquisitionLimits,
-    archives: PackageArchiveAcquisitionLimits,
-}
+pub type PackageAcquisitionLimits = Limits<PackageAcquisitionResource>;
 
-impl PackageAcquisitionLimits {
+impl Limits<PackageAcquisitionResource> {
     /// Validates both Package Acquisition limit families.
     pub fn new(
         ceilings: PackageAcquisitionCeilings,
     ) -> Result<Self, PackageAcquisitionLimitsError> {
-        Ok(Self {
-            trees: PackageTreeAcquisitionLimits::new(ceilings.trees)
-                .map_err(PackageAcquisitionLimitsError::Trees)?,
-            archives: PackageArchiveAcquisitionLimits::new(ceilings.archives)
-                .map_err(PackageAcquisitionLimitsError::Archives)?,
-        })
+        let trees =
+            PackageTreeAcquisitionLimits::new(ceilings.trees).map_err(map_tree_limits_error)?;
+        let archives = PackageArchiveAcquisitionLimits::new(ceilings.archives)
+            .map_err(map_archive_limits_error)?;
+        Ok(Self::from_ceilings([
+            trees.listed_entries(),
+            trees.listed_path_bytes(),
+            trees.total_listed_path_bytes(),
+            trees.selected_files(),
+            trees.object_bytes(),
+            trees.total_bytes(),
+            archives.archive_bytes(),
+        ]))
     }
 
     /// Limits shared across ordered Package Tree candidates.
     pub const fn trees(&self) -> PackageTreeAcquisitionLimits {
-        self.trees
+        PackageTreeAcquisitionLimits::from_ceilings([
+            self.ceilings[0],
+            self.ceilings[1],
+            self.ceilings[2],
+            self.ceilings[3],
+            self.ceilings[4],
+            self.ceilings[5],
+            0,
+        ])
     }
 
     /// Limits applied independently to cache and registry candidates.
     pub const fn archives(&self) -> PackageArchiveAcquisitionLimits {
-        self.archives
+        PackageArchiveAcquisitionLimits::from_ceilings([self.ceilings[6], 0, 0, 0, 0, 0, 0])
     }
 
     /// The validated first-party version-1 composite limits.
     pub const fn reference_v1() -> Self {
-        Self {
-            trees: PackageTreeAcquisitionLimits::reference_v1(),
-            archives: PackageArchiveAcquisitionLimits::reference_v1(),
+        Self::from_ceilings([
+            100_000,
+            64 * 1024,
+            64 * 1024 * 1024,
+            50_000,
+            64 * 1024 * 1024,
+            512 * 1024 * 1024,
+            128 * 1024 * 1024,
+        ])
+    }
+}
+
+fn map_tree_limits_error(
+    error: PackageTreeAcquisitionLimitsError,
+) -> PackageAcquisitionLimitsError {
+    match error {
+        PackageTreeAcquisitionLimitsError::CannotProbe { resource, ceiling } => {
+            PackageAcquisitionLimitsError::CannotProbe {
+                resource: match resource {
+                    PackageTreeAcquisitionResource::ListedEntries => {
+                        PackageAcquisitionResource::TreeListedEntries
+                    }
+                    PackageTreeAcquisitionResource::ListedPathBytes => {
+                        PackageAcquisitionResource::TreeListedPathBytes
+                    }
+                    PackageTreeAcquisitionResource::TotalListedPathBytes => {
+                        PackageAcquisitionResource::TreeTotalListedPathBytes
+                    }
+                    PackageTreeAcquisitionResource::SelectedFiles => {
+                        PackageAcquisitionResource::TreeSelectedFiles
+                    }
+                    PackageTreeAcquisitionResource::ObjectBytes => {
+                        PackageAcquisitionResource::TreeObjectBytes
+                    }
+                    PackageTreeAcquisitionResource::TotalBytes => {
+                        PackageAcquisitionResource::TreeTotalBytes
+                    }
+                    _ => unreachable!("unknown Package Tree Acquisition resource"),
+                },
+                ceiling,
+            }
         }
+        PackageTreeAcquisitionLimitsError::ObjectBytesExceedTotalBytes {
+            object_bytes,
+            total_bytes,
+        } => PackageAcquisitionLimitsError::ObjectBytesExceedTotalBytes {
+            object_bytes,
+            total_bytes,
+        },
+        _ => unreachable!("unrelated Package Tree Acquisition limits error"),
+    }
+}
+
+fn map_archive_limits_error(
+    error: PackageArchiveAcquisitionLimitsError,
+) -> PackageAcquisitionLimitsError {
+    match error {
+        PackageArchiveAcquisitionLimitsError::CannotProbe {
+            resource: PackageArchiveAcquisitionResource::ArchiveBytes,
+            ceiling,
+        } => PackageAcquisitionLimitsError::CannotProbe {
+            resource: PackageAcquisitionResource::ArchiveBytes,
+            ceiling,
+        },
+        _ => unreachable!("unrelated Package Archive Acquisition limits error"),
     }
 }
 
@@ -976,13 +993,12 @@ impl ExactPathAcquisitionOperation for PackageArchiveExactPathOperation<'_> {
         })
     }
 
-    fn limit_exceeded(&self, ceiling: u64, observed_at_least: u64) -> PackageAcquisitionError {
+    fn limit_exceeded(&self, ceiling: u64, _: u64) -> PackageAcquisitionError {
         self.error(PackageAcquisitionErrorCause::ArchiveLimit(
-            PackageArchiveAcquisitionLimitError::Exceeded {
-                resource: PackageArchiveAcquisitionResource::ArchiveBytes,
+            PackageArchiveAcquisitionLimitError::exceeded(
+                PackageArchiveAcquisitionResource::ArchiveBytes,
                 ceiling,
-                observed_at_least,
-            },
+            ),
         ))
     }
 
@@ -1264,16 +1280,15 @@ impl RecursiveAcquisitionOperation for PackageTreeAcquisitionOperation<'_> {
         source_index: usize,
         resource: RecursiveAcquisitionResource,
         ceiling: u64,
-        observed_at_least: u64,
+        _: u64,
     ) -> PackageAcquisitionError {
         self.error(
             source_index,
             None,
-            PackageAcquisitionErrorCause::TreeLimit(PackageTreeAcquisitionLimitError::Exceeded {
-                resource: map_resource(resource),
+            PackageAcquisitionErrorCause::TreeLimit(PackageTreeAcquisitionLimitError::exceeded(
+                map_resource(resource),
                 ceiling,
-                observed_at_least,
-            }),
+            )),
         )
     }
 
@@ -1686,14 +1701,14 @@ fn compose_candidate(source: &Location, child: &str) -> Location {
 
 impl From<PackageTreeAcquisitionLimits> for RecursiveAcquisitionLimits {
     fn from(limits: PackageTreeAcquisitionLimits) -> Self {
-        Self {
-            listed_entries: limits.listed_entries(),
-            listed_path_bytes: limits.listed_path_bytes(),
-            total_listed_path_bytes: limits.total_listed_path_bytes(),
-            selected_objects: limits.selected_files(),
-            object_bytes: limits.object_bytes(),
-            total_bytes: limits.total_bytes(),
-        }
+        Self::new(
+            limits.listed_entries(),
+            limits.listed_path_bytes(),
+            limits.total_listed_path_bytes(),
+            limits.selected_files(),
+            limits.object_bytes(),
+            limits.total_bytes(),
+        )
     }
 }
 
@@ -1713,6 +1728,7 @@ fn map_resource(resource: RecursiveAcquisitionResource) -> PackageTreeAcquisitio
         }
         RecursiveAcquisitionResource::ObjectBytes => PackageTreeAcquisitionResource::ObjectBytes,
         RecursiveAcquisitionResource::TotalBytes => PackageTreeAcquisitionResource::TotalBytes,
+        _ => unreachable!("unknown recursive acquisition resource"),
     }
 }
 

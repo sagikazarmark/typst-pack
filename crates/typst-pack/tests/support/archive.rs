@@ -1,5 +1,5 @@
 use typst_pack::pack_archive::{
-    DecodeError, DecodeLimits, EncodeError, EncodeLimits, decode, encode,
+    DecodeError, DecodeLimits, EncodeError, EncodeLimits, decode, encode_with_limits,
 };
 use typst_pack::{Pack, PackArchiveBytes};
 
@@ -9,5 +9,5 @@ pub fn decode_reference(bytes: impl Into<PackArchiveBytes>) -> Result<Pack, Deco
 }
 
 pub fn encode_reference(pack: &Pack) -> Result<PackArchiveBytes, EncodeError> {
-    encode(pack, EncodeLimits::reference_v1())
+    encode_with_limits(pack, EncodeLimits::reference_v1())
 }

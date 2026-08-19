@@ -9,7 +9,7 @@ use typst_pack::opendal::publication::{
 use typst_pack::opendal::{Location, OperatorBinding};
 use typst_pack::{
     CompilationLimits, CompilationOutputSpecification, CompilationResult, Pack,
-    PackCompilationRequest, SvgOutputSpecification, compile,
+    PackCompilationRequest, SvgOutputSpecification, compile_with_limits,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -76,7 +76,7 @@ fn two_page_result() -> &'static CompilationResult {
             .unwrap()
             .build()
             .unwrap();
-        compile(
+        compile_with_limits(
             PackCompilationRequest::new(
                 pack,
                 CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),

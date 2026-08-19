@@ -2,7 +2,8 @@ use std::io::{self, Write};
 
 use typst_pack::PackArchiveBytes;
 use typst_pack::pack_archive::{
-    CommitCertainty, EncodeLimits, StreamPublicationPhase, WritePackError, publish, write_pack,
+    CommitCertainty, EncodeLimits, StreamPublicationPhase, WritePackError, publish,
+    write_pack_with_limits,
 };
 
 #[test]
@@ -50,7 +51,8 @@ fn stream_flush_failure_reports_the_complete_visible_prefix_as_indeterminate() {
 fn write_pack_returns_exact_encoded_bytes_for_retry_without_reencoding() {
     let pack = simple_pack();
     let mut failing = ScriptedWriter::new(4, Some(8), false);
-    let error = write_pack(&mut failing, &pack, EncodeLimits::reference_v1()).unwrap_err();
+    let error =
+        write_pack_with_limits(&mut failing, &pack, EncodeLimits::reference_v1()).unwrap_err();
 
     let WritePackError::Publish { archive, source } = error else {
         panic!("expected a publication failure");
@@ -105,7 +107,7 @@ fn file_create_new_publishes_complete_bytes_and_never_replaces() {
 fn file_replace_requires_an_existing_destination_and_commits_atomically() {
     use typst_pack::pack_archive::{
         FilePublicationPhase, FilePublicationPolicy, SavePackError, StagingResidueStatus,
-        publish_file, save_pack,
+        publish_file, save_pack_with_limits,
     };
 
     let directory = tempfile::tempdir().unwrap();
@@ -160,7 +162,7 @@ fn file_replace_requires_an_existing_destination_and_commits_atomically() {
     assert_eq!(std::fs::read(&destination).unwrap(), archive.as_slice());
 
     let pack = simple_pack();
-    let error = save_pack(
+    let error = save_pack_with_limits(
         &destination,
         &pack,
         EncodeLimits::reference_v1(),

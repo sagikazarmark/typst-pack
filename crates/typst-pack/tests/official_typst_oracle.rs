@@ -23,7 +23,8 @@ use typst_pack::{
     DiagnosticSeverity as PackDiagnosticSeverity, DocumentTime, HtmlOutputSpecification,
     OutputFormat, Pack, PackCompilationRequest, PackOverrideSet, PackageTree,
     PackageTreeFulfillment, PdfOutputSpecification, PngOutputSpecification, RequestValueOrigin,
-    SvgOutputSpecification, TracepointKind, compile as compile_to_report, parse_page_selection,
+    SvgOutputSpecification, TracepointKind, compile_with_limits as compile_to_report,
+    parse_page_selection,
 };
 use typst_pdf::PdfStandard;
 

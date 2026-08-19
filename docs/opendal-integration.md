@@ -2438,7 +2438,7 @@ use std::error::Error;
 
 use typst_pack::{Pack, PackArchiveBytes};
 use typst_pack::pack_archive::{
-    AcquisitionLimits, DecodeError, DecodeLimits, EncodeLimits, decode, encode,
+    AcquisitionLimits, DecodeError, DecodeLimits, decode, encode,
 };
 use typst_pack::opendal::{Location, OperatorBindings};
 use typst_pack::opendal::pack_archive::{
@@ -2466,7 +2466,7 @@ pub async fn publish_then_acquire(
     pack: &Pack,
     destination: Location,
 ) -> Result<PublishThenAcquireOutcome, Box<dyn Error>> {
-    let archive = encode(pack, EncodeLimits::reference_v1())?;
+    let archive = encode(pack)?;
     let publish_request = PackArchivePublicationRequest::new(
         destination.clone(),
         PublicationPolicy::CreateOrVerify,
@@ -2516,7 +2516,7 @@ the evidence for not adding a builder.
 use std::error::Error;
 
 use typst_pack::{
-    CompilationLimits, CompilationOutputSpecification, CompilationReport,
+    CompilationOutputSpecification, CompilationReport,
     DocumentTime, Pack, PackCompilationRequest, compile,
 };
 use typst_pack::opendal::OperatorBindings;
@@ -2550,7 +2550,7 @@ pub async fn compile_with_object_storage_inputs(
         .adapter_resolved_overrides(pack_overrides)
         .fulfillments(fulfillments)
         .document_time(document_time);
-    Ok(compile(request, CompilationLimits::reference_v1())?)
+    Ok(compile(request)?)
 }
 ```
 

@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 use crate::error_display::format_error_list;
+use crate::limits::{LimitError, Limits, LimitsError, ResourceKind};
 use crate::pack::names_pack_path;
 use crate::project_snapshot::{ProjectSnapshot, ProjectSnapshotAssembly, ProjectSnapshotError};
 
@@ -16,54 +17,26 @@ use crate::project_snapshot::{ProjectSnapshot, ProjectSnapshotAssembly, ProjectS
 pub const IGNORE_FILE: &str = ".typkignore";
 
 /// A resource bounded during filesystem project gathering.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum FilesystemProjectResource {
-    VisitedEntries,
-    SelectedFiles,
-    RootPolicyBytes,
-    SelectedFileBytes,
-    TotalSelectedBytes,
+pub type FilesystemProjectResource = ResourceKind<0>;
+
+#[allow(non_upper_case_globals)]
+impl ResourceKind<0> {
+    pub const VisitedEntries: Self = Self::new(0);
+    pub const SelectedFiles: Self = Self::new(1);
+    pub const RootPolicyBytes: Self = Self::new(2);
+    pub const SelectedFileBytes: Self = Self::new(3);
+    pub const TotalSelectedBytes: Self = Self::new(4);
 }
 
-/// A supplied gathering ceiling that cannot support bounded accounting.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum FilesystemProjectLimitsError {
-    #[error("the {resource:?} ceiling must leave room for a plus-one probe")]
-    CannotProbe {
-        resource: FilesystemProjectResource,
-        ceiling: u64,
-    },
-}
+pub type FilesystemProjectLimitsError = LimitsError<FilesystemProjectResource>;
 
 /// A filesystem project exceeded a mandatory gathering ceiling.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum FilesystemProjectLimitError {
-    #[error(
-        "filesystem project gathering {resource:?} limit exceeded: ceiling {ceiling}, observed at least {observed_at_least}"
-    )]
-    Exceeded {
-        resource: FilesystemProjectResource,
-        ceiling: u64,
-        observed_at_least: u64,
-    },
-    #[error("filesystem project gathering {resource:?} accounting overflowed")]
-    AccountingOverflow { resource: FilesystemProjectResource },
-}
+pub type FilesystemProjectLimitError = LimitError<FilesystemProjectResource>;
 
 /// Mandatory finite resource ceilings for filesystem project gathering.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct FilesystemProjectLimits {
-    visited_entries: u64,
-    selected_files: u64,
-    root_policy_bytes: u64,
-    selected_file_bytes: u64,
-    total_selected_bytes: u64,
-}
+pub type FilesystemProjectLimits = Limits<FilesystemProjectResource>;
 
-impl FilesystemProjectLimits {
+impl Limits<FilesystemProjectResource> {
     /// Constructs validated mandatory finite gathering ceilings.
     pub fn new(
         visited_entries: u64,
@@ -72,66 +45,55 @@ impl FilesystemProjectLimits {
         selected_file_bytes: u64,
         total_selected_bytes: u64,
     ) -> Result<Self, FilesystemProjectLimitsError> {
-        let ceilings = [
-            (FilesystemProjectResource::VisitedEntries, visited_entries),
-            (FilesystemProjectResource::SelectedFiles, selected_files),
-            (
-                FilesystemProjectResource::RootPolicyBytes,
-                root_policy_bytes,
-            ),
-            (
-                FilesystemProjectResource::SelectedFileBytes,
-                selected_file_bytes,
-            ),
-            (
-                FilesystemProjectResource::TotalSelectedBytes,
-                total_selected_bytes,
-            ),
-        ];
-        if let Some((resource, ceiling)) = ceilings
-            .into_iter()
-            .find(|(_, ceiling)| *ceiling == u64::MAX)
-        {
-            return Err(FilesystemProjectLimitsError::CannotProbe { resource, ceiling });
-        }
-        Ok(Self {
+        Self::from_ceilings([
             visited_entries,
             selected_files,
             root_policy_bytes,
             selected_file_bytes,
             total_selected_bytes,
-        })
+            0,
+            0,
+        ])
+        .validate_probe_resources([
+            FilesystemProjectResource::VisitedEntries,
+            FilesystemProjectResource::SelectedFiles,
+            FilesystemProjectResource::RootPolicyBytes,
+            FilesystemProjectResource::SelectedFileBytes,
+            FilesystemProjectResource::TotalSelectedBytes,
+        ])
     }
 
     /// The first-party limits for filesystem projects.
     pub const fn reference_v1() -> Self {
-        Self {
-            visited_entries: 1_000_000,
-            selected_files: 100_000,
-            root_policy_bytes: 1024 * 1024,
-            selected_file_bytes: 256 * 1024 * 1024,
-            total_selected_bytes: 2 * 1024 * 1024 * 1024,
-        }
+        Self::from_ceilings([
+            1_000_000,
+            100_000,
+            1024 * 1024,
+            256 * 1024 * 1024,
+            2 * 1024 * 1024 * 1024,
+            0,
+            0,
+        ])
     }
 
     pub const fn visited_entries(&self) -> u64 {
-        self.visited_entries
+        self.ceilings[0]
     }
 
     pub const fn selected_files(&self) -> u64 {
-        self.selected_files
+        self.ceilings[1]
     }
 
     pub const fn root_policy_bytes(&self) -> u64 {
-        self.root_policy_bytes
+        self.ceilings[2]
     }
 
     pub const fn selected_file_bytes(&self) -> u64 {
-        self.selected_file_bytes
+        self.ceilings[3]
     }
 
     pub const fn total_selected_bytes(&self) -> u64 {
-        self.total_selected_bytes
+        self.ceilings[4]
     }
 }
 
@@ -299,7 +261,7 @@ pub fn gather_filesystem_project(
     let mut selected_files = u64::from(policy_file.bytes.is_some());
     check_limit(
         FilesystemProjectResource::SelectedFiles,
-        limits.selected_files,
+        limits.selected_files(),
         selected_files,
     )
     .map_err(|source| FilesystemProjectGatherError::limit(&policy_path, source))?;
@@ -332,7 +294,7 @@ pub fn gather_filesystem_project(
         .map_err(|source| FilesystemProjectGatherError::limit(entry.path(), source))?;
         check_limit(
             FilesystemProjectResource::VisitedEntries,
-            limits.visited_entries,
+            limits.visited_entries(),
             visited_entries,
         )
         .map_err(|source| FilesystemProjectGatherError::limit(entry.path(), source))?;
@@ -387,7 +349,7 @@ pub fn gather_filesystem_project(
                 .map_err(|source| FilesystemProjectGatherError::limit(entry.path(), source))?;
         if let Err(source) = check_limit(
             FilesystemProjectResource::SelectedFiles,
-            limits.selected_files,
+            limits.selected_files(),
             selected_files,
         ) {
             deferred_limit
@@ -409,7 +371,7 @@ pub fn gather_filesystem_project(
         let declared = metadata.len();
         if let Err(source) = check_limit(
             FilesystemProjectResource::SelectedFileBytes,
-            limits.selected_file_bytes,
+            limits.selected_file_bytes(),
             declared,
         ) {
             deferred_limit
@@ -424,7 +386,7 @@ pub fn gather_filesystem_project(
         .map_err(|source| FilesystemProjectGatherError::limit(entry.path(), source))?;
         if let Err(source) = check_limit(
             FilesystemProjectResource::TotalSelectedBytes,
-            limits.total_selected_bytes,
+            limits.total_selected_bytes(),
             declared_total,
         ) {
             deferred_limit
@@ -456,21 +418,21 @@ pub fn gather_filesystem_project(
         entries.push((IGNORE_FILE.to_owned(), bytes));
     }
     for (path, source) in selected {
-        let remaining = limits.total_selected_bytes - actual_total;
+        let remaining = limits.total_selected_bytes() - actual_total;
         let bytes = read_bounded(
             root,
             &source,
             &[
                 (
                     FilesystemProjectResource::SelectedFileBytes,
-                    limits.selected_file_bytes,
-                    limits.selected_file_bytes,
+                    limits.selected_file_bytes(),
+                    limits.selected_file_bytes(),
                     0,
                 ),
                 (
                     FilesystemProjectResource::TotalSelectedBytes,
                     remaining,
-                    limits.total_selected_bytes,
+                    limits.total_selected_bytes(),
                     actual_total,
                 ),
             ],
@@ -538,33 +500,33 @@ fn acquire_policy(
 
     check_limit(
         FilesystemProjectResource::VisitedEntries,
-        limits.visited_entries,
+        limits.visited_entries(),
         1,
     )
     .and_then(|_| {
         check_limit(
             FilesystemProjectResource::SelectedFiles,
-            limits.selected_files,
+            limits.selected_files(),
             1,
         )
     })
     .map_err(|source| FilesystemProjectGatherError::limit(path, source))?;
     check_limit(
         FilesystemProjectResource::RootPolicyBytes,
-        limits.root_policy_bytes,
+        limits.root_policy_bytes(),
         metadata.len(),
     )
     .and_then(|_| {
         check_limit(
             FilesystemProjectResource::SelectedFileBytes,
-            limits.selected_file_bytes,
+            limits.selected_file_bytes(),
             metadata.len(),
         )
     })
     .and_then(|_| {
         check_limit(
             FilesystemProjectResource::TotalSelectedBytes,
-            limits.total_selected_bytes,
+            limits.total_selected_bytes(),
             metadata.len(),
         )
     })
@@ -575,20 +537,20 @@ fn acquire_policy(
         &[
             (
                 FilesystemProjectResource::RootPolicyBytes,
-                limits.root_policy_bytes,
-                limits.root_policy_bytes,
+                limits.root_policy_bytes(),
+                limits.root_policy_bytes(),
                 0,
             ),
             (
                 FilesystemProjectResource::SelectedFileBytes,
-                limits.selected_file_bytes,
-                limits.selected_file_bytes,
+                limits.selected_file_bytes(),
+                limits.selected_file_bytes(),
                 0,
             ),
             (
                 FilesystemProjectResource::TotalSelectedBytes,
-                limits.total_selected_bytes,
-                limits.total_selected_bytes,
+                limits.total_selected_bytes(),
+                limits.total_selected_bytes(),
                 0,
             ),
         ],
@@ -823,11 +785,7 @@ fn check_limit(
     observed: u64,
 ) -> Result<(), FilesystemProjectLimitError> {
     if observed > ceiling {
-        return Err(FilesystemProjectLimitError::Exceeded {
-            resource,
-            ceiling,
-            observed_at_least: observed,
-        });
+        return Err(FilesystemProjectLimitError::exceeded(resource, ceiling));
     }
     Ok(())
 }

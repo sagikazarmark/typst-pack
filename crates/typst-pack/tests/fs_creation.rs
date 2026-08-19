@@ -710,7 +710,8 @@ mod fonts {
     fn a_created_pack_compiles_with_no_filesystem() {
         use typst_pack::{
             CompilationFulfillmentSet, CompilationOutputSpecification, FontContainer,
-            FontContainerFulfillment, PackCompilationRequest, PdfOutputSpecification, compile,
+            FontContainerFulfillment, PackCompilationRequest, PdfOutputSpecification,
+            compile_with_limits,
         };
 
         let dir = tempfile::tempdir().unwrap();
@@ -745,7 +746,8 @@ mod fonts {
         )
         .fulfillments(CompilationFulfillmentSet::new([], font_fulfillments).unwrap());
 
-        let report = compile(request, typst_pack::CompilationLimits::reference_v1()).unwrap();
+        let report =
+            compile_with_limits(request, typst_pack::CompilationLimits::reference_v1()).unwrap();
         let result = report.result().expect("semantic Compilation Result");
         assert!(result.artifacts()[0].bytes().starts_with(b"%PDF"));
     }

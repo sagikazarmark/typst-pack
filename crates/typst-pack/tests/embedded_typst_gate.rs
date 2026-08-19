@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 mod differential;
 
 use differential::DIFFERENTIAL_COVERAGE;
-use typst_pack::{OutputFormat, Pack, PackCompilationRequest, compile};
+use typst_pack::{OutputFormat, Pack, PackCompilationRequest, compile_with_limits};
 
 fn baseline() -> toml::Value {
     toml::from_str(include_str!("../embedded-typst.toml")).unwrap()
@@ -235,7 +235,7 @@ fn public_compilation_attests_the_approved_engine_and_exporters() {
                 typst_pack::HtmlOutputSpecification::default(),
             ),
         };
-        let report = compile(
+        let report = compile_with_limits(
             PackCompilationRequest::new(pack, specification),
             typst_pack::CompilationLimits::reference_v1(),
         )

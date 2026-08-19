@@ -10,7 +10,7 @@ use typst_pack::{
     HtmlOutputSpecification, OutputFormat, Pack, PackCompilationRequest, PackMetadata,
     PackOverrideSet, PackOverrideSetError, PackageTree, PackageTreeFulfillment,
     PdfOutputSpecification, PngOutputSpecification, RequestValueOrigin, SvgOutputSpecification,
-    compile as compile_with_limits,
+    compile_with_limits,
 };
 #[cfg(feature = "embedded-fonts")]
 use typst_pack::{FontContainer, FontContainerFulfillment};
@@ -685,7 +685,7 @@ fn cli_timing_path_preserves_accepted_fulfillment_outcomes() {
         .build()
         .unwrap();
 
-    let timed = typst_pack::cli_support::compile_with_timing(
+    let timed = typst_pack::cli_support::compile_with_timing_with_limits(
         PackCompilationRequest::new(pack, output(OutputFormat::Svg)),
         CompilationLimits::reference_v1(),
         None,

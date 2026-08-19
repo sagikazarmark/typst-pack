@@ -1,7 +1,7 @@
 use proptest::prelude::*;
 use typst_pack::pack_archive::{
     DecodeLimits, EncodeError, EncodeLimitError, EncodeLimits, EncodeLimitsError, EncodeResource,
-    RepresentationError, decode, encode,
+    RepresentationError, decode, encode_with_limits as encode,
 };
 use typst_pack::{
     FontFaceIdentity, FontRequirement, Pack, PackFontCatalogFace, PackIdentity, PackMetadata,

@@ -4,7 +4,7 @@ use typst_pack::{
     DiscoverySpecification, DocumentTime, FontCatalog, Pack, PackArchiveBytes,
     PackCompilationRequest, PackCreationInput, PackCreationOutcome, PackageAcquisitionFailures,
     PackageCatalog, PackageDisposition, PackageTree, PackageTreeFulfillment,
-    ProjectSnapshotAssembly, SvgOutputSpecification, TypstTarget, compile, create,
+    ProjectSnapshotAssembly, SvgOutputSpecification, TypstTarget, compile_with_limits, create,
 };
 
 #[cfg(feature = "embedded-fonts")]
@@ -124,7 +124,7 @@ fn compilation_artifact_clones_share_payload_bytes() {
         .unwrap()
         .build()
         .unwrap();
-    let report = compile(
+    let report = compile_with_limits(
         PackCompilationRequest::new(
             pack,
             CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
@@ -189,7 +189,7 @@ fn package_fulfillment_sets_reuse_validated_tree_payloads() {
         pointer
     );
 
-    let report = compile(
+    let report = compile_with_limits(
         PackCompilationRequest::new(
             pack,
             CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
@@ -233,7 +233,7 @@ fn font_fulfillment_sets_reuse_validated_container_payloads() {
         cloned.fonts().next().unwrap().container().data().as_ptr(),
         pointer
     );
-    let report = compile(
+    let report = compile_with_limits(
         PackCompilationRequest::new(
             pack,
             CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),

@@ -7,7 +7,7 @@ use typst_pack::{
     CompilationLimits, CompilationOutputSpecification, CompilationRequestIssue, FontContainer,
     FontContainerError, Pack, PackArchiveBytes, PackCompilationRequest, PackageTree,
     PackageTreeIssue, PageSelection, PngOutputSpecification, ProjectSnapshotAssembly,
-    ProjectSnapshotIssue, compile,
+    ProjectSnapshotIssue, compile_with_limits,
 };
 
 #[cfg(feature = "opendal")]
@@ -48,7 +48,7 @@ fn compilation_artifact_key_regressions_replay_through_request_construction() {
         .unwrap()
         .build()
         .unwrap();
-    let result = compile(
+    let result = compile_with_limits(
         PackCompilationRequest::new(
             pack,
             CompilationOutputSpecification::Svg(Default::default()),
@@ -220,7 +220,7 @@ fn compilation_request_regressions_replay_both_acceptance_and_rejection() {
         .unwrap()
         .build()
         .unwrap();
-    let accepted = compile(
+    let accepted = compile_with_limits(
         PackCompilationRequest::new(
             pack.clone(),
             CompilationOutputSpecification::Svg(Default::default()),
@@ -230,7 +230,7 @@ fn compilation_request_regressions_replay_both_acceptance_and_rejection() {
     .unwrap();
     assert!(accepted.result().is_some());
 
-    let rejected = compile(
+    let rejected = compile_with_limits(
         PackCompilationRequest::new(
             pack,
             CompilationOutputSpecification::Png(PngOutputSpecification {

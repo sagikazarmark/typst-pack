@@ -182,13 +182,9 @@ impl ExactPathAcquisitionOperation for PackArchiveExactPathOperation<'_> {
         self.error(PackArchiveAcquisitionErrorCause::Read(source))
     }
 
-    fn limit_exceeded(&self, ceiling: u64, observed_at_least: u64) -> PackArchiveAcquisitionError {
+    fn limit_exceeded(&self, ceiling: u64, _: u64) -> PackArchiveAcquisitionError {
         self.error(PackArchiveAcquisitionErrorCause::Limit(
-            AcquisitionLimitError::Exceeded {
-                resource: AcquisitionResource::ArchiveBytes,
-                ceiling,
-                observed_at_least,
-            },
+            AcquisitionLimitError::exceeded(AcquisitionResource::ArchiveBytes, ceiling),
         ))
     }
 

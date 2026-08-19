@@ -4,7 +4,7 @@ use typst_pack::pack_archive::{CommitCertainty, StagingResidueStatus};
 use typst_pack::{
     CompilationArtifactPublicationIssue, CompilationLimits, CompilationOutputSpecification,
     FilesystemMergePolicy, FilesystemPublicationPreflightIssue, Pack, PackCompilationRequest,
-    PackExtractionSelection, PdfOutputSpecification, SvgOutputSpecification, compile,
+    PackExtractionSelection, PdfOutputSpecification, SvgOutputSpecification, compile_with_limits,
     plan_pack_extraction, publish_compilation_artifacts_to_filesystem_paths,
     publish_pack_extraction_plan_to_filesystem,
 };
@@ -30,7 +30,7 @@ fn two_page_compilation_result() -> typst_pack::CompilationResult {
         .unwrap()
         .build()
         .unwrap();
-    let report = compile(
+    let report = compile_with_limits(
         PackCompilationRequest::new(
             pack,
             CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
@@ -302,7 +302,7 @@ fn compilation_artifacts_publish_as_a_new_tree_through_caller_selected_platform_
         .unwrap()
         .build()
         .unwrap();
-    let report = compile(
+    let report = compile_with_limits(
         PackCompilationRequest::new(
             pack,
             CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
@@ -442,7 +442,7 @@ fn rejected_compilation_results_are_not_published() {
         .unwrap()
         .build()
         .unwrap();
-    let report = compile(
+    let report = compile_with_limits(
         PackCompilationRequest::new(
             pack,
             CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
@@ -487,7 +487,7 @@ fn caller_selected_artifact_progress_preserves_non_unicode_platform_paths() {
         .unwrap()
         .build()
         .unwrap();
-    let report = compile(
+    let report = compile_with_limits(
         PackCompilationRequest::new(
             pack,
             CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),

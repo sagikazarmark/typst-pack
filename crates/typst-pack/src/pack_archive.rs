@@ -15,6 +15,7 @@ use typst::syntax::package::PackageSpec;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
+use crate::limits::{LimitError, Limits, LimitsError, ResourceKind};
 use crate::manifest::PackManifest;
 pub use crate::manifest::{FORMAT_VERSION, MANIFEST_PATH, PackManifestError as ManifestError};
 use crate::pack::{
@@ -28,43 +29,23 @@ use crate::payload::SharedBytes;
 use crate::{Pack, PackArchiveBytes};
 
 /// A resource bounded during Pack Archive Encoding.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum EncodeResource {
-    ArchiveBytes,
-    Members,
-    GeneratedMemberNameBytes,
-    ManifestBytes,
-    MemberBytes,
-    TotalContentBytes,
+pub type EncodeResource = ResourceKind<4>;
+
+#[allow(non_upper_case_globals)]
+impl ResourceKind<4> {
+    pub const ArchiveBytes: Self = Self::new(0);
+    pub const Members: Self = Self::new(1);
+    pub const GeneratedMemberNameBytes: Self = Self::new(2);
+    pub const ManifestBytes: Self = Self::new(3);
+    pub const MemberBytes: Self = Self::new(4);
+    pub const TotalContentBytes: Self = Self::new(5);
 }
 
 /// A supplied encode ceiling that cannot support bounded accounting.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum EncodeLimitsError {
-    #[error("the {resource:?} ceiling must leave room for a plus-one probe")]
-    CannotProbe {
-        resource: EncodeResource,
-        ceiling: u64,
-    },
-}
+pub type EncodeLimitsError = LimitsError<EncodeResource>;
 
 /// A Pack Archive exceeded a mandatory encode ceiling.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum EncodeLimitError {
-    #[error(
-        "Pack Archive Encode {resource:?} limit exceeded: ceiling {ceiling}, observed at least {observed_at_least}"
-    )]
-    Exceeded {
-        resource: EncodeResource,
-        ceiling: u64,
-        observed_at_least: u64,
-    },
-    #[error("Pack Archive Encode {resource:?} accounting overflowed")]
-    AccountingOverflow { resource: EncodeResource },
-}
+pub type EncodeLimitError = LimitError<EncodeResource>;
 
 /// A valid Pack value that version 1 cannot represent.
 #[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
@@ -81,17 +62,9 @@ pub enum RepresentationError {
 }
 
 /// Mandatory finite resource ceilings for Pack Archive Encoding.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct EncodeLimits {
-    archive_bytes: u64,
-    members: u64,
-    generated_member_name_bytes: u64,
-    manifest_bytes: u64,
-    member_bytes: u64,
-    total_content_bytes: u64,
-}
+pub type EncodeLimits = Limits<EncodeResource>;
 
-impl EncodeLimits {
+impl Limits<EncodeResource> {
     /// Constructs a validated set of mandatory finite encode ceilings.
     pub fn new(
         archive_bytes: u64,
@@ -101,67 +74,60 @@ impl EncodeLimits {
         member_bytes: u64,
         total_content_bytes: u64,
     ) -> Result<Self, EncodeLimitsError> {
-        let ceilings = [
-            (EncodeResource::ArchiveBytes, archive_bytes),
-            (EncodeResource::Members, members),
-            (
-                EncodeResource::GeneratedMemberNameBytes,
-                generated_member_name_bytes,
-            ),
-            (EncodeResource::ManifestBytes, manifest_bytes),
-            (EncodeResource::MemberBytes, member_bytes),
-            (EncodeResource::TotalContentBytes, total_content_bytes),
-        ];
-        if let Some((resource, ceiling)) = ceilings
-            .into_iter()
-            .find(|(_, ceiling)| *ceiling == u64::MAX)
-        {
-            return Err(EncodeLimitsError::CannotProbe { resource, ceiling });
-        }
-        Ok(Self {
+        Self::from_ceilings([
             archive_bytes,
             members,
             generated_member_name_bytes,
             manifest_bytes,
             member_bytes,
             total_content_bytes,
-        })
+            0,
+        ])
+        .validate_probe_resources([
+            EncodeResource::ArchiveBytes,
+            EncodeResource::Members,
+            EncodeResource::GeneratedMemberNameBytes,
+            EncodeResource::ManifestBytes,
+            EncodeResource::MemberBytes,
+            EncodeResource::TotalContentBytes,
+        ])
     }
 
     /// The first-party limits for version-1 Pack Archives.
     pub const fn reference_v1() -> Self {
-        Self {
-            archive_bytes: 512 * 1024 * 1024,
-            members: 100_000,
-            generated_member_name_bytes: 16 * 1024 * 1024,
-            manifest_bytes: 4 * 1024 * 1024,
-            member_bytes: 256 * 1024 * 1024,
-            total_content_bytes: 2 * 1024 * 1024 * 1024,
-        }
+        Self::from_ceilings([
+            512 * 1024 * 1024,
+            100_000,
+            16 * 1024 * 1024,
+            4 * 1024 * 1024,
+            256 * 1024 * 1024,
+            2 * 1024 * 1024 * 1024,
+            0,
+        ])
     }
 
     pub const fn archive_bytes(&self) -> u64 {
-        self.archive_bytes
+        self.ceilings[0]
     }
 
     pub const fn members(&self) -> u64 {
-        self.members
+        self.ceilings[1]
     }
 
     pub const fn generated_member_name_bytes(&self) -> u64 {
-        self.generated_member_name_bytes
+        self.ceilings[2]
     }
 
     pub const fn manifest_bytes(&self) -> u64 {
-        self.manifest_bytes
+        self.ceilings[3]
     }
 
     pub const fn member_bytes(&self) -> u64 {
-        self.member_bytes
+        self.ceilings[4]
     }
 
     pub const fn total_content_bytes(&self) -> u64 {
-        self.total_content_bytes
+        self.ceilings[5]
     }
 }
 
@@ -190,21 +156,29 @@ impl From<std::io::Error> for EncodeError {
 }
 
 /// Encodes one borrowed validated [`Pack`] into uniquely owned exact archive bytes.
-pub fn encode(pack: &Pack, limits: EncodeLimits) -> Result<PackArchiveBytes, EncodeError> {
+pub fn encode(pack: &Pack) -> Result<PackArchiveBytes, EncodeError> {
+    encode_with_limits(pack, EncodeLimits::reference_v1())
+}
+
+/// Encodes one borrowed validated [`Pack`] under explicit resource ceilings.
+pub fn encode_with_limits(
+    pack: &Pack,
+    limits: EncodeLimits,
+) -> Result<PackArchiveBytes, EncodeError> {
     let mut members = 1;
-    check_encode_exceeded(EncodeResource::Members, limits.members, members)?;
+    check_encode_exceeded(EncodeResource::Members, limits.members(), members)?;
     for _ in pack.files() {
-        account_member(&mut members, limits.members)?;
+        account_member(&mut members, limits.members())?;
     }
     for (_, files) in pack.packages() {
         for _ in files {
-            account_member(&mut members, limits.members)?;
+            account_member(&mut members, limits.members())?;
         }
     }
     let mut font_members = BTreeMap::new();
     for font in pack.fonts() {
         if let Entry::Vacant(entry) = font_members.entry(font.identity().container()) {
-            account_member(&mut members, limits.members)?;
+            account_member(&mut members, limits.members())?;
             entry.insert(font.data());
         }
     }
@@ -215,7 +189,7 @@ pub fn encode(pack: &Pack, limits: EncodeLimits) -> Result<PackArchiveBytes, Enc
         })?;
     check_encode_exceeded(
         EncodeResource::GeneratedMemberNameBytes,
-        limits.generated_member_name_bytes,
+        limits.generated_member_name_bytes(),
         generated_name_bytes,
     )?;
     for (path, _) in pack.files() {
@@ -227,7 +201,7 @@ pub fn encode(pack: &Pack, limits: EncodeLimits) -> Result<PackArchiveBytes, Enc
         )?;
         check_encode_exceeded(
             EncodeResource::GeneratedMemberNameBytes,
-            limits.generated_member_name_bytes,
+            limits.generated_member_name_bytes(),
             generated_name_bytes,
         )?;
     }
@@ -254,7 +228,7 @@ pub fn encode(pack: &Pack, limits: EncodeLimits) -> Result<PackArchiveBytes, Enc
             add_generated_name_bytes(&mut generated_name_bytes, parts)?;
             check_encode_exceeded(
                 EncodeResource::GeneratedMemberNameBytes,
-                limits.generated_member_name_bytes,
+                limits.generated_member_name_bytes(),
                 generated_name_bytes,
             )?;
         }
@@ -264,7 +238,7 @@ pub fn encode(pack: &Pack, limits: EncodeLimits) -> Result<PackArchiveBytes, Enc
         add_generated_name_bytes(&mut generated_name_bytes, [path.len()])?;
         check_encode_exceeded(
             EncodeResource::GeneratedMemberNameBytes,
-            limits.generated_member_name_bytes,
+            limits.generated_member_name_bytes(),
             generated_name_bytes,
         )?;
     }
@@ -282,9 +256,9 @@ pub fn encode(pack: &Pack, limits: EncodeLimits) -> Result<PackArchiveBytes, Enc
         account_content(data, limits, &mut total_content_bytes)?;
     }
 
-    let manifest = encode_manifest(pack, limits.manifest_bytes)?;
+    let manifest = encode_manifest(pack, limits.manifest_bytes())?;
 
-    let mut output = BoundedArchiveWriter::new(limits.archive_bytes);
+    let mut output = BoundedArchiveWriter::new(limits.archive_bytes());
     let result = (|| -> Result<(), EncodeError> {
         let mut zip = ZipWriter::new(&mut output);
         zip.start_file(MANIFEST_PATH, zip_file_options(manifest.len()))?;
@@ -576,11 +550,10 @@ impl Write for BoundedArchiveWriter {
         })?;
         self.logical_len = self.logical_len.max(end);
         if self.limit_error.is_none() && self.logical_len > self.ceiling {
-            self.limit_error = Some(EncodeLimitError::Exceeded {
-                resource: EncodeResource::ArchiveBytes,
-                ceiling: self.ceiling,
-                observed_at_least: self.logical_len,
-            });
+            self.limit_error = Some(EncodeLimitError::exceeded(
+                EncodeResource::ArchiveBytes,
+                self.ceiling,
+            ));
             self.position = end;
             return Err(std::io::Error::other("Pack Archive encode limit exceeded"));
         }
@@ -654,7 +627,7 @@ fn account_content(
     let bytes = u64::try_from(data.len()).map_err(|_| EncodeLimitError::AccountingOverflow {
         resource: EncodeResource::MemberBytes,
     })?;
-    check_encode_exceeded(EncodeResource::MemberBytes, limits.member_bytes, bytes)?;
+    check_encode_exceeded(EncodeResource::MemberBytes, limits.member_bytes(), bytes)?;
     *total = total
         .checked_add(bytes)
         .ok_or(EncodeLimitError::AccountingOverflow {
@@ -662,7 +635,7 @@ fn account_content(
         })?;
     check_encode_exceeded(
         EncodeResource::TotalContentBytes,
-        limits.total_content_bytes,
+        limits.total_content_bytes(),
         *total,
     )
 }
@@ -685,53 +658,29 @@ fn check_encode_exceeded(
     observed: u64,
 ) -> Result<(), EncodeLimitError> {
     if observed > ceiling {
-        return Err(EncodeLimitError::Exceeded {
-            resource,
-            ceiling,
-            observed_at_least: observed,
-        });
+        return Err(EncodeLimitError::exceeded(resource, ceiling));
     }
     Ok(())
 }
 
 /// A resource bounded during Pack Archive Decoding.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum DecodeResource {
-    ArchiveBytes,
-    Members,
-    RawMemberNameBytes,
-    ManifestBytes,
-    MemberBytes,
-    TotalContentBytes,
+pub type DecodeResource = ResourceKind<5>;
+
+#[allow(non_upper_case_globals)]
+impl ResourceKind<5> {
+    pub const ArchiveBytes: Self = Self::new(0);
+    pub const Members: Self = Self::new(1);
+    pub const RawMemberNameBytes: Self = Self::new(2);
+    pub const ManifestBytes: Self = Self::new(3);
+    pub const MemberBytes: Self = Self::new(4);
+    pub const TotalContentBytes: Self = Self::new(5);
 }
 
 /// A supplied decode ceiling that cannot support bounded accounting.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum DecodeLimitsError {
-    #[error("the {resource:?} ceiling must leave room for a plus-one probe")]
-    CannotProbe {
-        resource: DecodeResource,
-        ceiling: u64,
-    },
-}
+pub type DecodeLimitsError = LimitsError<DecodeResource>;
 
 /// A Pack Archive exceeded a mandatory decode ceiling.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum DecodeLimitError {
-    #[error(
-        "Pack Archive Decode {resource:?} limit exceeded: ceiling {ceiling}, observed at least {observed_at_least}"
-    )]
-    Exceeded {
-        resource: DecodeResource,
-        ceiling: u64,
-        observed_at_least: u64,
-    },
-    #[error("Pack Archive Decode {resource:?} accounting overflowed")]
-    AccountingOverflow { resource: DecodeResource },
-}
+pub type DecodeLimitError = LimitError<DecodeResource>;
 
 /// A failure in one phase of Pack Archive Decoding.
 #[derive(Debug, thiserror::Error)]
@@ -823,17 +772,9 @@ impl From<std::io::Error> for DecodeError {
 }
 
 /// Mandatory finite resource ceilings for Pack Archive Decoding.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct DecodeLimits {
-    archive_bytes: u64,
-    members: u64,
-    raw_member_name_bytes: u64,
-    manifest_bytes: u64,
-    member_bytes: u64,
-    total_content_bytes: u64,
-}
+pub type DecodeLimits = Limits<DecodeResource>;
 
-impl DecodeLimits {
+impl Limits<DecodeResource> {
     /// Constructs a validated set of mandatory finite decode ceilings.
     pub fn new(
         archive_bytes: u64,
@@ -843,75 +784,70 @@ impl DecodeLimits {
         member_bytes: u64,
         total_content_bytes: u64,
     ) -> Result<Self, DecodeLimitsError> {
-        let ceilings = [
-            (DecodeResource::ArchiveBytes, archive_bytes),
-            (DecodeResource::Members, members),
-            (DecodeResource::RawMemberNameBytes, raw_member_name_bytes),
-            (DecodeResource::ManifestBytes, manifest_bytes),
-            (DecodeResource::MemberBytes, member_bytes),
-            (DecodeResource::TotalContentBytes, total_content_bytes),
-        ];
-        if let Some((resource, ceiling)) = ceilings
-            .into_iter()
-            .find(|(_, ceiling)| *ceiling == u64::MAX)
-        {
-            return Err(DecodeLimitsError::CannotProbe { resource, ceiling });
-        }
-        Ok(Self {
+        Self::from_ceilings([
             archive_bytes,
             members,
             raw_member_name_bytes,
             manifest_bytes,
             member_bytes,
             total_content_bytes,
-        })
+            0,
+        ])
+        .validate_probe_resources([
+            DecodeResource::ArchiveBytes,
+            DecodeResource::Members,
+            DecodeResource::RawMemberNameBytes,
+            DecodeResource::ManifestBytes,
+            DecodeResource::MemberBytes,
+            DecodeResource::TotalContentBytes,
+        ])
     }
 
     /// The first-party limits for version-1 Pack Archives.
     pub const fn reference_v1() -> Self {
-        Self {
-            archive_bytes: 512 * 1024 * 1024,
-            members: 100_000,
-            raw_member_name_bytes: 16 * 1024 * 1024,
-            manifest_bytes: 4 * 1024 * 1024,
-            member_bytes: 256 * 1024 * 1024,
-            total_content_bytes: 2 * 1024 * 1024 * 1024,
-        }
+        Self::from_ceilings([
+            512 * 1024 * 1024,
+            100_000,
+            16 * 1024 * 1024,
+            4 * 1024 * 1024,
+            256 * 1024 * 1024,
+            2 * 1024 * 1024 * 1024,
+            0,
+        ])
     }
 
     pub const fn archive_bytes(&self) -> u64 {
-        self.archive_bytes
+        self.ceilings[0]
     }
 
     pub const fn members(&self) -> u64 {
-        self.members
+        self.ceilings[1]
     }
 
     pub const fn raw_member_name_bytes(&self) -> u64 {
-        self.raw_member_name_bytes
+        self.ceilings[2]
     }
 
     pub const fn manifest_bytes(&self) -> u64 {
-        self.manifest_bytes
+        self.ceilings[3]
     }
 
     pub const fn member_bytes(&self) -> u64 {
-        self.member_bytes
+        self.ceilings[4]
     }
 
     pub const fn total_content_bytes(&self) -> u64 {
-        self.total_content_bytes
+        self.ceilings[5]
     }
 }
 
 /// Decodes one borrowed exact Pack Archive into an authoritative [`Pack`].
 pub fn decode(archive: &PackArchiveBytes, limits: DecodeLimits) -> Result<Pack, DecodeError> {
-    if archive.len() > limits.archive_bytes {
-        return Err(DecodeLimitError::Exceeded {
-            resource: DecodeResource::ArchiveBytes,
-            ceiling: limits.archive_bytes,
-            observed_at_least: archive.len(),
-        }
+    if archive.len() > limits.archive_bytes() {
+        return Err(DecodeLimitError::exceeded(
+            DecodeResource::ArchiveBytes,
+            limits.archive_bytes(),
+        )
         .into());
     }
     let central_directory = locate_central_directory(archive.as_slice())?;
@@ -1367,13 +1303,10 @@ fn raw_central_entries<R: Read + Seek>(
             .ok_or(DecodeLimitError::AccountingOverflow {
                 resource: DecodeResource::Members,
             })?;
-        if observed_members > limits.members {
-            return Err(DecodeLimitError::Exceeded {
-                resource: DecodeResource::Members,
-                ceiling: limits.members,
-                observed_at_least: observed_members,
-            }
-            .into());
+        if observed_members > limits.members() {
+            return Err(
+                DecodeLimitError::exceeded(DecodeResource::Members, limits.members()).into(),
+            );
         }
         total_name_bytes = total_name_bytes
             .checked_add(u64::try_from(name_len).map_err(|_| {
@@ -1384,12 +1317,11 @@ fn raw_central_entries<R: Read + Seek>(
             .ok_or(DecodeLimitError::AccountingOverflow {
                 resource: DecodeResource::RawMemberNameBytes,
             })?;
-        if total_name_bytes > limits.raw_member_name_bytes {
-            return Err(DecodeLimitError::Exceeded {
-                resource: DecodeResource::RawMemberNameBytes,
-                ceiling: limits.raw_member_name_bytes,
-                observed_at_least: total_name_bytes,
-            }
+        if total_name_bytes > limits.raw_member_name_bytes() {
+            return Err(DecodeLimitError::exceeded(
+                DecodeResource::RawMemberNameBytes,
+                limits.raw_member_name_bytes(),
+            )
             .into());
         }
         let mut name = vec![0; name_len];
@@ -1623,7 +1555,7 @@ fn read_manifest<R: Read + Seek>(
     read_bounded(
         &mut entry,
         size,
-        limits.manifest_bytes,
+        limits.manifest_bytes(),
         DecodeResource::ManifestBytes,
         name,
     )
@@ -1637,7 +1569,7 @@ fn preflight_content<R: Read + Seek>(
     let mut total = 0u64;
     for &index in indices {
         let size = archive.by_index_raw(index)?.size();
-        check_exceeded(DecodeResource::MemberBytes, limits.member_bytes, size)?;
+        check_exceeded(DecodeResource::MemberBytes, limits.member_bytes(), size)?;
         total = total
             .checked_add(size)
             .ok_or(DecodeLimitError::AccountingOverflow {
@@ -1645,7 +1577,7 @@ fn preflight_content<R: Read + Seek>(
             })?;
         check_exceeded(
             DecodeResource::TotalContentBytes,
-            limits.total_content_bytes,
+            limits.total_content_bytes(),
             total,
         )?;
     }
@@ -1661,12 +1593,12 @@ fn read_content<R: Read + Seek>(
     let entry = archive.by_index(index)?;
     let name = entry.name().to_owned();
     let size = entry.size();
-    let total_remaining = limits.total_content_bytes.checked_sub(*total).ok_or(
+    let total_remaining = limits.total_content_bytes().checked_sub(*total).ok_or(
         DecodeLimitError::AccountingOverflow {
             resource: DecodeResource::TotalContentBytes,
         },
     )?;
-    let probe_ceiling = limits.member_bytes.min(total_remaining);
+    let probe_ceiling = limits.member_bytes().min(total_remaining);
     let capacity = usize::try_from(size.min(probe_ceiling).min(64 * 1024)).unwrap();
     let mut data = Vec::with_capacity(capacity);
     entry
@@ -1682,7 +1614,7 @@ fn read_content<R: Read + Seek>(
         })?;
     check_exceeded(
         DecodeResource::MemberBytes,
-        limits.member_bytes,
+        limits.member_bytes(),
         actual_member_bytes,
     )?;
     let actual_total =
@@ -1693,7 +1625,7 @@ fn read_content<R: Read + Seek>(
             })?;
     check_exceeded(
         DecodeResource::TotalContentBytes,
-        limits.total_content_bytes,
+        limits.total_content_bytes(),
         actual_total,
     )?;
     *total = actual_total;
@@ -1729,11 +1661,7 @@ fn check_exceeded(
     observed: u64,
 ) -> Result<(), DecodeLimitError> {
     if observed > ceiling {
-        return Err(DecodeLimitError::Exceeded {
-            resource,
-            ceiling,
-            observed_at_least: observed,
-        });
+        return Err(DecodeLimitError::exceeded(resource, ceiling));
     }
     Ok(())
 }

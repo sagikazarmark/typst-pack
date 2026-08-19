@@ -25,6 +25,7 @@ mod fs_fonts;
 mod fs_packages;
 #[cfg(feature = "fs")]
 mod fs_project;
+mod limits;
 mod manifest;
 #[cfg(feature = "opendal")]
 pub mod opendal;
@@ -64,7 +65,7 @@ pub use compile::{
     PackageTreeFulfillment, PageRange, PageSelection, PdfOutputSpecification,
     PdfStandardsValidationError, PngOutputSpecification, RequestValueOrigin,
     SvgOutputSpecification, TracepointKind, TypstInputsInventory, TypstTarget, compile,
-    parse_page_selection,
+    compile_with_limits, parse_page_selection,
 };
 pub use creation::{
     DependencyDiscoveryRejection, DiscoverySpecification, DiscoverySpecificationError,
@@ -120,6 +121,7 @@ pub use fs_project::{
     FilesystemProjectOperation, FilesystemProjectPolicyError, FilesystemProjectResource,
     FilesystemProjectSurveyError, IGNORE_FILE, gather_filesystem_project,
 };
+pub use limits::{LimitError, Limits, LimitsError, Resource, ResourceKind};
 pub use manifest::PackMetadata;
 pub use pack::{
     FILE_EXTENSION, FontContainerIdentity, FontFaceIdentity, FontRequirement, Pack, PackBuildError,

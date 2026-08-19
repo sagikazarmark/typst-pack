@@ -9,7 +9,7 @@ use typst_kit::diagnostics::termcolor::WriteColor;
 
 use crate::compile::{
     PackCompilationExecution, PackCompilationKernelOutcome, PackCompilationPreparation,
-    PackCompilationPresentation, compile_pack_kernel, prepare_pack_compilation,
+    PackCompilationPresentation, compile_pack_kernel, prepare_pack_compilation_with_limits,
 };
 use crate::fs_assembly::{PackAssemblyDiagnosticContext, PackAssemblyReport};
 use crate::{
@@ -96,10 +96,17 @@ impl TimedCliCompilation {
 
 pub fn compile_with_timing(
     request: PackCompilationRequest,
+    timings: Option<PathBuf>,
+) -> Result<TimedCliCompilation, CompilationRequestRejection> {
+    compile_with_timing_with_limits(request, CompilationLimits::reference_v1(), timings)
+}
+
+pub fn compile_with_timing_with_limits(
+    request: PackCompilationRequest,
     limits: CompilationLimits,
     timings: Option<PathBuf>,
 ) -> Result<TimedCliCompilation, CompilationRequestRejection> {
-    let (mut world, kernel) = match prepare_pack_compilation(request, limits) {
+    let (mut world, kernel) = match prepare_pack_compilation_with_limits(request, limits) {
         PackCompilationPreparation::Execute { world, kernel } => (world, kernel),
         PackCompilationPreparation::Rejected(rejection) => {
             return Err(rejection);

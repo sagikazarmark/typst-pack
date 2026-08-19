@@ -8,7 +8,7 @@ use typst_pack::{
     CompilationFulfillmentSet, CompilationOutputSpecification, CompilationRequestIssue,
     DocumentTime, HtmlOutputSpecification, Pack, PackCompilationRequest, PackOverrideSet,
     PackageTree, PackageTreeFulfillment, PngOutputSpecification, RequestValueOrigin,
-    SvgOutputSpecification, compile,
+    SvgOutputSpecification, compile_with_limits,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -64,7 +64,7 @@ fuzz_target!(|data: &[u8]| {
         inputs
     };
     if flags & 8 != 0 {
-        let report = compile(
+        let report = compile_with_limits(
             PackCompilationRequest::new(
                 pack.clone(),
                 CompilationOutputSpecification::Svg(SvgOutputSpecification {
@@ -194,12 +194,12 @@ fuzz_target!(|data: &[u8]| {
         request.fulfillments(fulfillments())
     };
 
-    let first_rejection = compile(
+    let first_rejection = compile_with_limits(
         build_request(reverse, reverse),
         typst_pack::CompilationLimits::reference_v1(),
     )
     .unwrap_err();
-    let second_rejection = compile(
+    let second_rejection = compile_with_limits(
         build_request(!reverse, !reverse),
         typst_pack::CompilationLimits::reference_v1(),
     )

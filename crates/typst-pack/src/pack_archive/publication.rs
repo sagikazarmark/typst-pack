@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 #[cfg(feature = "fs")]
 use std::sync::atomic::{AtomicU64, Ordering};
 
-use super::{EncodeError, EncodeLimits, encode};
+use super::{EncodeError, EncodeLimits, encode_with_limits};
 use crate::{Pack, PackArchiveBytes};
 
 /// Knowledge about whether one attempted destination effect completed.
@@ -137,9 +137,17 @@ pub enum WritePackError {
 pub fn write_pack(
     writer: impl Write,
     pack: &Pack,
+) -> Result<StreamPublicationReceipt, WritePackError> {
+    write_pack_with_limits(writer, pack, EncodeLimits::reference_v1())
+}
+
+/// Encodes under explicit resource ceilings and publishes one Pack.
+pub fn write_pack_with_limits(
+    writer: impl Write,
+    pack: &Pack,
     encode_limits: EncodeLimits,
 ) -> Result<StreamPublicationReceipt, WritePackError> {
-    let archive = encode(pack, encode_limits)?;
+    let archive = encode_with_limits(pack, encode_limits)?;
     match publish(writer, &archive) {
         Ok(receipt) => Ok(receipt),
         Err(source) => Err(WritePackError::Publish { archive, source }),
@@ -568,10 +576,20 @@ pub enum SavePackError {
 pub fn save_pack(
     destination: impl AsRef<Path>,
     pack: &Pack,
+    policy: FilePublicationPolicy,
+) -> Result<FilePublicationReceipt, SavePackError> {
+    save_pack_with_limits(destination, pack, EncodeLimits::reference_v1(), policy)
+}
+
+/// Encodes under explicit resource ceilings and atomically publishes one Pack.
+#[cfg(feature = "fs")]
+pub fn save_pack_with_limits(
+    destination: impl AsRef<Path>,
+    pack: &Pack,
     encode_limits: EncodeLimits,
     policy: FilePublicationPolicy,
 ) -> Result<FilePublicationReceipt, SavePackError> {
-    let archive = encode(pack, encode_limits)?;
+    let archive = encode_with_limits(pack, encode_limits)?;
     match publish_file(destination, &archive, policy) {
         Ok(receipt) => Ok(receipt),
         Err(source) => Err(SavePackError::Publish { archive, source }),

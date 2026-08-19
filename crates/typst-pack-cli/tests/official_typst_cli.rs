@@ -5,17 +5,16 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use official_typst_cli::OfficialTypstCli;
-use typst_pack::pack_archive::{EncodeLimits, encode};
+use typst_pack::pack_archive::encode;
 use typst_pack::{
-    CompilationLimits, CompilationOutputSpecification, CompilationRequestRejection,
-    CompilationResult, Pack, PackCompilationRequest, SvgOutputSpecification,
-    compile as compile_to_report,
+    CompilationOutputSpecification, CompilationRequestRejection, CompilationResult, Pack,
+    PackCompilationRequest, SvgOutputSpecification, compile as compile_to_report,
 };
 
 fn compile(
     request: PackCompilationRequest,
 ) -> Result<CompilationResult, CompilationRequestRejection> {
-    let report = compile_to_report(request, CompilationLimits::reference_v1())?;
+    let report = compile_to_report(request)?;
     Ok(report
         .result()
         .expect("expected a semantic Compilation Result")
@@ -41,7 +40,7 @@ fn write_pack(path: &Path, source: &str) -> Pack {
         .unwrap()
         .build()
         .unwrap();
-    std::fs::write(path, encode(&pack, EncodeLimits::reference_v1()).unwrap()).unwrap();
+    std::fs::write(path, encode(&pack).unwrap()).unwrap();
     pack
 }
 
@@ -528,11 +527,7 @@ fn official_typst_compile_gates_pack_source_and_data_overrides() {
         .build()
         .unwrap();
     let pack_path = directory.path().join("overrides.typk");
-    std::fs::write(
-        &pack_path,
-        encode(&pack, EncodeLimits::reference_v1()).unwrap(),
-    )
-    .unwrap();
+    std::fs::write(&pack_path, encode(&pack).unwrap()).unwrap();
     let source_replacement = directory.path().join("chapter-replacement.typ");
     let data_replacement = directory.path().join("data-replacement.txt");
     std::fs::write(&source_replacement, "#let source-width = 20").unwrap();

@@ -20,13 +20,13 @@ use typst_pdf::{PdfStandard, Timestamp};
 
 use typst_pack::cli_support::{
     CliCompilationExecution, CliCompilationOutcome, CliCompilationPresentation,
-    FilesystemPackageAuthority, compile_with_timing, emit_creation_error_diagnostics,
+    FilesystemPackageAuthority, compile_with_timing_with_limits, emit_creation_error_diagnostics,
     emit_creation_warnings, pdf_standard_requiring_tags, validate_pdf_standards,
 };
 use typst_pack::pack_archive::{
-    AcquisitionLimits, DecodeLimits, EncodeLimits, FORMAT_VERSION, FileAcquisitionError,
-    FilePublicationPolicy, OpenPackError, open_pack as open_pack_archive,
-    read_pack as read_pack_archive, save_pack, write_pack,
+    AcquisitionLimits, DecodeLimits, FORMAT_VERSION, FileAcquisitionError, FilePublicationPolicy,
+    OpenPackError, open_pack as open_pack_archive, read_pack as read_pack_archive, save_pack,
+    write_pack,
 };
 use typst_pack::{
     CompilationArtifact, CompilationArtifactPathPublicationError,
@@ -731,12 +731,8 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
     }
 
     if output == Path::new("-") {
-        write_pack(
-            std::io::stdout().lock(),
-            report.pack(),
-            EncodeLimits::reference_v1(),
-        )
-        .map_err(|err| format!("cannot write Pack to stdout: {err}"))?;
+        write_pack(std::io::stdout().lock(), report.pack())
+            .map_err(|err| format!("cannot write Pack to stdout: {err}"))?;
         return Ok(());
     }
 
@@ -748,8 +744,7 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
     } else {
         FilePublicationPolicy::CreateNew
     };
-    save_pack(&output, report.pack(), EncodeLimits::reference_v1(), policy)
-        .map_err(|error| error.to_string())?;
+    save_pack(&output, report.pack(), policy).map_err(|error| error.to_string())?;
 
     let project_file_count = report.pack().files().count();
     let vendored_package_count = report
@@ -1141,7 +1136,7 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     let fulfillments = CompilationFulfillmentSet::new(package_fulfillments, font_fulfillments)
         .expect("filesystem acquisition supplies each exact dependency at most once");
     request = request.fulfillments(fulfillments);
-    let timed = compile_with_timing(
+    let timed = compile_with_timing_with_limits(
         request,
         reference_compilation_limits(rayon::current_num_threads()),
         args.automation.timings.clone(),

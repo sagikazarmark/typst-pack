@@ -7,28 +7,68 @@ use super::super::acquisition::{
 };
 use super::super::location::{Location, LocationRoleError, OperatorResolver};
 use crate::acquisition_layout;
+use crate::limits::{Limits, ResourceKind};
 use crate::package_catalog::{
     PackageTreeError, PackageTreePathPreflightError, preflight_package_tree_paths,
 };
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RecursiveAcquisitionResource {
-    ListedEntries,
-    ListedPathBytes,
-    TotalListedPathBytes,
-    SelectedObjects,
-    ObjectBytes,
-    TotalBytes,
+pub(crate) type RecursiveAcquisitionResource = ResourceKind<8>;
+
+#[allow(non_upper_case_globals)]
+impl ResourceKind<8> {
+    pub(crate) const ListedEntries: Self = Self::new(0);
+    pub(crate) const ListedPathBytes: Self = Self::new(1);
+    pub(crate) const TotalListedPathBytes: Self = Self::new(2);
+    pub(crate) const SelectedObjects: Self = Self::new(3);
+    pub(crate) const ObjectBytes: Self = Self::new(4);
+    pub(crate) const TotalBytes: Self = Self::new(5);
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) struct RecursiveAcquisitionLimits {
-    pub(crate) listed_entries: u64,
-    pub(crate) listed_path_bytes: u64,
-    pub(crate) total_listed_path_bytes: u64,
-    pub(crate) selected_objects: u64,
-    pub(crate) object_bytes: u64,
-    pub(crate) total_bytes: u64,
+pub(crate) type RecursiveAcquisitionLimits = Limits<RecursiveAcquisitionResource>;
+
+impl Limits<RecursiveAcquisitionResource> {
+    pub(crate) const fn new(
+        listed_entries: u64,
+        listed_path_bytes: u64,
+        total_listed_path_bytes: u64,
+        selected_objects: u64,
+        object_bytes: u64,
+        total_bytes: u64,
+    ) -> Self {
+        Self::from_ceilings([
+            listed_entries,
+            listed_path_bytes,
+            total_listed_path_bytes,
+            selected_objects,
+            object_bytes,
+            total_bytes,
+            0,
+        ])
+    }
+
+    pub(crate) const fn listed_entries(&self) -> u64 {
+        self.ceilings[0]
+    }
+
+    pub(crate) const fn listed_path_bytes(&self) -> u64 {
+        self.ceilings[1]
+    }
+
+    pub(crate) const fn total_listed_path_bytes(&self) -> u64 {
+        self.ceilings[2]
+    }
+
+    pub(crate) const fn selected_objects(&self) -> u64 {
+        self.ceilings[3]
+    }
+
+    pub(crate) const fn object_bytes(&self) -> u64 {
+        self.ceilings[4]
+    }
+
+    pub(crate) const fn total_bytes(&self) -> u64 {
+        self.ceilings[5]
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -494,13 +534,13 @@ async fn read_source_plan<O: RecursiveAcquisitionOperation>(
     let mut objects = Vec::with_capacity(plan.selected.len());
     for path in plan.selected {
         let remaining = limits
-            .total_bytes
+            .total_bytes()
             .checked_sub(*retained_bytes)
             .ok_or_else(|| {
                 operation
                     .accounting_overflow(source_index, RecursiveAcquisitionResource::TotalBytes)
             })?;
-        let ceiling = limits.object_bytes.min(remaining);
+        let ceiling = limits.object_bytes().min(remaining);
         let exact_operation = RecursiveExactPathOperation {
             operation,
             source_index,
@@ -512,7 +552,7 @@ async fn read_source_plan<O: RecursiveAcquisitionOperation>(
             &plan.operator,
             &path.operation_path,
             ceiling,
-            limits.object_bytes,
+            limits.object_bytes(),
             &exact_operation,
         )
         .await?
@@ -557,15 +597,15 @@ impl<O: RecursiveAcquisitionOperation> ExactPathAcquisitionOperation
     }
 
     fn limit_exceeded(&self, _: u64, observed_at_least: u64) -> O::Error {
-        let (resource, ceiling) = if observed_at_least > self.limits.object_bytes {
+        let (resource, ceiling) = if observed_at_least > self.limits.object_bytes() {
             (
                 RecursiveAcquisitionResource::ObjectBytes,
-                self.limits.object_bytes,
+                self.limits.object_bytes(),
             )
         } else {
             (
                 RecursiveAcquisitionResource::TotalBytes,
-                self.limits.total_bytes,
+                self.limits.total_bytes(),
             )
         };
         self.operation.limit(
@@ -579,7 +619,7 @@ impl<O: RecursiveAcquisitionOperation> ExactPathAcquisitionOperation
     fn accounting_overflow(&self) -> O::Error {
         self.operation.accounting_overflow(
             self.source_index,
-            if self.limits.object_bytes <= self.remaining {
+            if self.limits.object_bytes() <= self.remaining {
                 RecursiveAcquisitionResource::ObjectBytes
             } else {
                 RecursiveAcquisitionResource::TotalBytes
@@ -636,8 +676,8 @@ impl SurveyAccounting {
         let mut retain_entry_evidence = true;
         self.listed_entries = match self.listed_entries.checked_add(1) {
             Some(observed) => {
-                if observed > self.limits.listed_entries {
-                    self.record_exceeded(0, source_index, self.limits.listed_entries, observed);
+                if observed > self.limits.listed_entries() {
+                    self.record_exceeded(0, source_index, self.limits.listed_entries(), observed);
                     retain_entry_evidence = false;
                 }
                 observed
@@ -649,12 +689,12 @@ impl SurveyAccounting {
             }
         };
         match u64::try_from(operation_path.len()) {
-            Ok(observed) if observed > self.limits.listed_path_bytes => {
+            Ok(observed) if observed > self.limits.listed_path_bytes() => {
                 self.record_exceeded(
                     1,
                     source_index,
-                    self.limits.listed_path_bytes,
-                    self.limits.listed_path_bytes.saturating_add(1),
+                    self.limits.listed_path_bytes(),
+                    self.limits.listed_path_bytes().saturating_add(1),
                 );
                 retain_entry_evidence = false;
             }
@@ -671,8 +711,8 @@ impl SurveyAccounting {
         let mut within_limit = true;
         self.selected_objects = match self.selected_objects.checked_add(1) {
             Some(observed) => {
-                if observed > self.limits.selected_objects {
-                    self.record_exceeded(3, source_index, self.limits.selected_objects, observed);
+                if observed > self.limits.selected_objects() {
+                    self.record_exceeded(3, source_index, self.limits.selected_objects(), observed);
                     within_limit = false;
                 }
                 observed
@@ -702,12 +742,12 @@ impl SurveyAccounting {
             };
             observed = next;
         }
-        if observed > self.limits.total_listed_path_bytes {
+        if observed > self.limits.total_listed_path_bytes() {
             self.record_exceeded(
                 2,
                 source_index,
-                self.limits.total_listed_path_bytes,
-                self.limits.total_listed_path_bytes.saturating_add(1),
+                self.limits.total_listed_path_bytes(),
+                self.limits.total_listed_path_bytes().saturating_add(1),
             );
             return false;
         }
@@ -1063,11 +1103,7 @@ mod tests {
             let list = ListScript::new("p/", 3, [ListStep::page(entries)]).unwrap();
             let service = ScriptedService::new(Capabilities::all(), [list], [], 8);
             let resolver = DirectResolver(service.operator());
-            let mut constrained = limits();
-            constrained.listed_entries = 2;
-            constrained.listed_path_bytes = 6;
-            constrained.total_listed_path_bytes = 5;
-            constrained.selected_objects = 1;
+            let constrained = RecursiveAcquisitionLimits::new(2, 6, 5, 1, 128, 1024);
             let location = location("p/");
             let mut acquisition = pin!(acquire_recursive_prefix(
                 &resolver,
@@ -1100,11 +1136,7 @@ mod tests {
             let list = ListScript::new("p/", 2, [ListStep::page(entries)]).unwrap();
             let service = ScriptedService::new(Capabilities::all(), [list], [], 8);
             let resolver = DirectResolver(service.operator());
-            let constrained = RecursiveAcquisitionLimits {
-                total_listed_path_bytes: 10,
-                selected_objects: 1,
-                ..limits()
-            };
+            let constrained = RecursiveAcquisitionLimits::new(32, 128, 10, 1, 128, 1024);
             let prefix = location("p/");
             let mut acquisition = pin!(acquire_recursive_prefix(
                 &resolver,
@@ -1129,31 +1161,19 @@ mod tests {
         let cases = [
             (
                 RecursiveAcquisitionResource::ListedEntries,
-                RecursiveAcquisitionLimits {
-                    listed_entries: 1,
-                    ..limits()
-                },
+                RecursiveAcquisitionLimits::new(1, 128, 1024, 32, 128, 1024),
             ),
             (
                 RecursiveAcquisitionResource::ListedPathBytes,
-                RecursiveAcquisitionLimits {
-                    listed_path_bytes: 6,
-                    ..limits()
-                },
+                RecursiveAcquisitionLimits::new(32, 6, 1024, 32, 128, 1024),
             ),
             (
                 RecursiveAcquisitionResource::TotalListedPathBytes,
-                RecursiveAcquisitionLimits {
-                    total_listed_path_bytes: 4,
-                    ..limits()
-                },
+                RecursiveAcquisitionLimits::new(32, 128, 4, 32, 128, 1024),
             ),
             (
                 RecursiveAcquisitionResource::SelectedObjects,
-                RecursiveAcquisitionLimits {
-                    selected_objects: 1,
-                    ..limits()
-                },
+                RecursiveAcquisitionLimits::new(32, 128, 1024, 1, 128, 1024),
             ),
         ];
 
@@ -1252,11 +1272,8 @@ mod tests {
             let service = ScriptedService::new(Capabilities::all(), [list], [read], 8);
             let resolver = DirectResolver(service.operator());
             let location = location("p/");
-            let constrained = RecursiveAcquisitionLimits {
-                object_bytes,
-                total_bytes,
-                ..limits()
-            };
+            let constrained =
+                RecursiveAcquisitionLimits::new(32, 128, 1024, 32, object_bytes, total_bytes);
             let mut acquisition = pin!(acquire_recursive_prefix(
                 &resolver,
                 &location,
@@ -1299,11 +1316,7 @@ mod tests {
         let service = ScriptedService::new(Capabilities::all(), [list], reads, 16);
         let resolver = DirectResolver(service.operator());
         let location = location("p/");
-        let constrained = RecursiveAcquisitionLimits {
-            object_bytes: 5,
-            total_bytes: 7,
-            ..limits()
-        };
+        let constrained = RecursiveAcquisitionLimits::new(32, 128, 1024, 32, 5, 7);
         let mut acquisition = pin!(acquire_recursive_prefix(
             &resolver,
             &location,
@@ -1335,11 +1348,7 @@ mod tests {
             let service = ScriptedService::new(Capabilities::all(), [list], reads, 16);
             let resolver = DirectResolver(service.operator());
             let location = location("p/");
-            let constrained = RecursiveAcquisitionLimits {
-                object_bytes: 5,
-                total_bytes: 7,
-                ..limits()
-            };
+            let constrained = RecursiveAcquisitionLimits::new(32, 128, 1024, 32, 5, 7);
             let mut acquisition = pin!(acquire_recursive_prefix(
                 &resolver,
                 &location,
@@ -1373,11 +1382,7 @@ mod tests {
         let service = ScriptedService::new(Capabilities::all(), [list], reads, 16);
         let resolver = DirectResolver(service.operator());
         let location = location("p/");
-        let exact = RecursiveAcquisitionLimits {
-            object_bytes: 5,
-            total_bytes: 8,
-            ..limits()
-        };
+        let exact = RecursiveAcquisitionLimits::new(32, 128, 1024, 32, 5, 8);
         let mut acquisition = pin!(acquire_recursive_prefix(
             &resolver,
             &location,
@@ -1406,10 +1411,14 @@ mod tests {
             })
         ));
 
-        let mut accounting = SurveyAccounting::new(RecursiveAcquisitionLimits {
-            total_listed_path_bytes: u64::MAX,
-            ..limits()
-        });
+        let mut accounting = SurveyAccounting::new(RecursiveAcquisitionLimits::new(
+            32,
+            128,
+            u64::MAX,
+            32,
+            128,
+            1024,
+        ));
         accounting.retained_path_bytes = u64::MAX;
         assert!(!accounting.retain_paths(0, &[1]));
         assert!(matches!(
@@ -1638,10 +1647,7 @@ mod tests {
         let service = ScriptedService::new(Capabilities::all(), [list], [], 4);
         let resolver = DirectResolver(service.operator());
         let location = location("p/");
-        let constrained = RecursiveAcquisitionLimits {
-            listed_path_bytes: 4,
-            ..limits()
-        };
+        let constrained = RecursiveAcquisitionLimits::new(32, 4, 1024, 32, 128, 1024);
         let mut acquisition = pin!(acquire_recursive_prefix(
             &resolver,
             &location,
@@ -1814,14 +1820,7 @@ mod tests {
     }
 
     fn limits() -> RecursiveAcquisitionLimits {
-        RecursiveAcquisitionLimits {
-            listed_entries: 32,
-            listed_path_bytes: 128,
-            total_listed_path_bytes: 1024,
-            selected_objects: 32,
-            object_bytes: 128,
-            total_bytes: 1024,
-        }
+        RecursiveAcquisitionLimits::new(32, 128, 1024, 32, 128, 1024)
     }
 
     fn issue(path: &str, kind: RecursiveSurveyIssueKind) -> RecursiveSurveyIssue {

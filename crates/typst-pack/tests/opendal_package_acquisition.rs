@@ -22,9 +22,9 @@ use typst_pack::opendal::pack_assembly::{
 };
 use typst_pack::opendal::pack_assembly::{
     PackageAcquisition, PackageAcquisitionCeilings, PackageAcquisitionErrorCause,
-    PackageAcquisitionLimits, PackageAcquisitionRequest, PackageAcquisitionRequestIssue,
-    PackageArchiveAcquisitionCeilings, PackageArchiveAcquisitionLimitError,
-    PackageArchiveAcquisitionLimitsError, PackageArchiveAcquisitionResource,
+    PackageAcquisitionLimits, PackageAcquisitionLimitsError, PackageAcquisitionRequest,
+    PackageAcquisitionRequestIssue, PackageAcquisitionResource, PackageArchiveAcquisitionCeilings,
+    PackageArchiveAcquisitionLimitError, PackageArchiveAcquisitionResource,
     PackageTreeAcquisitionCeilings, PackageTreeSource, acquire_package,
 };
 use typst_pack::opendal::{
@@ -236,14 +236,10 @@ fn request_aggregates_invalid_roles_and_limits_keep_the_reference_profile() {
             },
             ..reference
         }),
-        Err(
-            typst_pack::opendal::pack_assembly::PackageAcquisitionLimitsError::Archives(
-                PackageArchiveAcquisitionLimitsError::CannotProbe {
-                    resource: PackageArchiveAcquisitionResource::ArchiveBytes,
-                    ceiling: u64::MAX,
-                }
-            )
-        )
+        Err(PackageAcquisitionLimitsError::CannotProbe {
+            resource: PackageAcquisitionResource::ArchiveBytes,
+            ceiling: u64::MAX,
+        })
     ));
 }
 

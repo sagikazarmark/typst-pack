@@ -2,7 +2,7 @@ use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 use hayro_syntax::object::{DateTime, Dict, Name};
-use typst_pack::pack_archive::{DecodeLimits, EncodeLimits, decode, encode};
+use typst_pack::pack_archive::{DecodeLimits, decode, encode};
 use typst_pack::{Pack, PackArchiveBytes};
 
 #[cfg(all(feature = "_test-package-download-probe", debug_assertions))]
@@ -14,7 +14,7 @@ fn decode_reference(bytes: impl Into<PackArchiveBytes>) -> Pack {
 }
 
 fn encode_reference(pack: &Pack) -> PackArchiveBytes {
-    encode(pack, EncodeLimits::reference_v1()).unwrap()
+    encode(pack).unwrap()
 }
 
 fn write_minimal_project(directory: &std::path::Path) -> std::path::PathBuf {

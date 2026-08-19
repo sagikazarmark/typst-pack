@@ -27,6 +27,7 @@ use typst::syntax::package::PackageSpec;
 use typst_kit::packages::FsPackages;
 
 use crate::error_display::format_error_list;
+use crate::limits::{LimitError, Limits, LimitsError, ResourceKind};
 use crate::package_catalog::{PackageTree, PackageTreeError};
 use crate::package_failure::{PackageAcquisitionFailure, PackageAcquisitionFailureReason};
 #[cfg(feature = "egress")]
@@ -42,108 +43,75 @@ const USER_AGENT: &str = concat!("typst-pack/", env!("CARGO_PKG_VERSION"));
 const PACKAGE_DOWNLOAD_PROBE_ENV: &str = "TYPST_PACK_TEST_PACKAGE_DOWNLOAD_PROBE";
 
 /// A resource bounded during filesystem Package Tree gathering.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum FilesystemPackageResource {
-    VisitedEntries,
-    SelectedFiles,
-    SelectedFileBytes,
-    PackageTreeBytes,
+pub type FilesystemPackageResource = ResourceKind<1>;
+
+#[allow(non_upper_case_globals)]
+impl ResourceKind<1> {
+    pub const VisitedEntries: Self = Self::new(0);
+    pub const SelectedFiles: Self = Self::new(1);
+    pub const SelectedFileBytes: Self = Self::new(2);
+    pub const PackageTreeBytes: Self = Self::new(3);
 }
 
-/// A supplied gathering ceiling that cannot support bounded accounting.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum FilesystemPackageLimitsError {
-    #[error("the {resource:?} ceiling must leave room for a plus-one probe")]
-    CannotProbe {
-        resource: FilesystemPackageResource,
-        ceiling: u64,
-    },
-}
+pub type FilesystemPackageLimitsError = LimitsError<FilesystemPackageResource>;
 
 /// A filesystem package exceeded a mandatory gathering ceiling.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum FilesystemPackageLimitError {
-    #[error(
-        "filesystem Package Tree gathering {resource:?} limit exceeded: ceiling {ceiling}, observed at least {observed_at_least}"
-    )]
-    Exceeded {
-        resource: FilesystemPackageResource,
-        ceiling: u64,
-        observed_at_least: u64,
-    },
-    #[error("filesystem Package Tree gathering {resource:?} accounting overflowed")]
-    AccountingOverflow { resource: FilesystemPackageResource },
-}
+pub type FilesystemPackageLimitError = LimitError<FilesystemPackageResource>;
 
 /// Mandatory finite resource ceilings for filesystem Package Tree gathering.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct FilesystemPackageLimits {
-    visited_entries: u64,
-    selected_files: u64,
-    selected_file_bytes: u64,
-    package_tree_bytes: u64,
-}
+pub type FilesystemPackageLimits = Limits<FilesystemPackageResource>;
 
-impl FilesystemPackageLimits {
+impl Limits<FilesystemPackageResource> {
     pub fn new(
         visited_entries: u64,
         selected_files: u64,
         selected_file_bytes: u64,
         package_tree_bytes: u64,
     ) -> Result<Self, FilesystemPackageLimitsError> {
-        let ceilings = [
-            (FilesystemPackageResource::VisitedEntries, visited_entries),
-            (FilesystemPackageResource::SelectedFiles, selected_files),
-            (
-                FilesystemPackageResource::SelectedFileBytes,
-                selected_file_bytes,
-            ),
-            (
-                FilesystemPackageResource::PackageTreeBytes,
-                package_tree_bytes,
-            ),
-        ];
-        if let Some((resource, ceiling)) = ceilings
-            .into_iter()
-            .find(|(_, ceiling)| *ceiling == u64::MAX)
-        {
-            return Err(FilesystemPackageLimitsError::CannotProbe { resource, ceiling });
-        }
-        Ok(Self {
+        Self::from_ceilings([
             visited_entries,
             selected_files,
             selected_file_bytes,
             package_tree_bytes,
-        })
+            0,
+            0,
+            0,
+        ])
+        .validate_probe_resources([
+            FilesystemPackageResource::VisitedEntries,
+            FilesystemPackageResource::SelectedFiles,
+            FilesystemPackageResource::SelectedFileBytes,
+            FilesystemPackageResource::PackageTreeBytes,
+        ])
     }
 
     /// The first-party limits for package trees acquired from filesystems.
     pub const fn reference_v1() -> Self {
-        Self {
-            visited_entries: 100_000,
-            selected_files: 50_000,
-            selected_file_bytes: 64 * 1024 * 1024,
-            package_tree_bytes: 512 * 1024 * 1024,
-        }
+        Self::from_ceilings([
+            100_000,
+            50_000,
+            64 * 1024 * 1024,
+            512 * 1024 * 1024,
+            0,
+            0,
+            0,
+        ])
     }
 
     pub const fn visited_entries(&self) -> u64 {
-        self.visited_entries
+        self.ceilings[0]
     }
 
     pub const fn selected_files(&self) -> u64 {
-        self.selected_files
+        self.ceilings[1]
     }
 
     pub const fn selected_file_bytes(&self) -> u64 {
-        self.selected_file_bytes
+        self.ceilings[2]
     }
 
     pub const fn package_tree_bytes(&self) -> u64 {
-        self.package_tree_bytes
+        self.ceilings[3]
     }
 }
 
@@ -330,7 +298,7 @@ pub fn gather_filesystem_package(
         .map_err(|source| FilesystemPackageGatherError::limit(entry.path(), source))?;
         check_limit(
             FilesystemPackageResource::VisitedEntries,
-            limits.visited_entries,
+            limits.visited_entries(),
             visited_entries,
         )
         .map_err(|source| FilesystemPackageGatherError::limit(entry.path(), source))?;
@@ -368,7 +336,7 @@ pub fn gather_filesystem_package(
                 .map_err(|source| FilesystemPackageGatherError::limit(entry.path(), source))?;
         if let Err(source) = check_limit(
             FilesystemPackageResource::SelectedFiles,
-            limits.selected_files,
+            limits.selected_files(),
             selected_files,
         ) {
             deferred_limit
@@ -388,7 +356,7 @@ pub fn gather_filesystem_package(
         })?;
         if let Err(source) = check_limit(
             FilesystemPackageResource::SelectedFileBytes,
-            limits.selected_file_bytes,
+            limits.selected_file_bytes(),
             metadata.len(),
         ) {
             deferred_limit
@@ -403,7 +371,7 @@ pub fn gather_filesystem_package(
         .map_err(|source| FilesystemPackageGatherError::limit(entry.path(), source))?;
         if let Err(source) = check_limit(
             FilesystemPackageResource::PackageTreeBytes,
-            limits.package_tree_bytes,
+            limits.package_tree_bytes(),
             declared_total,
         ) {
             deferred_limit
@@ -435,9 +403,9 @@ pub fn gather_filesystem_package(
         let bytes = read_bounded_package_file(
             &mut file,
             &source,
-            limits.selected_file_bytes,
+            limits.selected_file_bytes(),
             actual_total,
-            limits.package_tree_bytes,
+            limits.package_tree_bytes(),
         )?;
         let observed = u64::try_from(bytes.len()).map_err(|_| {
             FilesystemPackageGatherError::limit(
@@ -685,11 +653,7 @@ fn check_limit(
     observed: u64,
 ) -> Result<(), FilesystemPackageLimitError> {
     if observed > ceiling {
-        return Err(FilesystemPackageLimitError::Exceeded {
-            resource,
-            ceiling,
-            observed_at_least: observed,
-        });
+        return Err(FilesystemPackageLimitError::exceeded(resource, ceiling));
     }
     Ok(())
 }
@@ -1205,13 +1169,12 @@ mod tests {
         assert!(matches!(
             error,
             FilesystemPackageGatherError::Limit {
-                source: FilesystemPackageLimitError::Exceeded {
-                    resource: FilesystemPackageResource::SelectedFileBytes,
-                    ceiling: 4,
-                    observed_at_least: 5,
-                },
+                source,
                 ..
-            }
+            } if source == FilesystemPackageLimitError::exceeded(
+                FilesystemPackageResource::SelectedFileBytes,
+                4,
+            )
         ));
     }
 

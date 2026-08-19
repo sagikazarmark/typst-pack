@@ -213,9 +213,9 @@ compiles unconditionally, so in-memory conformance needs no service feature.
 ```rust,ignore
 use std::path::Path;
 
-use typst_pack::pack_archive::{DecodeLimits, EncodeLimits, decode, encode};
+use typst_pack::pack_archive::{DecodeLimits, decode, encode};
 use typst_pack::{
-    compile, CompilationLimits, CompilationOutputSpecification, FilesystemPackAssembler,
+    compile, CompilationOutputSpecification, FilesystemPackAssembler,
     FilesystemPackAssemblerConfig, FilesystemPackAssemblyRequest, OutputFormat,
     Pack, PackCompilationRequest, PdfOutputSpecification,
 };
@@ -229,7 +229,7 @@ let report = assembler.assemble(
     )
     .embed_fonts(true),
 )?;
-let bytes = encode(report.pack(), EncodeLimits::reference_v1())?;
+let bytes = encode(report.pack())?;
 
 // ... ship the bytes somewhere, then compile without a file system:
 let pack = decode(&bytes, DecodeLimits::reference_v1())?;
@@ -237,7 +237,7 @@ let request = PackCompilationRequest::new(
     pack,
     CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
 );
-let report = compile(request, CompilationLimits::reference_v1())?;
+let report = compile(request)?;
 let output = report.result().expect("semantic compilation result");
 assert_eq!(output.engine_identity().implementation(), "typst");
 assert_eq!(output.exporter_identity().implementation(), "typst-pdf");
@@ -288,13 +288,13 @@ is what a web editor wants:
 
 ```rust,ignore
 use typst_pack::Pack;
-use typst_pack::pack_archive::{EncodeLimits, encode};
+use typst_pack::pack_archive::encode;
 
 let pack = Pack::builder("main.typ")
     .file("main.typ", source_text.as_bytes().to_vec())?
     .file("figure.png", image_bytes)?
     .build()?;
-let bytes = encode(&pack, EncodeLimits::reference_v1())?;
+let bytes = encode(&pack)?;
 ```
 
 Building a pack by hand gives up Dependency Discovery. `create` keeps it and
@@ -312,7 +312,7 @@ use typst_pack::{
     PackageAcquisitionFailures, PackageCatalog, PackageDisposition, PackageTree,
     ProjectSnapshotAssembly, TypstTarget,
 };
-use typst_pack::pack_archive::{EncodeLimits, encode};
+use typst_pack::pack_archive::encode;
 
 let project = ProjectSnapshotAssembly::new("main.typ").assemble([
     ("main.typ", source_text.as_bytes().to_vec()),
@@ -345,7 +345,7 @@ let PackCreationOutcome::Created { pack, warnings } = create(PackCreationInput {
 })? else {
     panic!("no package is missing");
 };
-let bytes = encode(&pack, EncodeLimits::reference_v1())?;
+let bytes = encode(&pack)?;
 ```
 
 Compiler observations select package and font requirements; project files come
@@ -475,7 +475,7 @@ let request = PackCompilationRequest::new(
     pack,
     CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
 ).overrides(overrides);
-let report = compile(request, CompilationLimits::reference_v1())?;
+let report = compile(request)?;
 let output = report.result().expect("semantic compilation result");
 ```
 
@@ -539,9 +539,9 @@ compatibility aliases:
   `TypstTarget`. Removed resource and inclusion arguments have no replacements.
 - Change creation from a directory plus `--entrypoint`/`--output` to
   `create <INPUT> [OUTPUT]`.
-- Replace `compile_pack(request)` with `compile(request, limits)` and pass an
-  explicit finite `CompilationLimits` value. First-party workflows use
-  `CompilationLimits::reference_v1()`. The provisional
+- Replace `compile_pack(request)` with `compile(request)`, which uses the
+  first-party `CompilationLimits::reference_v1()` profile. Use
+  `compile_with_limits(request, limits)` to supply explicit finite ceilings. The provisional
   arbitrary-`World` `compile` overload and public `PackWorld` builder are
   removed; configure semantic values on `PackCompilationRequest`.
 - `compile` returns `CompilationReport`; inspect `report.outcome()` or

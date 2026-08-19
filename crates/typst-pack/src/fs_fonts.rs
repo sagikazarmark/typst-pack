@@ -12,54 +12,28 @@ use crate::font_catalog::typst_embedded_font_containers;
 use crate::font_catalog::{
     FontCatalog, FontCatalogEntry, FontContainer, FontContainerError, FontDisposition,
 };
+use crate::limits::{LimitError, Limits, LimitsError, ResourceKind};
 
 /// A resource bounded during filesystem Font Catalog gathering.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum FilesystemFontResource {
-    VisitedEntries,
-    AcceptedContainers,
-    ContainerBytes,
-    TotalAcceptedBytes,
+pub type FilesystemFontResource = ResourceKind<2>;
+
+#[allow(non_upper_case_globals)]
+impl ResourceKind<2> {
+    pub const VisitedEntries: Self = Self::new(0);
+    pub const AcceptedContainers: Self = Self::new(1);
+    pub const ContainerBytes: Self = Self::new(2);
+    pub const TotalAcceptedBytes: Self = Self::new(3);
 }
 
-/// A supplied gathering ceiling that cannot support bounded accounting.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum FilesystemFontLimitsError {
-    #[error("the {resource:?} ceiling must leave room for a plus-one probe")]
-    CannotProbe {
-        resource: FilesystemFontResource,
-        ceiling: u64,
-    },
-}
+pub type FilesystemFontLimitsError = LimitsError<FilesystemFontResource>;
 
 /// A filesystem font source exceeded a mandatory gathering ceiling.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum FilesystemFontLimitError {
-    #[error(
-        "filesystem Font Catalog gathering {resource:?} limit exceeded: ceiling {ceiling}, observed at least {observed_at_least}"
-    )]
-    Exceeded {
-        resource: FilesystemFontResource,
-        ceiling: u64,
-        observed_at_least: u64,
-    },
-    #[error("filesystem Font Catalog gathering {resource:?} accounting overflowed")]
-    AccountingOverflow { resource: FilesystemFontResource },
-}
+pub type FilesystemFontLimitError = LimitError<FilesystemFontResource>;
 
 /// Mandatory finite resource ceilings for filesystem Font Catalog gathering.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct FilesystemFontLimits {
-    visited_entries: u64,
-    accepted_containers: u64,
-    container_bytes: u64,
-    total_accepted_bytes: u64,
-}
+pub type FilesystemFontLimits = Limits<FilesystemFontResource>;
 
-impl FilesystemFontLimits {
+impl Limits<FilesystemFontResource> {
     /// Constructs validated mandatory finite gathering ceilings.
     pub fn new(
         visited_entries: u64,
@@ -67,56 +41,50 @@ impl FilesystemFontLimits {
         container_bytes: u64,
         total_accepted_bytes: u64,
     ) -> Result<Self, FilesystemFontLimitsError> {
-        let ceilings = [
-            (FilesystemFontResource::VisitedEntries, visited_entries),
-            (
-                FilesystemFontResource::AcceptedContainers,
-                accepted_containers,
-            ),
-            (FilesystemFontResource::ContainerBytes, container_bytes),
-            (
-                FilesystemFontResource::TotalAcceptedBytes,
-                total_accepted_bytes,
-            ),
-        ];
-        if let Some((resource, ceiling)) = ceilings
-            .into_iter()
-            .find(|(_, ceiling)| *ceiling == u64::MAX)
-        {
-            return Err(FilesystemFontLimitsError::CannotProbe { resource, ceiling });
-        }
-        Ok(Self {
+        Self::from_ceilings([
             visited_entries,
             accepted_containers,
             container_bytes,
             total_accepted_bytes,
-        })
+            0,
+            0,
+            0,
+        ])
+        .validate_probe_resources([
+            FilesystemFontResource::VisitedEntries,
+            FilesystemFontResource::AcceptedContainers,
+            FilesystemFontResource::ContainerBytes,
+            FilesystemFontResource::TotalAcceptedBytes,
+        ])
     }
 
     /// The first-party limits for filesystem font sources.
     pub const fn reference_v1() -> Self {
-        Self {
-            visited_entries: 100_000,
-            accepted_containers: 16_384,
-            container_bytes: 256 * 1024 * 1024,
-            total_accepted_bytes: 2 * 1024 * 1024 * 1024,
-        }
+        Self::from_ceilings([
+            100_000,
+            16_384,
+            256 * 1024 * 1024,
+            2 * 1024 * 1024 * 1024,
+            0,
+            0,
+            0,
+        ])
     }
 
     pub const fn visited_entries(&self) -> u64 {
-        self.visited_entries
+        self.ceilings[0]
     }
 
     pub const fn accepted_containers(&self) -> u64 {
-        self.accepted_containers
+        self.ceilings[1]
     }
 
     pub const fn container_bytes(&self) -> u64 {
-        self.container_bytes
+        self.ceilings[2]
     }
 
     pub const fn total_accepted_bytes(&self) -> u64 {
-        self.total_accepted_bytes
+        self.ceilings[3]
     }
 }
 
@@ -519,7 +487,7 @@ fn survey_macos_downloadable_fonts(
         .map_err(|source| FilesystemFontGatherError::limit(&entry.path(), source))?;
         check_limit(
             FilesystemFontResource::VisitedEntries,
-            limits.visited_entries,
+            limits.visited_entries(),
             state.visited_entries,
         )
         .map_err(|source| FilesystemFontGatherError::limit(&entry.path(), source))?;
@@ -596,7 +564,7 @@ fn survey_root(
         .map_err(|source| FilesystemFontGatherError::limit(entry.path(), source))?;
         check_limit(
             FilesystemFontResource::VisitedEntries,
-            limits.visited_entries,
+            limits.visited_entries(),
             state.visited_entries,
         )
         .map_err(|source| FilesystemFontGatherError::limit(entry.path(), source))?;
@@ -656,7 +624,7 @@ fn account_container(
     .map_err(|source| FilesystemFontGatherError::limit(path, source))?;
     if let Err(source) = check_limit(
         FilesystemFontResource::AcceptedContainers,
-        limits.accepted_containers,
+        limits.accepted_containers(),
         state.accepted_containers,
     ) {
         if state.deferred_limit.is_none() {
@@ -666,7 +634,7 @@ fn account_container(
     }
     if let Err(source) = check_limit(
         FilesystemFontResource::ContainerBytes,
-        limits.container_bytes,
+        limits.container_bytes(),
         declared,
     ) {
         if state.deferred_limit.is_none() {
@@ -682,7 +650,7 @@ fn account_container(
     .map_err(|source| FilesystemFontGatherError::limit(path, source))?;
     if let Err(source) = check_limit(
         FilesystemFontResource::TotalAcceptedBytes,
-        limits.total_accepted_bytes,
+        limits.total_accepted_bytes(),
         state.declared_total,
     ) {
         if state.deferred_limit.is_none() {
@@ -700,8 +668,8 @@ fn read_bounded(
     total_before: u64,
     limits: FilesystemFontLimits,
 ) -> Result<Vec<u8>, FilesystemFontGatherError> {
-    let total_allowance = limits.total_accepted_bytes.saturating_sub(total_before);
-    let allowance = limits.container_bytes.min(total_allowance);
+    let total_allowance = limits.total_accepted_bytes().saturating_sub(total_before);
+    let allowance = limits.container_bytes().min(total_allowance);
     let mut file = open_without_following(root, boundary, path)?;
     let mut bytes = Vec::new();
     file.by_ref()
@@ -720,7 +688,7 @@ fn read_bounded(
     })?;
     check_limit(
         FilesystemFontResource::ContainerBytes,
-        limits.container_bytes,
+        limits.container_bytes(),
         observed,
     )
     .map_err(|source| FilesystemFontGatherError::limit(path, source))?;
@@ -732,7 +700,7 @@ fn read_bounded(
     .map_err(|source| FilesystemFontGatherError::limit(path, source))?;
     check_limit(
         FilesystemFontResource::TotalAcceptedBytes,
-        limits.total_accepted_bytes,
+        limits.total_accepted_bytes(),
         total,
     )
     .map_err(|source| FilesystemFontGatherError::limit(path, source))?;
@@ -992,11 +960,7 @@ fn check_limit(
     observed: u64,
 ) -> Result<(), FilesystemFontLimitError> {
     if observed > ceiling {
-        return Err(FilesystemFontLimitError::Exceeded {
-            resource,
-            ceiling,
-            observed_at_least: observed,
-        });
+        return Err(FilesystemFontLimitError::exceeded(resource, ceiling));
     }
     Ok(())
 }

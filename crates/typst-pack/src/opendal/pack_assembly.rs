@@ -134,6 +134,7 @@ use super::acquisition::recursive::{
 };
 use super::{BoxError, Location, LocationRoleError, OperatorResolver};
 use crate::FontDisposition;
+use crate::limits::{LimitError, Limits, LimitsError, ResourceKind};
 use crate::redacted_error::RedactedError;
 
 fn aggregate_issue_message<T: fmt::Display>(issues: &[T], summary: &str) -> String {
@@ -175,110 +176,91 @@ impl ProjectAcquisitionCeilings {
 }
 
 /// A resource bounded during OpenDAL Project Acquisition.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum ProjectAcquisitionResource {
-    ListedEntries,
-    ListedPathBytes,
-    TotalListedPathBytes,
-    SelectedFiles,
-    ObjectBytes,
-    TotalBytes,
+pub type ProjectAcquisitionResource = ResourceKind<9>;
+
+#[allow(non_upper_case_globals)]
+impl ResourceKind<9> {
+    pub const ListedEntries: Self = Self::new(0);
+    pub const ListedPathBytes: Self = Self::new(1);
+    pub const TotalListedPathBytes: Self = Self::new(2);
+    pub const SelectedFiles: Self = Self::new(3);
+    pub const ObjectBytes: Self = Self::new(4);
+    pub const TotalBytes: Self = Self::new(5);
 }
 
 /// A supplied Project Acquisition ceiling is internally inconsistent.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum ProjectAcquisitionLimitsError {
-    #[error("the {resource:?} ceiling must leave room for a plus-one probe")]
-    CannotProbe {
-        resource: ProjectAcquisitionResource,
-        ceiling: u64,
-    },
-    #[error("the ObjectBytes ceiling {object_bytes} exceeds the TotalBytes ceiling {total_bytes}")]
-    ObjectBytesExceedTotalBytes { object_bytes: u64, total_bytes: u64 },
-}
+pub type ProjectAcquisitionLimitsError = LimitsError<ProjectAcquisitionResource>;
 
 /// Mandatory finite limits for OpenDAL Project Acquisition.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ProjectAcquisitionLimits {
-    ceilings: ProjectAcquisitionCeilings,
-}
+pub type ProjectAcquisitionLimits = Limits<ProjectAcquisitionResource>;
 
-impl ProjectAcquisitionLimits {
+impl Limits<ProjectAcquisitionResource> {
     /// Validates all named acquisition ceilings.
     pub fn new(
         ceilings: ProjectAcquisitionCeilings,
     ) -> Result<Self, ProjectAcquisitionLimitsError> {
-        for (resource, ceiling) in [
-            (
-                ProjectAcquisitionResource::ObjectBytes,
-                ceilings.object_bytes,
-            ),
-            (ProjectAcquisitionResource::TotalBytes, ceilings.total_bytes),
-        ] {
-            if ceiling == u64::MAX {
-                return Err(ProjectAcquisitionLimitsError::CannotProbe { resource, ceiling });
-            }
-        }
+        let limits = Self::from_ceilings([
+            ceilings.listed_entries,
+            ceilings.listed_path_bytes,
+            ceilings.total_listed_path_bytes,
+            ceilings.selected_files,
+            ceilings.object_bytes,
+            ceilings.total_bytes,
+            0,
+        ])
+        .validate_probe_resources([
+            ProjectAcquisitionResource::ObjectBytes,
+            ProjectAcquisitionResource::TotalBytes,
+        ])?;
         if ceilings.object_bytes > ceilings.total_bytes {
             return Err(ProjectAcquisitionLimitsError::ObjectBytesExceedTotalBytes {
                 object_bytes: ceilings.object_bytes,
                 total_bytes: ceilings.total_bytes,
             });
         }
-        Ok(Self { ceilings })
+        Ok(limits)
     }
 
     /// The validated first-party version-1 Project Acquisition limits.
     pub const fn reference_v1() -> Self {
-        Self {
-            ceilings: ProjectAcquisitionCeilings::reference_v1(),
-        }
+        Self::from_ceilings([
+            1_000_000,
+            64 * 1024,
+            256 * 1024 * 1024,
+            100_000,
+            256 * 1024 * 1024,
+            2 * 1024 * 1024 * 1024,
+            0,
+        ])
     }
 
     pub const fn listed_entries(&self) -> u64 {
-        self.ceilings.listed_entries
+        self.ceilings[0]
     }
 
     pub const fn listed_path_bytes(&self) -> u64 {
-        self.ceilings.listed_path_bytes
+        self.ceilings[1]
     }
 
     pub const fn total_listed_path_bytes(&self) -> u64 {
-        self.ceilings.total_listed_path_bytes
+        self.ceilings[2]
     }
 
     pub const fn selected_files(&self) -> u64 {
-        self.ceilings.selected_files
+        self.ceilings[3]
     }
 
     pub const fn object_bytes(&self) -> u64 {
-        self.ceilings.object_bytes
+        self.ceilings[4]
     }
 
     pub const fn total_bytes(&self) -> u64 {
-        self.ceilings.total_bytes
+        self.ceilings[5]
     }
 }
 
 /// Project Acquisition exceeded or could not account for a mandatory limit.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum ProjectAcquisitionLimitError {
-    #[error(
-        "OpenDAL Project Acquisition {resource:?} limit exceeded: ceiling {ceiling}, observed at least {observed_at_least}"
-    )]
-    Exceeded {
-        resource: ProjectAcquisitionResource,
-        ceiling: u64,
-        observed_at_least: u64,
-    },
-    #[error("OpenDAL Project Acquisition {resource:?} accounting overflowed")]
-    AccountingOverflow {
-        resource: ProjectAcquisitionResource,
-    },
-}
+pub type ProjectAcquisitionLimitError = LimitError<ProjectAcquisitionResource>;
 
 /// A validated request to acquire every yielded file below one prefix.
 #[derive(Clone, Debug)]
@@ -675,16 +657,15 @@ impl RecursiveAcquisitionOperation for ProjectAcquisitionOperation<'_> {
         _: usize,
         resource: RecursiveAcquisitionResource,
         ceiling: u64,
-        observed_at_least: u64,
+        _: u64,
     ) -> ProjectAcquisitionError {
         ProjectAcquisitionError::new(
             self.source_location,
             None,
-            ProjectAcquisitionErrorCause::Limit(ProjectAcquisitionLimitError::Exceeded {
-                resource: map_resource(resource),
+            ProjectAcquisitionErrorCause::Limit(ProjectAcquisitionLimitError::exceeded(
+                map_resource(resource),
                 ceiling,
-                observed_at_least,
-            }),
+            )),
         )
     }
 
@@ -705,14 +686,14 @@ impl RecursiveAcquisitionOperation for ProjectAcquisitionOperation<'_> {
 
 impl From<ProjectAcquisitionLimits> for RecursiveAcquisitionLimits {
     fn from(limits: ProjectAcquisitionLimits) -> Self {
-        Self {
-            listed_entries: limits.listed_entries(),
-            listed_path_bytes: limits.listed_path_bytes(),
-            total_listed_path_bytes: limits.total_listed_path_bytes(),
-            selected_objects: limits.selected_files(),
-            object_bytes: limits.object_bytes(),
-            total_bytes: limits.total_bytes(),
-        }
+        Self::new(
+            limits.listed_entries(),
+            limits.listed_path_bytes(),
+            limits.total_listed_path_bytes(),
+            limits.selected_files(),
+            limits.object_bytes(),
+            limits.total_bytes(),
+        )
     }
 }
 
@@ -728,6 +709,7 @@ fn map_resource(resource: RecursiveAcquisitionResource) -> ProjectAcquisitionRes
         RecursiveAcquisitionResource::SelectedObjects => ProjectAcquisitionResource::SelectedFiles,
         RecursiveAcquisitionResource::ObjectBytes => ProjectAcquisitionResource::ObjectBytes,
         RecursiveAcquisitionResource::TotalBytes => ProjectAcquisitionResource::TotalBytes,
+        _ => unreachable!("unknown recursive acquisition resource"),
     }
 }
 
@@ -784,111 +766,89 @@ impl FontAcquisitionCeilings {
 }
 
 /// A resource bounded across one OpenDAL Font Acquisition.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum FontAcquisitionResource {
-    ListedEntries,
-    ListedPathBytes,
-    TotalListedPathBytes,
-    SelectedContainers,
-    ContainerBytes,
-    TotalBytes,
+pub type FontAcquisitionResource = ResourceKind<10>;
+
+#[allow(non_upper_case_globals)]
+impl ResourceKind<10> {
+    pub const ListedEntries: Self = Self::new(0);
+    pub const ListedPathBytes: Self = Self::new(1);
+    pub const TotalListedPathBytes: Self = Self::new(2);
+    pub const SelectedContainers: Self = Self::new(3);
+    pub const ContainerBytes: Self = Self::new(4);
+    pub const TotalBytes: Self = Self::new(5);
 }
 
 /// A supplied Font Acquisition ceiling is internally inconsistent.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum FontAcquisitionLimitsError {
-    #[error("the {resource:?} ceiling must leave room for a plus-one probe")]
-    CannotProbe {
-        resource: FontAcquisitionResource,
-        ceiling: u64,
-    },
-    #[error(
-        "the ContainerBytes ceiling {container_bytes} exceeds the TotalBytes ceiling {total_bytes}"
-    )]
-    ContainerBytesExceedTotalBytes {
-        container_bytes: u64,
-        total_bytes: u64,
-    },
-}
+pub type FontAcquisitionLimitsError = LimitsError<FontAcquisitionResource>;
 
 /// Mandatory finite limits for OpenDAL Font Acquisition.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FontAcquisitionLimits {
-    ceilings: FontAcquisitionCeilings,
-}
+pub type FontAcquisitionLimits = Limits<FontAcquisitionResource>;
 
-impl FontAcquisitionLimits {
+impl Limits<FontAcquisitionResource> {
     /// Validates all named acquisition ceilings.
     pub fn new(ceilings: FontAcquisitionCeilings) -> Result<Self, FontAcquisitionLimitsError> {
-        for (resource, ceiling) in [
-            (
-                FontAcquisitionResource::ContainerBytes,
-                ceilings.container_bytes,
-            ),
-            (FontAcquisitionResource::TotalBytes, ceilings.total_bytes),
-        ] {
-            if ceiling == u64::MAX {
-                return Err(FontAcquisitionLimitsError::CannotProbe { resource, ceiling });
-            }
-        }
+        let limits = Self::from_ceilings([
+            ceilings.listed_entries,
+            ceilings.listed_path_bytes,
+            ceilings.total_listed_path_bytes,
+            ceilings.selected_containers,
+            ceilings.container_bytes,
+            ceilings.total_bytes,
+            0,
+        ])
+        .validate_probe_resources([
+            FontAcquisitionResource::ContainerBytes,
+            FontAcquisitionResource::TotalBytes,
+        ])?;
         if ceilings.container_bytes > ceilings.total_bytes {
             return Err(FontAcquisitionLimitsError::ContainerBytesExceedTotalBytes {
                 container_bytes: ceilings.container_bytes,
                 total_bytes: ceilings.total_bytes,
             });
         }
-        Ok(Self { ceilings })
+        Ok(limits)
     }
 
     /// The validated first-party version-1 Font Acquisition limits.
     pub const fn reference_v1() -> Self {
-        Self {
-            ceilings: FontAcquisitionCeilings::reference_v1(),
-        }
+        Self::from_ceilings([
+            100_000,
+            64 * 1024,
+            64 * 1024 * 1024,
+            16_384,
+            256 * 1024 * 1024,
+            2 * 1024 * 1024 * 1024,
+            0,
+        ])
     }
 
     pub const fn listed_entries(&self) -> u64 {
-        self.ceilings.listed_entries
+        self.ceilings[0]
     }
 
     pub const fn listed_path_bytes(&self) -> u64 {
-        self.ceilings.listed_path_bytes
+        self.ceilings[1]
     }
 
     pub const fn total_listed_path_bytes(&self) -> u64 {
-        self.ceilings.total_listed_path_bytes
+        self.ceilings[2]
     }
 
     pub const fn selected_containers(&self) -> u64 {
-        self.ceilings.selected_containers
+        self.ceilings[3]
     }
 
     pub const fn container_bytes(&self) -> u64 {
-        self.ceilings.container_bytes
+        self.ceilings[4]
     }
 
     pub const fn total_bytes(&self) -> u64 {
-        self.ceilings.total_bytes
+        self.ceilings[5]
     }
 }
 
 /// Font Acquisition exceeded or could not account for a mandatory limit.
-#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum FontAcquisitionLimitError {
-    #[error(
-        "OpenDAL Font Acquisition {resource:?} limit exceeded: ceiling {ceiling}, observed at least {observed_at_least}"
-    )]
-    Exceeded {
-        resource: FontAcquisitionResource,
-        ceiling: u64,
-        observed_at_least: u64,
-    },
-    #[error("OpenDAL Font Acquisition {resource:?} accounting overflowed")]
-    AccountingOverflow { resource: FontAcquisitionResource },
-}
+pub type FontAcquisitionLimitError = LimitError<FontAcquisitionResource>;
 
 /// One explicitly configured OpenDAL prefix of Font Containers.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1427,16 +1387,15 @@ impl RecursiveAcquisitionOperation for FontAcquisitionOperation<'_> {
         source_index: usize,
         resource: RecursiveAcquisitionResource,
         ceiling: u64,
-        observed_at_least: u64,
+        _: u64,
     ) -> FontAcquisitionError {
         self.error(
             source_index,
             None,
-            FontAcquisitionErrorCause::Limit(FontAcquisitionLimitError::Exceeded {
-                resource: map_font_resource(resource),
+            FontAcquisitionErrorCause::Limit(FontAcquisitionLimitError::exceeded(
+                map_font_resource(resource),
                 ceiling,
-                observed_at_least,
-            }),
+            )),
         )
     }
 
@@ -1457,14 +1416,14 @@ impl RecursiveAcquisitionOperation for FontAcquisitionOperation<'_> {
 
 impl From<FontAcquisitionLimits> for RecursiveAcquisitionLimits {
     fn from(limits: FontAcquisitionLimits) -> Self {
-        Self {
-            listed_entries: limits.listed_entries(),
-            listed_path_bytes: limits.listed_path_bytes(),
-            total_listed_path_bytes: limits.total_listed_path_bytes(),
-            selected_objects: limits.selected_containers(),
-            object_bytes: limits.container_bytes(),
-            total_bytes: limits.total_bytes(),
-        }
+        Self::new(
+            limits.listed_entries(),
+            limits.listed_path_bytes(),
+            limits.total_listed_path_bytes(),
+            limits.selected_containers(),
+            limits.container_bytes(),
+            limits.total_bytes(),
+        )
     }
 }
 
@@ -1480,6 +1439,7 @@ fn map_font_resource(resource: RecursiveAcquisitionResource) -> FontAcquisitionR
         }
         RecursiveAcquisitionResource::ObjectBytes => FontAcquisitionResource::ContainerBytes,
         RecursiveAcquisitionResource::TotalBytes => FontAcquisitionResource::TotalBytes,
+        _ => unreachable!("unknown recursive acquisition resource"),
     }
 }
 

@@ -515,7 +515,7 @@ fn an_oversized_pax_size_is_rejected_before_the_described_member_is_read() {
             source: PackageExpansionLimitError::Exceeded {
                 resource: PackageExpansionResource::MemberBytes,
                 ceiling: 1024,
-                observed_at_least: 1048576,
+                observed_at_least: 1025,
             },
             ..
         }
@@ -692,7 +692,7 @@ fn an_archive_expanding_past_the_ceiling_is_not_expanded_at_all() {
                     observed_at_least,
                 },
             } if reported == &spec("@preview/example:1.0.0")
-                && *observed_at_least == nominal
+                && *observed_at_least == 4097
         ),
         "{error}"
     );

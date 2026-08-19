@@ -16,66 +16,36 @@ use typst_layout::PagedDocument;
 use typst_pdf::{PdfOptions, PdfStandard, PdfStandards, Timestamp};
 
 use crate::embedded::EmbeddedTypst;
+use crate::limits::{LimitError, Limits, LimitsError, ResourceKind};
 use crate::payload::SharedBytes;
 use crate::world::PackWorld;
 use crate::world_trace::{WorldTrace, logical_path};
 use crate::{FontContainer, FontContainerIdentity, Pack, PackageTree, PackageTreeIdentity};
 
 /// A resource bounded during compilation artifact export.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-#[non_exhaustive]
-pub enum CompilationResource {
-    SourcePages,
-    Artifacts,
-    PixelsPerArtifact,
-    TotalPixels,
-    ArtifactBytes,
-    RetainedArtifactBytes,
-    ExportWorkers,
+pub type CompilationResource = ResourceKind<3>;
+
+#[allow(non_upper_case_globals)]
+impl ResourceKind<3> {
+    pub const SourcePages: Self = Self::new(0);
+    pub const Artifacts: Self = Self::new(1);
+    pub const PixelsPerArtifact: Self = Self::new(2);
+    pub const TotalPixels: Self = Self::new(3);
+    pub const ArtifactBytes: Self = Self::new(4);
+    pub const RetainedArtifactBytes: Self = Self::new(5);
+    pub const ExportWorkers: Self = Self::new(6);
 }
 
 /// A supplied compilation ceiling that cannot support bounded accounting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[non_exhaustive]
-pub enum CompilationLimitsError {
-    #[error("the {resource:?} ceiling must leave room for a plus-one probe")]
-    CannotProbe {
-        resource: CompilationResource,
-        ceiling: u64,
-    },
-    #[error("the ExportWorkers ceiling must be greater than zero")]
-    ZeroWorkers,
-}
+pub type CompilationLimitsError = LimitsError<CompilationResource>;
 
 /// A mandatory compilation export ceiling was exceeded or could not be accounted.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
-#[non_exhaustive]
-pub enum CompilationLimitError {
-    #[error(
-        "compilation {resource:?} limit exceeded: ceiling {ceiling}, observed at least {observed_at_least}"
-    )]
-    Exceeded {
-        resource: CompilationResource,
-        ceiling: u64,
-        observed_at_least: u64,
-    },
-    #[error("compilation {resource:?} accounting overflowed")]
-    AccountingOverflow { resource: CompilationResource },
-}
+pub type CompilationLimitError = LimitError<CompilationResource>;
 
 /// Mandatory finite resource ceilings for compilation artifact export.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CompilationLimits {
-    source_pages: u64,
-    artifacts: u64,
-    pixels_per_artifact: u64,
-    total_pixels: u64,
-    artifact_bytes: u64,
-    retained_artifact_bytes: u64,
-    export_workers: u64,
-}
+pub type CompilationLimits = Limits<CompilationResource>;
 
-impl CompilationLimits {
+impl Limits<CompilationResource> {
     /// Constructs validated mandatory finite compilation ceilings.
     pub fn new(
         source_pages: u64,
@@ -86,28 +56,7 @@ impl CompilationLimits {
         retained_artifact_bytes: u64,
         export_workers: u64,
     ) -> Result<Self, CompilationLimitsError> {
-        let ceilings = [
-            (CompilationResource::SourcePages, source_pages),
-            (CompilationResource::Artifacts, artifacts),
-            (CompilationResource::PixelsPerArtifact, pixels_per_artifact),
-            (CompilationResource::TotalPixels, total_pixels),
-            (CompilationResource::ArtifactBytes, artifact_bytes),
-            (
-                CompilationResource::RetainedArtifactBytes,
-                retained_artifact_bytes,
-            ),
-            (CompilationResource::ExportWorkers, export_workers),
-        ];
-        if let Some((resource, ceiling)) = ceilings
-            .into_iter()
-            .find(|(_, ceiling)| *ceiling == u64::MAX)
-        {
-            return Err(CompilationLimitsError::CannotProbe { resource, ceiling });
-        }
-        if export_workers == 0 {
-            return Err(CompilationLimitsError::ZeroWorkers);
-        }
-        Ok(Self {
+        let limits = Self::from_ceilings([
             source_pages,
             artifacts,
             pixels_per_artifact,
@@ -115,61 +64,74 @@ impl CompilationLimits {
             artifact_bytes,
             retained_artifact_bytes,
             export_workers,
-        })
+        ])
+        .validate_probe_resources([
+            CompilationResource::SourcePages,
+            CompilationResource::Artifacts,
+            CompilationResource::PixelsPerArtifact,
+            CompilationResource::TotalPixels,
+            CompilationResource::ArtifactBytes,
+            CompilationResource::RetainedArtifactBytes,
+            CompilationResource::ExportWorkers,
+        ])?;
+        if export_workers == 0 {
+            return Err(CompilationLimitsError::ZeroWorkers);
+        }
+        Ok(limits)
     }
 
     /// The first-party bounded compilation export profile.
     pub const fn reference_v1() -> Self {
-        Self {
-            source_pages: 10_000,
-            artifacts: 10_000,
-            pixels_per_artifact: 100_000_000,
-            total_pixels: 1_000_000_000,
-            artifact_bytes: 512 * 1024 * 1024,
-            retained_artifact_bytes: 2 * 1024 * 1024 * 1024,
-            export_workers: 4,
-        }
+        Self::from_ceilings([
+            10_000,
+            10_000,
+            100_000_000,
+            1_000_000_000,
+            512 * 1024 * 1024,
+            2 * 1024 * 1024 * 1024,
+            4,
+        ])
     }
 
     /// Replaces the export-worker ceiling while preserving every other limit.
     pub fn with_export_workers(self, export_workers: u64) -> Result<Self, CompilationLimitsError> {
         Self::new(
-            self.source_pages,
-            self.artifacts,
-            self.pixels_per_artifact,
-            self.total_pixels,
-            self.artifact_bytes,
-            self.retained_artifact_bytes,
+            self.source_pages(),
+            self.artifacts(),
+            self.pixels_per_artifact(),
+            self.total_pixels(),
+            self.artifact_bytes(),
+            self.retained_artifact_bytes(),
             export_workers,
         )
     }
 
-    pub const fn source_pages(self) -> u64 {
-        self.source_pages
+    pub const fn source_pages(&self) -> u64 {
+        self.ceilings[0]
     }
 
-    pub const fn artifacts(self) -> u64 {
-        self.artifacts
+    pub const fn artifacts(&self) -> u64 {
+        self.ceilings[1]
     }
 
-    pub const fn pixels_per_artifact(self) -> u64 {
-        self.pixels_per_artifact
+    pub const fn pixels_per_artifact(&self) -> u64 {
+        self.ceilings[2]
     }
 
-    pub const fn total_pixels(self) -> u64 {
-        self.total_pixels
+    pub const fn total_pixels(&self) -> u64 {
+        self.ceilings[3]
     }
 
-    pub const fn artifact_bytes(self) -> u64 {
-        self.artifact_bytes
+    pub const fn artifact_bytes(&self) -> u64 {
+        self.ceilings[4]
     }
 
-    pub const fn retained_artifact_bytes(self) -> u64 {
-        self.retained_artifact_bytes
+    pub const fn retained_artifact_bytes(&self) -> u64 {
+        self.ceilings[5]
     }
 
-    pub const fn export_workers(self) -> u64 {
-        self.export_workers
+    pub const fn export_workers(&self) -> u64 {
+        self.ceilings[6]
     }
 }
 
@@ -1911,9 +1873,17 @@ pub(crate) fn compile_world(
 #[allow(clippy::result_large_err)]
 pub fn compile(
     request: PackCompilationRequest,
+) -> Result<CompilationReport, CompilationRequestRejection> {
+    compile_with_limits(request, CompilationLimits::reference_v1())
+}
+
+/// Compiles a validated Pack under explicit resource ceilings.
+#[allow(clippy::result_large_err)]
+pub fn compile_with_limits(
+    request: PackCompilationRequest,
     limits: CompilationLimits,
 ) -> Result<CompilationReport, CompilationRequestRejection> {
-    let (world, kernel) = match prepare_pack_compilation(request, limits) {
+    let (world, kernel) = match prepare_pack_compilation_with_limits(request, limits) {
         PackCompilationPreparation::Execute { world, kernel } => (world, kernel),
         PackCompilationPreparation::Report(report) => return Ok(report),
         PackCompilationPreparation::Rejected(rejection) => return Err(rejection),
@@ -1970,7 +1940,7 @@ pub(crate) enum PackCompilationPresentation {
     },
 }
 
-pub(crate) fn prepare_pack_compilation(
+pub(crate) fn prepare_pack_compilation_with_limits(
     request: PackCompilationRequest,
     limits: CompilationLimits,
 ) -> PackCompilationPreparation {
@@ -2871,7 +2841,7 @@ pub(crate) fn compile_with_default_pdf_timestamp(
     let source_page_count = document.pages().len();
     check_compilation_limit(
         CompilationResource::SourcePages,
-        limits.source_pages,
+        limits.source_pages(),
         u64::try_from(source_page_count).map_err(|_| {
             CompilationLimitError::AccountingOverflow {
                 resource: CompilationResource::SourcePages,
@@ -2986,11 +2956,7 @@ fn check_compilation_limit(
     observed: u64,
 ) -> Result<(), CompilationLimitError> {
     if observed > ceiling {
-        Err(CompilationLimitError::Exceeded {
-            resource,
-            ceiling,
-            observed_at_least: observed,
-        })
+        Err(CompilationLimitError::exceeded(resource, ceiling))
     } else {
         Ok(())
     }
@@ -3003,7 +2969,7 @@ fn check_artifact_count(
     let observed = u64::try_from(count).map_err(|_| CompilationLimitError::AccountingOverflow {
         resource: CompilationResource::Artifacts,
     })?;
-    check_compilation_limit(CompilationResource::Artifacts, limits.artifacts, observed)
+    check_compilation_limit(CompilationResource::Artifacts, limits.artifacts(), observed)
 }
 
 fn check_png_pixels(
@@ -3028,7 +2994,7 @@ fn check_png_pixels(
         )?;
         check_compilation_limit(
             CompilationResource::PixelsPerArtifact,
-            limits.pixels_per_artifact,
+            limits.pixels_per_artifact(),
             pixels,
         )?;
         total = total
@@ -3037,7 +3003,11 @@ fn check_png_pixels(
                 resource: CompilationResource::TotalPixels,
             })?;
     }
-    check_compilation_limit(CompilationResource::TotalPixels, limits.total_pixels, total)
+    check_compilation_limit(
+        CompilationResource::TotalPixels,
+        limits.total_pixels(),
+        total,
+    )
 }
 
 fn check_artifact_bytes(
@@ -3063,7 +3033,7 @@ fn retain_artifact_bytes(
     })?;
     check_compilation_limit(
         CompilationResource::ArtifactBytes,
-        limits.artifact_bytes,
+        limits.artifact_bytes(),
         bytes,
     )?;
     *retained = retained
@@ -3073,7 +3043,7 @@ fn retain_artifact_bytes(
         })?;
     check_compilation_limit(
         CompilationResource::RetainedArtifactBytes,
-        limits.retained_artifact_bytes,
+        limits.retained_artifact_bytes(),
         *retained,
     )
 }
@@ -3127,7 +3097,7 @@ where
     if items.is_empty() {
         return Ok(vec![]);
     }
-    let workers = usize::try_from(limits.export_workers)
+    let workers = usize::try_from(limits.export_workers())
         .unwrap_or(usize::MAX)
         .min(items.len());
     let pool = rayon::ThreadPoolBuilder::new()
@@ -3286,7 +3256,7 @@ mod result_identity_tests {
             .unwrap()
             .build()
             .unwrap();
-        let report = compile(
+        let report = compile_with_limits(
             PackCompilationRequest::new(
                 pack,
                 CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
@@ -3623,7 +3593,7 @@ mod result_identity_tests {
             .unwrap()
             .build()
             .unwrap();
-        let report = compile(
+        let report = compile_with_limits(
             PackCompilationRequest::new(
                 pack.clone(),
                 CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),

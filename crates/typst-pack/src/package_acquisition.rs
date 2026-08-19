@@ -18,6 +18,7 @@ use typst::syntax::package::PackageSpec;
 
 use crate::Pack;
 use crate::acquisition_layout;
+use crate::limits::{LimitError, Limits, LimitsError, ResourceKind};
 use crate::package_catalog::{PackageTree, PackageTreeError};
 
 /// A failure while acquiring exact Package Archive bytes from a stream.
@@ -41,54 +42,27 @@ pub const PACKAGE_REGISTRY_URL: &str = acquisition_layout::PACKAGE_REGISTRY_URL;
 pub const PACKAGE_REGISTRY_NAMESPACE: &str = acquisition_layout::PACKAGE_REGISTRY_NAMESPACE;
 
 /// A resource bounded during Package Archive Expansion.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum PackageExpansionResource {
-    CompressedArchiveBytes,
-    Members,
-    MemberNameBytes,
-    MemberBytes,
-    TotalExpandedBytes,
+pub type PackageExpansionResource = ResourceKind<6>;
+
+#[allow(non_upper_case_globals)]
+impl ResourceKind<6> {
+    pub const CompressedArchiveBytes: Self = Self::new(0);
+    pub const Members: Self = Self::new(1);
+    pub const MemberNameBytes: Self = Self::new(2);
+    pub const MemberBytes: Self = Self::new(3);
+    pub const TotalExpandedBytes: Self = Self::new(4);
 }
 
 /// A supplied expansion ceiling that cannot support bounded accounting.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum PackageExpansionLimitsError {
-    #[error("the {resource:?} ceiling must leave room for a plus-one probe")]
-    CannotProbe {
-        resource: PackageExpansionResource,
-        ceiling: u64,
-    },
-}
+pub type PackageExpansionLimitsError = LimitsError<PackageExpansionResource>;
 
 /// A package archive exceeded a mandatory expansion ceiling.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum PackageExpansionLimitError {
-    #[error(
-        "Package Archive Expansion {resource:?} limit exceeded: ceiling {ceiling}, observed at least {observed_at_least}"
-    )]
-    Exceeded {
-        resource: PackageExpansionResource,
-        ceiling: u64,
-        observed_at_least: u64,
-    },
-    #[error("Package Archive Expansion {resource:?} accounting overflowed")]
-    AccountingOverflow { resource: PackageExpansionResource },
-}
+pub type PackageExpansionLimitError = LimitError<PackageExpansionResource>;
 
 /// Mandatory finite resource ceilings for Package Archive Expansion.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct PackageExpansionLimits {
-    compressed_archive_bytes: u64,
-    members: u64,
-    member_name_bytes: u64,
-    member_bytes: u64,
-    total_expanded_bytes: u64,
-}
+pub type PackageExpansionLimits = Limits<PackageExpansionResource>;
 
-impl PackageExpansionLimits {
+impl Limits<PackageExpansionResource> {
     /// Constructs a validated set of mandatory finite expansion ceilings.
     pub fn new(
         compressed_archive_bytes: u64,
@@ -97,63 +71,55 @@ impl PackageExpansionLimits {
         member_bytes: u64,
         total_expanded_bytes: u64,
     ) -> Result<Self, PackageExpansionLimitsError> {
-        let ceilings = [
-            (
-                PackageExpansionResource::CompressedArchiveBytes,
-                compressed_archive_bytes,
-            ),
-            (PackageExpansionResource::Members, members),
-            (PackageExpansionResource::MemberNameBytes, member_name_bytes),
-            (PackageExpansionResource::MemberBytes, member_bytes),
-            (
-                PackageExpansionResource::TotalExpandedBytes,
-                total_expanded_bytes,
-            ),
-        ];
-        if let Some((resource, ceiling)) = ceilings
-            .into_iter()
-            .find(|(_, ceiling)| *ceiling == u64::MAX)
-        {
-            return Err(PackageExpansionLimitsError::CannotProbe { resource, ceiling });
-        }
-        Ok(Self {
+        Self::from_ceilings([
             compressed_archive_bytes,
             members,
             member_name_bytes,
             member_bytes,
             total_expanded_bytes,
-        })
+            0,
+            0,
+        ])
+        .validate_probe_resources([
+            PackageExpansionResource::CompressedArchiveBytes,
+            PackageExpansionResource::Members,
+            PackageExpansionResource::MemberNameBytes,
+            PackageExpansionResource::MemberBytes,
+            PackageExpansionResource::TotalExpandedBytes,
+        ])
     }
 
     /// The first-party limits for registry package archives.
     pub const fn reference_v1() -> Self {
-        Self {
-            compressed_archive_bytes: 128 * 1024 * 1024,
-            members: 50_000,
-            member_name_bytes: 8 * 1024 * 1024,
-            member_bytes: 64 * 1024 * 1024,
-            total_expanded_bytes: 512 * 1024 * 1024,
-        }
+        Self::from_ceilings([
+            128 * 1024 * 1024,
+            50_000,
+            8 * 1024 * 1024,
+            64 * 1024 * 1024,
+            512 * 1024 * 1024,
+            0,
+            0,
+        ])
     }
 
     pub const fn compressed_archive_bytes(&self) -> u64 {
-        self.compressed_archive_bytes
+        self.ceilings[0]
     }
 
     pub const fn members(&self) -> u64 {
-        self.members
+        self.ceilings[1]
     }
 
     pub const fn member_name_bytes(&self) -> u64 {
-        self.member_name_bytes
+        self.ceilings[2]
     }
 
     pub const fn member_bytes(&self) -> u64 {
-        self.member_bytes
+        self.ceilings[3]
     }
 
     pub const fn total_expanded_bytes(&self) -> u64 {
-        self.total_expanded_bytes
+        self.ceilings[4]
     }
 }
 
@@ -170,18 +136,18 @@ pub fn acquire_package_archive(
 ) -> Result<Vec<u8>, PackageArchiveAcquisitionError> {
     let resource = PackageExpansionResource::CompressedArchiveBytes;
     if let Some(size) = known_size {
-        check_expansion_limit(resource, limits.compressed_archive_bytes, size)?;
+        check_expansion_limit(resource, limits.compressed_archive_bytes(), size)?;
     }
 
     let mut bytes = Vec::new();
     reader
         .by_ref()
-        .take(limits.compressed_archive_bytes + 1)
+        .take(limits.compressed_archive_bytes() + 1)
         .read_to_end(&mut bytes)
         .map_err(PackageArchiveAcquisitionError::Read)?;
     let observed = u64::try_from(bytes.len())
         .map_err(|_| PackageExpansionLimitError::AccountingOverflow { resource })?;
-    check_expansion_limit(resource, limits.compressed_archive_bytes, observed)?;
+    check_expansion_limit(resource, limits.compressed_archive_bytes(), observed)?;
     Ok(bytes)
 }
 
@@ -232,7 +198,7 @@ pub fn expand_package_archive(
     })?;
     check_expansion_limit(
         PackageExpansionResource::CompressedArchiveBytes,
-        limits.compressed_archive_bytes,
+        limits.compressed_archive_bytes(),
         compressed_archive_bytes,
     )
     .map_err(limited)?;
@@ -262,7 +228,7 @@ pub fn expand_package_archive(
         check_tar_padding(&tar_state).map_err(&malformed)?;
 
         members = checked_add(members, 1, PackageExpansionResource::Members).map_err(limited)?;
-        check_expansion_limit(PackageExpansionResource::Members, limits.members, members)
+        check_expansion_limit(PackageExpansionResource::Members, limits.members(), members)
             .map_err(limited)?;
 
         let raw_name = entry.header().path_bytes().into_owned();
@@ -274,7 +240,7 @@ pub fn expand_package_archive(
         .map_err(limited)?;
         check_expansion_limit(
             PackageExpansionResource::MemberNameBytes,
-            limits.member_name_bytes,
+            limits.member_name_bytes(),
             member_name_bytes,
         )
         .map_err(limited)?;
@@ -302,7 +268,7 @@ pub fn expand_package_archive(
             .map_err(limited)?;
             check_expansion_limit(
                 PackageExpansionResource::MemberNameBytes,
-                limits.member_name_bytes,
+                limits.member_name_bytes(),
                 observed,
             )
             .map_err(limited)?;
@@ -310,7 +276,7 @@ pub fn expand_package_archive(
 
         check_expansion_limit(
             PackageExpansionResource::MemberBytes,
-            limits.member_bytes,
+            limits.member_bytes(),
             entry.size(),
         )
         .map_err(limited)?;
@@ -322,7 +288,7 @@ pub fn expand_package_archive(
         .map_err(limited)?;
         check_expansion_limit(
             PackageExpansionResource::TotalExpandedBytes,
-            limits.total_expanded_bytes,
+            limits.total_expanded_bytes(),
             observed_total,
         )
         .map_err(limited)?;
@@ -339,23 +305,23 @@ pub fn expand_package_archive(
                     "multiple local PAX extensions describe one archive member".to_owned(),
                 ));
             }
-            let name_remaining = limits.member_name_bytes - member_name_bytes;
+            let name_remaining = limits.member_name_bytes() - member_name_bytes;
             let parsed = match read_pax(&mut entry, declared_size, name_remaining) {
                 Ok(parsed) => parsed,
                 Err(PaxReadError::Io(error) | PaxReadError::Malformed(error)) => {
                     return Err(malformed(error));
                 }
                 Err(PaxReadError::NameLimit { observed }) => {
-                    return Err(limited(PackageExpansionLimitError::Exceeded {
-                        resource: PackageExpansionResource::MemberNameBytes,
-                        ceiling: limits.member_name_bytes,
-                        observed_at_least: checked_add(
-                            member_name_bytes,
-                            observed,
-                            PackageExpansionResource::MemberNameBytes,
-                        )
-                        .map_err(limited)?,
-                    }));
+                    checked_add(
+                        member_name_bytes,
+                        observed,
+                        PackageExpansionResource::MemberNameBytes,
+                    )
+                    .map_err(limited)?;
+                    return Err(limited(PackageExpansionLimitError::exceeded(
+                        PackageExpansionResource::MemberNameBytes,
+                        limits.member_name_bytes(),
+                    )));
                 }
             };
             register_tar_padding(&tar_state, entry.raw_file_position(), declared_size)
@@ -377,7 +343,7 @@ pub fn expand_package_archive(
             if let Some(size) = parsed.size {
                 check_expansion_limit(
                     PackageExpansionResource::MemberBytes,
-                    limits.member_bytes,
+                    limits.member_bytes(),
                     size,
                 )
                 .map_err(limited)?;
@@ -389,7 +355,7 @@ pub fn expand_package_archive(
                 .map_err(limited)?;
                 check_expansion_limit(
                     PackageExpansionResource::TotalExpandedBytes,
-                    limits.total_expanded_bytes,
+                    limits.total_expanded_bytes(),
                     observed_total,
                 )
                 .map_err(limited)?;
@@ -401,8 +367,8 @@ pub fn expand_package_archive(
         }
 
         let probe_ceiling = limits
-            .member_bytes
-            .min(limits.total_expanded_bytes - total_expanded_bytes);
+            .member_bytes()
+            .min(limits.total_expanded_bytes() - total_expanded_bytes);
         let mut reader = entry.by_ref().take(probe_ceiling + 1);
         let retain = entry_type.is_file() || entry_type.is_gnu_longname();
         let capacity = usize::try_from(declared_size.min(64 * 1024)).unwrap();
@@ -421,7 +387,7 @@ pub fn expand_package_archive(
                     .map_err(limited)?;
             check_expansion_limit(
                 PackageExpansionResource::MemberBytes,
-                limits.member_bytes,
+                limits.member_bytes(),
                 observed_size,
             )
             .map_err(limited)?;
@@ -433,7 +399,7 @@ pub fn expand_package_archive(
             .map_err(limited)?;
             check_expansion_limit(
                 PackageExpansionResource::TotalExpandedBytes,
-                limits.total_expanded_bytes,
+                limits.total_expanded_bytes(),
                 observed_total,
             )
             .map_err(limited)?;
@@ -748,11 +714,7 @@ fn check_expansion_limit(
     observed: u64,
 ) -> Result<(), PackageExpansionLimitError> {
     if observed > ceiling {
-        return Err(PackageExpansionLimitError::Exceeded {
-            resource,
-            ceiling,
-            observed_at_least: observed,
-        });
+        return Err(PackageExpansionLimitError::exceeded(resource, ceiling));
     }
     Ok(())
 }

@@ -20,7 +20,7 @@ fn decode_test_archive(bytes: impl Into<PackArchiveBytes>) -> Result<Pack, Decod
 }
 
 fn encode_test_archive(pack: &Pack) -> Result<PackArchiveBytes, EncodeError> {
-    crate::pack_archive::encode(pack, EncodeLimits::reference_v1())
+    crate::pack_archive::encode_with_limits(pack, EncodeLimits::reference_v1())
 }
 
 fn tiny_png() -> Vec<u8> {

@@ -7,7 +7,7 @@ use typst_pack::{
     CompilationResult, CreationTimestamp, DocumentTime, HtmlOutputSpecification, Pack,
     PackCompilationRequest, PackMetadata, PackOverrideSet, PackageDisposition,
     PdfOutputSpecification, PngOutputSpecification, RequestValueOrigin, SvgOutputSpecification,
-    compile as compile_to_report, parse_page_selection,
+    compile_with_limits as compile_to_report, parse_page_selection,
 };
 
 fn svg_output() -> CompilationOutputSpecification {

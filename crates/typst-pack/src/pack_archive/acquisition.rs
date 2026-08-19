@@ -4,69 +4,40 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use super::{DecodeError, DecodeLimits, decode};
+use crate::limits::{LimitError, Limits, LimitsError, ResourceKind};
 use crate::{Pack, PackArchiveBytes};
 
 /// A resource bounded during Pack Archive Acquisition.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum AcquisitionResource {
-    ArchiveBytes,
+pub type AcquisitionResource = ResourceKind<7>;
+
+#[allow(non_upper_case_globals)]
+impl ResourceKind<7> {
+    pub const ArchiveBytes: Self = Self::new(0);
 }
 
 /// A supplied acquisition ceiling that cannot support bounded accounting.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum AcquisitionLimitsError {
-    #[error("the {resource:?} ceiling must leave room for a plus-one probe")]
-    CannotProbe {
-        resource: AcquisitionResource,
-        ceiling: u64,
-    },
-}
+pub type AcquisitionLimitsError = LimitsError<AcquisitionResource>;
 
 /// Pack Archive Acquisition exceeded a mandatory ceiling.
-#[derive(Debug, Clone, Copy, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum AcquisitionLimitError {
-    #[error(
-        "Pack Archive Acquisition {resource:?} limit exceeded: ceiling {ceiling}, observed at least {observed_at_least}"
-    )]
-    Exceeded {
-        resource: AcquisitionResource,
-        ceiling: u64,
-        observed_at_least: u64,
-    },
-    #[error("Pack Archive Acquisition {resource:?} accounting overflowed")]
-    AccountingOverflow { resource: AcquisitionResource },
-}
+pub type AcquisitionLimitError = LimitError<AcquisitionResource>;
 
 /// Mandatory finite resource ceilings for Pack Archive Acquisition.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct AcquisitionLimits {
-    archive_bytes: u64,
-}
+pub type AcquisitionLimits = Limits<AcquisitionResource>;
 
-impl AcquisitionLimits {
+impl Limits<AcquisitionResource> {
     /// Constructs a validated acquisition ceiling.
     pub fn new(archive_bytes: u64) -> Result<Self, AcquisitionLimitsError> {
-        if archive_bytes == u64::MAX {
-            return Err(AcquisitionLimitsError::CannotProbe {
-                resource: AcquisitionResource::ArchiveBytes,
-                ceiling: archive_bytes,
-            });
-        }
-        Ok(Self { archive_bytes })
+        Self::from_ceilings([archive_bytes, 0, 0, 0, 0, 0, 0])
+            .validate_probe_resources([AcquisitionResource::ArchiveBytes])
     }
 
     /// The first-party acquisition limit for version-1 Pack Archives.
     pub const fn reference_v1() -> Self {
-        Self {
-            archive_bytes: 512 * 1024 * 1024,
-        }
+        Self::from_ceilings([512 * 1024 * 1024, 0, 0, 0, 0, 0, 0])
     }
 
     pub const fn archive_bytes(&self) -> u64 {
-        self.archive_bytes
+        self.ceilings[0]
     }
 }
 
@@ -91,7 +62,7 @@ pub fn acquire(
     let mut buffer = [0; BUFFER_BYTES];
     let mut observed = 0u64;
     loop {
-        let probe_end = limits.archive_bytes.checked_add(1).ok_or(
+        let probe_end = limits.archive_bytes().checked_add(1).ok_or(
             AcquisitionLimitError::AccountingOverflow {
                 resource: AcquisitionResource::ArchiveBytes,
             },
@@ -124,12 +95,11 @@ pub fn acquire(
             .ok_or(AcquisitionLimitError::AccountingOverflow {
                 resource: AcquisitionResource::ArchiveBytes,
             })?;
-        if observed > limits.archive_bytes {
-            return Err(AcquisitionLimitError::Exceeded {
-                resource: AcquisitionResource::ArchiveBytes,
-                ceiling: limits.archive_bytes,
-                observed_at_least: observed,
-            }
+        if observed > limits.archive_bytes() {
+            return Err(AcquisitionLimitError::exceeded(
+                AcquisitionResource::ArchiveBytes,
+                limits.archive_bytes(),
+            )
             .into());
         }
         bytes.extend_from_slice(&buffer[..read]);
@@ -244,15 +214,14 @@ pub fn acquire_file(
             source,
         })?
         .len();
-    if known_size > limits.archive_bytes {
+    if known_size > limits.archive_bytes() {
         return Err(FileAcquisitionError::Limit {
             path: path.to_owned(),
             phase: FileAcquisitionPhase::Metadata,
-            source: AcquisitionLimitError::Exceeded {
-                resource: AcquisitionResource::ArchiveBytes,
-                ceiling: limits.archive_bytes,
-                observed_at_least: known_size,
-            },
+            source: AcquisitionLimitError::exceeded(
+                AcquisitionResource::ArchiveBytes,
+                limits.archive_bytes(),
+            ),
         });
     }
     acquire(file, limits).map_err(|error| match error {

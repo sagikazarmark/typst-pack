@@ -2101,7 +2101,7 @@ mod tests {
     use crate::pack_archive::CommitCertainty;
     use crate::{
         CompilationLimits, CompilationOutputSpecification, Pack, PackCompilationRequest,
-        SvgOutputSpecification, compile,
+        SvgOutputSpecification, compile_with_limits,
     };
 
     use super::{
@@ -2844,7 +2844,7 @@ mod tests {
             .unwrap()
             .build()
             .unwrap();
-        compile(
+        compile_with_limits(
             PackCompilationRequest::new(
                 pack,
                 CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
