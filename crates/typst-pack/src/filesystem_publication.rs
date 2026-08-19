@@ -495,6 +495,87 @@ impl From<CompilationArtifactPublicationError> for CompilationArtifactPathPublic
     }
 }
 
+/// A failure to derive one filesystem publication root from output paths.
+#[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
+pub enum FilesystemPublicationPathError {
+    #[error("cannot resolve the current directory: {source}")]
+    CurrentDirectory {
+        #[source]
+        source: io::Error,
+    },
+    #[error("cannot resolve output directory `{path}`: {source}")]
+    OutputDirectory {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("output path `{path}` does not name a file")]
+    OutputPathDoesNotNameFile { path: PathBuf },
+    #[error("output paths do not share a filesystem root")]
+    NoSharedRoot,
+}
+
+/// Resolves output paths into one existing filesystem root and relative targets.
+///
+/// Parent directories are resolved using native filesystem canonicalization,
+/// while each output file name may remain absent for later publication.
+pub fn resolve_filesystem_publication_paths(
+    targets: &[PathBuf],
+) -> Result<(PathBuf, Vec<PathBuf>), FilesystemPublicationPathError> {
+    if targets.is_empty() {
+        let current = Path::new(".")
+            .canonicalize()
+            .map_err(|source| FilesystemPublicationPathError::CurrentDirectory { source })?;
+        return Ok((current, Vec::new()));
+    }
+    let resolved_targets = targets
+        .iter()
+        .map(|target| {
+            let parent = target.parent().unwrap_or_else(|| Path::new("."));
+            let parent = if parent.as_os_str().is_empty() {
+                Path::new(".")
+            } else {
+                parent
+            };
+            let parent = parent.canonicalize().map_err(|source| {
+                FilesystemPublicationPathError::OutputDirectory {
+                    path: parent.to_owned(),
+                    source,
+                }
+            })?;
+            let file_name = target.file_name().ok_or_else(|| {
+                FilesystemPublicationPathError::OutputPathDoesNotNameFile {
+                    path: target.to_owned(),
+                }
+            })?;
+            Ok(parent.join(file_name))
+        })
+        .collect::<Result<Vec<PathBuf>, FilesystemPublicationPathError>>()?;
+    let mut destination = resolved_targets[0]
+        .parent()
+        .expect("a resolved output file has a parent")
+        .to_owned();
+    while resolved_targets
+        .iter()
+        .any(|target| !target.starts_with(&destination))
+    {
+        if !destination.pop() {
+            return Err(FilesystemPublicationPathError::NoSharedRoot);
+        }
+    }
+    let relative_paths = resolved_targets
+        .iter()
+        .map(|target| {
+            target
+                .strip_prefix(&destination)
+                .expect("the selected destination is a common path prefix")
+                .to_owned()
+        })
+        .collect();
+    Ok((destination, relative_paths))
+}
+
 /// Publishes a succeeded Compilation Result through caller-selected
 /// destination-relative filesystem paths.
 ///

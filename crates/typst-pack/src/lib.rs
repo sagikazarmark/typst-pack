@@ -66,7 +66,7 @@ pub use compile::{
     PackCompilationWarning, PackOverrideSet, PackOverrideSetError, PackageFulfillmentReport,
     PackageTreeFulfillment, PageRange, PageSelection, PdfOutputSpecification,
     PdfStandardsValidationError, PngOutputSpecification, SvgOutputSpecification, TracepointKind,
-    compile, compile_with_limits, parse_page_selection,
+    compile, compile_with_limits, parse_page_selection, resolve_external_font_requirements,
 };
 pub use creation::{
     DependencyDiscoveryRejection, DiscoverySpecification, DiscoverySpecificationError,
@@ -77,9 +77,10 @@ pub use domain::{DocumentTime, TypstTarget};
 pub use filesystem_publication::{
     CompilationArtifactPathPublicationError, CompilationArtifactPublicationError,
     CompilationArtifactPublicationIssue, FilesystemDestinationEntryKind, FilesystemMergePolicy,
-    FilesystemPublicationErrorCause, FilesystemPublicationPhase,
+    FilesystemPublicationErrorCause, FilesystemPublicationPathError, FilesystemPublicationPhase,
     FilesystemPublicationPreflightIssue, PackExtractionPublicationError,
     publish_compilation_artifacts_to_filesystem_paths, publish_pack_extraction_plan_to_filesystem,
+    resolve_filesystem_publication_paths,
 };
 #[cfg(all(feature = "fs", fuzzing))]
 #[doc(hidden)]

@@ -277,28 +277,62 @@ impl PackOverrideSet {
         }
     }
 
+    /// Validates Pack Override paths before their replacement bytes are acquired.
+    pub fn validate_paths<I, S>(pack: &Pack, paths: I) -> Result<(), PackOverrideSetError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        let project_paths = pack
+            .files()
+            .map(|(path, _)| path.to_owned())
+            .collect::<BTreeSet<_>>();
+        let mut validated = BTreeSet::new();
+        for supplied in paths {
+            let path = validate_override_path(
+                &project_paths,
+                |path| validated.contains(path),
+                supplied.as_ref(),
+            )?;
+            validated.insert(path);
+        }
+        Ok(())
+    }
+
     /// Adds one replacement after strict Pack-owned preflight.
     pub fn replace(
         mut self,
         path: impl AsRef<str>,
         data: impl Into<Vec<u8>>,
     ) -> Result<Self, PackOverrideSetError> {
-        let supplied = path.as_ref();
-        let path = Pack::canonical_project_path(supplied).map_err(|message| {
-            PackOverrideSetError::InvalidProjectPath {
-                path: supplied.to_owned(),
-                message,
-            }
-        })?;
-        if self.replacements.contains_key(&path) {
-            return Err(PackOverrideSetError::DuplicateProjectPath { path });
-        }
-        if !self.project_paths.contains(&path) {
-            return Err(PackOverrideSetError::MissingProjectPath { path });
-        }
+        let path = validate_override_path(
+            &self.project_paths,
+            |path| self.replacements.contains_key(path),
+            path.as_ref(),
+        )?;
         self.replacements.insert(path, Bytes::new(data.into()));
         Ok(self)
     }
+}
+
+fn validate_override_path(
+    project_paths: &BTreeSet<String>,
+    is_declared: impl FnOnce(&str) -> bool,
+    supplied: &str,
+) -> Result<String, PackOverrideSetError> {
+    let path = Pack::canonical_project_path(supplied).map_err(|message| {
+        PackOverrideSetError::InvalidProjectPath {
+            path: supplied.to_owned(),
+            message,
+        }
+    })?;
+    if is_declared(&path) {
+        return Err(PackOverrideSetError::DuplicateProjectPath { path });
+    }
+    if !project_paths.contains(&path) {
+        return Err(PackOverrideSetError::MissingProjectPath { path });
+    }
+    Ok(path)
 }
 
 /// A Pack-owned Pack Override preflight rejection.

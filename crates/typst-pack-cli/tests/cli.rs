@@ -711,6 +711,76 @@ fn compile_accepts_a_non_unicode_pack_override_source_path() {
 }
 
 #[test]
+fn compile_preserves_pack_override_preflight_error_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"Hello".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let pack_path = directory.path().join("project.typk");
+    let output = directory.path().join("output.svg");
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
+
+    let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
+        .args([
+            "compile",
+            pack_path.to_str().unwrap(),
+            output.to_str().unwrap(),
+            "--format",
+            "svg",
+            "--override",
+            "missing.typ",
+            "missing-source.typ",
+            "--ignore-system-fonts",
+            "--ignore-embedded-fonts",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&result.stderr),
+        "error: Pack Override path `missing.typ` is not a contained project file\n"
+    );
+    assert!(!output.exists());
+}
+
+#[test]
+fn compile_preserves_publication_path_resolution_error_output() {
+    let directory = tempfile::tempdir().unwrap();
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"#rect(width: 1pt, height: 1pt)".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+    let pack_path = directory.path().join("project.typk");
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
+    let native_error = std::fs::canonicalize(directory.path().join("missing")).unwrap_err();
+
+    let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
+        .current_dir(directory.path())
+        .args([
+            "compile",
+            pack_path.to_str().unwrap(),
+            "missing/output.svg",
+            "--format",
+            "svg",
+            "--ignore-system-fonts",
+            "--ignore-embedded-fonts",
+        ])
+        .output()
+        .unwrap();
+
+    assert!(!result.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&result.stderr),
+        format!("error: cannot resolve output directory `missing`: {native_error}\n")
+    );
+    assert!(!directory.path().join("missing").exists());
+}
+
+#[test]
 fn create_reports_source_diagnostics_before_a_timing_failure() {
     let directory = tempfile::tempdir().unwrap();
     let project = directory.path().join("project");

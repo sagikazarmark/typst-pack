@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex};
 
 use chrono::{Datelike, Timelike};
 use clap::{Args, Parser, Subcommand, ValueEnum};
-use typst::foundations::{Bytes, Datetime, Dict, IntoValue};
+use typst::foundations::{Datetime, Dict, IntoValue};
 use typst::syntax::VirtualRoot;
 use typst_kit::diagnostics::DiagnosticFormat;
 use typst_kit::diagnostics::termcolor::{
@@ -29,20 +29,21 @@ use typst_pack::pack_archive::{
     write_pack,
 };
 use typst_pack::{
-    CanonicalIdentity, FILE_EXTENSION, FilesystemMergePolicy, FilesystemPackAssembler,
-    FilesystemPackAssemblerConfig, FilesystemPackAssemblyError, FilesystemPackAssemblyRequest,
-    FilesystemPublicationPreflightIssue, Pack, PackCreationError, PackExtractionPublicationError,
-    PackExtractionSelection, PackMetadata, plan_pack_extraction,
-    publish_pack_extraction_plan_to_filesystem,
-};
-use typst_pack::{
     CompilationArtifact, CompilationArtifactPathPublicationError,
     CompilationArtifactPublicationError, CompilationFulfillmentSet, CompilationLimits,
     CompilationOutputSpecification, CompilationReportOutcome, CompilationStatus, CreationTimestamp,
-    DocumentTime, FontContainer, FontContainerFulfillment, HtmlOutputSpecification, OutputFormat,
-    PackCompilationRequest, PackOverrideSet, PackageTreeFulfillment, PageRange, PageSelection,
-    PdfOutputSpecification, PngOutputSpecification, SvgOutputSpecification, TypstTarget,
-    parse_page_selection, publish_compilation_artifacts_to_filesystem_paths,
+    DocumentTime, HtmlOutputSpecification, OutputFormat, PackCompilationRequest, PackOverrideSet,
+    PackageTreeFulfillment, PageRange, PageSelection, PdfOutputSpecification,
+    PngOutputSpecification, SvgOutputSpecification, TypstTarget, parse_page_selection,
+    publish_compilation_artifacts_to_filesystem_paths, resolve_external_font_requirements,
+    resolve_filesystem_publication_paths,
+};
+use typst_pack::{
+    FILE_EXTENSION, FilesystemMergePolicy, FilesystemPackAssembler, FilesystemPackAssemblerConfig,
+    FilesystemPackAssemblyError, FilesystemPackAssemblyRequest,
+    FilesystemPublicationPreflightIssue, Pack, PackCreationError, PackExtractionPublicationError,
+    PackExtractionSelection, PackMetadata, plan_pack_extraction,
+    publish_pack_extraction_plan_to_filesystem,
 };
 
 const ENV_PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
@@ -974,13 +975,13 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     initialize_jobs(args.automation.jobs);
 
     let pack = read_pack_input(&args.pack)?;
-    let mut override_preflight = PackOverrideSet::new(&pack);
+    let mut override_paths = Vec::new();
     for pair in args.overrides.chunks_exact(2) {
         let pack_path = pair[0]
             .to_str()
             .ok_or("Pack Override project path must be valid UTF-8")?;
-        override_preflight = override_preflight
-            .replace(pack_path, Vec::new())
+        override_paths.push(pack_path);
+        PackOverrideSet::validate_paths(&pack, override_paths.iter().copied())
             .map_err(|error| CliError::Message(error.to_string()))?;
     }
     let host_dependencies = Arc::new(Mutex::new(BTreeSet::new()));
@@ -1005,17 +1006,14 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
             .insert(source);
     }
 
-    let mut supplied_fonts = BTreeMap::<CanonicalIdentity, Bytes>::new();
+    let mut supplied_fonts = Vec::new();
     if pack
         .font_requirements()
         .iter()
         .any(|requirement| !requirement.is_embedded())
     {
         let mut load = |font: typst::text::Font| {
-            let identity = CanonicalIdentity::for_font_container_bytes(font.data().as_slice());
-            supplied_fonts
-                .entry(identity)
-                .or_insert_with(|| font.data().clone());
+            supplied_fonts.push(font.data().clone());
         };
         if !args.fonts.ignore_system_fonts {
             for (source, _) in typst_kit::fonts::system() {
@@ -1105,12 +1103,11 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
             .with_timezone(&chrono::Utc)
             .timestamp()
     });
-    let external_font_identities = pack
-        .font_requirements()
-        .iter()
-        .filter(|requirement| !requirement.is_embedded())
-        .map(|requirement| requirement.container_identity())
-        .collect::<BTreeSet<_>>();
+    let font_fulfillments = resolve_external_font_requirements(
+        &pack,
+        supplied_fonts.into_iter().map(|data| data.into_vec()),
+    )
+    .map_err(|error| CliError::Message(error.to_string()))?;
     let mut request = PackCompilationRequest::new(pack, output_specification)
         .inputs(parse_inputs(&args.compilation.inputs))
         .document_time(DocumentTime::UnixTimestamp(document_timestamp));
@@ -1120,15 +1117,6 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     for feature in &args.compilation.features {
         request = request.feature((*feature).into());
     }
-    let font_fulfillments = supplied_fonts
-        .into_iter()
-        .filter(|(identity, _)| external_font_identities.contains(identity))
-        .map(|(identity, data)| {
-            FontContainer::new(data.to_vec())
-                .map(|container| FontContainerFulfillment::new(identity, container))
-                .map_err(|error| CliError::Message(error.to_string()))
-        })
-        .collect::<Result<Vec<_>, _>>()?;
     let package_fulfillments = package_fulfillments
         .into_iter()
         .map(|(spec, tree)| PackageTreeFulfillment::new(spec, tree))
@@ -1246,7 +1234,9 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
                         .write_all(output.artifacts()[0].bytes())
                         .map_err(|err| format!("cannot write output to stdout: {err}"))?;
                 } else {
-                    let (destination, relative_paths) = filesystem_publication_paths(&targets)?;
+                    let (destination, relative_paths) =
+                        resolve_filesystem_publication_paths(&targets)
+                            .map_err(|error| error.to_string())?;
                     publish_compilation_artifacts_to_filesystem_paths(
                         output,
                         destination,
@@ -1308,58 +1298,6 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         return Err(CliError::Reported);
     }
     command_result
-}
-
-fn filesystem_publication_paths(targets: &[PathBuf]) -> Result<(PathBuf, Vec<PathBuf>), String> {
-    if targets.is_empty() {
-        let current = Path::new(".")
-            .canonicalize()
-            .map_err(|error| format!("cannot resolve the current directory: {error}"))?;
-        return Ok((current, Vec::new()));
-    }
-    let resolved_targets = targets
-        .iter()
-        .map(|target| {
-            let parent = target.parent().unwrap_or_else(|| Path::new("."));
-            let parent = if parent.as_os_str().is_empty() {
-                Path::new(".")
-            } else {
-                parent
-            };
-            let parent = parent.canonicalize().map_err(|error| {
-                format!(
-                    "cannot resolve output directory `{}`: {error}",
-                    parent.display()
-                )
-            })?;
-            let file_name = target.file_name().ok_or_else(|| {
-                format!("output path `{}` does not name a file", target.display())
-            })?;
-            Ok(parent.join(file_name))
-        })
-        .collect::<Result<Vec<PathBuf>, String>>()?;
-    let mut destination = resolved_targets[0]
-        .parent()
-        .expect("a resolved output file has a parent")
-        .to_owned();
-    while resolved_targets
-        .iter()
-        .any(|target| !target.starts_with(&destination))
-    {
-        if !destination.pop() {
-            return Err("output paths do not share a filesystem root".to_owned());
-        }
-    }
-    let relative_paths = resolved_targets
-        .iter()
-        .map(|target| {
-            target
-                .strip_prefix(&destination)
-                .expect("the selected destination is a common path prefix")
-                .to_owned()
-        })
-        .collect();
-    Ok((destination, relative_paths))
 }
 
 fn format_compilation_publication_error(error: &CompilationArtifactPathPublicationError) -> String {
@@ -1804,7 +1742,7 @@ mod tests {
         symlink(&nested, directory.path().join("linked")).unwrap();
         let target = directory.path().join("linked/../output.pdf");
 
-        let (destination, relative) = filesystem_publication_paths(&[target]).unwrap();
+        let (destination, relative) = resolve_filesystem_publication_paths(&[target]).unwrap();
 
         assert_eq!(destination, actual.canonicalize().unwrap());
         assert_eq!(relative, [PathBuf::from("output.pdf")]);
@@ -1827,7 +1765,7 @@ mod tests {
             directory.path().join("second-link/../output-2.svg"),
         ];
 
-        let (destination, relative) = filesystem_publication_paths(&targets).unwrap();
+        let (destination, relative) = resolve_filesystem_publication_paths(&targets).unwrap();
 
         assert_eq!(destination, actual.canonicalize().unwrap());
         assert_eq!(

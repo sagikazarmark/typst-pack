@@ -6,7 +6,7 @@ use typst_pack::{
     FilesystemMergePolicy, FilesystemPublicationPreflightIssue, Pack, PackCompilationRequest,
     PackExtractionSelection, PdfOutputSpecification, PublicationKeyOutcome, SvgOutputSpecification,
     compile_with_limits, plan_pack_extraction, publish_compilation_artifacts_to_filesystem_paths,
-    publish_pack_extraction_plan_to_filesystem,
+    publish_pack_extraction_plan_to_filesystem, resolve_filesystem_publication_paths,
 };
 
 fn extraction_plan() -> typst_pack::PackExtractionPlan {
@@ -39,6 +39,58 @@ fn two_page_compilation_result() -> typst_pack::CompilationResult {
     )
     .unwrap();
     report.result().unwrap().clone()
+}
+
+#[test]
+fn publication_paths_resolve_a_common_destination_and_relative_targets() {
+    let directory = tempfile::tempdir().unwrap();
+    let root = temp_path(&directory);
+    std::fs::create_dir_all(root.join("first")).unwrap();
+    std::fs::create_dir_all(root.join("second")).unwrap();
+    let targets = [
+        root.join("first/output-1.svg"),
+        root.join("second/output-2.svg"),
+    ];
+
+    let (destination, relative_paths) = resolve_filesystem_publication_paths(&targets).unwrap();
+
+    assert_eq!(destination, root);
+    assert_eq!(
+        relative_paths,
+        [
+            std::path::PathBuf::from("first/output-1.svg"),
+            std::path::PathBuf::from("second/output-2.svg"),
+        ]
+    );
+}
+
+#[test]
+fn publication_path_resolution_retains_the_unresolved_output_directory() {
+    let directory = tempfile::tempdir().unwrap();
+    let unresolved = directory.path().join("missing");
+    let target = unresolved.join("output.svg");
+
+    let error = resolve_filesystem_publication_paths(&[target]).unwrap_err();
+
+    assert!(matches!(
+        error,
+        typst_pack::FilesystemPublicationPathError::OutputDirectory { path, .. }
+            if path == unresolved
+    ));
+}
+
+#[cfg(unix)]
+#[test]
+fn publication_path_resolution_rejects_a_target_without_a_file_name() {
+    let target = std::path::PathBuf::from("/");
+
+    let error = resolve_filesystem_publication_paths(std::slice::from_ref(&target)).unwrap_err();
+
+    assert!(matches!(
+        error,
+        typst_pack::FilesystemPublicationPathError::OutputPathDoesNotNameFile { path }
+            if path == target
+    ));
 }
 
 #[test]

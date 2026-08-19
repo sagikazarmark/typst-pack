@@ -12,7 +12,7 @@ use typst_pack::{
     compile_with_limits,
 };
 #[cfg(feature = "embedded-fonts")]
-use typst_pack::{FontContainer, FontContainerFulfillment};
+use typst_pack::{FontContainer, FontContainerFulfillment, resolve_external_font_requirements};
 
 fn compile(
     request: PackCompilationRequest,
@@ -722,6 +722,42 @@ fn compilation_fulfillment_set_rejects_duplicate_font_container_identities() {
 
 #[cfg(feature = "embedded-fonts")]
 #[test]
+fn external_font_requirements_are_resolved_from_matching_source_containers() {
+    let base = typst_kit::fonts::embedded().next().unwrap().0;
+    let variant = |tag| {
+        let mut data = base.data().to_vec();
+        data.push(tag);
+        data
+    };
+    let external = variant(1);
+    let embedded = variant(2);
+    let unrelated = variant(3);
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"unreached".to_vec())
+        .unwrap()
+        .external_font(external.clone(), base.index())
+        .unwrap()
+        .font(embedded.clone(), base.index())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    let fulfillments = resolve_external_font_requirements(
+        &pack,
+        [unrelated, external.clone(), external.clone(), embedded],
+    )
+    .unwrap();
+
+    assert_eq!(fulfillments.len(), 1);
+    assert_eq!(
+        fulfillments[0].expected_identity(),
+        typst_pack::CanonicalIdentity::for_font_container_bytes(&external)
+    );
+    assert_eq!(fulfillments[0].container().data(), external);
+}
+
+#[cfg(feature = "embedded-fonts")]
+#[test]
 fn font_fulfillment_issues_follow_packages_and_canonical_identity_kind_order() {
     let package: typst::syntax::package::PackageSpec = "@local/a:1.0.0".parse().unwrap();
     let base = typst_kit::fonts::embedded().next().unwrap().0;
@@ -1122,6 +1158,25 @@ fn pack_override_preflight_rejects_paths_outside_the_bound_pack() {
         .unwrap()
         .replace("./main.typ", b"second".to_vec())
         .unwrap_err();
+    assert!(matches!(
+        error,
+        PackOverrideSetError::DuplicateProjectPath { path } if path == "main.typ"
+    ));
+}
+
+#[test]
+fn pack_override_paths_can_be_validated_before_replacement_bytes_are_available() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"baseline".to_vec())
+        .unwrap()
+        .file("chapter.typ", b"chapter".to_vec())
+        .unwrap()
+        .build()
+        .unwrap();
+
+    PackOverrideSet::validate_paths(&pack, ["main.typ", "chapter.typ"]).unwrap();
+
+    let error = PackOverrideSet::validate_paths(&pack, ["main.typ", "./main.typ"]).unwrap_err();
     assert!(matches!(
         error,
         PackOverrideSetError::DuplicateProjectPath { path } if path == "main.typ"

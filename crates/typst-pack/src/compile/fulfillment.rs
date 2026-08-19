@@ -80,6 +80,37 @@ impl FontContainerFulfillment {
     }
 }
 
+/// Resolves the Pack's external Font Requirements from exact source-container bytes.
+///
+/// Each matching container produces at most one fulfillment. Unrelated and
+/// duplicate sources are ignored, and requirements with no matching source
+/// remain absent for compilation's exact fulfillment verification to report.
+pub fn resolve_external_font_requirements<I, S>(
+    pack: &Pack,
+    sources: I,
+) -> Result<Vec<FontContainerFulfillment>, crate::FontContainerError>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<Vec<u8>>,
+{
+    let required = pack
+        .font_requirements()
+        .iter()
+        .filter(|requirement| !requirement.is_embedded())
+        .map(|requirement| requirement.container_identity())
+        .collect::<BTreeSet<_>>();
+    let mut fulfillments = BTreeMap::new();
+    for source in sources {
+        let data = source.into();
+        let identity = CanonicalIdentity::for_font_container_bytes(&data);
+        if required.contains(&identity) && !fulfillments.contains_key(&identity) {
+            let container = FontContainer::new(data)?;
+            fulfillments.insert(identity, FontContainerFulfillment::new(identity, container));
+        }
+    }
+    Ok(fulfillments.into_values().collect())
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum CompilationFulfillmentSetIssue {
