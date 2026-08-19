@@ -10,8 +10,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 
-use crate::pack_archive::{CommitCertainty, StagingResidueStatus};
-use crate::{CompilationResult, CompilationStatus, PackExtractionPlan};
+use crate::pack_archive::StagingResidueStatus;
+use crate::{
+    CommitCertainty, CompilationArtifactPublicationEntry, CompilationArtifactPublicationProgress,
+    CompilationArtifactPublicationReceipt, CompilationResult, CompilationStatus,
+    PackExtractionPlan, PackExtractionPublicationEntry, PackExtractionPublicationProgress,
+    PackExtractionPublicationReceipt, PublicationKeyOutcome,
+};
 
 /// An explicit policy for publishing planned files to the filesystem.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -181,76 +186,8 @@ pub enum FilesystemPublicationErrorCause {
     Io(#[from] io::Error),
 }
 
-macro_rules! workflow_evidence {
-    ($progress:ident, $receipt:ident, $error:ident) => {
-        #[derive(Clone, Debug, Eq, PartialEq)]
-        pub struct $progress {
-            committed_files: Vec<PathBuf>,
-            commit_certainty: CommitCertainty,
-            staging_residue: Option<Box<Path>>,
-            staging_residue_status: StagingResidueStatus,
-        }
-
-        impl $progress {
-            /// Planned relative paths committed before the attempt returned, in
-            /// publication-plan order.
-            pub fn committed_files(&self) -> &[PathBuf] {
-                &self.committed_files
-            }
-
-            /// Certainty for the file effect attempted when this progress ended.
-            pub const fn commit_certainty(&self) -> CommitCertainty {
-                self.commit_certainty
-            }
-
-            /// Retry-relevant same-directory staging residue, when observable.
-            pub fn staging_residue(&self) -> Option<&Path> {
-                self.staging_residue.as_deref()
-            }
-
-            /// The observed state of retry-relevant staging residue.
-            pub const fn staging_residue_status(&self) -> StagingResidueStatus {
-                self.staging_residue_status
-            }
-        }
-
-        #[derive(Clone, Debug, Eq, PartialEq)]
-        pub struct $receipt {
-            destination: PathBuf,
-            policy: FilesystemMergePolicy,
-            progress: $progress,
-        }
-
-        impl $receipt {
-            pub const fn phase(&self) -> FilesystemPublicationPhase {
-                FilesystemPublicationPhase::Complete
-            }
-
-            pub fn destination(&self) -> &Path {
-                &self.destination
-            }
-
-            pub const fn policy(&self) -> FilesystemMergePolicy {
-                self.policy
-            }
-
-            pub const fn commit_certainty(&self) -> CommitCertainty {
-                CommitCertainty::Committed
-            }
-
-            pub const fn staging_residue(&self) -> Option<&Path> {
-                None
-            }
-
-            pub const fn staging_residue_status(&self) -> StagingResidueStatus {
-                StagingResidueStatus::Absent
-            }
-
-            pub const fn progress(&self) -> &$progress {
-                &self.progress
-            }
-        }
-
+macro_rules! workflow_error {
+    ($progress:ident, $error:ident) => {
         #[derive(Debug, thiserror::Error)]
         #[error(
             "filesystem publication to {destination:?} failed during {phase:?} with {commit_certainty:?} certainty: {source}"
@@ -313,14 +250,12 @@ macro_rules! workflow_evidence {
     };
 }
 
-workflow_evidence!(
+workflow_error!(
     PackExtractionPublicationProgress,
-    PackExtractionPublicationReceipt,
     PackExtractionPublicationError
 );
-workflow_evidence!(
+workflow_error!(
     CompilationArtifactPublicationProgress,
-    CompilationArtifactPublicationReceipt,
     CompilationArtifactPublicationError
 );
 
@@ -402,7 +337,7 @@ enum CommitScope {
 
 #[derive(Debug)]
 struct CoreReceipt {
-    committed_files: Vec<PathBuf>,
+    completed: Vec<usize>,
 }
 
 struct CoreError {
@@ -411,7 +346,7 @@ struct CoreError {
     staging_residue: Option<PathBuf>,
     staging_residue_status: Option<StagingResidueStatus>,
     commit_certainty: CommitCertainty,
-    committed_files: Vec<PathBuf>,
+    completed: Vec<usize>,
     preflight_issues: Option<Vec<FilesystemPublicationPreflightIssue>>,
     source: FilesystemPublicationErrorCause,
 }
@@ -422,8 +357,8 @@ struct CoreError {
 /// stages the complete plan in a sibling directory, and exposes it through one
 /// root commit where supported. Unsupported guarantees are returned as
 /// [`FilesystemPublicationErrorCause::UnsupportedPolicy`] rather than
-/// weakened to a merge. Receipts and errors describe visibility and staging
-/// residue; they make no crash-durability guarantee.
+/// weakened to a merge. Errors describe visibility and staging residue; the
+/// adapter makes no crash-durability guarantee.
 pub fn publish_pack_extraction_plan_to_filesystem(
     plan: &PackExtractionPlan,
     destination: impl AsRef<Path>,
@@ -439,17 +374,11 @@ pub fn publish_pack_extraction_plan_to_filesystem(
         })
         .collect::<Vec<_>>();
     match publish_files(&files, destination, policy) {
-        Ok(receipt) => Ok(PackExtractionPublicationReceipt {
-            destination: destination.to_owned(),
-            policy,
-            progress: PackExtractionPublicationProgress {
-                committed_files: receipt.committed_files,
-                commit_certainty: CommitCertainty::Committed,
-                staging_residue: None,
-                staging_residue_status: StagingResidueStatus::Absent,
-            },
-        }),
-        Err(error) => Err(pack_extraction_error(destination, policy, error)),
+        Ok(receipt) => Ok(PackExtractionPublicationReceipt::new(
+            *plan.pack_identity(),
+            pack_extraction_progress(&files, receipt.completed, policy),
+        )),
+        Err(error) => Err(pack_extraction_error(&files, destination, policy, error)),
     }
 }
 
@@ -471,17 +400,11 @@ pub fn publish_pack_extraction_plan_to_filesystem_with_fault_probe(
         })
         .collect::<Vec<_>>();
     match publish_files_with_faults(&files, destination, policy, probe.into(), |_, _, _| {}) {
-        Ok(receipt) => Ok(PackExtractionPublicationReceipt {
-            destination: destination.to_owned(),
-            policy,
-            progress: PackExtractionPublicationProgress {
-                committed_files: receipt.committed_files,
-                commit_certainty: CommitCertainty::Committed,
-                staging_residue: None,
-                staging_residue_status: StagingResidueStatus::Absent,
-            },
-        }),
-        Err(error) => Err(pack_extraction_error(destination, policy, error)),
+        Ok(receipt) => Ok(PackExtractionPublicationReceipt::new(
+            *plan.pack_identity(),
+            pack_extraction_progress(&files, receipt.completed, policy),
+        )),
+        Err(error) => Err(pack_extraction_error(&files, destination, policy, error)),
     }
 }
 
@@ -621,30 +544,26 @@ pub fn publish_compilation_artifacts_to_filesystem_paths(
             bytes: artifact.bytes(),
         })
         .collect::<Vec<_>>();
-    publish_compilation_artifact_files(&files, destination, policy).map_err(Into::into)
+    publish_compilation_artifact_files(result, &files, destination, policy).map_err(Into::into)
 }
 
 fn publish_compilation_artifact_files(
+    result: &CompilationResult,
     files: &[PlannedFile<'_>],
     destination: &Path,
     policy: FilesystemMergePolicy,
 ) -> Result<CompilationArtifactPublicationReceipt, CompilationArtifactPublicationError> {
     match publish_files(files, destination, policy) {
-        Ok(receipt) => Ok(CompilationArtifactPublicationReceipt {
-            destination: destination.to_owned(),
-            policy,
-            progress: CompilationArtifactPublicationProgress {
-                committed_files: receipt.committed_files,
-                commit_certainty: CommitCertainty::Committed,
-                staging_residue: None,
-                staging_residue_status: StagingResidueStatus::Absent,
-            },
-        }),
+        Ok(receipt) => Ok(CompilationArtifactPublicationReceipt::new(
+            result.result_identity(),
+            compilation_artifact_progress(receipt.completed, policy),
+        )),
         Err(error) => Err(compilation_artifact_error(destination, policy, error)),
     }
 }
 
 fn pack_extraction_error(
+    files: &[PlannedFile<'_>],
     destination: &Path,
     policy: FilesystemMergePolicy,
     error: CoreError,
@@ -662,12 +581,7 @@ fn pack_extraction_error(
         staging_residue: staging_residue.clone(),
         staging_residue_status,
         commit_certainty: error.commit_certainty,
-        progress: Box::new(PackExtractionPublicationProgress {
-            committed_files: error.committed_files,
-            commit_certainty: error.commit_certainty,
-            staging_residue,
-            staging_residue_status,
-        }),
+        progress: Box::new(pack_extraction_progress(files, error.completed, policy)),
         preflight_issues: error.preflight_issues.map(Vec::into_boxed_slice),
         source: Box::new(error.source),
     }
@@ -691,14 +605,54 @@ fn compilation_artifact_error(
         staging_residue: staging_residue.clone(),
         staging_residue_status,
         commit_certainty: error.commit_certainty,
-        progress: Box::new(CompilationArtifactPublicationProgress {
-            committed_files: error.committed_files,
-            commit_certainty: error.commit_certainty,
-            staging_residue,
-            staging_residue_status,
-        }),
+        progress: Box::new(compilation_artifact_progress(error.completed, policy)),
         preflight_issues: error.preflight_issues.map(Vec::into_boxed_slice),
         source: Box::new(error.source),
+    }
+}
+
+fn pack_extraction_progress(
+    files: &[PlannedFile<'_>],
+    completed: Vec<usize>,
+    policy: FilesystemMergePolicy,
+) -> PackExtractionPublicationProgress {
+    let outcome = filesystem_outcome(policy);
+    PackExtractionPublicationProgress::from_completed(
+        completed
+            .into_iter()
+            .map(|index| {
+                PackExtractionPublicationEntry::new(
+                    files[index]
+                        .relative_path
+                        .to_str()
+                        .expect("Pack Extraction paths are UTF-8")
+                        .to_owned(),
+                    outcome,
+                )
+            })
+            .collect(),
+    )
+}
+
+fn compilation_artifact_progress(
+    completed: Vec<usize>,
+    policy: FilesystemMergePolicy,
+) -> CompilationArtifactPublicationProgress {
+    let outcome = filesystem_outcome(policy);
+    CompilationArtifactPublicationProgress::from_completed(
+        completed
+            .into_iter()
+            .map(|index| CompilationArtifactPublicationEntry::new(index, outcome))
+            .collect(),
+    )
+}
+
+const fn filesystem_outcome(policy: FilesystemMergePolicy) -> PublicationKeyOutcome {
+    match policy {
+        FilesystemMergePolicy::PublishNewTree | FilesystemMergePolicy::MergeCreateOnly => {
+            PublicationKeyOutcome::Created
+        }
+        FilesystemMergePolicy::MergeReplaceExactFiles => PublicationKeyOutcome::Written,
     }
 }
 
@@ -742,7 +696,7 @@ fn publish_files_with_faults(
             staging_residue: None,
             staging_residue_status: None,
             commit_certainty: CommitCertainty::NotCommitted,
-            committed_files: Vec::new(),
+            completed: Vec::new(),
             preflight_issues: None,
             source: FilesystemPublicationErrorCause::UnsupportedPolicy(policy),
         });
@@ -754,7 +708,7 @@ fn publish_files_with_faults(
             staging_residue: None,
             staging_residue_status: None,
             commit_certainty: CommitCertainty::NotCommitted,
-            committed_files: Vec::new(),
+            completed: Vec::new(),
             preflight_issues: None,
             source: FilesystemPublicationErrorCause::UnsupportedPolicy(policy),
         });
@@ -781,7 +735,7 @@ fn publish_files_with_faults(
             staging_residue: None,
             staging_residue_status: None,
             commit_certainty: CommitCertainty::NotCommitted,
-            committed_files: Vec::new(),
+            completed: Vec::new(),
             preflight_issues: Some(issues),
             source: FilesystemPublicationErrorCause::Preflight,
         });
@@ -796,7 +750,7 @@ fn publish_files_with_faults(
             staging_residue: None,
             staging_residue_status: None,
             commit_certainty: CommitCertainty::NotCommitted,
-            committed_files: Vec::new(),
+            completed: Vec::new(),
             preflight_issues: None,
             source: FilesystemPublicationErrorCause::UnsupportedPolicy(policy),
         });
@@ -821,7 +775,7 @@ fn publish_files_with_faults(
         )
     })?;
 
-    let mut committed_files = Vec::with_capacity(files.len());
+    let mut completed = Vec::with_capacity(files.len());
     for (index, file) in files.iter().enumerate() {
         let relative = Path::new(file.relative_path);
         let target = destination.join(relative);
@@ -837,7 +791,7 @@ fn publish_files_with_faults(
                     Some(target),
                     None,
                     CommitCertainty::NotCommitted,
-                    committed_files,
+                    completed,
                     source,
                 ));
             }
@@ -851,7 +805,7 @@ fn publish_files_with_faults(
                     Some(target),
                     None,
                     CommitCertainty::NotCommitted,
-                    committed_files,
+                    completed,
                     source,
                 ));
             }
@@ -870,7 +824,7 @@ fn publish_files_with_faults(
                     Some(target),
                     Some(staging),
                     CommitCertainty::NotCommitted,
-                    committed_files,
+                    completed,
                     source,
                 ),
             ));
@@ -907,7 +861,7 @@ fn publish_files_with_faults(
                     Some(target),
                     Some(staging),
                     CommitCertainty::NotCommitted,
-                    committed_files,
+                    completed,
                     source,
                 ),
             ));
@@ -922,7 +876,7 @@ fn publish_files_with_faults(
                     Some(target),
                     Some(staging),
                     CommitCertainty::NotCommitted,
-                    committed_files,
+                    completed,
                     source,
                 ),
             ));
@@ -937,12 +891,12 @@ fn publish_files_with_faults(
                     Some(target),
                     Some(staging),
                     error.commit_certainty,
-                    committed_files,
+                    completed,
                     error.source,
                 ),
             ));
         }
-        committed_files.push(file.relative_path.to_owned());
+        completed.push(index);
         if let Err(source) =
             validate_directory_binding(&parent, target.parent().expect("a target has a parent"))
         {
@@ -951,13 +905,13 @@ fn publish_files_with_faults(
                 Some(target),
                 None,
                 CommitCertainty::Committed,
-                committed_files,
+                completed,
                 source,
             ));
         }
     }
 
-    Ok(CoreReceipt { committed_files })
+    Ok(CoreReceipt { completed })
 }
 
 #[allow(clippy::result_large_err)]
@@ -1005,7 +959,7 @@ fn publish_new_tree(
             staging_residue: error.staging_residue,
             staging_residue_status: Some(error.staging_residue_status),
             commit_certainty: CommitCertainty::NotCommitted,
-            committed_files: Vec::new(),
+            completed: Vec::new(),
             preflight_issues: None,
             source: FilesystemPublicationErrorCause::Io(error.source),
         })?;
@@ -1092,8 +1046,8 @@ fn publish_new_tree(
     if let Err(source) = validate_new_tree_commit_target(&parent, &destination_name) {
         let commit_certainty =
             observe_tree_commit_certainty(&parent, &staging_root, &staging_name, &destination_name);
-        let committed_files = if commit_certainty == CommitCertainty::Committed {
-            planned_file_paths(files)
+        let completed = if commit_certainty == CommitCertainty::Committed {
+            planned_file_indices(files)
         } else {
             Vec::new()
         };
@@ -1106,7 +1060,7 @@ fn publish_new_tree(
                 Some(destination.to_owned()),
                 Some(staging_path),
                 commit_certainty,
-                committed_files,
+                completed,
                 source,
             ),
         ));
@@ -1122,8 +1076,8 @@ fn publish_new_tree(
     if let Err(source) = commit_result {
         let commit_certainty =
             observe_tree_commit_certainty(&parent, &staging_root, &staging_name, &destination_name);
-        let committed_files = if commit_certainty == CommitCertainty::Committed {
-            planned_file_paths(files)
+        let completed = if commit_certainty == CommitCertainty::Committed {
+            planned_file_indices(files)
         } else {
             Vec::new()
         };
@@ -1140,7 +1094,7 @@ fn publish_new_tree(
             staging_residue: Some(staging_path),
             staging_residue_status: None,
             commit_certainty,
-            committed_files,
+            completed,
             preflight_issues: None,
             source,
         };
@@ -1153,26 +1107,23 @@ fn publish_new_tree(
         return Err(error);
     }
 
-    let committed_files = planned_file_paths(files);
+    let completed = planned_file_indices(files);
     if let Err(source) = validate_directory_binding(&parent, parent_path) {
         return Err(io_core_error(
             FilesystemPublicationPhase::Commit,
             Some(destination.to_owned()),
             None,
             CommitCertainty::Committed,
-            committed_files,
+            completed,
             source,
         ));
     }
 
-    Ok(CoreReceipt { committed_files })
+    Ok(CoreReceipt { completed })
 }
 
-fn planned_file_paths(files: &[PlannedFile<'_>]) -> Vec<PathBuf> {
-    files
-        .iter()
-        .map(|file| file.relative_path.to_owned())
-        .collect()
+fn planned_file_indices(files: &[PlannedFile<'_>]) -> Vec<usize> {
+    (0..files.len()).collect()
 }
 
 fn write_staging(
@@ -2634,7 +2585,7 @@ fn io_core_error(
     failed_target: Option<PathBuf>,
     staging_residue: Option<PathBuf>,
     commit_certainty: CommitCertainty,
-    committed_files: Vec<PathBuf>,
+    completed: Vec<usize>,
     source: io::Error,
 ) -> CoreError {
     CoreError {
@@ -2643,7 +2594,7 @@ fn io_core_error(
         staging_residue,
         staging_residue_status: None,
         commit_certainty,
-        committed_files,
+        completed,
         preflight_issues: None,
         source: FilesystemPublicationErrorCause::Io(source),
     }
@@ -2814,6 +2765,7 @@ mod tests {
         )
         .unwrap_err();
         let error = pack_extraction_error(
+            &files,
             &destination,
             FilesystemMergePolicy::MergeCreateOnly,
             core_error,
@@ -2825,7 +2777,7 @@ mod tests {
             Some(destination.join("b.txt").as_path())
         );
         assert_eq!(error.commit_certainty(), CommitCertainty::Indeterminate);
-        assert_eq!(error.progress().committed_files(), [PathBuf::from("a.txt")]);
+        assert_eq!(error.progress().completed()[0].relative_path(), "a.txt");
         assert_eq!(error.staging_residue_status(), StagingResidueStatus::Absent);
         assert!(matches!(
             error.cause(),
@@ -2853,6 +2805,7 @@ mod tests {
         )
         .unwrap_err();
         let error = pack_extraction_error(
+            &files,
             &destination,
             FilesystemMergePolicy::PublishNewTree,
             core_error,
@@ -2862,8 +2815,8 @@ mod tests {
         assert_eq!(error.failed_target(), Some(destination.as_path()));
         assert_eq!(error.commit_certainty(), CommitCertainty::Committed);
         assert_eq!(
-            error.progress().committed_files(),
-            [PathBuf::from("nested/file.txt")]
+            error.progress().completed()[0].relative_path(),
+            "nested/file.txt"
         );
         assert_eq!(error.staging_residue_status(), StagingResidueStatus::Absent);
         assert_eq!(
@@ -2897,6 +2850,7 @@ mod tests {
         )
         .unwrap_err();
         let error = pack_extraction_error(
+            &files,
             &destination,
             FilesystemMergePolicy::PublishNewTree,
             core_error,
@@ -2935,6 +2889,7 @@ mod tests {
         )
         .unwrap_err();
         let error = pack_extraction_error(
+            &files,
             &destination,
             FilesystemMergePolicy::PublishNewTree,
             core_error,
@@ -2969,6 +2924,7 @@ mod tests {
         )
         .unwrap_err();
         let error = pack_extraction_error(
+            &files,
             &destination,
             FilesystemMergePolicy::PublishNewTree,
             core_error,
@@ -3011,6 +2967,7 @@ mod tests {
         )
         .unwrap_err();
         let error = pack_extraction_error(
+            &files,
             &destination,
             FilesystemMergePolicy::PublishNewTree,
             core_error,
@@ -3063,6 +3020,7 @@ mod tests {
             )
             .unwrap_err();
             let error = pack_extraction_error(
+                &files,
                 &destination,
                 FilesystemMergePolicy::PublishNewTree,
                 core_error,
@@ -3101,7 +3059,7 @@ mod tests {
 
         assert_eq!(error.phase, FilesystemPublicationPhase::Commit);
         assert_eq!(error.commit_certainty, CommitCertainty::NotCommitted);
-        assert!(error.committed_files.is_empty());
+        assert!(error.completed.is_empty());
         assert_eq!(std::fs::read(&outside).unwrap(), b"outside");
     }
 
@@ -3132,6 +3090,7 @@ mod tests {
         )
         .unwrap_err();
         let error = pack_extraction_error(
+            &files,
             &destination,
             FilesystemMergePolicy::MergeReplaceExactFiles,
             core_error,
@@ -3144,7 +3103,7 @@ mod tests {
             StagingResidueStatus::Indeterminate
         );
         assert!(error.staging_residue().is_some());
-        assert!(error.progress().committed_files().is_empty());
+        assert!(error.progress().completed().is_empty());
         assert!(!outside.join("target.txt").exists());
         assert!(std::fs::read_dir(&displaced).unwrap().next().is_some());
     }

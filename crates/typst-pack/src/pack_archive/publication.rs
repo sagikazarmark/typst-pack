@@ -6,15 +6,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use super::{EncodeError, EncodeLimits, encode_with_limits};
-use crate::{Pack, PackArchiveBytes};
-
-/// Knowledge about whether one attempted destination effect completed.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum CommitCertainty {
-    NotCommitted,
-    Committed,
-    Indeterminate,
-}
+use crate::{CommitCertainty, Pack, PackArchiveBytes};
 
 /// The stream publication phase reached by an attempt.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -31,16 +23,8 @@ pub struct StreamPublicationReceipt {
 }
 
 impl StreamPublicationReceipt {
-    pub const fn phase(&self) -> StreamPublicationPhase {
-        StreamPublicationPhase::Complete
-    }
-
     pub const fn visible_prefix(&self) -> u64 {
         self.visible_prefix
-    }
-
-    pub const fn commit_certainty(&self) -> CommitCertainty {
-        CommitCertainty::Committed
     }
 }
 
@@ -206,10 +190,6 @@ pub struct FilePublicationReceipt {
 
 #[cfg(feature = "fs")]
 impl FilePublicationReceipt {
-    pub const fn phase(&self) -> FilePublicationPhase {
-        FilePublicationPhase::Complete
-    }
-
     pub fn destination(&self) -> &Path {
         &self.destination
     }
@@ -220,18 +200,6 @@ impl FilePublicationReceipt {
 
     pub const fn byte_length(&self) -> u64 {
         self.byte_length
-    }
-
-    pub const fn commit_certainty(&self) -> CommitCertainty {
-        CommitCertainty::Committed
-    }
-
-    pub const fn staging_residue(&self) -> Option<&Path> {
-        None
-    }
-
-    pub const fn staging_residue_status(&self) -> StagingResidueStatus {
-        StagingResidueStatus::Absent
     }
 }
 

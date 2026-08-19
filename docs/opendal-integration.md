@@ -1661,7 +1661,8 @@ the single validation seam.
 <a id="publication-common"></a>
 ## Publication common contract
 
-All names are under `typst_pack::opendal::publication`.
+Adapter-specific names are under `typst_pack::opendal::publication`.
+`PublicationKeyOutcome` is exported at the crate root and re-exported there.
 
 ```rust
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1677,9 +1678,6 @@ pub enum PublicationKeyOutcome {
     Created,
     AlreadyMatching,
     Written,
-}
-impl PublicationKeyOutcome {
-    pub const fn commit_certainty(self) -> Option<CommitCertainty>;
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1882,36 +1880,35 @@ or I/O and before the future can be dropped, including when it is never polled.
 <a id="publication-evidence"></a>
 ### Publication evidence
 
+Pack Extraction and Compilation Output Artifact publication evidence is exported
+at the `typst_pack` root and re-exported from
+`typst_pack::opendal::publication`. The filesystem and OpenDAL adapters return
+the same nominal types. Pack Archive and package-cache evidence remains specific
+to OpenDAL because those workflows have no corresponding shared adapter path.
+
 ```rust
 pub struct PackArchivePublicationEntry { /* private */ }
 impl PackArchivePublicationEntry {
     pub fn destination_path(&self) -> &str;
     pub const fn outcome(&self) -> PublicationKeyOutcome;
-    pub const fn commit_certainty(&self) -> Option<CommitCertainty>;
 }
 
 pub struct PackExtractionPublicationEntry { /* private */ }
 impl PackExtractionPublicationEntry {
     pub fn relative_path(&self) -> &str;
-    pub fn destination_path(&self) -> &str;
     pub const fn outcome(&self) -> PublicationKeyOutcome;
-    pub const fn commit_certainty(&self) -> Option<CommitCertainty>;
 }
 
 pub struct CompilationArtifactPublicationEntry { /* private */ }
 impl CompilationArtifactPublicationEntry {
     pub fn artifact_index(&self) -> usize;
-    pub fn key(&self) -> &str;
-    pub fn destination_path(&self) -> &str;
     pub const fn outcome(&self) -> PublicationKeyOutcome;
-    pub const fn commit_certainty(&self) -> Option<CommitCertainty>;
 }
 
 pub struct PackageCacheArchivePublicationEntry { /* private */ }
 impl PackageCacheArchivePublicationEntry {
     pub fn destination_path(&self) -> &str;
     pub const fn outcome(&self) -> PublicationKeyOutcome;
-    pub const fn commit_certainty(&self) -> Option<CommitCertainty>;
 }
 ```
 
@@ -1924,7 +1921,6 @@ impl PackArchivePublicationProgress {
     pub fn new() -> Self;
     pub fn completed(&self) -> Option<&PackArchivePublicationEntry>;
     pub fn outcome(&self) -> Option<PublicationKeyOutcome>;
-    pub fn attempted_effects_commit_certainty(&self) -> Option<CommitCertainty>;
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1933,7 +1929,6 @@ impl PackageCacheArchivePublicationProgress {
     pub fn new() -> Self;
     pub fn completed(&self) -> Option<&PackageCacheArchivePublicationEntry>;
     pub fn outcome(&self) -> Option<PublicationKeyOutcome>;
-    pub fn attempted_effects_commit_certainty(&self) -> Option<CommitCertainty>;
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1941,7 +1936,6 @@ pub struct PackExtractionPublicationProgress { /* private */ }
 impl PackExtractionPublicationProgress {
     pub fn new() -> Self;
     pub fn completed(&self) -> &[PackExtractionPublicationEntry];
-    pub fn attempted_effects_commit_certainty(&self) -> Option<CommitCertainty>;
 }
 
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1949,7 +1943,6 @@ pub struct CompilationArtifactPublicationProgress { /* private */ }
 impl CompilationArtifactPublicationProgress {
     pub fn new() -> Self;
     pub fn completed(&self) -> &[CompilationArtifactPublicationEntry];
-    pub fn attempted_effects_commit_certainty(&self) -> Option<CommitCertainty>;
 }
 ```
 
@@ -1960,61 +1953,48 @@ pub struct PackArchivePublicationReceipt { /* private */ }
 impl PackArchivePublicationReceipt {
     pub fn destination(&self) -> &Location;
     pub const fn policy(&self) -> PublicationPolicy;
-    pub const fn phase(&self) -> OpenDalPublicationPhase;
     pub fn completed(&self) -> &PackArchivePublicationEntry;
     pub const fn outcome(&self) -> PublicationKeyOutcome;
     pub fn progress(&self) -> &PackArchivePublicationProgress;
-    pub fn attempted_effects_commit_certainty(&self) -> Option<CommitCertainty>;
 }
 
 pub struct PackExtractionPublicationReceipt { /* private */ }
 impl PackExtractionPublicationReceipt {
-    pub fn destination(&self) -> &Location;
-    pub const fn policy(&self) -> PublicationPolicy;
     pub fn pack_identity(&self) -> PackIdentity;
-    pub const fn phase(&self) -> OpenDalPublicationPhase;
     pub fn completed(&self) -> &[PackExtractionPublicationEntry];
     pub fn progress(&self) -> &PackExtractionPublicationProgress;
-    pub fn attempted_effects_commit_certainty(&self) -> Option<CommitCertainty>;
 }
 
 pub struct CompilationArtifactPublicationReceipt { /* private */ }
 impl CompilationArtifactPublicationReceipt {
     pub fn compilation_result_identity(&self) -> CompilationResultIdentity;
-    pub fn destination(&self) -> &Location;
-    pub const fn policy(&self) -> PublicationPolicy;
-    pub const fn phase(&self) -> OpenDalPublicationPhase;
     pub fn completed(&self) -> &[CompilationArtifactPublicationEntry];
     pub fn progress(&self) -> &CompilationArtifactPublicationProgress;
-    pub fn attempted_effects_commit_certainty(&self) -> Option<CommitCertainty>;
 }
 
 pub struct PackageCacheArchivePublicationReceipt { /* private */ }
 impl PackageCacheArchivePublicationReceipt {
     pub fn destination(&self) -> &Location;
     pub const fn policy(&self) -> PublicationPolicy;
-    pub const fn phase(&self) -> OpenDalPublicationPhase;
     pub fn completed(&self) -> &PackageCacheArchivePublicationEntry;
     pub const fn outcome(&self) -> PublicationKeyOutcome;
     pub fn progress(&self) -> &PackageCacheArchivePublicationProgress;
-    pub fn attempted_effects_commit_certainty(&self) -> Option<CommitCertainty>;
 }
 ```
 
-Every successful receipt reports phase `Complete`. `Created` and `Written`
-carry `Some(Committed)`. `AlreadyMatching` attempted no destination effect and
-carries `None`. Receipt `attempted_effects_commit_certainty()` is `None` when
-every entry was `AlreadyMatching`; otherwise successful receipts return
-`Some(Committed)`. There is no unconditional receipt `commit_certainty()`.
-`CONTEXT.md` remains the authority for the domain term Commit Certainty and is
-not redefined here.
+Returning a receipt is the success signal; receipts do not repeat a constant
+`Complete` phase or derive Commit Certainty from successful outcomes. `Created`,
+`Written`, and `AlreadyMatching` retain the adapter's actual per-entry
+observation. Commit Certainty appears only on publication errors. `CONTEXT.md`
+remains the authority for the domain term Commit Certainty and is not redefined
+here.
 
-`Created`, `Written`, `AlreadyMatching`, and `Committed` describe evidence at
-the relevant read/write observation. They do not promise mutable destination
-state remains unchanged when the call returns or that multi-key publication is
-atomic. A streamed match proves one successful byte stream matched expected
-bytes; OpenDAL provides no portable snapshot/version-bound read, so it does not
-prove the complete object existed in that state at one instant.
+`Created`, `Written`, and `AlreadyMatching` describe evidence at the relevant
+read/write observation. They do not promise mutable destination state remains
+unchanged when the call returns or that multi-key publication is atomic. A
+streamed match proves one successful byte stream matched expected bytes;
+OpenDAL provides no portable snapshot/version-bound read, so it does not prove
+the complete object existed in that state at one instant.
 
 <a id="publication-errors"></a>
 ### Publication errors
@@ -2478,8 +2458,6 @@ pub async fn publish_then_acquire(
         PublicationKeyOutcome::Written => {}
         _ => return Err("unsupported future PublicationKeyOutcome variant".into()),
     }
-    let _attempted_effects = receipt.attempted_effects_commit_certainty();
-
     let acquire_request = PackArchiveAcquisitionRequest::new(
         destination,
         AcquisitionLimits::reference_v1(),

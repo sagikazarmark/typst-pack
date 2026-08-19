@@ -3,6 +3,7 @@
 mod acquisition;
 mod publication;
 
+pub use crate::CommitCertainty;
 pub use acquisition::*;
 pub use publication::*;
 

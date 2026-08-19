@@ -86,21 +86,14 @@ fuzz_target!(|data: &[u8]| {
             probe,
         );
         let committed = match &result {
-            Ok(receipt) => receipt.progress().committed_files(),
-            Err(error) => {
-                assert_eq!(
-                    error.progress().commit_certainty(),
-                    error.commit_certainty()
-                );
-                assert_eq!(
-                    error.progress().staging_residue_status(),
-                    error.staging_residue_status()
-                );
-                error.progress().committed_files()
-            }
-        };
-        assert_eq!(committed, &planned[..committed.len()]);
-        for relative_path in committed {
+            Ok(receipt) => receipt.completed(),
+            Err(error) => error.progress().completed(),
+        }
+        .iter()
+        .map(|entry| std::path::PathBuf::from(entry.relative_path()))
+        .collect::<Vec<_>>();
+        assert_eq!(committed, planned[..committed.len()]);
+        for relative_path in &committed {
             let entry = plan
                 .entries()
                 .iter()

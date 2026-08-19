@@ -4,8 +4,8 @@ use typst_pack::pack_archive::{CommitCertainty, StagingResidueStatus};
 use typst_pack::{
     CompilationArtifactPublicationIssue, CompilationLimits, CompilationOutputSpecification,
     FilesystemMergePolicy, FilesystemPublicationPreflightIssue, Pack, PackCompilationRequest,
-    PackExtractionSelection, PdfOutputSpecification, SvgOutputSpecification, compile_with_limits,
-    plan_pack_extraction, publish_compilation_artifacts_to_filesystem_paths,
+    PackExtractionSelection, PdfOutputSpecification, PublicationKeyOutcome, SvgOutputSpecification,
+    compile_with_limits, plan_pack_extraction, publish_compilation_artifacts_to_filesystem_paths,
     publish_pack_extraction_plan_to_filesystem,
 };
 
@@ -54,16 +54,16 @@ fn publish_new_tree_exposes_the_complete_plan_through_one_root_commit() {
     )
     .unwrap();
 
-    assert_eq!(receipt.commit_certainty(), CommitCertainty::Committed);
+    assert_eq!(receipt.pack_identity(), *plan.pack_identity());
     assert_eq!(
-        receipt.staging_residue_status(),
-        StagingResidueStatus::Absent
-    );
-    assert_eq!(
-        receipt.progress().committed_files(),
+        receipt
+            .completed()
+            .iter()
+            .map(|entry| (entry.relative_path(), entry.outcome()))
+            .collect::<Vec<_>>(),
         [
-            std::path::PathBuf::from("assets/data.txt"),
-            std::path::PathBuf::from("main.typ"),
+            ("assets/data.txt", PublicationKeyOutcome::Created),
+            ("main.typ", PublicationKeyOutcome::Created),
         ]
     );
     assert_eq!(
@@ -202,7 +202,7 @@ fn merge_policies_remain_distinct_and_preserve_unrelated_content() {
     assert_eq!(error.commit_certainty(), CommitCertainty::NotCommitted);
     assert_eq!(error.staging_residue_status(), StagingResidueStatus::Absent);
     assert_eq!(error.staging_residue(), None);
-    assert!(error.progress().committed_files().is_empty());
+    assert!(error.progress().completed().is_empty());
     assert_eq!(
         std::fs::read(destination.join("main.typ")).unwrap(),
         b"old main"
@@ -211,6 +211,7 @@ fn merge_policies_remain_distinct_and_preserve_unrelated_content() {
         std::fs::read(destination.join("assets/data.txt")).unwrap(),
         b"old data"
     );
+    std::fs::remove_file(destination.join("assets/data.txt")).unwrap();
 
     let receipt = publish_pack_extraction_plan_to_filesystem(
         &plan,
@@ -220,10 +221,14 @@ fn merge_policies_remain_distinct_and_preserve_unrelated_content() {
     .unwrap();
 
     assert_eq!(
-        receipt.progress().committed_files(),
+        receipt
+            .completed()
+            .iter()
+            .map(|entry| (entry.relative_path(), entry.outcome()))
+            .collect::<Vec<_>>(),
         [
-            std::path::PathBuf::from("assets/data.txt"),
-            std::path::PathBuf::from("main.typ"),
+            ("assets/data.txt", PublicationKeyOutcome::Written),
+            ("main.typ", PublicationKeyOutcome::Written),
         ]
     );
     assert_eq!(
@@ -287,7 +292,7 @@ fn preflight_aggregates_detectable_issues_before_writing() {
         FilesystemPublicationPreflightIssue::ComponentTooLong { relative_path, .. }
             if relative_path.ends_with("child.txt")
     )));
-    assert!(error.progress().committed_files().is_empty());
+    assert!(error.progress().completed().is_empty());
     assert!(!destination.join("main.typ").exists());
     assert_eq!(
         std::fs::read(destination.join("existing.txt")).unwrap(),
@@ -324,8 +329,16 @@ fn compilation_artifacts_publish_as_a_new_tree_through_caller_selected_platform_
     .unwrap();
 
     assert_eq!(
-        receipt.progress().committed_files(),
-        [std::path::PathBuf::from("reports/custom-name.pdf")]
+        receipt.compilation_result_identity(),
+        result.result_identity()
+    );
+    assert_eq!(
+        receipt
+            .completed()
+            .iter()
+            .map(|entry| (entry.artifact_index(), entry.outcome()))
+            .collect::<Vec<_>>(),
+        [(0, PublicationKeyOutcome::Created)]
     );
     assert_eq!(
         std::fs::read(destination.join(&paths[0])).unwrap(),
@@ -430,7 +443,7 @@ fn caller_selected_artifact_paths_reject_count_and_tree_conflicts_before_writes(
                     if relative_path.as_path() == invalid.as_path()
             )
         }));
-        assert!(error.progress().committed_files().is_empty());
+        assert!(error.progress().completed().is_empty());
         assert!(!destination.exists());
     }
 }
@@ -479,7 +492,7 @@ fn rejected_compilation_results_are_not_published() {
 
 #[cfg(unix)]
 #[test]
-fn caller_selected_artifact_progress_preserves_non_unicode_platform_paths() {
+fn caller_selected_artifact_publication_supports_non_unicode_platform_paths() {
     use std::os::unix::ffi::OsStringExt as _;
 
     let pack = Pack::builder("main.typ")
@@ -509,10 +522,7 @@ fn caller_selected_artifact_progress_preserves_non_unicode_platform_paths() {
     )
     .unwrap();
 
-    assert_eq!(
-        receipt.progress().committed_files(),
-        std::slice::from_ref(&relative)
-    );
+    assert_eq!(receipt.completed()[0].artifact_index(), 0);
     assert_eq!(
         std::fs::read(destination.join(relative)).unwrap(),
         result.artifacts()[0].bytes()
@@ -561,7 +571,7 @@ fn preflight_rejects_symlinked_targets_and_ancestors_without_writes() {
         FilesystemPublicationPreflightIssue::ConflictingTarget { relative_path, .. }
             if relative_path == "target.txt"
     )));
-    assert!(error.progress().committed_files().is_empty());
+    assert!(error.progress().completed().is_empty());
     assert!(!destination.join("main.typ").exists());
     assert!(!outside.join("child.txt").exists());
     assert!(!outside.join("target.txt").exists());
@@ -603,7 +613,11 @@ fn native_case_aliases_are_aggregated_before_writes() {
     } else {
         let receipt = result.unwrap();
         assert_eq!(
-            receipt.progress().committed_files(),
+            receipt
+                .completed()
+                .iter()
+                .map(|entry| entry.relative_path())
+                .collect::<Vec<_>>(),
             ["Case.txt", "case.txt", "main.typ"]
         );
     }

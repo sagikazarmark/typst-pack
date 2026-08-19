@@ -474,17 +474,21 @@ semantic result or operational outcome and the safe context needed to interpret
 it.
 
 **Publication Receipt**:
-Workflow-specific evidence that a destination adapter successfully completed one
-publication attempt. Receipts are operational evidence and do not contribute to
-Pack, Compilation, or Compilation Result identity.
+Evidence that a destination adapter successfully completed one publication
+attempt. Pack Extraction and Compilation Output Artifact receipts use the same
+adapter-neutral shapes across filesystem and OpenDAL publication. Receipts are
+operational evidence and do not contribute to Pack, Compilation, or Compilation
+Result identity.
 
 **Publication Progress**:
-Workflow-specific evidence of destination effects completed before an adapter
-error, with committed paths retained in publication-plan order. It states commit
-certainty and retry-relevant residue rather than requiring callers to infer
-effects by inspecting the destination.
+Evidence of publication entries completed before an adapter error, retained in
+publication-plan order. Adapter-specific errors separately retain commit
+certainty, failed destination context, and retry-relevant residue where
+applicable.
 
 **Commit Certainty**:
-The adapter's knowledge that one attempted destination effect was Not Committed,
-Committed, or Indeterminate. Indeterminate means observation cannot prove either
-result; it never silently weakens a requested publication policy.
+An error field recording the adapter's knowledge that one attempted destination
+effect was Not Committed, Committed, or Indeterminate. Indeterminate means
+observation cannot prove either result; it never silently weakens a requested
+publication policy. Successful receipts do not restate certainty implied by
+success.

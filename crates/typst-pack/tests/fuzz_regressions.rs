@@ -290,7 +290,7 @@ fn typkignore_and_publication_state_regressions_replay_natively() {
         }
         let receipt = publish_pack_extraction_plan_to_filesystem(&plan, &destination, policy)
             .unwrap_or_else(|error| panic!("publication regression {policy:?} failed: {error}"));
-        assert_eq!(receipt.commit_certainty(), CommitCertainty::Committed);
+        assert_eq!(receipt.completed().len(), 1);
         assert_eq!(
             std::fs::read(destination.join("main.typ")).unwrap(),
             b"published"

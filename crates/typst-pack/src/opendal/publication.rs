@@ -9,9 +9,16 @@ use super::location::validate_decoded_artifact_key_path;
 use super::{
     BoxError, Location, LocationError, LocationRoleError, OperatorBinding, OperatorResolver,
 };
-use crate::pack_archive::CommitCertainty;
 use crate::redacted_error::RedactedError;
-use crate::{CompilationResult, CompilationResultIdentity, CompilationStatus, PackArchiveBytes};
+use crate::{
+    CommitCertainty, CompilationResult, CompilationResultIdentity, CompilationStatus,
+    PackArchiveBytes,
+};
+pub use crate::{
+    CompilationArtifactPublicationEntry, CompilationArtifactPublicationProgress,
+    CompilationArtifactPublicationReceipt, PackExtractionPublicationEntry,
+    PackExtractionPublicationProgress, PackExtractionPublicationReceipt, PublicationKeyOutcome,
+};
 
 /// The exact-key conflict policy for an OpenDAL publication operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -21,25 +28,6 @@ pub enum PublicationPolicy {
     CreateOrVerify,
     /// Write every exact key without inspecting its existing value.
     OverwriteExactKeys,
-}
-
-/// The outcome observed for one successfully completed exact key.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum PublicationKeyOutcome {
-    Created,
-    AlreadyMatching,
-    Written,
-}
-
-impl PublicationKeyOutcome {
-    /// Commit Certainty for the destination effect represented by this outcome.
-    pub const fn commit_certainty(self) -> Option<CommitCertainty> {
-        match self {
-            Self::AlreadyMatching => None,
-            Self::Created | Self::Written => Some(CommitCertainty::Committed),
-        }
-    }
 }
 
 /// The OpenDAL adapter phase reached by a publication attempt.
@@ -796,7 +784,6 @@ pub fn publish_pack_extraction_plan<'a, R: OperatorResolver + ?Sized>(
             let mut operation = PackExtractionPublicationOperation {
                 request,
                 plan,
-                destinations: &destinations,
                 progress,
             };
             publish_exact_keys(
@@ -809,12 +796,10 @@ pub fn publish_pack_extraction_plan<'a, R: OperatorResolver + ?Sized>(
             .await?;
         }
 
-        Ok(PackExtractionPublicationReceipt {
-            destination: request.destination().clone(),
-            policy: request.policy(),
-            pack_identity: *plan.pack_identity(),
-            progress: progress.clone(),
-        })
+        Ok(PackExtractionPublicationReceipt::new(
+            *plan.pack_identity(),
+            progress.clone(),
+        ))
     }
 }
 
@@ -1035,11 +1020,7 @@ pub fn publish_compilation_artifacts<'a, R: OperatorResolver + ?Sized>(
             })
             .collect::<Vec<_>>();
         {
-            let mut operation = CompilationArtifactPublicationOperation {
-                request,
-                destinations: &destinations,
-                progress,
-            };
+            let mut operation = CompilationArtifactPublicationOperation { request, progress };
             publish_exact_keys(
                 resolver,
                 request.destination().binding(),
@@ -1050,12 +1031,10 @@ pub fn publish_compilation_artifacts<'a, R: OperatorResolver + ?Sized>(
             .await?;
         }
 
-        Ok(CompilationArtifactPublicationReceipt {
-            compilation_result_identity: request.compilation_result_identity(),
-            destination: request.destination().clone(),
-            policy: request.policy(),
-            progress: progress.clone(),
-        })
+        Ok(CompilationArtifactPublicationReceipt::new(
+            request.compilation_result_identity(),
+            progress.clone(),
+        ))
     }
 }
 
@@ -1184,15 +1163,6 @@ fn compilation_artifact_publication_error(
     }
 }
 
-fn attempted_effects_commit_certainty<'a>(
-    outcomes: impl IntoIterator<Item = &'a PublicationKeyOutcome>,
-) -> Option<CommitCertainty> {
-    outcomes
-        .into_iter()
-        .any(|outcome| outcome.commit_certainty().is_some())
-        .then_some(CommitCertainty::Committed)
-}
-
 macro_rules! workflow_evidence {
     (
         $entry:ident, $progress:ident, $receipt:ident,
@@ -1215,9 +1185,6 @@ macro_rules! workflow_evidence {
                 self.outcome
             }
 
-            pub const fn commit_certainty(&self) -> Option<CommitCertainty> {
-                self.outcome.commit_certainty()
-            }
         }
 
         #[derive(Clone, Debug, Default, Eq, PartialEq)]
@@ -1231,12 +1198,6 @@ macro_rules! workflow_evidence {
             }
 
             $($progress_accessors)*
-
-            pub fn attempted_effects_commit_certainty(&self) -> Option<CommitCertainty> {
-                attempted_effects_commit_certainty(
-                    self.completed.iter().map(|entry| &entry.outcome),
-                )
-            }
 
             pub(crate) fn clear(&mut self) {
                 self.completed.clear();
@@ -1256,16 +1217,8 @@ macro_rules! workflow_evidence {
         impl $receipt {
             $($receipt_accessors)*
 
-            pub const fn phase(&self) -> OpenDalPublicationPhase {
-                OpenDalPublicationPhase::Complete
-            }
-
             pub const fn progress(&self) -> &$progress {
                 &self.progress
-            }
-
-            pub fn attempted_effects_commit_certainty(&self) -> Option<CommitCertainty> {
-                self.progress.attempted_effects_commit_certainty()
             }
         }
     };
@@ -1328,55 +1281,6 @@ workflow_evidence!(
                 [] => panic!("a package-cache archive receipt has one completed entry"),
             }
         }
-    }
-);
-
-workflow_evidence!(
-    PackExtractionPublicationEntry,
-    PackExtractionPublicationProgress,
-    PackExtractionPublicationReceipt,
-    entry { relative_path: String, destination_path: String },
-    entry_accessors {
-        pub fn relative_path(&self) -> &str { &self.relative_path }
-        pub fn destination_path(&self) -> &str { &self.destination_path }
-    },
-    progress_accessors {
-        pub fn completed(&self) -> &[PackExtractionPublicationEntry] { &self.completed }
-    },
-    receipt { destination: Location, policy: PublicationPolicy, pack_identity: crate::PackIdentity },
-    receipt_accessors {
-        pub fn destination(&self) -> &Location { &self.destination }
-        pub const fn policy(&self) -> PublicationPolicy { self.policy }
-        pub fn pack_identity(&self) -> crate::PackIdentity { self.pack_identity }
-        pub fn completed(&self) -> &[PackExtractionPublicationEntry] { self.progress.completed() }
-    }
-);
-
-workflow_evidence!(
-    CompilationArtifactPublicationEntry,
-    CompilationArtifactPublicationProgress,
-    CompilationArtifactPublicationReceipt,
-    entry { artifact_index: usize, key: String, destination_path: String },
-    entry_accessors {
-        pub const fn artifact_index(&self) -> usize { self.artifact_index }
-        pub fn key(&self) -> &str { &self.key }
-        pub fn destination_path(&self) -> &str { &self.destination_path }
-    },
-    progress_accessors {
-        pub fn completed(&self) -> &[CompilationArtifactPublicationEntry] { &self.completed }
-    },
-    receipt {
-        compilation_result_identity: crate::CompilationResultIdentity,
-        destination: Location,
-        policy: PublicationPolicy
-    },
-    receipt_accessors {
-        pub fn compilation_result_identity(&self) -> crate::CompilationResultIdentity {
-            self.compilation_result_identity
-        }
-        pub fn destination(&self) -> &Location { &self.destination }
-        pub const fn policy(&self) -> PublicationPolicy { self.policy }
-        pub fn completed(&self) -> &[CompilationArtifactPublicationEntry] { self.progress.completed() }
     }
 );
 
@@ -1596,7 +1500,6 @@ impl ExactKeyPublicationCause for PackageCacheArchivePublicationErrorCause {
 struct PackExtractionPublicationOperation<'a> {
     request: &'a PackExtractionPublicationRequest,
     plan: &'a crate::PackExtractionPlan,
-    destinations: &'a [Location],
     progress: &'a mut PackExtractionPublicationProgress,
 }
 
@@ -1606,11 +1509,10 @@ impl ExactKeyPublicationOperation for PackExtractionPublicationOperation<'_> {
 
     fn completed_entry(&mut self, entry: ExactKeyPublicationEntry) {
         let index = entry.index;
-        self.progress.push(PackExtractionPublicationEntry {
-            relative_path: self.plan.entries()[index].relative_path().to_owned(),
-            destination_path: self.destinations[index].operation_path().to_owned(),
-            outcome: entry.outcome,
-        });
+        self.progress.push(PackExtractionPublicationEntry::new(
+            self.plan.entries()[index].relative_path().to_owned(),
+            entry.outcome,
+        ));
     }
 
     fn error(&self, failure: ExactKeyPublicationFailure, cause: Self::Cause) -> Self::Error {
@@ -1670,7 +1572,6 @@ impl ExactKeyOverwriteCause for PackExtractionPublicationErrorCause {
 
 struct CompilationArtifactPublicationOperation<'a> {
     request: &'a CompilationArtifactPublicationRequest,
-    destinations: &'a [Location],
     progress: &'a mut CompilationArtifactPublicationProgress,
 }
 
@@ -1680,14 +1581,10 @@ impl ExactKeyPublicationOperation for CompilationArtifactPublicationOperation<'_
 
     fn completed_entry(&mut self, entry: ExactKeyPublicationEntry) {
         let artifact_index = entry.index;
-        self.progress.push(CompilationArtifactPublicationEntry {
+        self.progress.push(CompilationArtifactPublicationEntry::new(
             artifact_index,
-            key: self.request.artifact_keys()[artifact_index].clone(),
-            destination_path: self.destinations[artifact_index]
-                .operation_path()
-                .to_owned(),
-            outcome: entry.outcome,
-        });
+            entry.outcome,
+        ));
     }
 
     fn error(&self, failure: ExactKeyPublicationFailure, cause: Self::Cause) -> Self::Error {
@@ -2360,7 +2257,6 @@ mod tests {
             receipt.completed()[0].outcome,
             PublicationKeyOutcome::AlreadyMatching
         );
-        assert_eq!(receipt.completed()[0].outcome.commit_certainty(), None);
         assert!(
             service
                 .log()
@@ -2699,7 +2595,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_evidence_does_not_treat_matching_observations_as_effects() {
+    fn workflow_evidence_retains_observed_outcomes() {
         let mut progress = PackArchivePublicationProgress::new();
         progress.push(PackArchivePublicationEntry {
             destination_path: "archive.typk".to_owned(),
@@ -2710,18 +2606,13 @@ mod tests {
             progress.outcome(),
             Some(PublicationKeyOutcome::AlreadyMatching)
         );
-        assert_eq!(progress.completed().unwrap().commit_certainty(), None);
-        assert_eq!(progress.attempted_effects_commit_certainty(), None);
 
         progress.clear();
         progress.push(PackArchivePublicationEntry {
             destination_path: "archive.typk".to_owned(),
             outcome: PublicationKeyOutcome::Created,
         });
-        assert_eq!(
-            progress.attempted_effects_commit_certainty(),
-            Some(CommitCertainty::Committed)
-        );
+        assert_eq!(progress.outcome(), Some(PublicationKeyOutcome::Created));
     }
 
     #[derive(Debug)]

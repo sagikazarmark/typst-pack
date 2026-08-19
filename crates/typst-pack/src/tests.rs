@@ -2264,7 +2264,7 @@ Rows: #csv("data.csv").len()
             FilesystemMergePolicy::MergeCreateOnly,
         )
         .unwrap();
-        assert!(!receipt.progress().committed_files().is_empty());
+        assert!(!receipt.completed().is_empty());
         assert!(target.join("main.typ").exists());
         assert!(target.join("assets/logo.png").exists());
         assert!(target.join("packages/local/greet/0.1.0/lib.typ").exists());
@@ -2344,7 +2344,7 @@ Rows: #csv("data.csv").len()
             FilesystemMergePolicy::MergeReplaceExactFiles,
         )
         .unwrap();
-        assert_eq!(receipt.progress().committed_files().len(), 2);
+        assert_eq!(receipt.completed().len(), 2);
         assert_eq!(fs::read(target.join("z.txt")).unwrap(), b"packed");
 
         let blocked_target = dir.path().join("blocked");
@@ -2473,7 +2473,7 @@ Rows: #csv("data.csv").len()
         )
         .unwrap();
 
-        assert_eq!(receipt.progress().committed_files().len(), 2);
+        assert_eq!(receipt.completed().len(), 2);
         assert!(target.join(pack_font_path(&pack.fonts()[0])).is_file());
     }
 }

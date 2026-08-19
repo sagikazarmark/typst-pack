@@ -86,17 +86,8 @@ fn absent_cache_object_is_created_from_exact_borrowed_bytes() {
     assert_eq!(archive.as_ptr(), archive_address);
     assert_eq!(receipt.destination(), request().destination());
     assert_eq!(receipt.policy(), PublicationPolicy::CreateOrVerify);
-    assert_eq!(receipt.phase(), OpenDalPublicationPhase::Complete);
     assert_eq!(receipt.outcome(), PublicationKeyOutcome::Created);
     assert_eq!(receipt.completed().destination_path(), cache_path());
-    assert_eq!(
-        receipt.completed().commit_certainty(),
-        Some(CommitCertainty::Committed)
-    );
-    assert_eq!(
-        receipt.attempted_effects_commit_certainty(),
-        Some(CommitCertainty::Committed)
-    );
     assert_eq!(
         service.destination().object(cache_path()),
         Some(archive.as_slice())
@@ -157,8 +148,6 @@ fn replay_incrementally_distinguishes_empty_exact_shorter_divergent_and_longer_s
         } else {
             let receipt = result.unwrap();
             assert_eq!(receipt.outcome(), PublicationKeyOutcome::AlreadyMatching);
-            assert_eq!(receipt.completed().commit_certainty(), None);
-            assert_eq!(receipt.attempted_effects_commit_certainty(), None);
         }
         assert_eq!(service.destination().object(cache_path()), Some(observed));
         assert!(
@@ -199,7 +188,6 @@ fn mutable_matching_stream_reports_only_a_read_observation() {
     .unwrap();
 
     assert_eq!(receipt.outcome(), PublicationKeyOutcome::AlreadyMatching);
-    assert_eq!(receipt.attempted_effects_commit_certainty(), None);
     assert_eq!(
         service.destination().object(cache_path()),
         Some(b"YYin".as_slice())
@@ -308,7 +296,6 @@ fn conditional_race_is_verified_once_without_treating_the_read_as_a_commit() {
     };
 
     assert_eq!(receipt.outcome(), PublicationKeyOutcome::AlreadyMatching);
-    assert_eq!(receipt.attempted_effects_commit_certainty(), None);
     assert_eq!(
         service
             .log()
@@ -609,7 +596,6 @@ fn memory_creation_and_replay_preserve_exact_bytes() {
     )))
     .unwrap();
     assert_eq!(replay.outcome(), PublicationKeyOutcome::AlreadyMatching);
-    assert_eq!(replay.attempted_effects_commit_certainty(), None);
     assert_eq!(
         expect_ready(pin!(operator.read(cache_path())))
             .unwrap()

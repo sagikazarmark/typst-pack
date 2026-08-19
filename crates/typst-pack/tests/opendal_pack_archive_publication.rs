@@ -80,16 +80,7 @@ fn overwrite_writes_exact_borrowed_bytes_once_without_reading_or_touching_other_
     assert_eq!(archive.as_slice().as_ptr(), archive_address);
     assert_eq!(receipt.destination(), request.destination());
     assert_eq!(receipt.policy(), PublicationPolicy::OverwriteExactKeys);
-    assert_eq!(receipt.phase(), OpenDalPublicationPhase::Complete);
     assert_eq!(receipt.outcome(), PublicationKeyOutcome::Written);
-    assert_eq!(
-        receipt.completed().commit_certainty(),
-        Some(CommitCertainty::Committed)
-    );
-    assert_eq!(
-        receipt.attempted_effects_commit_certainty(),
-        Some(CommitCertainty::Committed)
-    );
     assert_eq!(
         service.destination().object("packs/document.typk"),
         Some(archive.as_slice())
@@ -145,8 +136,6 @@ fn create_or_verify_compares_empty_and_exact_streams_as_read_only_successes() {
         .unwrap();
 
         assert_eq!(receipt.outcome(), PublicationKeyOutcome::AlreadyMatching);
-        assert_eq!(receipt.completed().commit_certainty(), None);
-        assert_eq!(receipt.attempted_effects_commit_certainty(), None);
         assert!(
             service
                 .log()
@@ -238,7 +227,6 @@ fn create_or_verify_reports_a_mutable_matching_stream_without_claiming_an_effect
     .unwrap();
 
     assert_eq!(receipt.outcome(), PublicationKeyOutcome::AlreadyMatching);
-    assert_eq!(receipt.attempted_effects_commit_certainty(), None);
     assert_eq!(
         service.destination().object("packs/document.typk"),
         Some(b"YYin".as_slice())
@@ -272,10 +260,6 @@ fn create_or_verify_creates_absent_bytes_and_performs_one_bounded_race_verificat
     )))
     .unwrap();
     assert_eq!(created.outcome(), PublicationKeyOutcome::Created);
-    assert_eq!(
-        created.attempted_effects_commit_certainty(),
-        Some(CommitCertainty::Committed)
-    );
 
     let pending = PendingPoint::new();
     let race_service = PublicationService::new(
@@ -320,7 +304,6 @@ fn create_or_verify_creates_absent_bytes_and_performs_one_bounded_race_verificat
     };
 
     assert_eq!(receipt.outcome(), PublicationKeyOutcome::AlreadyMatching);
-    assert_eq!(receipt.attempted_effects_commit_certainty(), None);
     assert_eq!(
         race_service
             .log()
@@ -641,7 +624,6 @@ fn memory_publish_replay_and_acquire_preserve_exact_bytes_before_decode() {
         let receipt =
             expect_ready(pin!(publish_pack_archive(&bindings, &replay, &archive))).unwrap();
         assert_eq!(receipt.outcome(), PublicationKeyOutcome::AlreadyMatching);
-        assert_eq!(receipt.attempted_effects_commit_certainty(), None);
     }
 
     let acquisition =

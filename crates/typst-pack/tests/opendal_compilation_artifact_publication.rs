@@ -15,15 +15,16 @@ use scripted_opendal::{
 };
 use typst_pack::opendal::publication::{
     CompilationArtifactKeyIssue, CompilationArtifactPublicationErrorCause,
-    CompilationArtifactPublicationProgress, CompilationArtifactPublicationRequest,
-    CompilationArtifactPublicationRequestIssue, OpenDalPublicationPhase, PublicationKeyOutcome,
-    PublicationPolicy, publish_compilation_artifacts,
+    CompilationArtifactPublicationRequest, CompilationArtifactPublicationRequestIssue,
+    OpenDalPublicationPhase, PublicationKeyOutcome, PublicationPolicy,
+    publish_compilation_artifacts,
 };
 use typst_pack::opendal::{
     Location, LocationRoleError, OperatorBinding, OperatorBindings, OperatorResolver,
 };
 use typst_pack::pack_archive::CommitCertainty;
 use typst_pack::{
+    CompilationArtifactPublicationProgress, CompilationArtifactPublicationReceipt,
     CompilationLimits, CompilationOutputSpecification, CompilationResult, CompilationStatus, Pack,
     PackCompilationRequest, SvgOutputSpecification, compile_with_limits,
 };
@@ -208,51 +209,23 @@ fn overwrite_publishes_exact_artifact_bytes_and_complete_evidence_in_order() {
     let identity = result.result_identity();
     let mut progress = CompilationArtifactPublicationProgress::new();
 
-    let receipt = expect_ready(pin!(publish_compilation_artifacts(
-        &bindings,
-        &request,
-        &result,
-        &mut progress,
-    )))
+    let receipt: CompilationArtifactPublicationReceipt = expect_ready(pin!(
+        publish_compilation_artifacts(&bindings, &request, &result, &mut progress,)
+    ))
     .unwrap();
 
     assert_eq!(result.result_identity(), identity);
     assert_eq!(receipt.compilation_result_identity(), identity);
-    assert_eq!(receipt.destination(), request.destination());
-    assert_eq!(receipt.policy(), PublicationPolicy::OverwriteExactKeys);
-    assert_eq!(receipt.phase(), OpenDalPublicationPhase::Complete);
     assert_eq!(receipt.progress(), &progress);
-    assert_eq!(
-        receipt.attempted_effects_commit_certainty(),
-        Some(CommitCertainty::Committed)
-    );
     assert_eq!(
         receipt
             .completed()
             .iter()
-            .map(|entry| (
-                entry.artifact_index(),
-                entry.key(),
-                entry.destination_path(),
-                entry.outcome(),
-                entry.commit_certainty(),
-            ))
+            .map(|entry| (entry.artifact_index(), entry.outcome()))
             .collect::<Vec<_>>(),
         [
-            (
-                0,
-                "document.svg",
-                "output/document.svg",
-                PublicationKeyOutcome::Written,
-                Some(CommitCertainty::Committed),
-            ),
-            (
-                1,
-                "pages/2.svg",
-                "output/pages/2.svg",
-                PublicationKeyOutcome::Written,
-                Some(CommitCertainty::Committed),
-            ),
+            (0, PublicationKeyOutcome::Written),
+            (1, PublicationKeyOutcome::Written),
         ]
     );
     assert_eq!(
@@ -347,10 +320,6 @@ fn dropping_mid_publication_leaves_the_completed_prefix_in_caller_progress() {
         progress.completed()[0].outcome(),
         PublicationKeyOutcome::Written
     );
-    assert_eq!(
-        progress.attempted_effects_commit_certainty(),
-        Some(CommitCertainty::Committed)
-    );
 }
 
 #[test]
@@ -398,19 +367,12 @@ fn create_or_verify_completes_all_comparisons_before_creating_absent_artifacts()
         receipt
             .completed()
             .iter()
-            .map(|entry| (entry.outcome(), entry.commit_certainty()))
+            .map(|entry| entry.outcome())
             .collect::<Vec<_>>(),
         [
-            (PublicationKeyOutcome::AlreadyMatching, None),
-            (
-                PublicationKeyOutcome::Created,
-                Some(CommitCertainty::Committed)
-            ),
+            PublicationKeyOutcome::AlreadyMatching,
+            PublicationKeyOutcome::Created,
         ]
-    );
-    assert_eq!(
-        receipt.attempted_effects_commit_certainty(),
-        Some(CommitCertainty::Committed)
     );
     let log = service.log();
     let second_read = log
@@ -427,7 +389,7 @@ fn create_or_verify_completes_all_comparisons_before_creating_absent_artifacts()
 }
 
 #[test]
-fn matching_create_or_verify_receipt_has_no_attempted_effect_certainty() {
+fn matching_create_or_verify_receipt_reports_the_read_only_outcome() {
     let result = compilation_result("matching");
     let bytes = result.artifacts()[0].bytes().to_vec();
     let service = PublicationService::new(
@@ -458,8 +420,6 @@ fn matching_create_or_verify_receipt_has_no_attempted_effect_certainty() {
         receipt.completed()[0].outcome(),
         PublicationKeyOutcome::AlreadyMatching
     );
-    assert_eq!(receipt.completed()[0].commit_certainty(), None);
-    assert_eq!(receipt.attempted_effects_commit_certainty(), None);
 }
 
 #[test]
@@ -504,7 +464,6 @@ fn mutable_comparison_and_conditional_race_project_read_only_success_evidence() 
         mutable_receipt.completed()[0].outcome(),
         PublicationKeyOutcome::AlreadyMatching
     );
-    assert_eq!(mutable_receipt.attempted_effects_commit_certainty(), None);
 
     let race_result = compilation_result("race verification");
     let race_bytes = race_result.artifacts()[0].bytes().to_vec();
@@ -559,7 +518,6 @@ fn mutable_comparison_and_conditional_race_project_read_only_success_evidence() 
         race_receipt.completed()[0].outcome(),
         PublicationKeyOutcome::AlreadyMatching
     );
-    assert_eq!(race_receipt.attempted_effects_commit_certainty(), None);
 }
 
 #[test]
@@ -847,7 +805,6 @@ fn empty_succeeded_results_skip_resolution_and_unpolled_futures_clear_stale_prog
     )))
     .unwrap();
     assert!(receipt.completed().is_empty());
-    assert_eq!(receipt.attempted_effects_commit_certainty(), None);
 
     let result = compilation_result("stale progress");
     let service = PublicationService::new(

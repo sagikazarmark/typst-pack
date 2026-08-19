@@ -14,9 +14,7 @@ fn stream_publication_handles_short_writes_and_reports_complete_evidence() {
     let receipt = publish(&mut writer, &archive).unwrap();
 
     assert_eq!(writer.bytes, archive.as_slice());
-    assert_eq!(receipt.phase(), StreamPublicationPhase::Complete);
     assert_eq!(receipt.visible_prefix(), archive.len());
-    assert_eq!(receipt.commit_certainty(), CommitCertainty::Committed);
     assert!(writer.flush_called);
 }
 
@@ -82,10 +80,7 @@ fn file_create_new_publishes_complete_bytes_and_never_replaces() {
 
     let receipt = publish_file(&destination, &archive, FilePublicationPolicy::CreateNew).unwrap();
     assert_eq!(std::fs::read(&destination).unwrap(), archive.as_slice());
-    assert_eq!(receipt.phase(), FilePublicationPhase::Complete);
     assert_eq!(receipt.destination(), destination);
-    assert_eq!(receipt.commit_certainty(), CommitCertainty::Committed);
-    assert_eq!(receipt.staging_residue(), None);
 
     let replacement = PackArchiveBytes::from_vec(b"replacement".to_vec());
     let error =
@@ -152,13 +147,12 @@ fn file_replace_requires_an_existing_destination_and_commits_atomically() {
     );
 
     std::fs::write(&destination, b"old archive").unwrap();
-    let receipt = publish_file(
+    publish_file(
         &destination,
         &archive,
         FilePublicationPolicy::ReplaceExisting,
     )
     .unwrap();
-    assert_eq!(receipt.commit_certainty(), CommitCertainty::Committed);
     assert_eq!(std::fs::read(&destination).unwrap(), archive.as_slice());
 
     let pack = simple_pack();

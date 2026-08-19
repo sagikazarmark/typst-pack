@@ -38,6 +38,7 @@ mod package_catalog;
 mod package_failure;
 mod payload;
 mod project_snapshot;
+mod publication;
 #[cfg(feature = "opendal")]
 mod redacted_error;
 mod world;
@@ -74,11 +75,9 @@ pub use creation::{
 #[cfg(feature = "fs")]
 pub use filesystem_publication::{
     CompilationArtifactPathPublicationError, CompilationArtifactPublicationError,
-    CompilationArtifactPublicationIssue, CompilationArtifactPublicationProgress,
-    CompilationArtifactPublicationReceipt, FilesystemDestinationEntryKind, FilesystemMergePolicy,
+    CompilationArtifactPublicationIssue, FilesystemDestinationEntryKind, FilesystemMergePolicy,
     FilesystemPublicationErrorCause, FilesystemPublicationPhase,
     FilesystemPublicationPreflightIssue, PackExtractionPublicationError,
-    PackExtractionPublicationProgress, PackExtractionPublicationReceipt,
     publish_compilation_artifacts_to_filesystem_paths, publish_pack_extraction_plan_to_filesystem,
 };
 #[cfg(all(feature = "fs", fuzzing))]
@@ -149,6 +148,11 @@ pub use package_failure::{
 pub use payload::PackArchiveBytes;
 pub use project_snapshot::{
     ProjectSnapshot, ProjectSnapshotAssembly, ProjectSnapshotError, ProjectSnapshotIssue,
+};
+pub use publication::{
+    CommitCertainty, CompilationArtifactPublicationEntry, CompilationArtifactPublicationProgress,
+    CompilationArtifactPublicationReceipt, PackExtractionPublicationEntry,
+    PackExtractionPublicationProgress, PackExtractionPublicationReceipt, PublicationKeyOutcome,
 };
 
 #[cfg(test)]

@@ -15,8 +15,7 @@ use scripted_opendal::{
     WriteStep,
 };
 use typst_pack::opendal::publication::{
-    OpenDalPublicationPhase, PackExtractionPublicationErrorCause,
-    PackExtractionPublicationProgress, PackExtractionPublicationRequest,
+    OpenDalPublicationPhase, PackExtractionPublicationErrorCause, PackExtractionPublicationRequest,
     PackExtractionPublicationRequestError, PublicationKeyOutcome, PublicationPolicy,
     publish_pack_extraction_plan,
 };
@@ -24,7 +23,10 @@ use typst_pack::opendal::{
     Location, LocationRoleError, OperatorBinding, OperatorBindings, OperatorResolver,
 };
 use typst_pack::pack_archive::CommitCertainty;
-use typst_pack::{Pack, PackExtractionSelection, plan_pack_extraction};
+use typst_pack::{
+    Pack, PackExtractionPublicationProgress, PackExtractionPublicationReceipt,
+    PackExtractionSelection, plan_pack_extraction,
+};
 
 #[test]
 fn request_accepts_normalized_prefixes_and_rejects_exact_objects() {
@@ -73,47 +75,22 @@ fn overwrite_publishes_exact_plan_bytes_and_complete_evidence_in_plan_order() {
     let request = request(PublicationPolicy::OverwriteExactKeys);
     let mut progress = PackExtractionPublicationProgress::new();
 
-    let receipt = expect_ready(pin!(publish_pack_extraction_plan(
-        &bindings,
-        &request,
-        &plan,
-        &mut progress,
-    )))
+    let receipt: PackExtractionPublicationReceipt = expect_ready(pin!(
+        publish_pack_extraction_plan(&bindings, &request, &plan, &mut progress,)
+    ))
     .unwrap();
 
     assert_eq!(receipt.pack_identity(), *plan.pack_identity());
-    assert_eq!(receipt.destination(), request.destination());
-    assert_eq!(receipt.policy(), PublicationPolicy::OverwriteExactKeys);
-    assert_eq!(receipt.phase(), OpenDalPublicationPhase::Complete);
     assert_eq!(receipt.progress(), &progress);
-    assert_eq!(
-        receipt.attempted_effects_commit_certainty(),
-        Some(CommitCertainty::Committed)
-    );
     assert_eq!(
         receipt
             .completed()
             .iter()
-            .map(|entry| (
-                entry.relative_path(),
-                entry.destination_path(),
-                entry.outcome(),
-                entry.commit_certainty(),
-            ))
+            .map(|entry| (entry.relative_path(), entry.outcome()))
             .collect::<Vec<_>>(),
         [
-            (
-                "assets/logo.bin",
-                "extracted/assets/logo.bin",
-                PublicationKeyOutcome::Written,
-                Some(CommitCertainty::Committed),
-            ),
-            (
-                "main.typ",
-                "extracted/main.typ",
-                PublicationKeyOutcome::Written,
-                Some(CommitCertainty::Committed),
-            ),
+            ("assets/logo.bin", PublicationKeyOutcome::Written),
+            ("main.typ", PublicationKeyOutcome::Written),
         ]
     );
     assert_eq!(
@@ -215,14 +192,11 @@ fn create_or_verify_preflights_every_entry_then_reports_matching_and_created_ent
         receipt
             .completed()
             .iter()
-            .map(|entry| (entry.outcome(), entry.commit_certainty()))
+            .map(|entry| entry.outcome())
             .collect::<Vec<_>>(),
         [
-            (PublicationKeyOutcome::AlreadyMatching, None),
-            (
-                PublicationKeyOutcome::Created,
-                Some(CommitCertainty::Committed)
-            ),
+            PublicationKeyOutcome::AlreadyMatching,
+            PublicationKeyOutcome::Created,
         ]
     );
     let log = service.log();
@@ -559,7 +533,6 @@ fn mutable_streams_and_matching_conditional_races_are_read_only_successes() {
         mutable_receipt.completed()[0].outcome(),
         PublicationKeyOutcome::AlreadyMatching
     );
-    assert_eq!(mutable_receipt.attempted_effects_commit_certainty(), None);
 
     let pending = PendingPoint::new();
     let race_service = PublicationService::new(
@@ -600,7 +573,6 @@ fn mutable_streams_and_matching_conditional_races_are_read_only_successes() {
         race_receipt.completed()[0].outcome(),
         PublicationKeyOutcome::AlreadyMatching
     );
-    assert_eq!(race_receipt.attempted_effects_commit_certainty(), None);
 }
 
 #[test]
@@ -638,8 +610,8 @@ fn dropping_mid_plan_leaves_the_contiguous_completed_prefix_with_the_caller() {
     assert_eq!(progress.completed().len(), 1);
     assert_eq!(progress.completed()[0].relative_path(), "assets/logo.bin");
     assert_eq!(
-        progress.attempted_effects_commit_certainty(),
-        Some(CommitCertainty::Committed)
+        progress.completed()[0].outcome(),
+        PublicationKeyOutcome::Written
     );
 }
 
@@ -694,7 +666,6 @@ fn memory_proves_exact_root_state_and_create_or_verify_replay() {
             .iter()
             .all(|entry| entry.outcome() == PublicationKeyOutcome::AlreadyMatching)
     );
-    assert_eq!(receipt.attempted_effects_commit_certainty(), None);
 }
 
 #[test]

@@ -870,7 +870,7 @@ fn extract_command(args: ExtractArgs) -> CliResult {
 
     println!(
         "extracted {} file(s) into `{}`",
-        receipt.progress().committed_files().len(),
+        receipt.completed().len(),
         output.display()
     );
     Ok(())
