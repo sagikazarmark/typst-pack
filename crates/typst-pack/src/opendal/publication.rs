@@ -11,8 +11,7 @@ use super::{
 };
 use crate::redacted_error::RedactedError;
 use crate::{
-    CommitCertainty, CompilationResult, CompilationResultIdentity, CompilationStatus,
-    PackArchiveBytes,
+    CanonicalIdentity, CommitCertainty, CompilationResult, CompilationStatus, PackArchiveBytes,
 };
 pub use crate::{
     CompilationArtifactPublicationEntry, CompilationArtifactPublicationProgress,
@@ -515,7 +514,7 @@ pub enum PackExtractionPublicationRequestError {
 /// A validated request to publish every artifact in one succeeded Compilation Result.
 #[derive(Clone, Debug)]
 pub struct CompilationArtifactPublicationRequest {
-    compilation_result_identity: CompilationResultIdentity,
+    compilation_result_identity: CanonicalIdentity,
     destination: Location,
     artifact_keys: Vec<String>,
     policy: PublicationPolicy,
@@ -595,7 +594,7 @@ impl CompilationArtifactPublicationRequest {
         })
     }
 
-    pub const fn compilation_result_identity(&self) -> CompilationResultIdentity {
+    pub const fn compilation_result_identity(&self) -> CanonicalIdentity {
         self.compilation_result_identity
     }
 
@@ -621,13 +620,13 @@ impl CompilationArtifactPublicationRequest {
     .issues.len(),
 )]
 pub struct CompilationArtifactPublicationRequestRejection {
-    compilation_result_identity: CompilationResultIdentity,
+    compilation_result_identity: CanonicalIdentity,
     destination: Location,
     issues: Box<[CompilationArtifactPublicationRequestIssue]>,
 }
 
 impl CompilationArtifactPublicationRequestRejection {
-    pub const fn compilation_result_identity(&self) -> CompilationResultIdentity {
+    pub const fn compilation_result_identity(&self) -> CanonicalIdentity {
         self.compilation_result_identity
     }
 
@@ -1049,7 +1048,7 @@ pub fn publish_compilation_artifacts<'a, R: OperatorResolver + ?Sized>(
     .destination.operation_path(),
 )]
 pub struct CompilationArtifactPublicationError {
-    compilation_result_identity: CompilationResultIdentity,
+    compilation_result_identity: CanonicalIdentity,
     destination: Location,
     policy: PublicationPolicy,
     failed_artifact_index: Option<usize>,
@@ -1063,7 +1062,7 @@ pub struct CompilationArtifactPublicationError {
 }
 
 impl CompilationArtifactPublicationError {
-    pub const fn compilation_result_identity(&self) -> CompilationResultIdentity {
+    pub const fn compilation_result_identity(&self) -> CanonicalIdentity {
         self.compilation_result_identity
     }
 
@@ -1110,8 +1109,8 @@ impl CompilationArtifactPublicationError {
 pub enum CompilationArtifactPublicationErrorCause {
     #[error("the Compilation Result identity mismatched")]
     CompilationResultMismatch {
-        expected: CompilationResultIdentity,
-        actual: CompilationResultIdentity,
+        expected: CanonicalIdentity,
+        actual: CanonicalIdentity,
     },
     #[error("a composed destination path was invalid")]
     InvalidDestinationPath { artifact_index: usize, key: String },

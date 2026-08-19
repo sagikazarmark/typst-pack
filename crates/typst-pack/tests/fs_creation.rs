@@ -732,7 +732,8 @@ mod fonts {
             let data = typst_kit::fonts::embedded()
                 .map(|(font, _)| font.data().to_vec())
                 .find(|data| {
-                    typst_pack::FontContainerIdentity::from_bytes(data.as_slice()) == identity
+                    typst_pack::CanonicalIdentity::for_font_container_bytes(data.as_slice())
+                        == identity
                 })
                 .expect("a Typst embedded container fulfills the requirement");
             font_fulfillments.push(FontContainerFulfillment::new(

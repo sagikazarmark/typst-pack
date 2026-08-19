@@ -6,8 +6,9 @@ use std::collections::{BTreeMap, BTreeSet};
 use typst::foundations::Bytes;
 use typst::syntax::package::{PackageSpec, PackageVersion};
 
-use crate::pack::{Pack, PackageTreeIdentity};
+use crate::paths::{canonical_relative_path, path_tree_conflicts};
 use crate::payload::SharedBytes;
+use crate::{CanonicalIdentity, CanonicalIdentityRole};
 
 /// Whether a Package Tree's bytes travel inside the Pack or must be fulfilled
 /// externally when the Pack is compiled.
@@ -30,7 +31,7 @@ impl PackageDisposition {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PackageTree {
     files: BTreeMap<String, SharedBytes>,
-    identity: PackageTreeIdentity,
+    identity: CanonicalIdentity,
     file_count: u64,
     byte_length: u64,
 }
@@ -110,7 +111,7 @@ impl PackageTree {
     }
 
     /// The Canonical Identity derived from every path and exact byte value.
-    pub fn identity(&self) -> PackageTreeIdentity {
+    pub fn identity(&self) -> CanonicalIdentity {
         self.identity
     }
 
@@ -139,7 +140,7 @@ impl PackageTree {
 
 pub(crate) fn derive_package_tree_identity<'a>(
     files: impl IntoIterator<Item = (&'a str, &'a SharedBytes)>,
-) -> (PackageTreeIdentity, u64, u64) {
+) -> (CanonicalIdentity, u64, u64) {
     let projection = files
         .into_iter()
         .map(|(path, data)| (path, data.len() as u64, typst::utils::hash128(data)))
@@ -147,12 +148,15 @@ pub(crate) fn derive_package_tree_identity<'a>(
     let file_count = projection.len() as u64;
     let byte_length = projection.iter().map(|(_, length, _)| length).sum();
     (
-        PackageTreeIdentity::from_digest(typst::utils::hash128(&(
-            crate::pack::PACKAGE_TREE_IDENTITY_SCHEMA,
-            file_count,
-            byte_length,
-            projection,
-        ))),
+        CanonicalIdentity::from_digest(
+            CanonicalIdentityRole::PackageTree,
+            typst::utils::hash128(&(
+                "typst-pack-complete-package-tree-v1",
+                file_count,
+                byte_length,
+                projection,
+            )),
+        ),
         file_count,
         byte_length,
     )
@@ -236,9 +240,9 @@ pub(crate) fn preflight_package_tree_paths(
     let mut issues = Vec::new();
     for path in paths {
         let path = path.as_ref();
-        match Pack::canonical_package_path(path) {
+        match canonical_relative_path(path) {
             Ok(canonical) => {
-                if !retain(&[canonical.len()]) {
+                if !retain(&[canonical.as_str().len()]) {
                     return Err(PackageTreePathPreflightError::RetentionLimit);
                 }
                 canonical_paths.push(canonical);
@@ -249,7 +253,7 @@ pub(crate) fn preflight_package_tree_paths(
                 }
                 issues.push(PackageTreeIssue::InvalidPath {
                     path: path.to_owned(),
-                    message,
+                    message: message.to_string(),
                 });
             }
         }
@@ -257,7 +261,7 @@ pub(crate) fn preflight_package_tree_paths(
 
     let mut ordered = canonical_paths
         .iter()
-        .map(String::as_str)
+        .map(|path| path.as_str())
         .collect::<Vec<_>>();
     ordered.sort_unstable();
     let mut last_duplicate = None;
@@ -279,27 +283,36 @@ pub(crate) fn preflight_package_tree_paths(
     }
 
     ordered.dedup();
-    for (index, ancestor) in ordered.iter().enumerate() {
+    for ancestor in &ordered {
         if !retain(&[ancestor.len() + 1]) {
             return Err(PackageTreePathPreflightError::RetentionLimit);
         }
-        let prefix = format!("{ancestor}/");
-        for descendant in ordered[index + 1..]
+    }
+    let conflicts = path_tree_conflicts(ordered.iter().map(|path| {
+        let canonical = canonical_paths
             .iter()
-            .take_while(|descendant| descendant.starts_with(&prefix))
-        {
-            if !retain(&[ancestor.len(), descendant.len()]) {
-                return Err(PackageTreePathPreflightError::RetentionLimit);
-            }
-            issues.push(PackageTreeIssue::PathTreeConflict {
-                ancestor: (*ancestor).to_owned(),
-                descendant: (*descendant).to_owned(),
-            });
+            .find(|canonical| canonical.as_str() == *path)
+            .expect("an ordered canonical path came from the preflight input");
+        (canonical, ())
+    }));
+    for conflict in conflicts {
+        if !retain(&[
+            conflict.ancestor.as_str().len(),
+            conflict.descendant.as_str().len(),
+        ]) {
+            return Err(PackageTreePathPreflightError::RetentionLimit);
         }
+        issues.push(PackageTreeIssue::PathTreeConflict {
+            ancestor: conflict.ancestor.to_string(),
+            descendant: conflict.descendant.to_string(),
+        });
     }
 
     if issues.is_empty() {
-        Ok(canonical_paths)
+        Ok(canonical_paths
+            .into_iter()
+            .map(|path| path.into_string())
+            .collect())
     } else {
         issues.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
         Err(PackageTreePathPreflightError::Invalid(PackageTreeError {

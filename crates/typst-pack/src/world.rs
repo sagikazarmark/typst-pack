@@ -13,7 +13,7 @@ use typst::{Feature, Library, LibraryExt, World};
 use typst_kit::files::{FileLoader, FileStore};
 use typst_kit::fonts::FontStore;
 
-use crate::compile::DocumentTime;
+use crate::domain::DocumentTime;
 use crate::pack::{CompilationDependencySnapshot, Pack, PackageFiles};
 
 /// A complete Typst [`World`] backed by a [`Pack`].

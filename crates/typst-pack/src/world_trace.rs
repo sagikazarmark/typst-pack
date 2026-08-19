@@ -111,7 +111,7 @@ impl<W: World + ?Sized> World for WorldTrace<'_, W> {
                 format!(
                     "font:{:032x}",
                     u128::from_be_bytes(
-                        crate::FontContainerIdentity::from_bytes(font.data().as_slice()).digest()
+                        crate::pack::font_container_identity(font.data().as_slice()).digest()
                     )
                 ),
                 Some(font.index() as usize),

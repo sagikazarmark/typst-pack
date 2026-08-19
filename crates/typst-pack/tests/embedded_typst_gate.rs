@@ -4,7 +4,9 @@ use std::collections::BTreeSet;
 mod differential;
 
 use differential::DIFFERENTIAL_COVERAGE;
-use typst_pack::{OutputFormat, Pack, PackCompilationRequest, compile_with_limits};
+use typst_pack::{
+    ImplementationRole, OutputFormat, Pack, PackCompilationRequest, compile_with_limits,
+};
 
 fn baseline() -> toml::Value {
     toml::from_str(include_str!("../embedded-typst.toml")).unwrap()
@@ -247,6 +249,7 @@ fn public_compilation_attests_the_approved_engine_and_exporters() {
         let (exporter_version, exporter_checksum) = expected(exporter);
 
         assert_eq!(result.engine_identity().implementation(), "typst");
+        assert_eq!(result.engine_identity().role(), ImplementationRole::Engine);
         assert_eq!(result.engine_identity().version(), engine_version);
         assert_eq!(result.engine_identity().source_checksum(), engine_checksum);
         let mut features = Vec::new();
@@ -275,6 +278,10 @@ fn public_compilation_attests_the_approved_engine_and_exporters() {
         };
         assert_eq!(result.engine_identity().feature_set(), expected_features);
         assert_eq!(result.exporter_identity().implementation(), exporter);
+        assert_eq!(
+            result.exporter_identity().role(),
+            ImplementationRole::Exporter
+        );
         assert_eq!(result.exporter_identity().feature_set(), expected_features);
         assert_eq!(result.exporter_identity().version(), exporter_version);
         assert_eq!(

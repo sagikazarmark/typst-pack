@@ -36,7 +36,7 @@ fn a_disposition_names_whether_container_bytes_travel_in_the_pack() {
 #[cfg(feature = "embedded-fonts")]
 mod containers {
     use typst_pack::{
-        FontCatalog, FontCatalogEntry, FontContainer, FontContainerIdentity, FontDisposition,
+        CanonicalIdentity, FontCatalog, FontCatalogEntry, FontContainer, FontDisposition,
         typst_embedded_font_containers,
     };
 
@@ -51,7 +51,7 @@ mod containers {
     #[test]
     fn standalone_container_identity_depends_only_on_exact_bytes() {
         let data = typst_container();
-        let expected = FontContainerIdentity::from_bytes(&data);
+        let expected = CanonicalIdentity::for_font_container_bytes(&data);
 
         let first = FontContainer::new(data.clone()).unwrap();
         let second = FontContainer::new(data).unwrap();
@@ -66,7 +66,7 @@ mod containers {
     fn faces_are_expanded_in_container_local_index_order() {
         let collection = two_face_collection(&typst_container());
         let data_pointer = collection.as_ptr();
-        let identity = FontContainerIdentity::from_bytes(&collection);
+        let identity = CanonicalIdentity::for_font_container_bytes(&collection);
         let container = FontContainer::new(collection).unwrap();
 
         let faces = container.faces();
@@ -110,9 +110,9 @@ mod containers {
                 .map(|face| (face.identity().container(), face.identity().index()))
                 .collect::<Vec<_>>(),
             [
-                (FontContainerIdentity::from_bytes(&second), 0),
-                (FontContainerIdentity::from_bytes(&second), 1),
-                (FontContainerIdentity::from_bytes(&first), 0),
+                (CanonicalIdentity::for_font_container_bytes(&second), 0),
+                (CanonicalIdentity::for_font_container_bytes(&second), 1),
+                (CanonicalIdentity::for_font_container_bytes(&first), 0),
             ]
         );
     }
@@ -195,8 +195,8 @@ mod filesystem {
     use std::path::{Path, PathBuf};
 
     use typst_pack::{
-        FilesystemPackAssembler, FilesystemPackAssemblerConfig, FilesystemPackAssemblyRequest,
-        FontContainerIdentity,
+        CanonicalIdentity, FilesystemPackAssembler, FilesystemPackAssemblerConfig,
+        FilesystemPackAssemblyRequest,
     };
 
     use crate::font_bytes::{family_of, renamed_family, typst_container};
@@ -254,11 +254,11 @@ mod filesystem {
 
         assert_eq!(
             selected([&first_directory, &second_directory]),
-            FontContainerIdentity::from_bytes(&first)
+            CanonicalIdentity::for_font_container_bytes(&first)
         );
         assert_eq!(
             selected([&second_directory, &first_directory]),
-            FontContainerIdentity::from_bytes(&second)
+            CanonicalIdentity::for_font_container_bytes(&second)
         );
     }
 
@@ -302,12 +302,12 @@ mod filesystem {
         assert_eq!(embedded.len(), 1, "the scanned container is embedded");
         assert_eq!(
             embedded[0].container_identity(),
-            FontContainerIdentity::from_bytes(&scanned_font)
+            CanonicalIdentity::for_font_container_bytes(&scanned_font)
         );
         assert_eq!(external.len(), 1, "Typst's own container stays external");
         assert_eq!(
             external[0].container_identity(),
-            FontContainerIdentity::from_bytes(&typst_font)
+            CanonicalIdentity::for_font_container_bytes(&typst_font)
         );
 
         // The Pack Font Catalog keeps the candidate catalog's relative order:
@@ -320,8 +320,8 @@ mod filesystem {
                 .map(|face| face.identity().container())
                 .collect::<Vec<_>>(),
             [
-                FontContainerIdentity::from_bytes(&typst_font),
-                FontContainerIdentity::from_bytes(&scanned_font),
+                CanonicalIdentity::for_font_container_bytes(&typst_font),
+                CanonicalIdentity::for_font_container_bytes(&scanned_font),
             ]
         );
     }
@@ -353,7 +353,7 @@ mod filesystem {
         assert_eq!(requirements.len(), 1);
         assert_eq!(
             requirements[0].container_identity(),
-            FontContainerIdentity::from_bytes(&data)
+            CanonicalIdentity::for_font_container_bytes(&data)
         );
         assert!(requirements[0].is_embedded());
     }

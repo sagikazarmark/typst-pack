@@ -275,7 +275,7 @@ operational dependency failure, and its fulfillment report retains
 caller-supplied package and font provenance, cache disposition, and licensing
 metadata without including those operational values in Compilation Identity or
 Compilation Result Identity. Request rejection is the outer error and retains
-the complete request inventory. Every semantic result also exposes its document
+the complete ordered issue set. Every semantic result also exposes its document
 summary and canonical Compilation Access Trace.
 
 For PNG and SVG, `source_page_number()` identifies each artifact independently

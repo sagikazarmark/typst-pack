@@ -1,9 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use typst_pack::{
-    FontCatalog, FontCatalogEntry, FontContainer, FontContainerIdentity, FontDisposition,
-};
+use typst_pack::{CanonicalIdentity, FontCatalog, FontCatalogEntry, FontContainer, FontDisposition};
 
 fuzz_target!(|data: &[u8]| {
     let Ok(container) = FontContainer::new(data.to_vec()) else {
@@ -14,7 +12,7 @@ fuzz_target!(|data: &[u8]| {
     assert!(!faces.is_empty());
     assert_eq!(
         container.identity(),
-        FontContainerIdentity::from_bytes(data)
+        CanonicalIdentity::for_font_container_bytes(data)
     );
     assert!(faces.iter().all(|face| {
         face.identity().container() == container.identity() && face.data() == data

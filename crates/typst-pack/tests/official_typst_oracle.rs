@@ -22,9 +22,8 @@ use typst_pack::{
     CompilationResult, CompilationStatus, CreationTimestamp, DiagnosticPhase, DiagnosticProducer,
     DiagnosticSeverity as PackDiagnosticSeverity, DocumentTime, HtmlOutputSpecification,
     OutputFormat, Pack, PackCompilationRequest, PackOverrideSet, PackageTree,
-    PackageTreeFulfillment, PdfOutputSpecification, PngOutputSpecification, RequestValueOrigin,
-    SvgOutputSpecification, TracepointKind, compile_with_limits as compile_to_report,
-    parse_page_selection,
+    PackageTreeFulfillment, PdfOutputSpecification, PngOutputSpecification, SvgOutputSpecification,
+    TracepointKind, compile_with_limits as compile_to_report, parse_page_selection,
 };
 use typst_pdf::PdfStandard;
 
@@ -430,7 +429,7 @@ fn stabilized_project_round_trips_and_matches_pack_svg_compilation() {
     assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
     assert!(actual.diagnostics().iter().all(|diagnostic| {
         diagnostic.phase() == DiagnosticPhase::Compilation
-            && diagnostic.producer() == DiagnosticProducer::Engine(actual.engine_identity())
+            && diagnostic.producer() == DiagnosticProducer::new(actual.engine_identity())
     }));
     assert_eq!(actual.artifacts().len(), expected.artifacts.len());
     for (actual, expected) in actual.artifacts().iter().zip(&expected.artifacts) {
@@ -551,29 +550,6 @@ fn shared_semantic_values_drive_the_same_official_source_behavior() {
 
     assert_eq!(actual.status(), CompilationStatus::Succeeded);
     assert_eq!(actual.artifacts()[0].bytes(), expected.artifacts[0].bytes);
-    let inventory = actual.request_inventory();
-    assert_eq!(
-        inventory.inputs().origin(),
-        RequestValueOrigin::CallerSupplied
-    );
-    assert_eq!(inventory.inputs().value().entry_count(), 1);
-    assert_eq!(inventory.inputs().value().total_key_bytes(), 5);
-    assert!(inventory.inputs().value().total_value_repr_bytes() > 0);
-    assert_ne!(inventory.inputs().value().commitment(), [0; 16]);
-    assert_eq!(
-        inventory.document_time().origin(),
-        RequestValueOrigin::CallerSupplied
-    );
-    assert_eq!(
-        inventory.document_time().value(),
-        &DocumentTime::Fixed(document_time)
-    );
-    assert_eq!(inventory.features().len(), 1);
-    assert_eq!(inventory.features()[0].value(), typst::Feature::A11yExtras);
-    assert_eq!(
-        inventory.features()[0].origin(),
-        RequestValueOrigin::CallerSupplied
-    );
 }
 
 #[test]
@@ -632,7 +608,7 @@ fn independent_oracle_and_pack_compilation_ignore_conflicting_ambient_environmen
 }
 
 #[test]
-fn effective_defaults_and_required_features_keep_their_origins() {
+fn html_feature_is_derived_and_bundle_is_rejected() {
     let fixture = Fixture::exporter_rejection();
     let pack = stabilized_pack(&fixture);
     let result = compile(PackCompilationRequest::new(
@@ -640,39 +616,16 @@ fn effective_defaults_and_required_features_keep_their_origins() {
         output(OutputFormat::Html),
     ))
     .unwrap();
-    let inventory = result.request_inventory();
-
-    assert_eq!(
-        inventory.inputs().origin(),
-        RequestValueOrigin::CoreDefaulted
-    );
-    assert_eq!(inventory.inputs().value().entry_count(), 0);
-    assert_eq!(
-        inventory.document_time().origin(),
-        RequestValueOrigin::CoreDefaulted
-    );
-    assert_eq!(inventory.document_time().value(), &DocumentTime::Absent);
-    assert_eq!(inventory.features().len(), 1);
-    assert_eq!(inventory.features()[0].value(), typst::Feature::Html);
-    assert_eq!(
-        inventory.features()[0].origin(),
-        RequestValueOrigin::CoreDerived
-    );
-    assert!(inventory.selected_features().is_empty());
+    assert_eq!(result.status(), CompilationStatus::Succeeded);
 
     let explicit = compile(
         PackCompilationRequest::new(stabilized_pack(&fixture), output(OutputFormat::Html))
             .feature(typst::Feature::Html),
     )
     .unwrap();
-    assert_eq!(explicit.request_inventory().selected_features().len(), 1);
     assert_eq!(
-        explicit.request_inventory().selected_features()[0].origin(),
-        RequestValueOrigin::CallerSupplied
-    );
-    assert_eq!(
-        explicit.request_inventory().features()[0].origin(),
-        RequestValueOrigin::CallerSupplied
+        result.compilation_identity(),
+        explicit.compilation_identity()
     );
 
     let rejected = compile(
@@ -682,14 +635,6 @@ fn effective_defaults_and_required_features_keep_their_origins() {
     let Err(rejection) = rejected else {
         panic!("the unsupported Bundle feature must be rejected by Pack preparation");
     };
-    assert_eq!(
-        rejection
-            .request_inventory()
-            .output_specification()
-            .value()
-            .format(),
-        OutputFormat::Html
-    );
     assert_eq!(rejection.issues().len(), 1);
     assert!(matches!(
         rejection.issues()[0],
@@ -773,7 +718,7 @@ fn pack_rejection_matches_official_diagnostics_and_remains_a_result() {
     assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
     assert!(actual.diagnostics().iter().all(|diagnostic| {
         diagnostic.phase() == DiagnosticPhase::Compilation
-            && diagnostic.producer() == DiagnosticProducer::Engine(actual.engine_identity())
+            && diagnostic.producer() == DiagnosticProducer::new(actual.engine_identity())
     }));
 }
 
@@ -808,7 +753,7 @@ fn pack_exporter_rejection_matches_official_diagnostics() {
     assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
     assert!(actual.diagnostics().iter().all(|diagnostic| {
         diagnostic.phase() == DiagnosticPhase::Export
-            && diagnostic.producer() == DiagnosticProducer::Exporter(actual.exporter_identity())
+            && diagnostic.producer() == DiagnosticProducer::new(actual.exporter_identity())
     }));
 }
 
@@ -851,7 +796,7 @@ fn pack_pdf_option_conflict_matches_official_exporter_rejection() {
     assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
     assert!(actual.diagnostics().iter().all(|diagnostic| {
         diagnostic.phase() == DiagnosticPhase::Export
-            && diagnostic.producer() == DiagnosticProducer::Exporter(actual.exporter_identity())
+            && diagnostic.producer() == DiagnosticProducer::new(actual.exporter_identity())
     }));
 }
 
@@ -1033,9 +978,9 @@ fn stabilized_pack_matches_official_html_artifacts_and_pretty_control() {
         },
     );
 
-    for (actual, expected, pretty_enabled) in [
-        (&compact, &expected_compact, false),
-        (&pretty_result, &expected_pretty, true),
+    for (actual, expected) in [
+        (&compact, &expected_compact),
+        (&pretty_result, &expected_pretty),
     ] {
         assert_eq!(expected.status, ObservationStatus::Accepted);
         assert_eq!(expected.target, Target::Html);
@@ -1048,25 +993,9 @@ fn stabilized_pack_matches_official_html_artifacts_and_pretty_control() {
         assert_eq!(actual.artifacts()[0].format(), OutputFormat::Html);
         assert_eq!(actual.artifacts()[0].source_page_number(), None);
         assert_eq!(actual.artifacts()[0].bytes(), expected.artifacts[0].bytes);
-        let CompilationOutputSpecification::Html(output) =
-            actual.request_inventory().output_specification().value()
-        else {
-            panic!("expected HTML output specification");
-        };
-        assert_eq!(output.pretty, pretty_enabled);
-        assert_eq!(actual.request_inventory().features().len(), 1);
-        assert_eq!(
-            actual.request_inventory().features()[0].value(),
-            typst::Feature::Html
-        );
-        assert_eq!(
-            actual.request_inventory().features()[0].origin(),
-            RequestValueOrigin::CoreDerived
-        );
-        assert!(actual.request_inventory().selected_features().is_empty());
         assert!(actual.diagnostics().iter().all(|diagnostic| {
             diagnostic.phase() == DiagnosticPhase::Compilation
-                && diagnostic.producer() == DiagnosticProducer::Engine(actual.engine_identity())
+                && diagnostic.producer() == DiagnosticProducer::new(actual.engine_identity())
         }));
         assert_eq!(actual.exporter_identity().implementation(), "typst-html");
         assert_eq!(actual.exporter_identity().version(), "0.15.1");
@@ -1141,7 +1070,7 @@ fn html_compiler_rejection_matches_official_diagnostics_and_order() {
     assert_eq!(error.severity(), PackDiagnosticSeverity::Error);
     assert!(actual.diagnostics().iter().all(|diagnostic| {
         diagnostic.phase() == DiagnosticPhase::Compilation
-            && diagnostic.producer() == DiagnosticProducer::Engine(actual.engine_identity())
+            && diagnostic.producer() == DiagnosticProducer::new(actual.engine_identity())
     }));
 }
 
@@ -1174,13 +1103,13 @@ fn html_exporter_rejection_matches_official_diagnostics_and_order() {
     assert!(warnings.iter().all(|warning| {
         warning.severity() == PackDiagnosticSeverity::Warning
             && warning.phase() == DiagnosticPhase::Compilation
-            && warning.producer() == DiagnosticProducer::Engine(actual.engine_identity())
+            && warning.producer() == DiagnosticProducer::new(actual.engine_identity())
     }));
     assert_eq!(error.severity(), PackDiagnosticSeverity::Error);
     assert_eq!(error.phase(), DiagnosticPhase::Export);
     assert_eq!(
         error.producer(),
-        DiagnosticProducer::Exporter(actual.exporter_identity())
+        DiagnosticProducer::new(actual.exporter_identity())
     );
     assert_eq!(error.hints().len(), 1);
 }
@@ -1224,13 +1153,6 @@ fn pack_png_defaults_match_the_pinned_official_exporter() {
         NonZeroUsize::new(1)
     );
     assert_eq!(actual.artifacts()[0].bytes(), expected.artifacts[0].bytes);
-    let CompilationOutputSpecification::Png(output) =
-        actual.request_inventory().output_specification().value()
-    else {
-        panic!("expected PNG output specification");
-    };
-    assert_eq!(output.pixels_per_inch, Some(144.0));
-    assert!(!output.render_bleed);
     assert_eq!(actual.exporter_identity().implementation(), "typst-render");
     assert_eq!(actual.exporter_identity().version(), "0.15.1");
 }
@@ -1289,7 +1211,7 @@ fn stabilized_pack_matches_complete_official_png_page_artifacts() {
     assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
     assert!(actual.diagnostics().iter().all(|diagnostic| {
         diagnostic.phase() == DiagnosticPhase::Compilation
-            && diagnostic.producer() == DiagnosticProducer::Engine(actual.engine_identity())
+            && diagnostic.producer() == DiagnosticProducer::new(actual.engine_identity())
     }));
     assert_eq!(actual.artifacts().len(), expected.artifacts.len());
     for (actual, expected) in actual.artifacts().iter().zip(&expected.artifacts) {

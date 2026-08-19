@@ -6,9 +6,8 @@ use libfuzzer_sys::fuzz_target;
 use typst::foundations::{Dict, Value};
 use typst_pack::{
     CompilationFulfillmentSet, CompilationOutputSpecification, CompilationRequestIssue,
-    DocumentTime, HtmlOutputSpecification, Pack, PackCompilationRequest, PackOverrideSet,
-    PackageTree, PackageTreeFulfillment, PngOutputSpecification, RequestValueOrigin,
-    SvgOutputSpecification, compile_with_limits,
+    DocumentTime, Pack, PackCompilationRequest, PackOverrideSet, PackageTree,
+    PackageTreeFulfillment, PngOutputSpecification, SvgOutputSpecification, compile_with_limits,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -58,11 +57,6 @@ fuzz_target!(|data: &[u8]| {
         );
         inputs
     };
-    let adapter_inputs = {
-        let mut inputs = Dict::new();
-        inputs.insert("adapter".into(), Value::Int(data.len() as i64));
-        inputs
-    };
     if flags & 8 != 0 {
         let report = compile_with_limits(
             PackCompilationRequest::new(
@@ -85,8 +79,6 @@ fuzz_target!(|data: &[u8]| {
         pixels_per_inch: Some(if invalid_ppi { f64::NAN } else { 144.0 }),
         render_bleed: false,
     });
-    let adapter_output =
-        CompilationOutputSpecification::Html(HtmlOutputSpecification { pretty: reverse });
     let undeclared: typst::syntax::package::PackageSpec =
         "@local/undeclared:1.0.0".parse().unwrap();
     let fulfillments = || {
@@ -101,19 +93,10 @@ fuzz_target!(|data: &[u8]| {
     };
     let feature_operations = data
         .iter()
-        .map(|byte| match byte % 6 {
-            0 => (typst::Feature::Html, RequestValueOrigin::AdapterResolved),
-            1 => (typst::Feature::Html, RequestValueOrigin::CallerSupplied),
-            2 => (typst::Feature::Bundle, RequestValueOrigin::AdapterResolved),
-            3 => (typst::Feature::Bundle, RequestValueOrigin::CallerSupplied),
-            4 => (
-                typst::Feature::A11yExtras,
-                RequestValueOrigin::AdapterResolved,
-            ),
-            _ => (
-                typst::Feature::A11yExtras,
-                RequestValueOrigin::CallerSupplied,
-            ),
+        .map(|byte| match byte % 3 {
+            0 => typst::Feature::Html,
+            1 => typst::Feature::Bundle,
+            _ => typst::Feature::A11yExtras,
         })
         .collect::<Vec<_>>();
     let expected_features = [
@@ -125,71 +108,31 @@ fuzz_target!(|data: &[u8]| {
     .filter_map(|feature| {
         let origins = feature_operations
             .iter()
-            .filter_map(|(value, origin)| (*value == feature).then_some(*origin));
-        if origins
-            .clone()
-            .any(|origin| origin == RequestValueOrigin::CallerSupplied)
-        {
-            Some((feature, RequestValueOrigin::CallerSupplied))
-        } else if origins
-            .clone()
-            .any(|origin| origin == RequestValueOrigin::AdapterResolved)
-        {
-            Some((feature, RequestValueOrigin::AdapterResolved))
-        } else {
-            None
-        }
+            .any(|value| *value == feature);
+        origins.then_some(feature)
     })
     .collect::<Vec<_>>();
-    let build_request = |reverse_origins: bool, reverse_overrides: bool| {
-        let mut request = PackCompilationRequest::new_with_adapter_resolved_output(
-            pack.clone(),
-            CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
-        );
-        if reverse_origins {
-            request = request
-                .inputs(caller_inputs.clone())
-                .adapter_resolved_inputs(adapter_inputs.clone())
-                .output(invalid_output.clone())
-                .adapter_resolved_output(adapter_output.clone())
-                .document_time(DocumentTime::UnixTimestamp(if invalid_document_time {
-                    i64::MAX
-                } else {
-                    0
-                }))
-                .adapter_resolved_document_time(DocumentTime::UnixTimestamp(0));
-        } else {
-            request = request
-                .adapter_resolved_inputs(adapter_inputs.clone())
-                .inputs(caller_inputs.clone())
-                .adapter_resolved_output(adapter_output.clone())
-                .output(invalid_output.clone())
-                .adapter_resolved_document_time(DocumentTime::UnixTimestamp(0))
-                .document_time(DocumentTime::UnixTimestamp(if invalid_document_time {
-                    i64::MAX
-                } else {
-                    0
-                }));
-        }
+    let build_request = |reverse_features: bool, reverse_overrides: bool| {
+        let mut request = PackCompilationRequest::new(pack.clone(), invalid_output.clone())
+            .inputs(caller_inputs.clone())
+            .document_time(DocumentTime::UnixTimestamp(if invalid_document_time {
+                i64::MAX
+            } else {
+                0
+            }));
         let override_pack = if mismatched_overrides {
             &other_pack
         } else {
             &pack
         };
-        request = request
-            .overrides(build_overrides(override_pack, reverse_overrides))
-            .adapter_resolved_overrides(PackOverrideSet::new(&pack));
-        let operations = if reverse_origins {
+        request = request.overrides(build_overrides(override_pack, reverse_overrides));
+        let operations = if reverse_features {
             feature_operations.iter().rev().copied().collect::<Vec<_>>()
         } else {
             feature_operations.clone()
         };
-        for (feature, origin) in operations {
-            request = match origin {
-                RequestValueOrigin::CallerSupplied => request.feature(feature),
-                RequestValueOrigin::AdapterResolved => request.adapter_resolved_feature(feature),
-                _ => unreachable!(),
-            };
+        for feature in operations {
+            request = request.feature(feature);
         }
         request.fulfillments(fulfillments())
     };
@@ -228,60 +171,12 @@ fuzz_target!(|data: &[u8]| {
         if mismatched_overrides {
             expected_issues.push(2);
         }
-        if expected_features
-            .iter()
-            .any(|(feature, _)| *feature == typst::Feature::Bundle)
-        {
+        if expected_features.contains(&typst::Feature::Bundle) {
             expected_issues.push(3);
         }
         if invalid_document_time {
             expected_issues.push(4);
         }
         assert_eq!(issue_kinds, expected_issues);
-        let inventory = rejection.request_inventory();
-        assert_eq!(
-            inventory.output_specification().origin(),
-            RequestValueOrigin::CallerSupplied
-        );
-        assert_eq!(
-            inventory.inputs().origin(),
-            RequestValueOrigin::CallerSupplied
-        );
-        assert_eq!(
-            inventory.overrides().origin(),
-            RequestValueOrigin::CallerSupplied
-        );
-        assert_eq!(
-            inventory.document_time().origin(),
-            RequestValueOrigin::CallerSupplied
-        );
-        assert_eq!(
-            inventory
-                .features()
-                .iter()
-                .map(|feature| (feature.value(), feature.origin()))
-                .collect::<Vec<_>>(),
-            expected_features
-        );
     }
-    assert_eq!(
-        first_rejection.request_inventory().inputs().value(),
-        second_rejection.request_inventory().inputs().value()
-    );
-    let overrides = |rejection: &typst_pack::CompilationRequestRejection| {
-        rejection
-            .request_inventory()
-            .overrides()
-            .value()
-            .iter()
-            .map(|entry| {
-                (
-                    entry.path().to_owned(),
-                    entry.byte_len(),
-                    entry.commitment(),
-                )
-            })
-            .collect::<Vec<_>>()
-    };
-    assert_eq!(overrides(&first_rejection), overrides(&second_rejection));
 });

@@ -40,7 +40,7 @@ fn observe_pack(pack: &Pack) -> PackObservation {
                 (
                     requirement.spec().to_string(),
                     IdentityObservation {
-                        kind: identity.kind().into(),
+                        kind: identity.role().as_str().into(),
                         schema: identity.schema().into(),
                         algorithm: identity.algorithm().into(),
                         digest: identity.digest(),

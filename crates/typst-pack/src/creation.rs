@@ -20,7 +20,7 @@ use typst::{Feature, Library, LibraryExt, World};
 use typst_kit::datetime::Time;
 use typst_kit::files::{FileLoader, FileStore};
 
-use crate::compile::{DocumentTime, TypstTarget};
+use crate::domain::{DocumentTime, TypstTarget};
 use crate::embedded::EmbeddedTypst;
 use crate::font_catalog::{CatalogFonts, FontCatalog, FontDisposition};
 use crate::manifest::PackMetadata;

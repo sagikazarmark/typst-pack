@@ -6,7 +6,8 @@ use typst::text::{Font, FontBook, FontInfo};
 use typst::utils::LazyHash;
 use typst_kit::fonts::FontStore;
 
-use crate::pack::{FontContainerIdentity, FontFaceIdentity};
+use crate::CanonicalIdentity;
+use crate::pack::{FontFaceIdentity, font_container_identity};
 use crate::payload::SharedBytes;
 
 /// Whether a Font Container's bytes travel inside the Pack or must be
@@ -54,7 +55,7 @@ pub enum FontContainerError {
 #[derive(Clone, Debug)]
 pub struct FontContainer {
     data: SharedBytes,
-    identity: FontContainerIdentity,
+    identity: CanonicalIdentity,
     faces: Vec<FontContainerFace>,
 }
 
@@ -70,7 +71,7 @@ impl FontContainer {
     }
 
     pub(crate) fn from_shared(data: SharedBytes) -> Result<Self, FontContainerError> {
-        let identity = FontContainerIdentity::from_bytes(data.as_slice());
+        let identity = font_container_identity(data.as_slice());
         let faces = Font::iter(data.to_typst())
             .map(|font| FontContainerFace {
                 identity: FontFaceIdentity::new(identity, font.index()),
@@ -93,7 +94,7 @@ impl FontContainer {
     }
 
     /// The Canonical Identity of the container bytes.
-    pub fn identity(&self) -> FontContainerIdentity {
+    pub fn identity(&self) -> CanonicalIdentity {
         self.identity
     }
 

@@ -3,7 +3,7 @@
 use std::collections::{BTreeMap, btree_map::Entry};
 use std::fmt;
 
-use crate::PackIdentity;
+use crate::CanonicalIdentity;
 use crate::pack::{Pack, font_container_path};
 use crate::payload::SharedBytes;
 
@@ -96,14 +96,14 @@ impl PackExtractionEntry {
 /// plan contains no destination, platform path, conflict policy, or write state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackExtractionPlan {
-    pack_identity: PackIdentity,
+    pack_identity: CanonicalIdentity,
     selection: PackExtractionSelection,
     entries: Vec<PackExtractionEntry>,
 }
 
 impl PackExtractionPlan {
     /// The identity of the Pack projected by this plan.
-    pub fn pack_identity(&self) -> &PackIdentity {
+    pub fn pack_identity(&self) -> &CanonicalIdentity {
         &self.pack_identity
     }
 

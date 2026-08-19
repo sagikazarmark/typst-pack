@@ -1,16 +1,17 @@
 //! The validated in-memory Pack model.
 
-use std::borrow::Borrow;
 use std::collections::{BTreeMap, BTreeSet};
 use std::str::FromStr;
 
-use typst::syntax::VirtualPath;
 use typst::syntax::package::PackageSpec;
 use typst::text::{Font, FontInfo};
 
 use crate::manifest::PackMetadata;
+use crate::paths::{
+    CanonicalPath, canonical_relative_path, path_tree_conflicts as shared_path_tree_conflicts,
+};
 use crate::payload::SharedBytes;
-use crate::{FontContainer, PackageTree};
+use crate::{CanonicalIdentity, CanonicalIdentityRole, FontContainer, PackageTree};
 
 /// The conventional file extension for packs.
 pub const FILE_EXTENSION: &str = "typk";
@@ -25,10 +26,6 @@ pub(crate) fn names_pack_path(path: &str) -> bool {
     })
 }
 
-pub(crate) const PACKAGE_TREE_IDENTITY_KIND: &str = "complete-package-tree";
-pub(crate) const PACKAGE_TREE_IDENTITY_SCHEMA: &str = "typst-pack-complete-package-tree-v1";
-pub(crate) const PACKAGE_TREE_IDENTITY_ALGORITHM: &str = "typst-hash128-0.15";
-
 /// A portable pack of a Typst project.
 ///
 /// A pack holds project files (sources, images, and data files), optionally
@@ -37,6 +34,7 @@ pub(crate) const PACKAGE_TREE_IDENTITY_ALGORITHM: &str = "typst-hash128-0.15";
 /// manifest, conventionally named `*.typk`.
 #[derive(Debug, Clone)]
 pub struct Pack {
+    identity: CanonicalIdentity,
     entrypoint: CanonicalPath,
     metadata: Option<PackMetadata>,
     files: BTreeMap<CanonicalPath, SharedBytes>,
@@ -46,28 +44,6 @@ pub struct Pack {
     fonts: Vec<PackFont>,
     font_catalog: Vec<PackFontCatalogFace>,
     font_requirements: Vec<FontRequirement>,
-}
-
-/// The canonical semantic identity of a [`Pack`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub struct PackIdentity(u128);
-
-impl PackIdentity {
-    pub fn kind(self) -> &'static str {
-        "pack"
-    }
-
-    pub fn schema(self) -> &'static str {
-        "typst-pack-identity-v1"
-    }
-
-    pub fn algorithm(self) -> &'static str {
-        "typst-hash128-0.15"
-    }
-
-    pub fn digest(self) -> [u8; 16] {
-        self.0.to_be_bytes()
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -87,7 +63,7 @@ impl PackageFiles {
             files: tree
                 .into_shared_files()
                 .into_iter()
-                .map(|(path, data)| (CanonicalPath(path), data))
+                .map(|(path, data)| (CanonicalPath::from_canonical(path), data))
                 .collect(),
         }
     }
@@ -95,13 +71,13 @@ impl PackageFiles {
 
 /// Exact verified dependencies accepted by the synchronous Compilation Kernel.
 pub(crate) struct CompilationDependencySnapshot {
-    pack_identity: PackIdentity,
+    pack_identity: CanonicalIdentity,
     packages: BTreeMap<String, PackageFiles>,
     font_catalog: Vec<Font>,
 }
 
 impl CompilationDependencySnapshot {
-    pub(crate) fn pack_identity(&self) -> PackIdentity {
+    pub(crate) fn pack_identity(&self) -> CanonicalIdentity {
         self.pack_identity
     }
 
@@ -110,42 +86,11 @@ impl CompilationDependencySnapshot {
     }
 }
 
-/// The canonical content identity of one Package Tree.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct PackageTreeIdentity(u128);
-
-impl PackageTreeIdentity {
-    pub(crate) fn from_digest(digest: u128) -> Self {
-        Self(digest)
-    }
-
-    pub fn digest(self) -> [u8; 16] {
-        self.0.to_be_bytes()
-    }
-    pub fn kind(self) -> &'static str {
-        PACKAGE_TREE_IDENTITY_KIND
-    }
-    pub fn schema(self) -> &'static str {
-        PACKAGE_TREE_IDENTITY_SCHEMA
-    }
-    pub fn algorithm(self) -> &'static str {
-        PACKAGE_TREE_IDENTITY_ALGORITHM
-    }
-    pub(crate) fn encode(self) -> String {
-        format!("{:032x}", self.0)
-    }
-    pub(crate) fn decode(value: &str) -> Option<Self> {
-        (value.len() == 32)
-            .then(|| u128::from_str_radix(value, 16).ok().map(Self))
-            .flatten()
-    }
-}
-
 /// One exact package specification and Package Tree identity.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageRequirement {
     spec: PackageSpec,
-    tree: PackageTreeIdentity,
+    tree: CanonicalIdentity,
     file_count: u64,
     byte_length: u64,
     embedded: bool,
@@ -155,7 +100,7 @@ impl PackageRequirement {
     pub fn spec(&self) -> &PackageSpec {
         &self.spec
     }
-    pub fn tree_identity(&self) -> PackageTreeIdentity {
+    pub fn tree_identity(&self) -> CanonicalIdentity {
         self.tree
     }
     pub fn file_count(&self) -> u64 {
@@ -169,39 +114,6 @@ impl PackageRequirement {
     }
 }
 
-#[derive(Debug, Clone, Eq, Ord, PartialEq, PartialOrd)]
-struct CanonicalPath(String);
-
-#[derive(Debug)]
-struct PathTreeConflict {
-    ancestor: CanonicalPath,
-    ancestor_role: PackPathRole,
-    descendant: CanonicalPath,
-    descendant_role: PackPathRole,
-}
-
-impl CanonicalPath {
-    fn as_str(&self) -> &str {
-        &self.0
-    }
-
-    fn into_string(self) -> String {
-        self.0
-    }
-}
-
-impl Borrow<str> for CanonicalPath {
-    fn borrow(&self) -> &str {
-        self.as_str()
-    }
-}
-
-impl std::fmt::Display for CanonicalPath {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
 /// A font embedded in a pack.
 #[derive(Debug, Clone)]
 pub struct PackFont {
@@ -210,43 +122,11 @@ pub struct PackFont {
     font: Font,
 }
 
-/// The canonical content identity of one exact Font Container.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct FontContainerIdentity(u128);
-
-impl FontContainerIdentity {
-    /// Derives the identity from exact container bytes.
-    pub fn from_bytes(data: &[u8]) -> Self {
-        Self(typst::utils::hash128(&data))
-    }
-
-    /// The identity digest in big-endian order.
-    pub fn digest(self) -> [u8; 16] {
-        self.0.to_be_bytes()
-    }
-
-    pub fn kind(self) -> &'static str {
-        "font-container"
-    }
-
-    pub fn schema(self) -> &'static str {
-        "typst-pack-font-container-identity-v1"
-    }
-
-    pub fn algorithm(self) -> &'static str {
-        "typst-hash128-0.15"
-    }
-
-    pub(crate) fn encode(self) -> String {
-        format!("{:032x}", self.0)
-    }
-
-    pub(crate) fn decode(value: &str) -> Option<Self> {
-        u128::from_str_radix(value, 16).ok().map(Self)
-    }
+pub(crate) fn font_container_identity(data: &[u8]) -> CanonicalIdentity {
+    CanonicalIdentity::for_font_container_bytes(data)
 }
 
-pub(crate) fn font_container_path(identity: FontContainerIdentity, data: Option<&[u8]>) -> String {
+pub(crate) fn font_container_path(identity: CanonicalIdentity, data: Option<&[u8]>) -> String {
     let extension = match data.and_then(|data| data.get(..4)) {
         Some(b"OTTO") => "otf",
         Some(b"ttcf") => "ttc",
@@ -259,18 +139,18 @@ pub(crate) fn font_container_path(identity: FontContainerIdentity, data: Option<
 /// The exact identity of one face within a Font Container.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct FontFaceIdentity {
-    container: FontContainerIdentity,
+    container: CanonicalIdentity,
     index: u32,
 }
 
 impl FontFaceIdentity {
     /// The face at a container-local index within the given container.
-    pub(crate) fn new(container: FontContainerIdentity, index: u32) -> Self {
+    pub(crate) fn new(container: CanonicalIdentity, index: u32) -> Self {
         Self { container, index }
     }
 
     /// The containing font file or collection.
-    pub fn container(self) -> FontContainerIdentity {
+    pub fn container(self) -> CanonicalIdentity {
         self.container
     }
 
@@ -302,14 +182,14 @@ impl PackFontCatalogFace {
 /// One exact Font Container and the faces required from it.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FontRequirement {
-    container: FontContainerIdentity,
+    container: CanonicalIdentity,
     length: u64,
     face_indices: Vec<u32>,
     embedded: bool,
 }
 
 impl FontRequirement {
-    pub fn container_identity(&self) -> FontContainerIdentity {
+    pub fn container_identity(&self) -> CanonicalIdentity {
         self.container
     }
 
@@ -368,8 +248,8 @@ pub(crate) enum PackFontSourceInput {
 #[derive(Debug, Clone, Copy)]
 pub(crate) enum DeclaredFontContainerIdentity {
     Absent,
-    Partial(Option<FontContainerIdentity>),
-    Valid(FontContainerIdentity),
+    Partial(Option<CanonicalIdentity>),
+    Valid(CanonicalIdentity),
     Invalid,
 }
 
@@ -390,7 +270,7 @@ pub(crate) struct PackageFileInput {
 #[derive(Debug)]
 pub(crate) struct PackageRequirementInput {
     pub(crate) spec: Result<PackageSpec, InvalidPackageSpecInput>,
-    pub(crate) tree: Option<PackageTreeIdentity>,
+    pub(crate) tree: Option<CanonicalIdentity>,
     pub(crate) file_count: u64,
     pub(crate) byte_length: u64,
     pub(crate) embedded: bool,
@@ -456,7 +336,7 @@ impl Pack {
             }
         }));
         issues.extend(path_tree_conflicts(
-            canonical_files.keys().cloned(),
+            canonical_files.keys(),
             PackPathRole::ProjectFile,
         ));
 
@@ -499,13 +379,11 @@ impl Pack {
             }
         }
         for ((package, embedded), files) in &package_groups {
-            let conflicts = find_path_tree_conflicts(
+            let conflicts = shared_path_tree_conflicts(
                 files
                     .files
                     .keys()
-                    .cloned()
-                    .map(|path| (path, PackPathRole::PackageFile))
-                    .collect(),
+                    .map(|path| (path, PackPathRole::PackageFile)),
             );
             if !conflicts.is_empty() {
                 invalid_package_groups.insert((package.clone(), *embedded));
@@ -513,9 +391,9 @@ impl Pack {
             for conflict in conflicts {
                 issues.push(PackInvariantIssue::PackagePathTreeConflict {
                     package: package.clone(),
-                    ancestor: conflict.ancestor.into_string(),
+                    ancestor: conflict.ancestor.to_string(),
                     ancestor_role: conflict.ancestor_role,
-                    descendant: conflict.descendant.into_string(),
+                    descendant: conflict.descendant.to_string(),
                     descendant_role: conflict.descendant_role,
                 });
             }
@@ -640,6 +518,7 @@ impl Pack {
         let mut font_catalog = Vec::new();
         let mut font_requirements = Vec::<FontRequirement>::new();
         let mut font_faces = BTreeSet::new();
+        let mut declared_font_paths = BTreeSet::new();
         for (position, entry) in input.fonts.into_iter().enumerate() {
             let (path, data, declared_identity, declared_length, exact_bytes) = match entry.source {
                 PackFontSourceInput::ExactBytes(data) => (
@@ -654,13 +533,21 @@ impl Pack {
                     identity,
                     length,
                     data,
-                } => (label, data, identity, length, false),
+                } => {
+                    match canonical_path(PackPathRole::FontData, &label) {
+                        Ok(path) => {
+                            declared_font_paths.insert(path);
+                        }
+                        Err(issue) => issues.push(issue),
+                    }
+                    (label, data, identity, length, false)
+                }
             };
             let index = entry.index;
             let embedded = entry.embedded;
             let parsed_data = data.as_ref().and_then(|data| {
                 Font::new(data.to_typst(), index).map(|font| {
-                    let container = FontContainerIdentity::from_bytes(data.as_slice());
+                    let container = font_container_identity(data.as_slice());
                     (data.clone(), font, container, data.len() as u64)
                 })
             });
@@ -745,6 +632,10 @@ impl Pack {
                 });
             }
         }
+        issues.extend(path_tree_conflicts(
+            &declared_font_paths,
+            PackPathRole::FontData,
+        ));
         if let Some(entrypoint) = &entrypoint
             && !canonical_files.contains_key(entrypoint)
         {
@@ -758,8 +649,16 @@ impl Pack {
             return Err(PackInvariantError { issues });
         }
 
+        let entrypoint = entrypoint.expect("a valid Pack has a canonical entrypoint");
+        let identity = pack_identity(
+            &entrypoint,
+            &canonical_files,
+            &package_requirements,
+            &font_catalog,
+        );
         Ok(Self {
-            entrypoint: entrypoint.expect("a valid Pack has a canonical entrypoint"),
+            identity,
+            entrypoint,
             metadata: input.metadata,
             files: canonical_files,
             packages: canonical_packages,
@@ -771,43 +670,8 @@ impl Pack {
     }
 
     /// Derives the Pack's identity-bearing semantic projection.
-    pub fn identity(&self) -> PackIdentity {
-        let project_files = self
-            .files
-            .iter()
-            .map(|(path, data)| (path.as_str(), typst::utils::hash128(data)))
-            .collect::<Vec<_>>();
-        let packages = self
-            .package_requirements()
-            .iter()
-            .map(|requirement| {
-                (
-                    requirement.spec.to_string(),
-                    requirement.tree.0,
-                    requirement.file_count,
-                    requirement.byte_length,
-                    requirement.embedded,
-                )
-            })
-            .collect::<Vec<_>>();
-        let fonts = self
-            .font_catalog()
-            .iter()
-            .map(|face| {
-                (
-                    face.identity.container.0,
-                    face.identity.index,
-                    face.embedded,
-                )
-            })
-            .collect::<Vec<_>>();
-        PackIdentity(typst::utils::hash128(&(
-            "typst-pack-identity-v1",
-            self.entrypoint(),
-            project_files,
-            packages,
-            fonts,
-        )))
+    pub fn identity(&self) -> CanonicalIdentity {
+        self.identity
     }
 
     /// The root-relative path of the entrypoint file.
@@ -910,7 +774,7 @@ impl Pack {
     pub(crate) fn materialize_compilation_dependency_snapshot(
         &self,
         mut package_fulfillments: BTreeMap<String, PackageTree>,
-        font_fulfillments: BTreeMap<FontContainerIdentity, FontContainer>,
+        font_fulfillments: BTreeMap<CanonicalIdentity, FontContainer>,
     ) -> CompilationDependencySnapshot {
         let mut packages = self.packages.clone();
         for requirement in self
@@ -954,9 +818,47 @@ impl Pack {
     }
 }
 
+fn pack_identity(
+    entrypoint: &CanonicalPath,
+    files: &BTreeMap<CanonicalPath, SharedBytes>,
+    package_requirements: &[PackageRequirement],
+    font_catalog: &[PackFontCatalogFace],
+) -> CanonicalIdentity {
+    let project_files = files
+        .iter()
+        .map(|(path, data)| (path.as_str(), typst::utils::hash128(data)))
+        .collect::<Vec<_>>();
+    let packages = package_requirements
+        .iter()
+        .map(|requirement| {
+            (
+                requirement.spec.to_string(),
+                requirement.tree,
+                requirement.file_count,
+                requirement.byte_length,
+                requirement.embedded,
+            )
+        })
+        .collect::<Vec<_>>();
+    let fonts = font_catalog
+        .iter()
+        .map(|face| (face.identity.container, face.identity.index, face.embedded))
+        .collect::<Vec<_>>();
+    CanonicalIdentity::from_digest(
+        CanonicalIdentityRole::Pack,
+        typst::utils::hash128(&(
+            "typst-pack-identity-v1",
+            entrypoint.as_str(),
+            project_files,
+            packages,
+            fonts,
+        )),
+    )
+}
+
 fn package_tree_identity(
     files: &BTreeMap<CanonicalPath, SharedBytes>,
-) -> (PackageTreeIdentity, u64, u64) {
+) -> (CanonicalIdentity, u64, u64) {
     crate::package_catalog::derive_package_tree_identity(
         files.iter().map(|(path, data)| (path.as_str(), data)),
     )
@@ -1146,33 +1048,7 @@ fn canonical_path_without_membership(
         path: path.to_owned(),
         message,
     };
-    if path.is_empty() || path.starts_with('/') || path.starts_with('\\') {
-        return Err(invalid("path must name a root-relative file".to_owned()));
-    }
-    if path.contains('\\') {
-        return Err(invalid(
-            "backslashes are not portable path separators".to_owned(),
-        ));
-    }
-    if path.contains('\0') {
-        return Err(invalid("path must not contain NUL bytes".to_owned()));
-    }
-    if has_windows_drive_prefix(path) {
-        return Err(invalid(
-            "path must not contain a platform root prefix".to_owned(),
-        ));
-    }
-    let vpath = VirtualPath::new(path).map_err(|err| invalid(err.to_string()))?;
-    let canonical = vpath.get_without_slash();
-    if canonical.is_empty() {
-        return Err(invalid("path must name a file".to_owned()));
-    }
-    if has_windows_drive_prefix(canonical) {
-        return Err(invalid(
-            "path must not contain a platform root prefix".to_owned(),
-        ));
-    }
-    Ok(CanonicalPath(canonical.to_owned()))
+    canonical_relative_path(path).map_err(|error| invalid(error.to_string()))
 }
 
 fn validate_package_spec(spec: &PackageSpec) -> Result<(), PackInvariantIssue> {
@@ -1192,44 +1068,16 @@ fn validate_package_spec(spec: &PackageSpec) -> Result<(), PackInvariantIssue> {
     Ok(())
 }
 
-fn has_windows_drive_prefix(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
-}
-
-fn find_path_tree_conflicts(
-    mut paths: Vec<(CanonicalPath, PackPathRole)>,
-) -> Vec<PathTreeConflict> {
-    paths.sort_by(|(left, _), (right, _)| left.cmp(right));
-    let mut conflicts = Vec::new();
-    for (ancestor, ancestor_role) in &paths {
-        let prefix = format!("{ancestor}/");
-        for (descendant, descendant_role) in paths
-            .iter()
-            .skip(paths.partition_point(|(path, _)| path.as_str() < prefix.as_str()))
-            .take_while(|(path, _)| path.as_str().starts_with(&prefix))
-        {
-            conflicts.push(PathTreeConflict {
-                ancestor: ancestor.clone(),
-                ancestor_role: *ancestor_role,
-                descendant: descendant.clone(),
-                descendant_role: *descendant_role,
-            });
-        }
-    }
-    conflicts
-}
-
-fn path_tree_conflicts(
-    paths: impl IntoIterator<Item = CanonicalPath>,
+fn path_tree_conflicts<'a>(
+    paths: impl IntoIterator<Item = &'a CanonicalPath>,
     role: PackPathRole,
 ) -> Vec<PackInvariantIssue> {
-    find_path_tree_conflicts(paths.into_iter().map(|path| (path, role)).collect())
+    shared_path_tree_conflicts(paths.into_iter().map(|path| (path, role)))
         .into_iter()
         .map(|conflict| PackInvariantIssue::PathTreeConflict {
-            ancestor: conflict.ancestor.into_string(),
+            ancestor: conflict.ancestor.to_string(),
             ancestor_role: conflict.ancestor_role,
-            descendant: conflict.descendant.into_string(),
+            descendant: conflict.descendant.to_string(),
             descendant_role: conflict.descendant_role,
         })
         .collect()

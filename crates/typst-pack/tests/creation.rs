@@ -693,7 +693,7 @@ fn a_supplied_tree_path_that_cannot_name_a_package_file_is_rejected() {
 #[cfg(feature = "embedded-fonts")]
 mod fonts {
     use typst_pack::{
-        FontCatalog, FontCatalogEntry, FontContainer, FontContainerIdentity, FontDisposition,
+        CanonicalIdentity, FontCatalog, FontCatalogEntry, FontContainer, FontDisposition,
         PackCreationOutcome, create,
     };
 
@@ -733,7 +733,8 @@ mod fonts {
             requirements
                 .iter()
                 .find(|requirement| {
-                    requirement.container_identity() == FontContainerIdentity::from_bytes(data)
+                    requirement.container_identity()
+                        == CanonicalIdentity::for_font_container_bytes(data)
                 })
                 .map(|requirement| requirement.is_embedded())
         };
@@ -749,8 +750,8 @@ mod fonts {
                 .map(|face| face.identity().container())
                 .collect::<Vec<_>>(),
             [
-                FontContainerIdentity::from_bytes(&serif),
-                FontContainerIdentity::from_bytes(&mono),
+                CanonicalIdentity::for_font_container_bytes(&serif),
+                CanonicalIdentity::for_font_container_bytes(&mono),
             ]
         );
     }
@@ -774,7 +775,7 @@ mod fonts {
         assert_eq!(requirements.len(), 1);
         assert_eq!(
             requirements[0].container_identity(),
-            FontContainerIdentity::from_bytes(&serif)
+            CanonicalIdentity::for_font_container_bytes(&serif)
         );
     }
 

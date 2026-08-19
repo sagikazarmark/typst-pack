@@ -11,7 +11,6 @@ use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};
 use std::str::FromStr;
 
-use typst::syntax::VirtualPath;
 use typst::syntax::package::PackageSpec;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
@@ -20,14 +19,13 @@ use crate::limits::{LimitError, Limits, LimitsError, ResourceKind};
 use crate::manifest::PackManifest;
 pub use crate::manifest::{FORMAT_VERSION, MANIFEST_PATH, PackManifestError as ManifestError};
 use crate::pack::{
-    DeclaredFontContainerIdentity, FontContainerIdentity, InvalidPackageSpecInput,
-    PACKAGE_TREE_IDENTITY_ALGORITHM, PACKAGE_TREE_IDENTITY_KIND, PACKAGE_TREE_IDENTITY_SCHEMA,
-    PackConstructionInput, PackFontInput, PackFontSourceInput, PackInvariantError,
-    PackageFileInput, PackageRequirementInput, PackageRequirementsInput, PackageTreeIdentity,
-    ProjectFileInput, font_container_path,
+    DeclaredFontContainerIdentity, InvalidPackageSpecInput, PackConstructionInput, PackFontInput,
+    PackFontSourceInput, PackInvariantError, PackageFileInput, PackageRequirementInput,
+    PackageRequirementsInput, ProjectFileInput, font_container_path,
 };
+use crate::paths::{canonical_relative_path, has_windows_drive_prefix};
 use crate::payload::SharedBytes;
-use crate::{Pack, PackArchiveBytes};
+use crate::{CanonicalIdentity, CanonicalIdentityRole, Pack, PackArchiveBytes};
 
 /// A resource bounded during Pack Archive Encoding.
 pub type EncodeResource = ResourceKind<4>;
@@ -340,7 +338,7 @@ fn encode_manifest(pack: &Pack, ceiling: u64) -> Result<String, EncodeLimitError
             manifest.push("\ntree-digest = ")?;
             manifest.push_quoted(&requirement.tree_identity().encode())?;
             manifest.push("\ntree-identity-kind = ")?;
-            manifest.push_quoted(requirement.tree_identity().kind())?;
+            manifest.push_quoted(requirement.tree_identity().role().as_str())?;
             manifest.push("\ntree-identity-schema = ")?;
             manifest.push_quoted(requirement.tree_identity().schema())?;
             manifest.push("\ntree-identity-algorithm = ")?;
@@ -384,7 +382,7 @@ fn encode_manifest(pack: &Pack, ceiling: u64) -> Result<String, EncodeLimitError
         manifest.push("\ncontainer-digest = ")?;
         manifest.push_quoted(&container.encode())?;
         manifest.push("\ncontainer-identity-kind = ")?;
-        manifest.push_quoted(container.kind())?;
+        manifest.push_quoted(container.role().as_str())?;
         manifest.push("\ncontainer-identity-schema = ")?;
         manifest.push_quoted(container.schema())?;
         manifest.push("\ncontainer-identity-algorithm = ")?;
@@ -951,7 +949,7 @@ pub fn decode(archive: &PackArchiveBytes, limits: DecodeLimits) -> Result<Pack, 
     let manifest = PackManifest::from_toml(manifest_text)?;
 
     let mut font_paths = BTreeSet::new();
-    let mut font_path_values = Vec::new();
+    let mut canonical_font_paths = BTreeMap::new();
     for font in manifest.fonts() {
         let path = canonical_archive_name(font.path())
             .map_err(|_| ArchiveError::InvalidFontPath(font.path().to_owned()))?;
@@ -963,14 +961,7 @@ pub fn decode(archive: &PackArchiveBytes, limits: DecodeLimits) -> Result<Pack, 
             .into());
         }
         font_paths.insert(path.clone());
-        font_path_values.push(path);
-    }
-    if let Some((ancestor, descendant)) = find_path_tree_conflict(font_path_values) {
-        return Err(ArchiveError::FontPathTreeConflict {
-            ancestor,
-            descendant,
-        }
-        .into());
+        canonical_font_paths.insert(font.path().to_owned(), path);
     }
 
     let font_entries = unknown_entries
@@ -1045,13 +1036,13 @@ pub fn decode(archive: &PackArchiveBytes, limits: DecodeLimits) -> Result<Pack, 
         .fonts()
         .iter()
         .map(|entry| {
-            let canonical = canonical_archive_name(entry.path()).ok();
+            let canonical = canonical_font_paths.get(entry.path());
             PackFontInput {
                 source: PackFontSourceInput::Declared {
                     label: entry.path().to_owned(),
                     identity: declared_font_container_identity(entry),
                     length: entry.container_length(),
-                    data: canonical.and_then(|path| fonts_by_path.get(&path).cloned()),
+                    data: canonical.and_then(|path| fonts_by_path.get(path).cloned()),
                 },
                 index: entry.index(),
                 embedded: !entry.is_external(),
@@ -1078,10 +1069,11 @@ fn package_requirement_input(
         spec: error.spec,
         message: error.message,
     });
-    let tree = (entry.tree_identity_kind() == PACKAGE_TREE_IDENTITY_KIND
-        && entry.tree_identity_schema() == PACKAGE_TREE_IDENTITY_SCHEMA
-        && entry.tree_identity_algorithm() == PACKAGE_TREE_IDENTITY_ALGORITHM)
-        .then(|| PackageTreeIdentity::decode(entry.tree_digest()))
+    let role = CanonicalIdentityRole::PackageTree;
+    let tree = (entry.tree_identity_kind() == role.as_str()
+        && entry.tree_identity_schema() == role.schema()
+        && entry.tree_identity_algorithm() == "typst-hash128-0.15")
+        .then(|| CanonicalIdentity::decode(role, entry.tree_digest()))
         .flatten();
     PackageRequirementInput {
         spec,
@@ -1104,15 +1096,17 @@ fn declared_font_container_identity(
     if matches!(components, (None, None, None, None)) {
         return DeclaredFontContainerIdentity::Absent;
     }
-    let digest = match components.0.map(FontContainerIdentity::decode) {
+    let digest = match components
+        .0
+        .map(|value| CanonicalIdentity::decode(CanonicalIdentityRole::FontContainer, value))
+    {
         Some(Some(identity)) => Some(identity),
         Some(None) => return DeclaredFontContainerIdentity::Invalid,
         None => None,
     };
-    if components.1.is_some_and(|kind| kind != "font-container")
-        || components
-            .2
-            .is_some_and(|schema| schema != "typst-pack-font-container-identity-v1")
+    let role = CanonicalIdentityRole::FontContainer;
+    if components.1.is_some_and(|kind| kind != role.as_str())
+        || components.2.is_some_and(|schema| schema != role.schema())
         || components
             .3
             .is_some_and(|algorithm| algorithm != "typst-hash128-0.15")
@@ -1138,7 +1132,7 @@ mod semantic_input_tests {
 
     #[test]
     fn partial_embedded_font_identity_fields_remain_independently_validated() {
-        let identity = FontContainerIdentity::from_bytes(b"font bytes");
+        let identity = crate::pack::font_container_identity(b"font bytes");
         let digest = identity
             .digest()
             .iter()
@@ -1695,10 +1689,9 @@ fn canonical_archive_name(path: &str) -> Result<String, ArchiveError> {
     {
         return Err(ArchiveError::UnsafeMemberName(path.to_owned()));
     }
-    let canonical = VirtualPath::new(path)
+    let canonical = canonical_relative_path(path)
         .map_err(|_| ArchiveError::UnsafeMemberName(path.to_owned()))?
-        .get_without_slash()
-        .to_owned();
+        .into_string();
     if has_windows_drive_prefix(&canonical) {
         return Err(ArchiveError::UnsafeMemberName(path.to_owned()));
     }
@@ -1727,11 +1720,6 @@ fn strip_current_directory_prefix(mut path: &str) -> &str {
     path
 }
 
-fn has_windows_drive_prefix(path: &str) -> bool {
-    let bytes = path.as_bytes();
-    bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':'
-}
-
 fn reserved_font_archive_role(path: &str) -> Option<ReservedMemberRole> {
     if is_same_or_descendant(path, MANIFEST_PATH) {
         Some(ReservedMemberRole::Manifest)
@@ -1749,15 +1737,4 @@ fn is_same_or_descendant(path: &str, ancestor: &str) -> bool {
         || path
             .strip_prefix(ancestor)
             .is_some_and(|suffix| suffix.starts_with('/'))
-}
-
-fn find_path_tree_conflict(mut paths: Vec<String>) -> Option<(String, String)> {
-    paths.sort();
-    for ancestor in &paths {
-        let prefix = format!("{ancestor}/");
-        if let Some(descendant) = paths.iter().find(|path| path.starts_with(&prefix)) {
-            return Some((ancestor.clone(), descendant.clone()));
-        }
-    }
-    None
 }

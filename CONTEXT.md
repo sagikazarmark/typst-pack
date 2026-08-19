@@ -345,16 +345,10 @@ their applicable controls and derive the required Typst Target and format featur
 The core resolves deterministic defaults, canonicalizes page selection and PDF
 standards, and rejects invalid values before compilation.
 
-**Compilation Request Inventory**:
-The canonical description of every effective semantic request value: output
-controls and origins, safe Typst-input and Pack-override commitments, selected
-and derived features, and Document Time. Values that affect only acquisition,
-presentation, or destination do not contribute.
-
 **Compilation Request Commitment**:
 A role-separated digest that binds sensitive Typst inputs or Pack Override bytes
-without exposing them. Safe inventories retain commitments and exact sizes rather
-than raw values. Commitments do not provide confidentiality against guessing.
+without exposing them. Commitments are private inputs to Compilation Identity and
+do not provide confidentiality against guessing.
 
 **Pack Override**:
 A compilation-scoped byte replacement for one project file contained in a Pack,
@@ -369,25 +363,21 @@ not the engine reads it.
 
 ## Compilation Results
 
-**Engine Identity**:
-The exact embedded Typst compiler identity attested by typst-pack: implementation,
-version, source checksum, Rust target, target features, crate feature set, and
-debug-assertion mode.
-
-**Exporter Identity**:
-The exact official format exporter identity attested with the same implementation
-fields as Engine Identity.
+**Implementation Identity**:
+The exact embedded engine or official exporter implementation attested by
+typst-pack: role, implementation, version, source checksum, Rust target, target
+features, crate feature set, and debug-assertion mode. Engine and Exporter roles
+are distinct identity-bearing values.
 
 **Compilation Request Rejection**:
 The deterministic, side-effect-free rejection of an invalid semantic request
-before Compilation Identity or dependency verification. It owns the complete
-Compilation Request Inventory and every independently detectable ordered
-Compilation Request Issue.
+before Compilation Identity or dependency verification. It owns every
+independently detectable ordered Compilation Request Issue.
 
 **Compilation Identity**:
 The pre-execution identity of one fully specified semantic compilation. It binds
 Pack Identity, output specification, input and override commitments, features,
-Document Time, Engine Identity, and Exporter Identity. Destinations, timing,
+Document Time, and role-separated Implementation Identities. Destinations, timing,
 provenance, and fulfillment cache metadata do not contribute.
 
 **Compilation Operation Outcome**:
@@ -396,8 +386,8 @@ Compilation Result. Shipped outcomes aggregate every independently detectable
 missing, unexpected, or identity-mismatched external package and font
 fulfillment in canonical order. Fulfillments carry validated Package Trees and
 Font Containers, so malformed raw dependency bytes fail before compilation when
-those values are constructed. Outcomes retain request inventory, Compilation
-Identity, and fulfillment reporting through Compilation Report.
+those values are constructed. Outcomes retain Compilation Identity and
+fulfillment reporting through Compilation Report.
 
 **Canonical Compilation Diagnostic**:
 One ordered compiler or exporter diagnostic containing severity, message, logical
@@ -423,8 +413,8 @@ total Source Page Number count reached before complete export.
 The immutable semantic value produced after request acceptance and exact
 dependency verification. It records succeeded or rejected status, ordered
 artifacts, complete canonical diagnostics, Pack Compilation Warnings, document
-summary, Compilation Access Trace, implementation identities, request inventory,
-Compilation Identity, and Compilation Result Identity. Compiler or exporter
+summary, Compilation Access Trace, implementation identities, Compilation
+Identity, and Compilation Result Identity. Compiler or exporter
 rejection is a result with no artifacts, not an operational failure.
 
 **Compilation Result Identity**:

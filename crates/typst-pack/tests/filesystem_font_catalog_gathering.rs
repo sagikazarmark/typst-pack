@@ -17,7 +17,7 @@ use typst_pack::{
 #[cfg(feature = "embedded-fonts")]
 use crate::font_bytes::typst_container;
 #[cfg(feature = "embedded-fonts")]
-use typst_pack::{FilesystemFontLimitError, FontContainerIdentity};
+use typst_pack::{CanonicalIdentity, FilesystemFontLimitError};
 
 #[cfg(feature = "embedded-fonts")]
 fn limits(values: [u64; 4]) -> FilesystemFontLimits {
@@ -88,15 +88,15 @@ fn configured_sources_and_paths_compose_in_order_with_explicit_dispositions() {
             .collect::<Vec<_>>(),
         [
             (
-                FontContainerIdentity::from_bytes(&first),
+                CanonicalIdentity::for_font_container_bytes(&first),
                 FontDisposition::External,
             ),
             (
-                FontContainerIdentity::from_bytes(&second),
+                CanonicalIdentity::for_font_container_bytes(&second),
                 FontDisposition::External,
             ),
             (
-                FontContainerIdentity::from_bytes(&first),
+                CanonicalIdentity::for_font_container_bytes(&first),
                 FontDisposition::Embedded,
             ),
         ]

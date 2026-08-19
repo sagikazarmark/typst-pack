@@ -34,12 +34,12 @@ use std::str::FromStr;
 
 use typst::syntax::package::PackageSpec;
 use typst_pack::{
-    DependencyDiscoveryRejection, DiscoverySpecification, DocumentTime, FontCatalog,
-    FontCatalogEntry, FontContainer, FontContainerIdentity, FontDisposition, Pack,
-    PackCreationError, PackCreationInput, PackCreationOutcome, PackIdentity, PackMetadata,
-    PackageAcquisitionFailure, PackageAcquisitionFailureReason, PackageAcquisitionFailures,
-    PackageCatalog, PackageCatalogIssue, PackageDisposition, PackageTree, PackageTreeIdentity,
-    ProjectSnapshotAssembly, TypstTarget, create,
+    CanonicalIdentity, DependencyDiscoveryRejection, DiscoverySpecification, DocumentTime,
+    FontCatalog, FontCatalogEntry, FontContainer, FontDisposition, Pack, PackCreationError,
+    PackCreationInput, PackCreationOutcome, PackMetadata, PackageAcquisitionFailure,
+    PackageAcquisitionFailureReason, PackageAcquisitionFailures, PackageCatalog,
+    PackageCatalogIssue, PackageDisposition, PackageTree, ProjectSnapshotAssembly, TypstTarget,
+    create,
 };
 
 /// 2023-11-14T22:13:20Z, the Document Time every representative request in the
@@ -1077,15 +1077,15 @@ fn conform_failure_object_storage(fixture: &Fixture) -> Failure {
 /// Everything about a Pack the corpus asserts on, as one comparable value.
 #[derive(Debug, PartialEq)]
 struct Projection {
-    identity: PackIdentity,
+    identity: CanonicalIdentity,
     entrypoint: String,
     metadata: Option<PackMetadata>,
     project: Vec<(String, Vec<u8>)>,
     embedded_packages: Vec<(String, Vec<(String, Vec<u8>)>)>,
-    packages: Vec<(String, PackageTreeIdentity, u64, u64, bool)>,
-    embedded_fonts: Vec<(FontContainerIdentity, u32, Vec<u8>)>,
-    font_catalog: Vec<(FontContainerIdentity, u32, bool)>,
-    font_requirements: Vec<(FontContainerIdentity, u64, Vec<u32>, bool)>,
+    packages: Vec<(String, CanonicalIdentity, u64, u64, bool)>,
+    embedded_fonts: Vec<(CanonicalIdentity, u32, Vec<u8>)>,
+    font_catalog: Vec<(CanonicalIdentity, u32, bool)>,
+    font_requirements: Vec<(CanonicalIdentity, u64, Vec<u32>, bool)>,
 }
 
 fn projection(pack: &Pack) -> Projection {
@@ -1164,7 +1164,7 @@ fn package_dispositions(pack: &Pack) -> Vec<(String, bool)> {
 
 /// The Pack Font Catalog: each face's container, its container-local index, and
 /// whether that container's bytes travel in the Pack, in catalog order.
-fn font_catalog(pack: &Pack) -> Vec<(FontContainerIdentity, u32, bool)> {
+fn font_catalog(pack: &Pack) -> Vec<(CanonicalIdentity, u32, bool)> {
     pack.font_catalog()
         .iter()
         .map(|face| {
@@ -1178,7 +1178,7 @@ fn font_catalog(pack: &Pack) -> Vec<(FontContainerIdentity, u32, bool)> {
 }
 
 /// Each Font Requirement's container and whether its bytes travel in the Pack.
-fn font_requirements(pack: &Pack) -> Vec<(FontContainerIdentity, bool)> {
+fn font_requirements(pack: &Pack) -> Vec<(CanonicalIdentity, bool)> {
     pack.font_requirements()
         .iter()
         .map(|requirement| (requirement.container_identity(), requirement.is_embedded()))
@@ -1511,7 +1511,7 @@ mod fonts {
     #[cfg(all(feature = "opendal", feature = "package-acquisition"))]
     use std::pin::pin;
 
-    use typst_pack::{FontContainerIdentity, FontDisposition};
+    use typst_pack::{CanonicalIdentity, FontDisposition};
 
     use crate::font_bytes::{family_of, font_collection, renamed_family, typst_container};
     use crate::{Fixture, FontSource, conform, font_catalog, font_requirements};
@@ -1698,7 +1698,7 @@ mod fonts {
 
         // Every face of a collection travels in the same container, so two
         // selected faces are one Font Requirement.
-        let identity = FontContainerIdentity::from_bytes(&container);
+        let identity = CanonicalIdentity::for_font_container_bytes(&container);
         assert_eq!(font_requirements(&created.pack), [(identity, true)]);
         assert_eq!(
             font_catalog(&created.pack),
@@ -1729,11 +1729,11 @@ mod fonts {
 
         assert_eq!(
             selected([&first, &second]),
-            [(FontContainerIdentity::from_bytes(&first), true)]
+            [(CanonicalIdentity::for_font_container_bytes(&first), true)]
         );
         assert_eq!(
             selected([&second, &first]),
-            [(FontContainerIdentity::from_bytes(&second), true)]
+            [(CanonicalIdentity::for_font_container_bytes(&second), true)]
         );
     }
 
@@ -1755,8 +1755,8 @@ mod fonts {
 
         // One Pack references a container it may not redistribute and embeds
         // one it may, and the Pack Font Catalog keeps candidate order.
-        let typst_identity = FontContainerIdentity::from_bytes(&typst_font);
-        let scanned_identity = FontContainerIdentity::from_bytes(&scanned);
+        let typst_identity = CanonicalIdentity::for_font_container_bytes(&typst_font);
+        let scanned_identity = CanonicalIdentity::for_font_container_bytes(&scanned);
         assert_eq!(
             font_catalog(&created.pack),
             [(typst_identity, 0, false), (scanned_identity, 0, true),]

@@ -152,7 +152,10 @@ fn package_tree_exposes_canonical_identity_order_and_totals() {
     );
     assert_eq!(tree.file_count(), 2);
     assert_eq!(tree.byte_length(), 14);
-    assert_eq!(tree.identity().kind(), "complete-package-tree");
+    assert_eq!(
+        tree.identity().role(),
+        typst_pack::CanonicalIdentityRole::PackageTree
+    );
     assert_eq!(
         tree.identity().schema(),
         "typst-pack-complete-package-tree-v1"

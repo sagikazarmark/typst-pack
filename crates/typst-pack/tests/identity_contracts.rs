@@ -3,10 +3,10 @@
 use proptest::prelude::*;
 use typst::foundations::{Datetime, Dict, Smart, Value};
 use typst_pack::{
-    CompilationLimits, CompilationOutputSpecification, CompilationRequestRejection,
-    CompilationResult, CreationTimestamp, DocumentTime, HtmlOutputSpecification, Pack,
-    PackCompilationRequest, PackMetadata, PackOverrideSet, PackageDisposition,
-    PdfOutputSpecification, PngOutputSpecification, RequestValueOrigin, SvgOutputSpecification,
+    CanonicalIdentityRole, CompilationLimits, CompilationOutputSpecification,
+    CompilationRequestRejection, CompilationResult, CreationTimestamp, DocumentTime,
+    HtmlOutputSpecification, Pack, PackCompilationRequest, PackMetadata, PackOverrideSet,
+    PackageDisposition, PdfOutputSpecification, PngOutputSpecification, SvgOutputSpecification,
     compile_with_limits as compile_to_report, parse_page_selection,
 };
 
@@ -73,7 +73,7 @@ proptest! {
 fn frozen_pack_identity_vector() {
     let identity = identity_pack().identity();
 
-    assert_eq!(identity.kind(), "pack");
+    assert_eq!(identity.role(), CanonicalIdentityRole::Pack);
     assert_eq!(identity.schema(), "typst-pack-identity-v1");
     assert_eq!(identity.algorithm(), "typst-hash128-0.15");
     assert_eq!(
@@ -103,24 +103,27 @@ fn frozen_featureless_compilation_and_result_identity_vectors() {
     let compilation = result.compilation_identity();
     let result_identity = result.result_identity();
 
-    assert_eq!(compilation.kind(), "compilation");
+    assert_eq!(compilation.role(), CanonicalIdentityRole::Compilation);
     assert_eq!(compilation.schema(), "typst-pack-compilation-v1");
     assert_eq!(compilation.algorithm(), "typst-hash128-0.15");
     assert_eq!(
         compilation.digest(),
         [
-            0x04, 0x67, 0x5e, 0xcb, 0xc5, 0x89, 0x68, 0xd7, 0x63, 0xa8, 0xfe, 0xd3, 0x4c, 0xce,
-            0xde, 0x67,
+            0xac, 0x5d, 0xad, 0xb4, 0x28, 0xd9, 0x46, 0x06, 0x6f, 0x84, 0x29, 0xdf, 0x6e, 0x8b,
+            0xad, 0xc3,
         ]
     );
-    assert_eq!(result_identity.kind(), "compilation-result");
+    assert_eq!(
+        result_identity.role(),
+        CanonicalIdentityRole::CompilationResult
+    );
     assert_eq!(result_identity.schema(), "typst-pack-compilation-result-v1");
     assert_eq!(result_identity.algorithm(), "typst-hash128-0.15");
     assert_eq!(
         result_identity.digest(),
         [
-            0x4b, 0xce, 0xae, 0x83, 0x78, 0xcd, 0x40, 0x90, 0x72, 0x28, 0x91, 0x7b, 0x9e, 0x0a,
-            0x74, 0xf6,
+            0xe2, 0xf7, 0x65, 0x65, 0x46, 0x16, 0x68, 0x0b, 0xc3, 0xcf, 0x1a, 0x5e, 0xda, 0x2a,
+            0xb7, 0xbc,
         ]
     );
 }
@@ -144,12 +147,12 @@ fn frozen_opendal_compilation_and_result_identity_vectors() {
     assert_implementation_attestation_vectors(
         "opendal",
         [
-            0xc8, 0xcb, 0x29, 0x92, 0xf4, 0xcf, 0x8a, 0x1b, 0xdd, 0x5d, 0x4b, 0x92, 0xa7, 0xf6,
-            0xcf, 0x6f,
+            0x36, 0xf9, 0x16, 0xe0, 0xcc, 0x51, 0x81, 0x2d, 0xff, 0xfb, 0xb7, 0xab, 0x5f, 0xa4,
+            0x3d, 0xe7,
         ],
         [
-            0x37, 0xd3, 0x7c, 0x48, 0xdc, 0xa6, 0xab, 0xb3, 0x66, 0x0e, 0xa6, 0xe9, 0x13, 0x48,
-            0x56, 0xf4,
+            0x7e, 0x54, 0xc3, 0x0a, 0x79, 0xa3, 0x8c, 0xad, 0xbf, 0xd1, 0xc9, 0x91, 0x97, 0xae,
+            0x51, 0x1d,
         ],
     );
 }
@@ -171,12 +174,12 @@ fn frozen_all_feature_compilation_and_result_identity_vectors() {
     assert_implementation_attestation_vectors(
         "_test-package-download-probe,default,diagnostics,egress,embedded-fonts,fs,opendal,package-acquisition,parallel",
         [
-            0xd0, 0x98, 0xec, 0x8b, 0xfb, 0x80, 0xf9, 0xdb, 0x26, 0xc8, 0x98, 0x71, 0x98, 0xe5,
-            0x8d, 0xd1,
+            0x32, 0x7f, 0x07, 0xa5, 0x97, 0xbb, 0x11, 0x65, 0xd7, 0xfc, 0x94, 0x88, 0x44, 0xb1,
+            0x32, 0x89,
         ],
         [
-            0x46, 0x75, 0xb7, 0x37, 0x63, 0x18, 0xe7, 0xfb, 0x71, 0xaa, 0x39, 0x7c, 0xe8, 0x9d,
-            0xf3, 0x53,
+            0xb6, 0x4b, 0x2c, 0xeb, 0xd2, 0xc2, 0xfc, 0x36, 0x2d, 0xb0, 0x44, 0x72, 0xbb, 0xb7,
+            0x51, 0xe8,
         ],
     );
 }
@@ -477,7 +480,7 @@ fn compilation_identity_binds_pack_inputs_overrides_features_and_document_time()
 }
 
 #[test]
-fn identities_exclude_metadata_and_request_origins() {
+fn identities_exclude_metadata_and_normalize_equivalent_request_values() {
     let metadata = PackMetadata::new()
         .with_name("Named Pack")
         .with_description("Operational description")
@@ -507,18 +510,18 @@ fn identities_exclude_metadata_and_request_origins() {
             .document_time(time),
     )
     .unwrap();
-    let adapter = compile(
+    let described = compile(
         PackCompilationRequest::new(metadata_pack, svg_output())
-            .adapter_resolved_inputs(inputs)
-            .adapter_resolved_feature(typst::Feature::A11yExtras)
-            .adapter_resolved_document_time(time),
+            .inputs(inputs)
+            .feature(typst::Feature::A11yExtras)
+            .document_time(time),
     )
     .unwrap();
     assert_eq!(
         caller.compilation_identity(),
-        adapter.compilation_identity()
+        described.compilation_identity()
     );
-    assert_eq!(caller.result_identity(), adapter.result_identity());
+    assert_eq!(caller.result_identity(), described.result_identity());
 
     let default_png = compile(PackCompilationRequest::new(
         plain_pack.clone(),
@@ -533,10 +536,6 @@ fn identities_exclude_metadata_and_request_origins() {
         }),
     ))
     .unwrap();
-    assert_ne!(
-        default_png.request_inventory().output_origins(),
-        explicit_png.request_inventory().output_origins()
-    );
     assert_eq!(
         default_png.compilation_identity(),
         explicit_png.compilation_identity()
@@ -553,20 +552,6 @@ fn identities_exclude_metadata_and_request_origins() {
     .unwrap();
     let default_empty_overrides =
         compile(PackCompilationRequest::new(plain_pack, svg_output())).unwrap();
-    assert_eq!(
-        default_empty_overrides
-            .request_inventory()
-            .overrides()
-            .origin(),
-        RequestValueOrigin::CoreDefaulted
-    );
-    assert_eq!(
-        caller_empty_overrides
-            .request_inventory()
-            .overrides()
-            .origin(),
-        RequestValueOrigin::CallerSupplied
-    );
     assert_eq!(
         default_empty_overrides.compilation_identity(),
         caller_empty_overrides.compilation_identity()

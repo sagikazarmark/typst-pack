@@ -1,4 +1,4 @@
-use crate::{CompilationResultIdentity, PackIdentity};
+use crate::CanonicalIdentity;
 
 /// Knowledge about whether one attempted destination effect completed.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -80,13 +80,13 @@ impl PackExtractionPublicationProgress {
 /// Evidence from successful publication of one Pack Extraction Plan.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackExtractionPublicationReceipt {
-    pack_identity: PackIdentity,
+    pack_identity: CanonicalIdentity,
     progress: PackExtractionPublicationProgress,
 }
 
 impl PackExtractionPublicationReceipt {
     pub(crate) const fn new(
-        pack_identity: PackIdentity,
+        pack_identity: CanonicalIdentity,
         progress: PackExtractionPublicationProgress,
     ) -> Self {
         Self {
@@ -95,7 +95,7 @@ impl PackExtractionPublicationReceipt {
         }
     }
 
-    pub const fn pack_identity(&self) -> PackIdentity {
+    pub const fn pack_identity(&self) -> CanonicalIdentity {
         self.pack_identity
     }
 
@@ -168,13 +168,13 @@ impl CompilationArtifactPublicationProgress {
 /// Evidence from successful publication of one Compilation Result's artifacts.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct CompilationArtifactPublicationReceipt {
-    compilation_result_identity: CompilationResultIdentity,
+    compilation_result_identity: CanonicalIdentity,
     progress: CompilationArtifactPublicationProgress,
 }
 
 impl CompilationArtifactPublicationReceipt {
     pub(crate) const fn new(
-        compilation_result_identity: CompilationResultIdentity,
+        compilation_result_identity: CanonicalIdentity,
         progress: CompilationArtifactPublicationProgress,
     ) -> Self {
         Self {
@@ -183,7 +183,7 @@ impl CompilationArtifactPublicationReceipt {
         }
     }
 
-    pub const fn compilation_result_identity(&self) -> CompilationResultIdentity {
+    pub const fn compilation_result_identity(&self) -> CanonicalIdentity {
         self.compilation_result_identity
     }
 

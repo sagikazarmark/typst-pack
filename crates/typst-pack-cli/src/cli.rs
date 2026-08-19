@@ -29,6 +29,13 @@ use typst_pack::pack_archive::{
     write_pack,
 };
 use typst_pack::{
+    CanonicalIdentity, FILE_EXTENSION, FilesystemMergePolicy, FilesystemPackAssembler,
+    FilesystemPackAssemblerConfig, FilesystemPackAssemblyError, FilesystemPackAssemblyRequest,
+    FilesystemPublicationPreflightIssue, Pack, PackCreationError, PackExtractionPublicationError,
+    PackExtractionSelection, PackMetadata, plan_pack_extraction,
+    publish_pack_extraction_plan_to_filesystem,
+};
+use typst_pack::{
     CompilationArtifact, CompilationArtifactPathPublicationError,
     CompilationArtifactPublicationError, CompilationFulfillmentSet, CompilationLimits,
     CompilationOutputSpecification, CompilationReportOutcome, CompilationStatus, CreationTimestamp,
@@ -36,13 +43,6 @@ use typst_pack::{
     PackCompilationRequest, PackOverrideSet, PackageTreeFulfillment, PageRange, PageSelection,
     PdfOutputSpecification, PngOutputSpecification, SvgOutputSpecification, TypstTarget,
     parse_page_selection, publish_compilation_artifacts_to_filesystem_paths,
-};
-use typst_pack::{
-    FILE_EXTENSION, FilesystemMergePolicy, FilesystemPackAssembler, FilesystemPackAssemblerConfig,
-    FilesystemPackAssemblyError, FilesystemPackAssemblyRequest,
-    FilesystemPublicationPreflightIssue, FontContainerIdentity, Pack, PackCreationError,
-    PackExtractionPublicationError, PackExtractionSelection, PackMetadata, plan_pack_extraction,
-    publish_pack_extraction_plan_to_filesystem,
 };
 
 const ENV_PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
@@ -836,7 +836,7 @@ fn inspect(args: InspectArgs) -> CliResult {
                 .collect::<String>();
             println!(
                 "  {}:{}:{}:{digest} face {} ({}) - {}",
-                identity.container().kind(),
+                identity.container().role().as_str(),
                 identity.container().schema(),
                 identity.container().algorithm(),
                 identity.index(),
@@ -1005,15 +1005,16 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
             .insert(source);
     }
 
-    let mut supplied_fonts = BTreeMap::<FontContainerIdentity, Bytes>::new();
+    let mut supplied_fonts = BTreeMap::<CanonicalIdentity, Bytes>::new();
     if pack
         .font_requirements()
         .iter()
         .any(|requirement| !requirement.is_embedded())
     {
         let mut load = |font: typst::text::Font| {
+            let identity = CanonicalIdentity::for_font_container_bytes(font.data().as_slice());
             supplied_fonts
-                .entry(FontContainerIdentity::from_bytes(font.data().as_slice()))
+                .entry(identity)
                 .or_insert_with(|| font.data().clone());
         };
         if !args.fonts.ignore_system_fonts {
@@ -1110,15 +1111,14 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         .filter(|requirement| !requirement.is_embedded())
         .map(|requirement| requirement.container_identity())
         .collect::<BTreeSet<_>>();
-    let mut request =
-        PackCompilationRequest::new_with_adapter_resolved_output(pack, output_specification)
-            .adapter_resolved_inputs(parse_inputs(&args.compilation.inputs))
-            .adapter_resolved_document_time(DocumentTime::UnixTimestamp(document_timestamp));
+    let mut request = PackCompilationRequest::new(pack, output_specification)
+        .inputs(parse_inputs(&args.compilation.inputs))
+        .document_time(DocumentTime::UnixTimestamp(document_timestamp));
     if !args.overrides.is_empty() {
         request = request.overrides(overrides);
     }
     for feature in &args.compilation.features {
-        request = request.adapter_resolved_feature((*feature).into());
+        request = request.feature((*feature).into());
     }
     let font_fulfillments = supplied_fonts
         .into_iter()

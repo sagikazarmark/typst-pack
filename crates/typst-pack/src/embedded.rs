@@ -4,7 +4,7 @@ use typst::World;
 use typst::diag::{SourceResult, Warned};
 use typst_layout::{Page, PagedDocument};
 
-use crate::compile::{EngineIdentity, ExporterIdentity, OutputFormat};
+use crate::compile::{ImplementationIdentity, ImplementationRole, OutputFormat};
 
 const TYPST_ENGINE_VERSION: &str = env!("TYPST_PACK_ENGINE_VERSION");
 const TYPST_ENGINE_CHECKSUM: &str = env!("TYPST_PACK_ENGINE_CHECKSUM");
@@ -20,18 +20,28 @@ const TYPST_HTML_CHECKSUM: &str = env!("TYPST_PACK_HTML_CHECKSUM");
 pub(crate) struct EmbeddedTypst;
 
 impl EmbeddedTypst {
-    pub(crate) fn engine_identity() -> EngineIdentity {
-        EngineIdentity::new("typst", TYPST_ENGINE_VERSION, TYPST_ENGINE_CHECKSUM)
+    pub(crate) fn engine_identity() -> ImplementationIdentity {
+        ImplementationIdentity::new(
+            ImplementationRole::Engine,
+            "typst",
+            TYPST_ENGINE_VERSION,
+            TYPST_ENGINE_CHECKSUM,
+        )
     }
 
-    pub(crate) fn exporter_identity(format: OutputFormat) -> ExporterIdentity {
+    pub(crate) fn exporter_identity(format: OutputFormat) -> ImplementationIdentity {
         let (implementation, version, checksum) = match format {
             OutputFormat::Pdf => ("typst-pdf", TYPST_PDF_VERSION, TYPST_PDF_CHECKSUM),
             OutputFormat::Png => ("typst-render", TYPST_RENDER_VERSION, TYPST_RENDER_CHECKSUM),
             OutputFormat::Svg => ("typst-svg", TYPST_SVG_VERSION, TYPST_SVG_CHECKSUM),
             OutputFormat::Html => ("typst-html", TYPST_HTML_VERSION, TYPST_HTML_CHECKSUM),
         };
-        ExporterIdentity::new(implementation, version, checksum)
+        ImplementationIdentity::new(
+            ImplementationRole::Exporter,
+            implementation,
+            version,
+            checksum,
+        )
     }
 
     pub(crate) fn compile_paged(world: &dyn World) -> Warned<SourceResult<PagedDocument>> {

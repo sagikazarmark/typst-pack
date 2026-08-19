@@ -1205,7 +1205,7 @@ fn archive_decoding_rejects_font_paths_at_reserved_namespace_roots() {
 }
 
 #[test]
-fn archive_decoding_rejects_conflicting_font_data_tree_paths() {
+fn pack_construction_rejects_conflicting_font_data_tree_paths() {
     let manifest = b"format-version = 1\n[project]\nentrypoint = \"main.typ\"\n[[fonts]]\npath = \"fonts/a\"\nfamilies = [\"A\"]\n[[fonts]]\npath = \"fonts/a/face.ttf\"\nfamilies = [\"B\"]\n";
     let bytes = raw_stored_zip(&[
         (MANIFEST_PATH, manifest),
@@ -1216,10 +1216,15 @@ fn archive_decoding_rejects_conflicting_font_data_tree_paths() {
 
     assert!(matches!(
         decode_test_archive(bytes),
-        Err(DecodeError::Archive(ArchiveError::FontPathTreeConflict {
-            ref descendant,
-            ..
-        })) if descendant == "fonts/a/face.ttf"
+        Err(DecodeError::InvalidPack(ref error))
+            if error.issues().iter().any(|issue| matches!(
+                issue,
+                PackInvariantIssue::PathTreeConflict {
+                    descendant,
+                    descendant_role: PackPathRole::FontData,
+                    ..
+                } if descendant == "fonts/a/face.ttf"
+            ))
     ));
 }
 

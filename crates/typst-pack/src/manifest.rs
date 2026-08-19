@@ -5,11 +5,6 @@ use std::str::FromStr;
 use serde::{Deserialize, Deserializer, Serialize};
 use typst::syntax::package::PackageSpec;
 
-#[cfg(test)]
-use crate::pack::{
-    PACKAGE_TREE_IDENTITY_ALGORITHM, PACKAGE_TREE_IDENTITY_KIND, PACKAGE_TREE_IDENTITY_SCHEMA,
-};
-
 /// The archive entry name of the manifest.
 pub const MANIFEST_PATH: &str = "typst-pack.toml";
 
@@ -222,9 +217,9 @@ impl PackageManifest {
         Self {
             spec: spec.to_string(),
             tree_digest,
-            tree_identity_kind: PACKAGE_TREE_IDENTITY_KIND.to_owned(),
-            tree_identity_schema: PACKAGE_TREE_IDENTITY_SCHEMA.to_owned(),
-            tree_identity_algorithm: PACKAGE_TREE_IDENTITY_ALGORITHM.to_owned(),
+            tree_identity_kind: "complete-package-tree".to_owned(),
+            tree_identity_schema: "typst-pack-complete-package-tree-v1".to_owned(),
+            tree_identity_algorithm: "typst-hash128-0.15".to_owned(),
             file_count,
             byte_length,
         }
