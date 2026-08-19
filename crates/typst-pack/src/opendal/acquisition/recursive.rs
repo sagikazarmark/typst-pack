@@ -1,5 +1,3 @@
-use std::future::Future;
-
 use futures_util::StreamExt;
 use opendal::ErrorKind;
 
@@ -98,34 +96,6 @@ pub(crate) enum RecursiveAcquisitionError<E> {
 pub(crate) struct RecursiveSourcesAcquisitionError<E> {
     pub(crate) source_index: usize,
     pub(crate) source: RecursiveAcquisitionError<E>,
-}
-
-/// The role-local hooks driven by composite compilation acquisition.
-///
-/// Implementations own canonical targets, in-flight reservations, exact raw
-/// results, and typed role-local failures. Cross-role scheduling, failure
-/// selection, cancellation, and final conversion remain with the composite
-/// caller rather than this protocol.
-pub(crate) trait AcquisitionRole {
-    /// One canonically ordered acquisition target and its diagnostic context.
-    type Target: Clone;
-    /// Role-total capacity held while one target is in flight.
-    type Reservation;
-    /// Exact owned bytes and operational metadata produced for one target.
-    type RawResult;
-    /// A typed failure attributed to one target within this role.
-    type Failure;
-    type Acquire<'a>: Future<Output = Result<Self::RawResult, Self::Failure>> + 'a
-    where
-        Self: 'a;
-
-    fn targets(&self) -> &[Self::Target];
-    fn reserve(&mut self, target: &Self::Target) -> Result<Self::Reservation, Self::Failure>;
-    fn acquire<'a>(
-        &'a self,
-        target: &'a Self::Target,
-        reservation: Self::Reservation,
-    ) -> Self::Acquire<'a>;
 }
 
 pub(crate) async fn acquire_recursive_prefix<R: OperatorResolver + ?Sized>(
@@ -922,19 +892,6 @@ mod tests {
     use crate::opendal::{Location, OperatorBinding, OperatorResolver};
 
     use super::*;
-
-    #[test]
-    fn one_role_can_be_driven_through_target_reservation_result_and_failure_hooks() {
-        let mut role = ExampleRole {
-            targets: vec!["object"],
-            remaining: 7,
-        };
-        let target = role.targets()[0];
-        let reservation = role.reserve(&target).unwrap();
-        let mut acquisition = pin!(role.acquire(&target, reservation));
-
-        assert_eq!(expect_ready(acquisition.as_mut()).unwrap(), ("object", 7));
-    }
 
     #[test]
     fn drains_root_survey_before_reading_and_returns_exact_bytes_in_path_order() {
@@ -1818,35 +1775,6 @@ mod tests {
 
         fn resolve(&self, _: &OperatorBinding) -> Result<opendal::Operator, Self::Error> {
             Ok(self.0.clone())
-        }
-    }
-
-    struct ExampleRole {
-        targets: Vec<&'static str>,
-        remaining: u64,
-    }
-
-    impl AcquisitionRole for ExampleRole {
-        type Target = &'static str;
-        type Reservation = u64;
-        type RawResult = (&'static str, u64);
-        type Failure = Infallible;
-        type Acquire<'a> = std::future::Ready<Result<Self::RawResult, Self::Failure>>;
-
-        fn targets(&self) -> &[Self::Target] {
-            &self.targets
-        }
-
-        fn reserve(&mut self, _: &Self::Target) -> Result<Self::Reservation, Self::Failure> {
-            Ok(self.remaining)
-        }
-
-        fn acquire<'a>(
-            &'a self,
-            target: &'a Self::Target,
-            reservation: Self::Reservation,
-        ) -> Self::Acquire<'a> {
-            std::future::ready(Ok((*target, reservation)))
         }
     }
 }

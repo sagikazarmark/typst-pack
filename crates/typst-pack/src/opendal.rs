@@ -5,8 +5,6 @@
 
 #[allow(dead_code)]
 mod acquisition;
-#[allow(dead_code)]
-mod compilation;
 pub mod location;
 pub mod pack_archive;
 pub mod pack_assembly;
