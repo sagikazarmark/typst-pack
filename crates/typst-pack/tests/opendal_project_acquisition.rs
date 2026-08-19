@@ -21,7 +21,9 @@ use typst_pack::opendal::pack_assembly::{
     ProjectAcquisitionLimitsError, ProjectAcquisitionRequest, ProjectAcquisitionRequestError,
     ProjectAcquisitionResource, acquire_project,
 };
-use typst_pack::opendal::{Location, LocationRoleError, OperatorBinding, OperatorBindings};
+use typst_pack::opendal::{
+    Location, LocationRoleError, OperatorBinding, OperatorBindings, OperatorResolver,
+};
 
 #[test]
 fn acquires_every_yielded_project_file_and_hands_exact_entries_to_snapshot_assembly() {
@@ -200,6 +202,7 @@ fn structural_issues_are_typed_canonical_and_precede_all_reads() {
             },
         ]
     );
+    assert_eq!(survey.to_string(), "project survey failed with 4 issue(s)");
     assert!(
         service
             .log()
@@ -444,6 +447,10 @@ fn failures_keep_native_causes_typed_but_out_of_outer_diagnostics() {
         error
             .source()
             .unwrap()
+            .source()
+            .unwrap()
+            .source()
+            .unwrap()
             .downcast_ref::<opendal::Error>()
             .unwrap()
             .kind(),
@@ -451,11 +458,33 @@ fn failures_keep_native_causes_typed_but_out_of_outer_diagnostics() {
     );
     for rendered in [error.to_string(), format!("{error:?}")] {
         assert!(rendered.contains("project"));
-        assert!(rendered.contains("prefix"));
         assert!(rendered.contains("project/secret.typ"));
         assert!(!rendered.contains("sensitive"));
         assert!(!rendered.contains("scripted"));
     }
+}
+
+#[test]
+fn resolver_failures_are_boxed_and_reachable_through_the_typed_cause() {
+    let request = request("project/", ProjectAcquisitionLimits::reference_v1());
+
+    let error = expect_ready(pin!(acquire_project(&FailingResolver, &request))).unwrap_err();
+    assert!(matches!(
+        error.cause(),
+        ProjectAcquisitionErrorCause::ResolveOperator(source)
+            if source.downcast_ref::<ResolveFailure>().is_some()
+    ));
+    assert!(
+        error
+            .source()
+            .unwrap()
+            .source()
+            .unwrap()
+            .source()
+            .unwrap()
+            .downcast_ref::<ResolveFailure>()
+            .is_some()
+    );
 }
 
 fn expect_ready<F: Future>(mut future: std::pin::Pin<&mut F>) -> F::Output {
@@ -480,3 +509,17 @@ fn bindings(service: &ScriptedService) -> OperatorBindings {
 }
 
 fn assert_send<T: Send>(_: T) {}
+
+#[derive(Debug, thiserror::Error)]
+#[error("project resolver failure")]
+struct ResolveFailure;
+
+struct FailingResolver;
+
+impl OperatorResolver for FailingResolver {
+    type Error = ResolveFailure;
+
+    fn resolve(&self, _: &OperatorBinding) -> Result<opendal::Operator, Self::Error> {
+        Err(ResolveFailure)
+    }
+}

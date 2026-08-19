@@ -225,6 +225,10 @@ fn keeps_absence_unsupported_resolution_and_read_failures_distinct() {
         absent
             .source()
             .unwrap()
+            .source()
+            .unwrap()
+            .source()
+            .unwrap()
             .downcast_ref::<opendal::Error>()
             .unwrap()
             .kind(),
@@ -252,7 +256,15 @@ fn keeps_absence_unsupported_resolution_and_read_failures_distinct() {
         unsupported.cause(),
         PackArchiveAcquisitionErrorCause::ReadUnsupported
     ));
-    assert!(unsupported.source().is_none());
+    assert!(
+        unsupported
+            .source()
+            .unwrap()
+            .source()
+            .unwrap()
+            .source()
+            .is_none()
+    );
     assert!(unsupported_service.log().entries().is_empty());
 
     let read_script = ReadScript::new(
@@ -276,15 +288,48 @@ fn keeps_absence_unsupported_resolution_and_read_failures_distinct() {
     ));
     assert_safe_outer_diagnostics(&read, "archive", "broken.typk");
 
+    let partial_not_found = ReadScript::new(
+        "partial.typk",
+        1,
+        [
+            ReadStep::chunk(b"partial"),
+            ReadStep::failure(opendal::ErrorKind::NotFound),
+        ],
+    )
+    .unwrap();
+    let partial_service = ScriptedService::new(Capabilities::all(), [], [partial_not_found], 8);
+    let partial_bindings = bindings(&partial_service);
+    let partial_request = request("partial.typk", 32);
+    let partial = expect_ready(pin!(acquire_pack_archive(
+        &partial_bindings,
+        &partial_request
+    )))
+    .unwrap_err();
+    assert!(matches!(
+        partial.cause(),
+        PackArchiveAcquisitionErrorCause::Read(source)
+            if source.kind() == opendal::ErrorKind::NotFound
+    ));
+
     let resolver = RejectingResolver;
     let resolve_request = request("secret.typk", 8);
     let mut resolve = pin!(acquire_pack_archive(&resolver, &resolve_request));
     let resolve = expect_ready(resolve.as_mut()).unwrap_err();
     assert!(matches!(
         resolve.cause(),
-        PackArchiveAcquisitionErrorCause::ResolveOperator(ResolverFailure)
+        PackArchiveAcquisitionErrorCause::ResolveOperator(source)
+            if source.downcast_ref::<ResolverFailure>().is_some()
     ));
-    assert!(resolve.source().unwrap().is::<ResolverFailure>());
+    assert!(
+        resolve
+            .source()
+            .unwrap()
+            .source()
+            .unwrap()
+            .source()
+            .unwrap()
+            .is::<ResolverFailure>()
+    );
     assert_safe_outer_diagnostics(&resolve, "archive", "secret.typk");
 }
 
@@ -384,16 +429,13 @@ fn bindings(service: &ScriptedService) -> OperatorBindings {
     OperatorBindings::new([(OperatorBinding::new("archive").unwrap(), service.operator())]).unwrap()
 }
 
-fn assert_safe_outer_diagnostics<E>(
-    error: &typst_pack::opendal::pack_archive::PackArchiveAcquisitionError<E>,
+fn assert_safe_outer_diagnostics(
+    error: &typst_pack::opendal::pack_archive::PackArchiveAcquisitionError,
     binding: &str,
     operation_path: &str,
 ) {
-    let display = error.to_string();
-    let debug = format!("{error:?}");
-    for rendered in [&display, &debug] {
+    for rendered in [error.to_string(), format!("{error:?}")] {
         assert!(rendered.contains(binding));
-        assert!(rendered.contains("exact"));
         assert!(rendered.contains(operation_path));
         assert!(!rendered.contains("sensitive"));
         assert!(!rendered.contains("scripted"));

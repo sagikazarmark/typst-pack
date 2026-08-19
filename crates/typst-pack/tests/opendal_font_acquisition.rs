@@ -390,6 +390,10 @@ fn request_aggregates_invalid_source_roles_in_caller_order() {
             },
         ]
     );
+    assert_eq!(
+        rejection.to_string(),
+        "Font Acquisition request rejected with 2 issue(s)"
+    );
 }
 
 #[test]
@@ -564,6 +568,7 @@ fn structural_issues_are_aggregated_in_source_then_path_order() {
             },
         ]
     );
+    assert_eq!(survey.to_string(), "font survey failed with 2 issue(s)");
     assert!(
         service
             .log()
@@ -712,6 +717,10 @@ fn disappearance_cancellation_and_native_diagnostics_keep_source_evidence() {
         error
             .source()
             .unwrap()
+            .source()
+            .unwrap()
+            .source()
+            .unwrap()
             .downcast_ref::<opendal::Error>()
             .unwrap()
             .kind(),
@@ -723,6 +732,29 @@ fn disappearance_cancellation_and_native_diagnostics_keep_source_evidence() {
         assert!(!rendered.contains("sensitive"));
         assert!(!rendered.contains("scripted"));
     }
+}
+
+#[test]
+fn resolver_failures_are_boxed_and_reachable_through_the_typed_cause() {
+    let request = request(&["fonts/"], FontAcquisitionLimits::reference_v1());
+
+    let error = expect_ready(pin!(acquire_fonts(&FailingResolver, &request))).unwrap_err();
+    assert!(matches!(
+        error.cause(),
+        FontAcquisitionErrorCause::ResolveOperator(source)
+            if source.downcast_ref::<ResolveFailure>().is_some()
+    ));
+    assert!(
+        error
+            .source()
+            .unwrap()
+            .source()
+            .unwrap()
+            .source()
+            .unwrap()
+            .downcast_ref::<ResolveFailure>()
+            .is_some()
+    );
 }
 
 #[test]
@@ -857,5 +889,19 @@ impl OperatorResolver for CountingResolver {
     fn resolve(&self, _: &OperatorBinding) -> Result<opendal::Operator, Self::Error> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.operator.clone())
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("font resolver failure")]
+struct ResolveFailure;
+
+struct FailingResolver;
+
+impl OperatorResolver for FailingResolver {
+    type Error = ResolveFailure;
+
+    fn resolve(&self, _: &OperatorBinding) -> Result<opendal::Operator, Self::Error> {
+        Err(ResolveFailure)
     }
 }

@@ -13,6 +13,8 @@ mod compile;
 mod creation;
 mod embedded;
 #[cfg(feature = "fs")]
+mod error_display;
+#[cfg(feature = "fs")]
 mod filesystem_publication;
 mod font_catalog;
 #[cfg(feature = "fs")]
@@ -35,6 +37,8 @@ mod package_catalog;
 mod package_failure;
 mod payload;
 mod project_snapshot;
+#[cfg(feature = "opendal")]
+mod redacted_error;
 mod world;
 mod world_trace;
 

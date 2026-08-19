@@ -6,7 +6,6 @@ mod scripted_opendal;
 
 use std::convert::Infallible;
 use std::error::Error as _;
-use std::fmt;
 use std::future::Future;
 use std::pin::pin;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -29,8 +28,7 @@ use typst_pack::opendal::pack_assembly::{
     PackageTreeAcquisitionCeilings, PackageTreeSource, acquire_package,
 };
 use typst_pack::opendal::{
-    Location, LocationRoleError, OperatorBinding, OperatorBindings, OperatorBindingsResolveError,
-    OperatorResolver,
+    Location, LocationRoleError, OperatorBinding, OperatorBindings, OperatorResolver,
 };
 #[cfg(feature = "package-acquisition")]
 use typst_pack::{
@@ -377,8 +375,15 @@ fn non_not_found_registry_errors_are_terminal_other_failures() {
     );
     assert!(error.failed_path().is_none());
     assert_eq!(error.failure().reason(), error.reason());
+    let cause = error
+        .source()
+        .unwrap()
+        .source()
+        .unwrap()
+        .downcast_ref::<PackageAcquisitionErrorCause>()
+        .unwrap();
     assert_eq!(
-        error
+        cause
             .source()
             .unwrap()
             .downcast_ref::<opendal::Error>()
@@ -404,9 +409,17 @@ fn resolver_and_archive_capability_failures_remain_typed() {
     let resolve_error = expect_ready(pin!(acquire_package(&resolver, &request))).unwrap_err();
     assert!(matches!(
         resolve_error.cause(),
-        PackageAcquisitionErrorCause::ResolveOperator(ResolverFailure)
+        PackageAcquisitionErrorCause::ResolveOperator(source)
+            if source.downcast_ref::<ResolverFailure>().is_some()
     ));
-    assert!(resolve_error.source().unwrap().is::<ResolverFailure>());
+    let cause = resolve_error
+        .source()
+        .unwrap()
+        .source()
+        .unwrap()
+        .downcast_ref::<PackageAcquisitionErrorCause>()
+        .unwrap();
+    assert!(cause.source().unwrap().is::<ResolverFailure>());
 
     let service = ScriptedService::new(
         Capabilities {
@@ -428,7 +441,14 @@ fn resolver_and_archive_capability_failures_remain_typed() {
         capability_error.cause(),
         PackageAcquisitionErrorCause::UnsupportedArchiveRead
     ));
-    assert!(capability_error.source().is_none());
+    let cause = capability_error
+        .source()
+        .unwrap()
+        .source()
+        .unwrap()
+        .downcast_ref::<PackageAcquisitionErrorCause>()
+        .unwrap();
+    assert!(cause.source().is_none());
 }
 
 #[test]
@@ -811,6 +831,17 @@ fn malformed_cache_and_registry_archives_map_to_the_same_stable_failure() {
             error.cause(),
             AcquiredPackageInsertionErrorCause::ArchiveExpansion(_)
         ));
+        let cause = error
+            .source()
+            .unwrap()
+            .downcast_ref::<Box<AcquiredPackageInsertionErrorCause>>()
+            .unwrap();
+        assert!(
+            cause
+                .source()
+                .unwrap()
+                .is::<Box<typst_pack::PackageAcquisitionError>>()
+        );
         assert_eq!(failures.get(&spec), Some(error.failure()));
         assert!(catalog.get(&spec).is_none());
     }
@@ -945,16 +976,9 @@ impl OperatorResolver for RejectingResolver {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("resolver failed")]
 struct ResolverFailure;
-
-impl fmt::Display for ResolverFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("resolver failed")
-    }
-}
-
-impl std::error::Error for ResolverFailure {}
 
 #[cfg(feature = "package-acquisition")]
 fn package_archive() -> Vec<u8> {
@@ -1020,7 +1044,7 @@ fn assert_send<T: Send>(_: T) {}
 fn tree_error(
     service: &ScriptedService,
     limits: PackageAcquisitionLimits,
-) -> typst_pack::opendal::pack_assembly::PackageAcquisitionError<OperatorBindingsResolveError> {
+) -> typst_pack::opendal::pack_assembly::PackageAcquisitionError {
     let bindings = OperatorBindings::new([(
         OperatorBinding::new("packages").unwrap(),
         service.operator(),

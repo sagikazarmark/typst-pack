@@ -4,6 +4,7 @@
 #[path = "support/opendal.rs"]
 mod scripted_opendal;
 
+use std::error::Error as _;
 use std::future::Future;
 use std::pin::pin;
 use std::task::{Context, Poll, Waker};
@@ -118,11 +119,10 @@ fn request_aggregates_rejection_issues_in_canonical_order() {
             },
         ]
     );
-    for rendered in [rejection.to_string(), format!("{rejection:?}")] {
-        assert!(rendered.contains("artifacts"));
-        assert!(rendered.contains("prefix"));
-        assert!(rendered.contains("output"));
-    }
+    let rendered = rejection.to_string();
+    assert!(rendered.contains("artifacts"));
+    assert!(rendered.contains("prefix"));
+    assert!(rendered.contains("output"));
 }
 
 #[test]
@@ -900,6 +900,32 @@ fn operator_bindings_produce_a_send_publication_future() {
     ));
 }
 
+#[test]
+fn resolver_failure_is_boxed_beneath_the_public_cause() {
+    let result = compilation_result("resolver failure");
+    let request = request_for(&result, ["document.svg"], PublicationPolicy::CreateOrVerify);
+    let mut progress = CompilationArtifactPublicationProgress::new();
+
+    let error = expect_ready(pin!(publish_compilation_artifacts(
+        &FailingResolver,
+        &request,
+        &result,
+        &mut progress,
+    )))
+    .unwrap_err();
+
+    assert_eq!(error.phase(), OpenDalPublicationPhase::ResolveOperator);
+    assert_eq!(error.commit_certainty(), CommitCertainty::NotCommitted);
+    let CompilationArtifactPublicationErrorCause::ResolveOperator(source) = error.cause() else {
+        panic!("unexpected cause: {:?}", error.cause());
+    };
+    assert!(source.downcast_ref::<ResolveError>().is_some());
+    assert!(!format!("{error:?}").contains("resolver rejected"));
+    let cause = error.source().unwrap().source().unwrap();
+    assert!(cause.is::<CompilationArtifactPublicationErrorCause>());
+    assert!(cause.source().unwrap().is::<ResolveError>());
+}
+
 fn two_page_result() -> CompilationResult {
     compilation_result(
         "#set page(width: 10pt, height: 10pt, margin: 0pt)\n\
@@ -1000,3 +1026,17 @@ impl OperatorResolver for RejectingResolver {
         unreachable!("result validation must precede operator resolution")
     }
 }
+
+struct FailingResolver;
+
+impl OperatorResolver for FailingResolver {
+    type Error = ResolveError;
+
+    fn resolve(&self, _: &OperatorBinding) -> Result<opendal::Operator, Self::Error> {
+        Err(ResolveError)
+    }
+}
+
+#[derive(Debug, thiserror::Error)]
+#[error("resolver rejected")]
+struct ResolveError;

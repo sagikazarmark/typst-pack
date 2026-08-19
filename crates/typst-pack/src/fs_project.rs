@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
+use crate::error_display::format_error_list;
 use crate::pack::names_pack_path;
 use crate::project_snapshot::{ProjectSnapshot, ProjectSnapshotAssembly, ProjectSnapshotError};
 
@@ -202,7 +203,12 @@ impl FilesystemProjectIssue {
 }
 
 /// All safely detectable issues found by one filesystem structural survey.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
+#[error(
+    "filesystem project survey found {} issue(s){}",
+    .issues.len(),
+    format_error_list(.issues.as_slice())
+)]
 pub struct FilesystemProjectSurveyError {
     issues: Vec<FilesystemProjectIssue>,
 }
@@ -212,22 +218,6 @@ impl FilesystemProjectSurveyError {
         &self.issues
     }
 }
-
-impl std::fmt::Display for FilesystemProjectSurveyError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "filesystem project survey found {} issue(s)",
-            self.issues.len()
-        )?;
-        for issue in &self.issues {
-            write!(formatter, ": {issue}")?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for FilesystemProjectSurveyError {}
 
 /// A failure while parsing the root filesystem Project Ignore Policy.
 #[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]

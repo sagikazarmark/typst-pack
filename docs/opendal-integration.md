@@ -445,7 +445,7 @@ segment-aware and byte-exact after root dispatch projection.
 
 ```rust
 pub trait OperatorResolver {
-    type Error: std::error::Error + 'static;
+    type Error: std::error::Error + Send + Sync + 'static;
     fn resolve(
         &self,
         binding: &OperatorBinding,
@@ -917,7 +917,7 @@ pub enum ProjectAcquisitionRequestError {
 pub async fn acquire_project<R: OperatorResolver + ?Sized>(
     resolver: &R,
     request: &ProjectAcquisitionRequest,
-) -> Result<ProjectAcquisition, ProjectAcquisitionError<R::Error>>;
+) -> Result<ProjectAcquisition, ProjectAcquisitionError>;
 
 pub struct ProjectAcquisitionEntry { /* private String, Vec<u8> */ }
 impl ProjectAcquisitionEntry {
@@ -953,16 +953,16 @@ impl ProjectAcquisitionSurveyError {
     pub fn issues(&self) -> &[ProjectAcquisitionIssue];
 }
 
-pub struct ProjectAcquisitionError<E> { /* private */ }
-impl<E> ProjectAcquisitionError<E> {
+pub struct ProjectAcquisitionError { /* private */ }
+impl ProjectAcquisitionError {
     pub fn source_location(&self) -> &Location;
     pub fn failed_path(&self) -> Option<&str>;
-    pub fn cause(&self) -> &ProjectAcquisitionErrorCause<E>;
+    pub fn cause(&self) -> &ProjectAcquisitionErrorCause;
 }
 
 #[non_exhaustive]
-pub enum ProjectAcquisitionErrorCause<E> {
-    ResolveOperator(E),
+pub enum ProjectAcquisitionErrorCause {
+    ResolveOperator(Box<dyn std::error::Error + Send + Sync>),
     UnsupportedCapabilities { list: bool, list_with_recursive: bool, read: bool },
     List(::opendal::Error),
     Read(::opendal::Error),
@@ -1017,7 +1017,7 @@ pub enum FontAcquisitionRequestIssue {
 pub async fn acquire_fonts<R: OperatorResolver + ?Sized>(
     resolver: &R,
     request: &FontAcquisitionRequest,
-) -> Result<FontAcquisition, FontAcquisitionError<R::Error>>;
+) -> Result<FontAcquisition, FontAcquisitionError>;
 
 pub struct FontAcquisitionEntry { /* private */ }
 impl FontAcquisitionEntry {
@@ -1056,17 +1056,17 @@ impl FontAcquisitionSurveyError {
     pub fn issues(&self) -> &[FontAcquisitionIssue];
 }
 
-pub struct FontAcquisitionError<E> { /* private */ }
-impl<E> FontAcquisitionError<E> {
+pub struct FontAcquisitionError { /* private */ }
+impl FontAcquisitionError {
     pub fn source_index(&self) -> usize;
     pub fn source_location(&self) -> &Location;
     pub fn failed_path(&self) -> Option<&str>;
-    pub fn cause(&self) -> &FontAcquisitionErrorCause<E>;
+    pub fn cause(&self) -> &FontAcquisitionErrorCause;
 }
 
 #[non_exhaustive]
-pub enum FontAcquisitionErrorCause<E> {
-    ResolveOperator(E),
+pub enum FontAcquisitionErrorCause {
+    ResolveOperator(Box<dyn std::error::Error + Send + Sync>),
     UnsupportedCapabilities { list: bool, list_with_recursive: bool, read: bool },
     List(::opendal::Error),
     Read(::opendal::Error),
@@ -1131,7 +1131,7 @@ pub enum PackageAcquisitionRequestIssue {
 pub async fn acquire_package<R: OperatorResolver + ?Sized>(
     resolver: &R,
     request: &PackageAcquisitionRequest,
-) -> Result<PackageAcquisition, PackageAcquisitionError<R::Error>>;
+) -> Result<PackageAcquisition, PackageAcquisitionError>;
 
 #[non_exhaustive]
 pub enum PackageAcquisition {
@@ -1240,8 +1240,8 @@ by OpenDAL surveys and final `PackageTree::from_owned_entries`. Its authoritativ
 core issue variants.
 
 ```rust
-pub struct PackageAcquisitionError<E> { /* private */ }
-impl<E> PackageAcquisitionError<E> {
+pub struct PackageAcquisitionError { /* private */ }
+impl PackageAcquisitionError {
     pub fn spec(&self) -> &typst::syntax::package::PackageSpec;
     pub fn source_index(&self) -> Option<usize>;
     pub fn configured_source(&self) -> Option<&Location>;
@@ -1249,12 +1249,12 @@ impl<E> PackageAcquisitionError<E> {
     pub fn failed_path(&self) -> Option<&str>;
     pub fn failure(&self) -> &PackageAcquisitionFailure;
     pub fn reason(&self) -> &PackageAcquisitionFailureReason;
-    pub fn cause(&self) -> &PackageAcquisitionErrorCause<E>;
+    pub fn cause(&self) -> &PackageAcquisitionErrorCause;
 }
 
 #[non_exhaustive]
-pub enum PackageAcquisitionErrorCause<E> {
-    ResolveOperator(E),
+pub enum PackageAcquisitionErrorCause {
+    ResolveOperator(Box<dyn std::error::Error + Send + Sync>),
     UnsupportedTreeCapabilities { list: bool, list_with_recursive: bool, read: bool },
     UnsupportedArchiveRead,
     TreeList(::opendal::Error),
@@ -1374,16 +1374,16 @@ pub enum PackArchiveAcquisitionRequestError {
 pub async fn acquire_pack_archive<R: OperatorResolver + ?Sized>(
     resolver: &R,
     request: &PackArchiveAcquisitionRequest,
-) -> Result<PackArchiveBytes, PackArchiveAcquisitionError<R::Error>>;
+) -> Result<PackArchiveBytes, PackArchiveAcquisitionError>;
 
-pub struct PackArchiveAcquisitionError<E> { /* private */ }
-impl<E> PackArchiveAcquisitionError<E> {
+pub struct PackArchiveAcquisitionError { /* private */ }
+impl PackArchiveAcquisitionError {
     pub fn source_location(&self) -> &Location;
-    pub fn cause(&self) -> &PackArchiveAcquisitionErrorCause<E>;
+    pub fn cause(&self) -> &PackArchiveAcquisitionErrorCause;
 }
 #[non_exhaustive]
-pub enum PackArchiveAcquisitionErrorCause<E> {
-    ResolveOperator(E),
+pub enum PackArchiveAcquisitionErrorCause {
+    ResolveOperator(Box<dyn std::error::Error + Send + Sync>),
     ReadUnsupported,
     ObjectAbsent(::opendal::Error),
     Read(::opendal::Error),
@@ -1495,7 +1495,7 @@ suffix filtering participates.
 pub async fn acquire_compilation_bundle<R: OperatorResolver + ?Sized>(
     resolver: &R,
     request: &CompilationAcquisitionRequest,
-) -> Result<CompilationAcquisitionBundle, CompilationAcquisitionError<R::Error>>;
+) -> Result<CompilationAcquisitionBundle, CompilationAcquisitionError>;
 
 pub struct PackOverrideAcquisitionEntry { /* private */ }
 impl PackOverrideAcquisitionEntry {
@@ -1599,17 +1599,17 @@ impl CompilationPackageAcquisitionSurveyError {
     pub fn issues(&self) -> &[CompilationPackageAcquisitionIssue];
 }
 
-pub struct CompilationAcquisitionError<E> { /* private */ }
-impl<E> CompilationAcquisitionError<E> {
+pub struct CompilationAcquisitionError { /* private */ }
+impl CompilationAcquisitionError {
     pub fn pack_identity(&self) -> PackIdentity;
     pub fn target(&self) -> &CompilationAcquisitionTarget;
     pub fn source_location(&self) -> &Location;
-    pub fn cause(&self) -> &CompilationAcquisitionErrorCause<E>;
+    pub fn cause(&self) -> &CompilationAcquisitionErrorCause;
 }
 
 #[non_exhaustive]
-pub enum CompilationAcquisitionErrorCause<E> {
-    ResolveOperator(E),
+pub enum CompilationAcquisitionErrorCause {
+    ResolveOperator(Box<dyn std::error::Error + Send + Sync>),
     UnsupportedCapabilities { list: bool, list_with_recursive: bool, read: bool },
     List(::opendal::Error),
     Read(::opendal::Error),
@@ -1841,7 +1841,7 @@ pub async fn publish_pack_archive<R: OperatorResolver + ?Sized>(
     resolver: &R,
     request: &PackArchivePublicationRequest,
     archive: &PackArchiveBytes,
-) -> Result<PackArchivePublicationReceipt, PackArchivePublicationError<R::Error>>;
+) -> Result<PackArchivePublicationReceipt, PackArchivePublicationError>;
 
 pub fn publish_pack_extraction_plan<'a, R: OperatorResolver + ?Sized>(
     resolver: &'a R,
@@ -1851,7 +1851,7 @@ pub fn publish_pack_extraction_plan<'a, R: OperatorResolver + ?Sized>(
 ) -> impl std::future::Future<
     Output = Result<
         PackExtractionPublicationReceipt,
-        PackExtractionPublicationError<R::Error>,
+        PackExtractionPublicationError,
     >,
 > + 'a;
 
@@ -1859,7 +1859,7 @@ pub async fn publish_package_cache_archive<R: OperatorResolver + ?Sized>(
     resolver: &R,
     request: &PackageCacheArchivePublicationRequest,
     archive: &[u8],
-) -> Result<PackageCacheArchivePublicationReceipt, PackageCacheArchivePublicationError<R::Error>>;
+) -> Result<PackageCacheArchivePublicationReceipt, PackageCacheArchivePublicationError>;
 
 pub fn publish_compilation_artifacts<'a, R: OperatorResolver + ?Sized>(
     resolver: &'a R,
@@ -1869,7 +1869,7 @@ pub fn publish_compilation_artifacts<'a, R: OperatorResolver + ?Sized>(
 ) -> impl std::future::Future<
     Output = Result<
         CompilationArtifactPublicationReceipt,
-        CompilationArtifactPublicationError<R::Error>,
+        CompilationArtifactPublicationError,
     >,
 > + 'a;
 ```
@@ -2023,19 +2023,19 @@ Every publication error has private fields, implements `std::error::Error`, and
 exposes non-optional terminal `commit_certainty() -> CommitCertainty`.
 
 ```rust
-pub struct PackArchivePublicationError<E> { /* private */ }
-impl<E> PackArchivePublicationError<E> {
+pub struct PackArchivePublicationError { /* private */ }
+impl PackArchivePublicationError {
     pub fn destination(&self) -> &Location;
     pub const fn policy(&self) -> PublicationPolicy;
     pub fn failed_path(&self) -> Option<&str>;
     pub const fn phase(&self) -> OpenDalPublicationPhase;
     pub fn progress(&self) -> &PackArchivePublicationProgress;
     pub const fn commit_certainty(&self) -> CommitCertainty;
-    pub fn cause(&self) -> &PackArchivePublicationErrorCause<E>;
+    pub fn cause(&self) -> &PackArchivePublicationErrorCause;
 }
 
-pub struct PackExtractionPublicationError<E> { /* private */ }
-impl<E> PackExtractionPublicationError<E> {
+pub struct PackExtractionPublicationError { /* private */ }
+impl PackExtractionPublicationError {
     pub fn destination(&self) -> &Location;
     pub const fn policy(&self) -> PublicationPolicy;
     pub fn failed_relative_path(&self) -> Option<&str>;
@@ -2043,11 +2043,11 @@ impl<E> PackExtractionPublicationError<E> {
     pub const fn phase(&self) -> OpenDalPublicationPhase;
     pub fn progress(&self) -> &PackExtractionPublicationProgress;
     pub const fn commit_certainty(&self) -> CommitCertainty;
-    pub fn cause(&self) -> &PackExtractionPublicationErrorCause<E>;
+    pub fn cause(&self) -> &PackExtractionPublicationErrorCause;
 }
 
-pub struct CompilationArtifactPublicationError<E> { /* private */ }
-impl<E> CompilationArtifactPublicationError<E> {
+pub struct CompilationArtifactPublicationError { /* private */ }
+impl CompilationArtifactPublicationError {
     pub fn compilation_result_identity(&self) -> CompilationResultIdentity;
     pub fn destination(&self) -> &Location;
     pub const fn policy(&self) -> PublicationPolicy;
@@ -2057,25 +2057,25 @@ impl<E> CompilationArtifactPublicationError<E> {
     pub const fn phase(&self) -> OpenDalPublicationPhase;
     pub fn progress(&self) -> &CompilationArtifactPublicationProgress;
     pub const fn commit_certainty(&self) -> CommitCertainty;
-    pub fn cause(&self) -> &CompilationArtifactPublicationErrorCause<E>;
+    pub fn cause(&self) -> &CompilationArtifactPublicationErrorCause;
 }
 
-pub struct PackageCacheArchivePublicationError<E> { /* private */ }
-impl<E> PackageCacheArchivePublicationError<E> {
+pub struct PackageCacheArchivePublicationError { /* private */ }
+impl PackageCacheArchivePublicationError {
     pub fn destination(&self) -> &Location;
     pub const fn policy(&self) -> PublicationPolicy;
     pub fn failed_path(&self) -> Option<&str>;
     pub const fn phase(&self) -> OpenDalPublicationPhase;
     pub fn progress(&self) -> &PackageCacheArchivePublicationProgress;
     pub const fn commit_certainty(&self) -> CommitCertainty;
-    pub fn cause(&self) -> &PackageCacheArchivePublicationErrorCause<E>;
+    pub fn cause(&self) -> &PackageCacheArchivePublicationErrorCause;
 }
 ```
 
 ```rust
 #[non_exhaustive]
-pub enum PackArchivePublicationErrorCause<E> {
-    ResolveOperator(E),
+pub enum PackArchivePublicationErrorCause {
+    ResolveOperator(Box<dyn std::error::Error + Send + Sync>),
     UnsupportedPolicy { policy: PublicationPolicy },
     UnsupportedObjectSize { byte_length: u64 },
     PreflightRead(::opendal::Error),
@@ -2086,9 +2086,9 @@ pub enum PackArchivePublicationErrorCause<E> {
 }
 
 #[non_exhaustive]
-pub enum PackExtractionPublicationErrorCause<E> {
+pub enum PackExtractionPublicationErrorCause {
     InvalidDestinationPath { relative_path: String },
-    ResolveOperator(E),
+    ResolveOperator(Box<dyn std::error::Error + Send + Sync>),
     UnsupportedPolicy { policy: PublicationPolicy },
     UnsupportedObjectSize { byte_length: u64 },
     PreflightRead(::opendal::Error),
@@ -2099,10 +2099,10 @@ pub enum PackExtractionPublicationErrorCause<E> {
 }
 
 #[non_exhaustive]
-pub enum CompilationArtifactPublicationErrorCause<E> {
+pub enum CompilationArtifactPublicationErrorCause {
     CompilationResultMismatch { expected: CompilationResultIdentity, actual: CompilationResultIdentity },
     InvalidDestinationPath { artifact_index: usize, key: String },
-    ResolveOperator(E),
+    ResolveOperator(Box<dyn std::error::Error + Send + Sync>),
     UnsupportedPolicy { policy: PublicationPolicy },
     UnsupportedObjectSize { artifact_index: usize, byte_length: u64 },
     PreflightRead(::opendal::Error),
@@ -2113,8 +2113,8 @@ pub enum CompilationArtifactPublicationErrorCause<E> {
 }
 
 #[non_exhaustive]
-pub enum PackageCacheArchivePublicationErrorCause<E> {
-    ResolveOperator(E),
+pub enum PackageCacheArchivePublicationErrorCause {
+    ResolveOperator(Box<dyn std::error::Error + Send + Sync>),
     UnsupportedPolicy { policy: PublicationPolicy },
     UnsupportedObjectSize { byte_length: u64 },
     PreflightRead(::opendal::Error),
@@ -2128,8 +2128,8 @@ Because cause enums are non-exhaustive, callers match every variant they need
 and retain a wildcard arm. For example:
 
 ```rust
-fn pack_archive_publication_failure_kind<E>(
-    cause: &PackArchivePublicationErrorCause<E>,
+fn pack_archive_publication_failure_kind(
+    cause: &PackArchivePublicationErrorCause,
 ) -> &'static str {
     match cause {
         PackArchivePublicationErrorCause::ResolveOperator(_) => "resolver",

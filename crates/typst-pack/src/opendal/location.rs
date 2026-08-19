@@ -353,7 +353,7 @@ pub enum LocationRoleError {
 
 /// Resolves an Operator binding without rewriting operation paths.
 pub trait OperatorResolver {
-    type Error: Error + 'static;
+    type Error: Error + Send + Sync + 'static;
 
     fn resolve(&self, binding: &OperatorBinding) -> Result<::opendal::Operator, Self::Error>;
 }

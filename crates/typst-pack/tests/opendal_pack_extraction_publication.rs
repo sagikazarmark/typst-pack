@@ -338,10 +338,14 @@ fn resolver_read_create_and_race_failures_retain_typed_public_causes() {
     )))
     .unwrap_err();
     assert_eq!(resolve.phase(), OpenDalPublicationPhase::ResolveOperator);
-    assert!(matches!(
-        resolve.cause(),
-        PackExtractionPublicationErrorCause::ResolveOperator(ResolveError)
-    ));
+    let PackExtractionPublicationErrorCause::ResolveOperator(source) = resolve.cause() else {
+        panic!("unexpected cause: {:?}", resolve.cause());
+    };
+    assert!(source.downcast_ref::<ResolveError>().is_some());
+    assert!(!format!("{resolve:?}").contains("resolver rejected"));
+    let cause = resolve.source().unwrap().source().unwrap();
+    assert!(cause.is::<PackExtractionPublicationErrorCause>());
+    assert!(cause.source().unwrap().is::<ResolveError>());
 
     let read_service = PublicationService::new(
         PublicationCapabilities::all(),

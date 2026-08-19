@@ -6,6 +6,7 @@ use std::fs::OpenOptions;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
+use crate::error_display::format_error_list;
 #[cfg(feature = "embedded-fonts")]
 use crate::font_catalog::typst_embedded_font_containers;
 use crate::font_catalog::{
@@ -232,7 +233,12 @@ impl FilesystemFontIssue {
 }
 
 /// All safely detectable issues found by one filesystem font survey.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
+#[error(
+    "filesystem font survey found {} issue(s){}",
+    .issues.len(),
+    format_error_list(.issues.as_slice())
+)]
 pub struct FilesystemFontSurveyError {
     issues: Vec<FilesystemFontIssue>,
 }
@@ -242,22 +248,6 @@ impl FilesystemFontSurveyError {
         &self.issues
     }
 }
-
-impl std::fmt::Display for FilesystemFontSurveyError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "filesystem font survey found {} issue(s)",
-            self.issues.len()
-        )?;
-        for issue in &self.issues {
-            write!(formatter, ": {issue}")?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for FilesystemFontSurveyError {}
 
 /// One selected filesystem entry whose bytes are not a valid Font Container.
 #[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
@@ -280,7 +270,12 @@ impl FilesystemFontContainerIssue {
 }
 
 /// Every invalid Font Container found while validating selected entries.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
+#[error(
+    "filesystem font validation found {} invalid container(s){}",
+    .issues.len(),
+    format_error_list(.issues.as_slice())
+)]
 pub struct FilesystemFontValidationError {
     issues: Vec<FilesystemFontContainerIssue>,
 }
@@ -290,22 +285,6 @@ impl FilesystemFontValidationError {
         &self.issues
     }
 }
-
-impl std::fmt::Display for FilesystemFontValidationError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "filesystem font validation found {} invalid container(s)",
-            self.issues.len()
-        )?;
-        for issue in &self.issues {
-            write!(formatter, ": {issue}")?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for FilesystemFontValidationError {}
 
 /// A failure while gathering a Font Catalog from configured filesystem sources.
 #[derive(Debug, thiserror::Error)]

@@ -657,9 +657,11 @@ pub struct PackAssemblyDiagnosticContext {
 }
 
 /// A Pack Creation failure retained by the filesystem Pack Assembler.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("{error}")]
 pub struct FilesystemPackAssemblyCreationError {
     context: Box<PackAssemblyDiagnosticContext>,
+    #[source]
     error: PackCreationError,
     package_failures: Vec<FilesystemPackageAcquisitionError>,
 }
@@ -692,21 +694,11 @@ impl FilesystemPackAssemblyCreationError {
     }
 }
 
-impl std::fmt::Display for FilesystemPackAssemblyCreationError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        self.error.fmt(formatter)
-    }
-}
-
-impl std::error::Error for FilesystemPackAssemblyCreationError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.error)
-    }
-}
-
 /// An invalid Discovery Specification retained by filesystem Pack Assembly.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
+#[error("invalid Discovery Specification: {source}")]
 pub struct FilesystemPackAssemblyDiscoveryError {
+    #[source]
     source: crate::creation::DiscoverySpecificationError,
 }
 
@@ -719,22 +711,6 @@ impl FilesystemPackAssemblyDiscoveryError {
     /// Recovers the Discovery Specification construction failure.
     pub fn into_source(self) -> crate::creation::DiscoverySpecificationError {
         self.source
-    }
-}
-
-impl std::fmt::Display for FilesystemPackAssemblyDiscoveryError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "invalid Discovery Specification: {}",
-            self.source
-        )
-    }
-}
-
-impl std::error::Error for FilesystemPackAssemblyDiscoveryError {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&self.source)
     }
 }
 

@@ -26,6 +26,7 @@ use typst::foundations::Bytes;
 use typst::syntax::package::PackageSpec;
 use typst_kit::packages::FsPackages;
 
+use crate::error_display::format_error_list;
 use crate::package_catalog::{PackageTree, PackageTreeError};
 use crate::package_failure::{PackageAcquisitionFailure, PackageAcquisitionFailureReason};
 #[cfg(feature = "egress")]
@@ -216,7 +217,12 @@ impl FilesystemPackageIssue {
 }
 
 /// All safely detectable issues found by one filesystem package survey.
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
+#[error(
+    "filesystem package survey found {} issue(s){}",
+    .issues.len(),
+    format_error_list(.issues.as_slice())
+)]
 pub struct FilesystemPackageSurveyError {
     issues: Vec<FilesystemPackageIssue>,
 }
@@ -226,22 +232,6 @@ impl FilesystemPackageSurveyError {
         &self.issues
     }
 }
-
-impl std::fmt::Display for FilesystemPackageSurveyError {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "filesystem package survey found {} issue(s)",
-            self.issues.len()
-        )?;
-        for issue in &self.issues {
-            write!(formatter, ": {issue}")?;
-        }
-        Ok(())
-    }
-}
-
-impl std::error::Error for FilesystemPackageSurveyError {}
 
 /// A failure while gathering a Package Tree from the filesystem.
 #[derive(Debug, thiserror::Error)]
@@ -444,20 +434,11 @@ pub fn gather_filesystem_package(
         let mut file = open_without_following(root, &source)?;
         let bytes = read_bounded_package_file(
             &mut file,
+            &source,
             limits.selected_file_bytes,
             actual_total,
             limits.package_tree_bytes,
-        )
-        .map_err(|error| match error {
-            BoundedPackageReadError::Io(error) => FilesystemPackageGatherError::io(
-                FilesystemPackageOperation::ReadSelectedFile,
-                &source,
-                error,
-            ),
-            BoundedPackageReadError::Limit(error) => {
-                FilesystemPackageGatherError::limit(&source, error)
-            }
-        })?;
+        )?;
         let observed = u64::try_from(bytes.len()).map_err(|_| {
             FilesystemPackageGatherError::limit(
                 &source,
@@ -478,17 +459,13 @@ pub fn gather_filesystem_package(
     PackageTree::from_owned_entries(entries).map_err(FilesystemPackageGatherError::PackageTree)
 }
 
-enum BoundedPackageReadError {
-    Io(std::io::Error),
-    Limit(FilesystemPackageLimitError),
-}
-
 fn read_bounded_package_file(
     mut reader: impl Read,
+    path: &Path,
     selected_file_ceiling: u64,
     total_before: u64,
     package_tree_ceiling: u64,
-) -> Result<Vec<u8>, BoundedPackageReadError> {
+) -> Result<Vec<u8>, FilesystemPackageGatherError> {
     let total_allowance = package_tree_ceiling.saturating_sub(total_before);
     let allowance = selected_file_ceiling.min(total_allowance);
     let mut bytes = Vec::new();
@@ -496,30 +473,39 @@ fn read_bounded_package_file(
         .by_ref()
         .take(allowance + 1)
         .read_to_end(&mut bytes)
-        .map_err(BoundedPackageReadError::Io)?;
+        .map_err(|error| {
+            FilesystemPackageGatherError::io(
+                FilesystemPackageOperation::ReadSelectedFile,
+                path,
+                error,
+            )
+        })?;
     let observed = u64::try_from(bytes.len()).map_err(|_| {
-        BoundedPackageReadError::Limit(FilesystemPackageLimitError::AccountingOverflow {
-            resource: FilesystemPackageResource::SelectedFileBytes,
-        })
+        FilesystemPackageGatherError::limit(
+            path,
+            FilesystemPackageLimitError::AccountingOverflow {
+                resource: FilesystemPackageResource::SelectedFileBytes,
+            },
+        )
     })?;
     check_limit(
         FilesystemPackageResource::SelectedFileBytes,
         selected_file_ceiling,
         observed,
     )
-    .map_err(BoundedPackageReadError::Limit)?;
+    .map_err(|source| FilesystemPackageGatherError::limit(path, source))?;
     let total = checked_add(
         total_before,
         observed,
         FilesystemPackageResource::PackageTreeBytes,
     )
-    .map_err(BoundedPackageReadError::Limit)?;
+    .map_err(|source| FilesystemPackageGatherError::limit(path, source))?;
     check_limit(
         FilesystemPackageResource::PackageTreeBytes,
         package_tree_ceiling,
         total,
     )
-    .map_err(BoundedPackageReadError::Limit)?;
+    .map_err(|source| FilesystemPackageGatherError::limit(path, source))?;
     Ok(bytes)
 }
 
@@ -1213,25 +1199,35 @@ mod tests {
 
     #[test]
     fn incremental_package_file_read_stops_at_the_plus_one_byte() {
-        let error = read_bounded_package_file(&b"12345-extra"[..], 4, 0, 100).unwrap_err();
+        let error =
+            read_bounded_package_file(&b"12345-extra"[..], Path::new("package.typ"), 4, 0, 100)
+                .unwrap_err();
         assert!(matches!(
             error,
-            BoundedPackageReadError::Limit(FilesystemPackageLimitError::Exceeded {
-                resource: FilesystemPackageResource::SelectedFileBytes,
-                ceiling: 4,
-                observed_at_least: 5,
-            })
+            FilesystemPackageGatherError::Limit {
+                source: FilesystemPackageLimitError::Exceeded {
+                    resource: FilesystemPackageResource::SelectedFileBytes,
+                    ceiling: 4,
+                    observed_at_least: 5,
+                },
+                ..
+            }
         ));
     }
 
     #[test]
     fn incremental_package_tree_read_reports_accounting_overflow() {
-        let error = read_bounded_package_file(&b"x"[..], 1, u64::MAX, u64::MAX).unwrap_err();
+        let error =
+            read_bounded_package_file(&b"x"[..], Path::new("package.typ"), 1, u64::MAX, u64::MAX)
+                .unwrap_err();
         assert!(matches!(
             error,
-            BoundedPackageReadError::Limit(FilesystemPackageLimitError::AccountingOverflow {
-                resource: FilesystemPackageResource::PackageTreeBytes,
-            })
+            FilesystemPackageGatherError::Limit {
+                source: FilesystemPackageLimitError::AccountingOverflow {
+                    resource: FilesystemPackageResource::PackageTreeBytes,
+                },
+                ..
+            }
         ));
     }
 

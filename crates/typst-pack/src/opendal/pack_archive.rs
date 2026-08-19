@@ -1,13 +1,13 @@
 //! Pack Archive Acquisition through caller-supplied OpenDAL operators.
 
-use std::{error::Error, fmt};
-
+use super::BoxError;
 use super::acquisition::{
-    ExactObjectAcquisitionError, ExactObjectLimitError, acquire_exact_object,
+    ExactPathAcquisitionOperation, ResolvedOperators, acquire_exact_path, exact_path_absent_error,
 };
 use super::{Location, LocationRoleError, OperatorResolver};
 use crate::PackArchiveBytes;
 use crate::pack_archive::{AcquisitionLimitError, AcquisitionLimits, AcquisitionResource};
+use crate::redacted_error::RedactedError;
 
 /// A validated request to acquire one exact Pack Archive object.
 #[derive(Clone, Debug)]
@@ -83,131 +83,120 @@ pub enum PackArchiveAcquisitionRequestError {
 pub async fn acquire_pack_archive<R: OperatorResolver + ?Sized>(
     resolver: &R,
     request: &PackArchiveAcquisitionRequest,
-) -> Result<PackArchiveBytes, PackArchiveAcquisitionError<R::Error>> {
-    let bytes = acquire_exact_object(resolver, request.source(), request.limits().archive_bytes())
-        .await
-        .map_err(|error| PackArchiveAcquisitionError {
-            source_location: request.source().clone(),
-            cause: map_acquisition_error(error),
+) -> Result<PackArchiveBytes, PackArchiveAcquisitionError> {
+    let error = |cause| PackArchiveAcquisitionError {
+        source_location: request.source().clone(),
+        cause: RedactedError::new(cause),
+    };
+    let mut operators = ResolvedOperators::new(resolver);
+    let resolved = operators
+        .resolve(request.source().binding())
+        .map_err(|source| {
+            error(PackArchiveAcquisitionErrorCause::ResolveOperator(Box::new(
+                source,
+            )))
         })?;
+    if !resolved.read {
+        return Err(error(PackArchiveAcquisitionErrorCause::ReadUnsupported));
+    }
+    let ceiling = request.limits().archive_bytes();
+    let operation = PackArchiveExactPathOperation { request };
+    let bytes = acquire_exact_path(
+        &resolved.operator,
+        request.source().dispatch_path(),
+        ceiling,
+        ceiling,
+        &operation,
+    )
+    .await?
+    .ok_or_else(|| {
+        operation.error(PackArchiveAcquisitionErrorCause::ObjectAbsent(
+            exact_path_absent_error(),
+        ))
+    })?;
 
     Ok(PackArchiveBytes::from_vec(bytes))
 }
 
 /// A failure while acquiring exact Pack Archive bytes through OpenDAL.
 ///
-/// This error's own `Display` and `Debug` output omits native resolver and
-/// OpenDAL messages. Rendering its complete source chain may disclose backend
-/// endpoints, bucket names, or other backend-provided context.
-pub struct PackArchiveAcquisitionError<E> {
+/// Rendering the complete source chain may disclose backend endpoints, bucket
+/// names, or other backend-provided context.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Pack Archive Acquisition failed for binding {binding} at exact-object operation path {operation_path:?}: {cause}",
+    binding = .source_location.binding(),
+    operation_path = .source_location.operation_path(),
+)]
+pub struct PackArchiveAcquisitionError {
     source_location: Location,
-    cause: PackArchiveAcquisitionErrorCause<E>,
+    #[source]
+    cause: RedactedError<PackArchiveAcquisitionErrorCause>,
 }
 
-impl<E> PackArchiveAcquisitionError<E> {
+impl PackArchiveAcquisitionError {
     /// The normalized exact-object source that failed.
     pub fn source_location(&self) -> &Location {
         &self.source_location
     }
 
     /// The typed cause of the acquisition failure.
-    pub fn cause(&self) -> &PackArchiveAcquisitionErrorCause<E> {
-        &self.cause
-    }
-}
-
-impl<E> fmt::Display for PackArchiveAcquisitionError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "Pack Archive Acquisition failed for binding {} at exact-object operation path {:?}: {}",
-            self.source_location.binding(),
-            self.source_location.operation_path(),
-            self.cause.label(),
-        )
-    }
-}
-
-impl<E> fmt::Debug for PackArchiveAcquisitionError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PackArchiveAcquisitionError")
-            .field("binding", self.source_location.binding())
-            .field("role", &"exact object")
-            .field("operation_path", &self.source_location.operation_path())
-            .field("cause", &self.cause.label())
-            .finish()
-    }
-}
-
-impl<E: Error + 'static> Error for PackArchiveAcquisitionError<E> {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match &self.cause {
-            PackArchiveAcquisitionErrorCause::ResolveOperator(source) => Some(source),
-            PackArchiveAcquisitionErrorCause::ReadUnsupported => None,
-            PackArchiveAcquisitionErrorCause::ObjectAbsent(source)
-            | PackArchiveAcquisitionErrorCause::Read(source) => Some(source),
-            PackArchiveAcquisitionErrorCause::Limit(source) => Some(source),
-        }
+    pub fn cause(&self) -> &PackArchiveAcquisitionErrorCause {
+        self.cause.inner()
     }
 }
 
 /// The typed cause of an OpenDAL Pack Archive Acquisition failure.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum PackArchiveAcquisitionErrorCause<E> {
-    ResolveOperator(E),
+pub enum PackArchiveAcquisitionErrorCause {
+    #[error("operator resolution failed")]
+    ResolveOperator(#[source] BoxError),
+    #[error("read capability is unsupported")]
     ReadUnsupported,
-    ObjectAbsent(::opendal::Error),
-    Read(::opendal::Error),
-    Limit(AcquisitionLimitError),
+    #[error("the exact object is absent")]
+    ObjectAbsent(#[source] ::opendal::Error),
+    #[error("the exact object read failed")]
+    Read(#[source] ::opendal::Error),
+    #[error("the archive byte limit failed")]
+    Limit(#[source] AcquisitionLimitError),
 }
 
-impl<E> PackArchiveAcquisitionErrorCause<E> {
-    fn label(&self) -> &'static str {
-        match self {
-            Self::ResolveOperator(_) => "operator resolution failed",
-            Self::ReadUnsupported => "read capability is unsupported",
-            Self::ObjectAbsent(_) => "the exact object is absent",
-            Self::Read(_) => "the exact object read failed",
-            Self::Limit(_) => "the archive byte limit failed",
+struct PackArchiveExactPathOperation<'a> {
+    request: &'a PackArchiveAcquisitionRequest,
+}
+
+impl PackArchiveExactPathOperation<'_> {
+    fn error(&self, cause: PackArchiveAcquisitionErrorCause) -> PackArchiveAcquisitionError {
+        PackArchiveAcquisitionError {
+            source_location: self.request.source().clone(),
+            cause: RedactedError::new(cause),
         }
     }
 }
 
-fn map_acquisition_error<E>(
-    error: ExactObjectAcquisitionError<E>,
-) -> PackArchiveAcquisitionErrorCause<E> {
-    match error {
-        ExactObjectAcquisitionError::InvalidLocationRole(_) => {
-            unreachable!("PackArchiveAcquisitionRequest validates the exact-object role")
-        }
-        ExactObjectAcquisitionError::ResolveOperator(source) => {
-            PackArchiveAcquisitionErrorCause::ResolveOperator(source)
-        }
-        ExactObjectAcquisitionError::ReadUnsupported => {
-            PackArchiveAcquisitionErrorCause::ReadUnsupported
-        }
-        ExactObjectAcquisitionError::ObjectAbsent(source) => {
-            PackArchiveAcquisitionErrorCause::ObjectAbsent(source)
-        }
-        ExactObjectAcquisitionError::Read(source) => PackArchiveAcquisitionErrorCause::Read(source),
-        ExactObjectAcquisitionError::Limit(source) => {
-            PackArchiveAcquisitionErrorCause::Limit(match source {
-                ExactObjectLimitError::Exceeded {
-                    ceiling,
-                    observed_at_least,
-                } => AcquisitionLimitError::Exceeded {
-                    resource: AcquisitionResource::ArchiveBytes,
-                    ceiling,
-                    observed_at_least,
-                },
-                ExactObjectLimitError::AccountingOverflow => {
-                    AcquisitionLimitError::AccountingOverflow {
-                        resource: AcquisitionResource::ArchiveBytes,
-                    }
-                }
-            })
-        }
+impl ExactPathAcquisitionOperation for PackArchiveExactPathOperation<'_> {
+    type Error = PackArchiveAcquisitionError;
+
+    fn read(&self, source: ::opendal::Error) -> PackArchiveAcquisitionError {
+        self.error(PackArchiveAcquisitionErrorCause::Read(source))
+    }
+
+    fn limit_exceeded(&self, ceiling: u64, observed_at_least: u64) -> PackArchiveAcquisitionError {
+        self.error(PackArchiveAcquisitionErrorCause::Limit(
+            AcquisitionLimitError::Exceeded {
+                resource: AcquisitionResource::ArchiveBytes,
+                ceiling,
+                observed_at_least,
+            },
+        ))
+    }
+
+    fn accounting_overflow(&self) -> PackArchiveAcquisitionError {
+        self.error(PackArchiveAcquisitionErrorCause::Limit(
+            AcquisitionLimitError::AccountingOverflow {
+                resource: AcquisitionResource::ArchiveBytes,
+            },
+        ))
     }
 }

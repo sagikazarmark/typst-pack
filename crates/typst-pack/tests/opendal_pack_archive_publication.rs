@@ -422,10 +422,13 @@ fn resolver_read_create_race_and_direct_write_failures_retain_typed_causes() {
     .unwrap_err();
     assert_eq!(resolve.phase(), OpenDalPublicationPhase::ResolveOperator);
     assert_eq!(resolve.commit_certainty(), CommitCertainty::NotCommitted);
-    assert!(matches!(
-        resolve.cause(),
-        PackArchivePublicationErrorCause::ResolveOperator(ResolveError)
-    ));
+    let PackArchivePublicationErrorCause::ResolveOperator(source) = resolve.cause() else {
+        panic!("unexpected cause: {:?}", resolve.cause());
+    };
+    assert!(source.downcast_ref::<ResolveError>().is_some());
+    let cause = resolve.source().unwrap().source().unwrap();
+    assert!(cause.is::<PackArchivePublicationErrorCause>());
+    assert!(cause.source().unwrap().is::<ResolveError>());
 
     let read_service = PublicationService::new(
         PublicationCapabilities::all(),
@@ -674,7 +677,6 @@ fn outer_diagnostics_are_safe_and_operator_bindings_make_a_send_future() {
 
     for rendered in [error.to_string(), format!("{error:?}")] {
         assert!(rendered.contains("archive"));
-        assert!(rendered.contains("exact"));
         assert!(rendered.contains("packs/document.typk"));
         assert!(!rendered.contains("sensitive"));
         assert!(!rendered.contains("resolver rejected"));

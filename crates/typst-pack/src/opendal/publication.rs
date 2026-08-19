@@ -1,13 +1,16 @@
 //! OpenDAL exact-key publication vocabulary and crate-private execution.
 
-use std::{collections::BTreeMap, error::Error, fmt, future::Future};
+use std::{collections::BTreeMap, future::Future};
 
 use futures_util::StreamExt;
 use opendal::ErrorKind;
 
 use super::location::validate_decoded_artifact_key_path;
-use super::{Location, LocationError, LocationRoleError, OperatorBinding, OperatorResolver};
+use super::{
+    BoxError, Location, LocationError, LocationRoleError, OperatorBinding, OperatorResolver,
+};
 use crate::pack_archive::CommitCertainty;
+use crate::redacted_error::RedactedError;
 use crate::{CompilationResult, CompilationResultIdentity, CompilationStatus, PackArchiveBytes};
 
 /// The exact-key conflict policy for an OpenDAL publication operation.
@@ -166,94 +169,54 @@ pub async fn publish_pack_archive<R: OperatorResolver + ?Sized>(
     resolver: &R,
     request: &PackArchivePublicationRequest,
     archive: &PackArchiveBytes,
-) -> Result<PackArchivePublicationReceipt, PackArchivePublicationError<R::Error>> {
+) -> Result<PackArchivePublicationReceipt, PackArchivePublicationError> {
     let mut progress = PackArchivePublicationProgress::new();
     let destination_path = request.destination().operation_path();
     let keys = [ExactKey::new(destination_path, archive.as_slice())];
-    let execution = publish_exact_keys(
-        resolver,
-        request.destination().binding(),
-        request.policy(),
-        &keys,
-        |entry| {
-            progress.push(PackArchivePublicationEntry {
-                destination_path: destination_path.to_owned(),
-                outcome: entry.outcome,
-            });
-        },
-    )
-    .await;
-
-    match execution {
-        Ok(_) => Ok(PackArchivePublicationReceipt {
-            destination: request.destination().clone(),
-            policy: request.policy(),
-            progress,
-        }),
-        Err(error) => {
-            let phase = error.phase;
-            let failed_path = error.failed_path;
-            let commit_certainty = error.commit_certainty;
-            let cause = match *error.cause {
-                ExactKeyPublicationErrorCause::ResolveOperator(source) => {
-                    PackArchivePublicationErrorCause::ResolveOperator(source)
-                }
-                ExactKeyPublicationErrorCause::UnsupportedPolicy => {
-                    PackArchivePublicationErrorCause::UnsupportedPolicy {
-                        policy: request.policy(),
-                    }
-                }
-                ExactKeyPublicationErrorCause::UnsupportedObjectSize { byte_length } => {
-                    PackArchivePublicationErrorCause::UnsupportedObjectSize { byte_length }
-                }
-                ExactKeyPublicationErrorCause::PreflightRead(source) => {
-                    PackArchivePublicationErrorCause::PreflightRead(source)
-                }
-                ExactKeyPublicationErrorCause::ByteConflict {
-                    expected_byte_length,
-                    observed_byte_length_at_least,
-                } => PackArchivePublicationErrorCause::ByteConflict {
-                    expected_byte_length,
-                    observed_byte_length_at_least,
-                },
-                ExactKeyPublicationErrorCause::ConditionalCreate(source) => {
-                    PackArchivePublicationErrorCause::ConditionalCreate(source)
-                }
-                ExactKeyPublicationErrorCause::RaceVerification(source) => {
-                    PackArchivePublicationErrorCause::RaceVerification(source)
-                }
-                ExactKeyPublicationErrorCause::DirectWrite(source) => {
-                    PackArchivePublicationErrorCause::DirectWrite(source)
-                }
-            };
-            Err(PackArchivePublicationError {
-                destination: request.destination().clone(),
-                policy: request.policy(),
-                failed_path,
-                phase,
-                progress,
-                commit_certainty,
-                cause,
-            })
-        }
+    {
+        let mut operation = PackArchivePublicationOperation {
+            request,
+            progress: &mut progress,
+        };
+        publish_exact_keys(
+            resolver,
+            request.destination().binding(),
+            request.policy(),
+            &keys,
+            &mut operation,
+        )
+        .await?;
     }
+
+    Ok(PackArchivePublicationReceipt {
+        destination: request.destination().clone(),
+        policy: request.policy(),
+        progress,
+    })
 }
 
 /// A failure while publishing exact Pack Archive bytes through OpenDAL.
 ///
-/// This error's own `Display` and `Debug` output omits native resolver and
+/// This error's own `Display` and `Debug` output omit native resolver and
 /// OpenDAL messages. Rendering its source chain may disclose backend context.
-pub struct PackArchivePublicationError<E> {
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Pack Archive publication failed for binding {} at exact-object operation path {:?} during {phase:?}: {cause}",
+    .destination.binding(),
+    .destination.operation_path(),
+)]
+pub struct PackArchivePublicationError {
     destination: Location,
     policy: PublicationPolicy,
     failed_path: Option<String>,
     phase: OpenDalPublicationPhase,
     progress: PackArchivePublicationProgress,
     commit_certainty: CommitCertainty,
-    cause: PackArchivePublicationErrorCause<E>,
+    #[source]
+    cause: RedactedError<PackArchivePublicationErrorCause>,
 }
 
-impl<E> PackArchivePublicationError<E> {
+impl PackArchivePublicationError {
     pub fn destination(&self) -> &Location {
         &self.destination
     }
@@ -278,90 +241,34 @@ impl<E> PackArchivePublicationError<E> {
         self.commit_certainty
     }
 
-    pub fn cause(&self) -> &PackArchivePublicationErrorCause<E> {
-        &self.cause
-    }
-}
-
-impl<E> fmt::Display for PackArchivePublicationError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "Pack Archive publication failed for binding {} at exact-object operation path {:?} during {:?}: {}",
-            self.destination.binding(),
-            self.destination.operation_path(),
-            self.phase,
-            self.cause.label(),
-        )
-    }
-}
-
-impl<E> fmt::Debug for PackArchivePublicationError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PackArchivePublicationError")
-            .field("binding", self.destination.binding())
-            .field("role", &"exact object")
-            .field("operation_path", &self.destination.operation_path())
-            .field("policy", &self.policy)
-            .field("failed_path", &self.failed_path)
-            .field("phase", &self.phase)
-            .field("progress", &self.progress)
-            .field("commit_certainty", &self.commit_certainty)
-            .field("cause", &self.cause.label())
-            .finish()
-    }
-}
-
-impl<E: Error + 'static> Error for PackArchivePublicationError<E> {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match &self.cause {
-            PackArchivePublicationErrorCause::ResolveOperator(source) => Some(source),
-            PackArchivePublicationErrorCause::PreflightRead(source)
-            | PackArchivePublicationErrorCause::ConditionalCreate(source)
-            | PackArchivePublicationErrorCause::RaceVerification(source)
-            | PackArchivePublicationErrorCause::DirectWrite(source) => Some(source),
-            PackArchivePublicationErrorCause::UnsupportedPolicy { .. }
-            | PackArchivePublicationErrorCause::UnsupportedObjectSize { .. }
-            | PackArchivePublicationErrorCause::ByteConflict { .. } => None,
-        }
+    pub fn cause(&self) -> &PackArchivePublicationErrorCause {
+        self.cause.inner()
     }
 }
 
 /// The typed cause of an OpenDAL Pack Archive publication failure.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum PackArchivePublicationErrorCause<E> {
-    ResolveOperator(E),
-    UnsupportedPolicy {
-        policy: PublicationPolicy,
-    },
-    UnsupportedObjectSize {
-        byte_length: u64,
-    },
-    PreflightRead(::opendal::Error),
+pub enum PackArchivePublicationErrorCause {
+    #[error("operator resolution failed")]
+    ResolveOperator(#[source] BoxError),
+    #[error("the publication policy is unsupported")]
+    UnsupportedPolicy { policy: PublicationPolicy },
+    #[error("the archive exceeds the advertised object size")]
+    UnsupportedObjectSize { byte_length: u64 },
+    #[error("a preflight read failed")]
+    PreflightRead(#[source] ::opendal::Error),
+    #[error("destination bytes conflict")]
     ByteConflict {
         expected_byte_length: u64,
         observed_byte_length_at_least: u64,
     },
-    ConditionalCreate(::opendal::Error),
-    RaceVerification(::opendal::Error),
-    DirectWrite(::opendal::Error),
-}
-
-impl<E> PackArchivePublicationErrorCause<E> {
-    fn label(&self) -> &'static str {
-        match self {
-            Self::ResolveOperator(_) => "operator resolution failed",
-            Self::UnsupportedPolicy { .. } => "the publication policy is unsupported",
-            Self::UnsupportedObjectSize { .. } => "the archive exceeds the advertised object size",
-            Self::PreflightRead(_) => "a preflight read failed",
-            Self::ByteConflict { .. } => "destination bytes conflict",
-            Self::ConditionalCreate(_) => "a conditional create failed",
-            Self::RaceVerification(_) => "race verification failed",
-            Self::DirectWrite(_) => "a direct write failed",
-        }
-    }
+    #[error("a conditional create failed")]
+    ConditionalCreate(#[source] ::opendal::Error),
+    #[error("race verification failed")]
+    RaceVerification(#[source] ::opendal::Error),
+    #[error("a direct write failed")]
+    DirectWrite(#[source] ::opendal::Error),
 }
 
 /// A validated request to publish caller-supplied bytes to one package-cache object.
@@ -471,94 +378,53 @@ pub async fn publish_package_cache_archive<R: OperatorResolver + ?Sized>(
     resolver: &R,
     request: &PackageCacheArchivePublicationRequest,
     archive: &[u8],
-) -> Result<PackageCacheArchivePublicationReceipt, PackageCacheArchivePublicationError<R::Error>> {
+) -> Result<PackageCacheArchivePublicationReceipt, PackageCacheArchivePublicationError> {
     let mut progress = PackageCacheArchivePublicationProgress::new();
     let destination_path = request.destination().operation_path();
     let keys = [ExactKey::new(destination_path, archive)];
-    let execution = publish_exact_keys(
-        resolver,
-        request.destination().binding(),
-        request.policy(),
-        &keys,
-        |entry| {
-            progress.push(PackageCacheArchivePublicationEntry {
-                destination_path: destination_path.to_owned(),
-                outcome: entry.outcome,
-            });
-        },
-    )
-    .await;
-
-    match execution {
-        Ok(_) => Ok(PackageCacheArchivePublicationReceipt {
-            destination: request.destination().clone(),
-            policy: request.policy(),
-            progress,
-        }),
-        Err(error) => {
-            let phase = error.phase;
-            let failed_path = error.failed_path;
-            let commit_certainty = error.commit_certainty;
-            let cause = match *error.cause {
-                ExactKeyPublicationErrorCause::ResolveOperator(source) => {
-                    PackageCacheArchivePublicationErrorCause::ResolveOperator(source)
-                }
-                ExactKeyPublicationErrorCause::UnsupportedPolicy => {
-                    PackageCacheArchivePublicationErrorCause::UnsupportedPolicy {
-                        policy: request.policy(),
-                    }
-                }
-                ExactKeyPublicationErrorCause::UnsupportedObjectSize { byte_length } => {
-                    PackageCacheArchivePublicationErrorCause::UnsupportedObjectSize { byte_length }
-                }
-                ExactKeyPublicationErrorCause::PreflightRead(source) => {
-                    PackageCacheArchivePublicationErrorCause::PreflightRead(source)
-                }
-                ExactKeyPublicationErrorCause::ByteConflict {
-                    expected_byte_length,
-                    observed_byte_length_at_least,
-                } => PackageCacheArchivePublicationErrorCause::ByteConflict {
-                    expected_byte_length,
-                    observed_byte_length_at_least,
-                },
-                ExactKeyPublicationErrorCause::ConditionalCreate(source) => {
-                    PackageCacheArchivePublicationErrorCause::ConditionalCreate(source)
-                }
-                ExactKeyPublicationErrorCause::RaceVerification(source) => {
-                    PackageCacheArchivePublicationErrorCause::RaceVerification(source)
-                }
-                ExactKeyPublicationErrorCause::DirectWrite(_) => {
-                    unreachable!("package-cache publication fixes CreateOrVerify")
-                }
-            };
-            Err(PackageCacheArchivePublicationError {
-                destination: request.destination().clone(),
-                policy: request.policy(),
-                failed_path,
-                phase,
-                progress,
-                commit_certainty,
-                cause,
-            })
-        }
+    {
+        let mut operation = PackageCacheArchivePublicationOperation {
+            request,
+            progress: &mut progress,
+        };
+        publish_create_or_verify_exact_keys(
+            resolver,
+            request.destination().binding(),
+            &keys,
+            &mut operation,
+        )
+        .await?;
     }
+
+    Ok(PackageCacheArchivePublicationReceipt {
+        destination: request.destination().clone(),
+        policy: request.policy(),
+        progress,
+    })
 }
 
 /// A failure while publishing caller-supplied package-cache archive bytes.
 ///
-/// This error's own `Display` and `Debug` output omits native resolver and
+/// This error's own `Display` and `Debug` output omit native resolver and
 /// OpenDAL messages. Rendering its source chain may disclose backend context.
-pub struct PackageCacheArchivePublicationError<E> {
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "package-cache archive publication failed for binding {} at exact-object operation path {:?} during {phase:?}: {cause}",
+    .destination.binding(),
+    .destination.operation_path(),
+)]
+pub struct PackageCacheArchivePublicationError {
     destination: Location,
     policy: PublicationPolicy,
     failed_path: Option<String>,
     phase: OpenDalPublicationPhase,
     progress: PackageCacheArchivePublicationProgress,
     commit_certainty: CommitCertainty,
-    cause: PackageCacheArchivePublicationErrorCause<E>,
+    #[source]
+    cause: RedactedError<PackageCacheArchivePublicationErrorCause>,
 }
 
-impl<E> PackageCacheArchivePublicationError<E> {
+impl PackageCacheArchivePublicationError {
     pub fn destination(&self) -> &Location {
         &self.destination
     }
@@ -583,87 +449,32 @@ impl<E> PackageCacheArchivePublicationError<E> {
         self.commit_certainty
     }
 
-    pub fn cause(&self) -> &PackageCacheArchivePublicationErrorCause<E> {
-        &self.cause
-    }
-}
-
-impl<E> fmt::Display for PackageCacheArchivePublicationError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "package-cache archive publication failed for binding {} at exact-object operation path {:?} during {:?}: {}",
-            self.destination.binding(),
-            self.destination.operation_path(),
-            self.phase,
-            self.cause.label(),
-        )
-    }
-}
-
-impl<E> fmt::Debug for PackageCacheArchivePublicationError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PackageCacheArchivePublicationError")
-            .field("binding", self.destination.binding())
-            .field("role", &"exact object")
-            .field("operation_path", &self.destination.operation_path())
-            .field("policy", &self.policy)
-            .field("failed_path", &self.failed_path)
-            .field("phase", &self.phase)
-            .field("progress", &self.progress)
-            .field("commit_certainty", &self.commit_certainty)
-            .field("cause", &self.cause.label())
-            .finish()
-    }
-}
-
-impl<E: Error + 'static> Error for PackageCacheArchivePublicationError<E> {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match &self.cause {
-            PackageCacheArchivePublicationErrorCause::ResolveOperator(source) => Some(source),
-            PackageCacheArchivePublicationErrorCause::PreflightRead(source)
-            | PackageCacheArchivePublicationErrorCause::ConditionalCreate(source)
-            | PackageCacheArchivePublicationErrorCause::RaceVerification(source) => Some(source),
-            PackageCacheArchivePublicationErrorCause::UnsupportedPolicy { .. }
-            | PackageCacheArchivePublicationErrorCause::UnsupportedObjectSize { .. }
-            | PackageCacheArchivePublicationErrorCause::ByteConflict { .. } => None,
-        }
+    pub fn cause(&self) -> &PackageCacheArchivePublicationErrorCause {
+        self.cause.inner()
     }
 }
 
 /// The typed cause of an OpenDAL package-cache archive publication failure.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum PackageCacheArchivePublicationErrorCause<E> {
-    ResolveOperator(E),
-    UnsupportedPolicy {
-        policy: PublicationPolicy,
-    },
-    UnsupportedObjectSize {
-        byte_length: u64,
-    },
-    PreflightRead(::opendal::Error),
+pub enum PackageCacheArchivePublicationErrorCause {
+    #[error("operator resolution failed")]
+    ResolveOperator(#[source] BoxError),
+    #[error("the publication policy is unsupported")]
+    UnsupportedPolicy { policy: PublicationPolicy },
+    #[error("the archive exceeds the advertised object size")]
+    UnsupportedObjectSize { byte_length: u64 },
+    #[error("a preflight read failed")]
+    PreflightRead(#[source] ::opendal::Error),
+    #[error("destination bytes conflict")]
     ByteConflict {
         expected_byte_length: u64,
         observed_byte_length_at_least: u64,
     },
-    ConditionalCreate(::opendal::Error),
-    RaceVerification(::opendal::Error),
-}
-
-impl<E> PackageCacheArchivePublicationErrorCause<E> {
-    fn label(&self) -> &'static str {
-        match self {
-            Self::ResolveOperator(_) => "operator resolution failed",
-            Self::UnsupportedPolicy { .. } => "the publication policy is unsupported",
-            Self::UnsupportedObjectSize { .. } => "the archive exceeds the advertised object size",
-            Self::PreflightRead(_) => "a preflight read failed",
-            Self::ByteConflict { .. } => "destination bytes conflict",
-            Self::ConditionalCreate(_) => "a conditional create failed",
-            Self::RaceVerification(_) => "race verification failed",
-        }
-    }
+    #[error("a conditional create failed")]
+    ConditionalCreate(#[source] ::opendal::Error),
+    #[error("race verification failed")]
+    RaceVerification(#[source] ::opendal::Error),
 }
 
 /// A validated request to publish one Pack Extraction Plan beneath a prefix.
@@ -814,7 +625,13 @@ impl CompilationArtifactPublicationRequest {
 }
 
 /// Complete deterministic rejection of a Compilation Output Artifact publication request.
-#[derive(Clone, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error(
+    "Compilation Output Artifact publication request rejected for binding {} beneath prefix operation path {:?} with {} issue(s)",
+    .destination.binding(),
+    .destination.operation_path(),
+    .issues.len(),
+)]
 pub struct CompilationArtifactPublicationRequestRejection {
     compilation_result_identity: CompilationResultIdentity,
     destination: Location,
@@ -830,36 +647,6 @@ impl CompilationArtifactPublicationRequestRejection {
         &self.issues
     }
 }
-
-impl fmt::Display for CompilationArtifactPublicationRequestRejection {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "Compilation Output Artifact publication request rejected for binding {} beneath prefix operation path {:?} with {} issue(s)",
-            self.destination.binding(),
-            self.destination.operation_path(),
-            self.issues.len()
-        )
-    }
-}
-
-impl fmt::Debug for CompilationArtifactPublicationRequestRejection {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("CompilationArtifactPublicationRequestRejection")
-            .field("binding", self.destination.binding())
-            .field("role", &"prefix")
-            .field("operation_path", &self.destination.operation_path())
-            .field(
-                "compilation_result_identity",
-                &self.compilation_result_identity,
-            )
-            .field("issues", &self.issues)
-            .finish()
-    }
-}
-
-impl Error for CompilationArtifactPublicationRequestRejection {}
 
 /// One independently detectable issue in a Compilation Output Artifact publication request.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -975,9 +762,8 @@ pub fn publish_pack_extraction_plan<'a, R: OperatorResolver + ?Sized>(
     request: &'a PackExtractionPublicationRequest,
     plan: &'a crate::PackExtractionPlan,
     progress: &'a mut PackExtractionPublicationProgress,
-) -> impl Future<
-    Output = Result<PackExtractionPublicationReceipt, PackExtractionPublicationError<R::Error>>,
-> + 'a {
+) -> impl Future<Output = Result<PackExtractionPublicationReceipt, PackExtractionPublicationError>> + 'a
+{
     progress.clear();
     async move {
         let mut destinations = Vec::with_capacity(plan.entries().len());
@@ -1006,87 +792,43 @@ pub fn publish_pack_extraction_plan<'a, R: OperatorResolver + ?Sized>(
             .zip(plan.entries())
             .map(|(destination, entry)| ExactKey::new(destination.operation_path(), entry.bytes()))
             .collect::<Vec<_>>();
-        let execution = publish_exact_keys(
-            resolver,
-            request.destination().binding(),
-            request.policy(),
-            &keys,
-            |entry| {
-                let index = entry.index;
-                progress.push(PackExtractionPublicationEntry {
-                    relative_path: plan.entries()[index].relative_path().to_owned(),
-                    destination_path: destinations[index].operation_path().to_owned(),
-                    outcome: entry.outcome,
-                });
-            },
-        )
-        .await;
-
-        match execution {
-            Ok(_) => Ok(PackExtractionPublicationReceipt {
-                destination: request.destination().clone(),
-                policy: request.policy(),
-                pack_identity: *plan.pack_identity(),
-                progress: progress.clone(),
-            }),
-            Err(error) => {
-                let failed_index = error.failed_index;
-                let failed_relative_path =
-                    failed_index.map(|index| plan.entries()[index].relative_path().to_owned());
-                let failed_destination_path = error.failed_path;
-                let phase = error.phase;
-                let commit_certainty = error.commit_certainty;
-                let cause = match *error.cause {
-                    ExactKeyPublicationErrorCause::ResolveOperator(source) => {
-                        PackExtractionPublicationErrorCause::ResolveOperator(source)
-                    }
-                    ExactKeyPublicationErrorCause::UnsupportedPolicy => {
-                        PackExtractionPublicationErrorCause::UnsupportedPolicy {
-                            policy: request.policy(),
-                        }
-                    }
-                    ExactKeyPublicationErrorCause::UnsupportedObjectSize { byte_length } => {
-                        PackExtractionPublicationErrorCause::UnsupportedObjectSize { byte_length }
-                    }
-                    ExactKeyPublicationErrorCause::PreflightRead(source) => {
-                        PackExtractionPublicationErrorCause::PreflightRead(source)
-                    }
-                    ExactKeyPublicationErrorCause::ByteConflict {
-                        expected_byte_length,
-                        observed_byte_length_at_least,
-                    } => PackExtractionPublicationErrorCause::ByteConflict {
-                        expected_byte_length,
-                        observed_byte_length_at_least,
-                    },
-                    ExactKeyPublicationErrorCause::ConditionalCreate(source) => {
-                        PackExtractionPublicationErrorCause::ConditionalCreate(source)
-                    }
-                    ExactKeyPublicationErrorCause::RaceVerification(source) => {
-                        PackExtractionPublicationErrorCause::RaceVerification(source)
-                    }
-                    ExactKeyPublicationErrorCause::DirectWrite(source) => {
-                        PackExtractionPublicationErrorCause::DirectWrite(source)
-                    }
-                };
-                Err(pack_extraction_publication_error(
-                    request,
-                    failed_relative_path,
-                    failed_destination_path,
-                    phase,
-                    progress,
-                    commit_certainty,
-                    cause,
-                ))
-            }
+        {
+            let mut operation = PackExtractionPublicationOperation {
+                request,
+                plan,
+                destinations: &destinations,
+                progress,
+            };
+            publish_exact_keys(
+                resolver,
+                request.destination().binding(),
+                request.policy(),
+                &keys,
+                &mut operation,
+            )
+            .await?;
         }
+
+        Ok(PackExtractionPublicationReceipt {
+            destination: request.destination().clone(),
+            policy: request.policy(),
+            pack_identity: *plan.pack_identity(),
+            progress: progress.clone(),
+        })
     }
 }
 
 /// A failure while publishing a Pack Extraction Plan through OpenDAL.
 ///
-/// This error's own `Display` and `Debug` output omits native resolver and
+/// This error's own `Display` and `Debug` output omit native resolver and
 /// OpenDAL messages. Rendering its source chain may disclose backend context.
-pub struct PackExtractionPublicationError<E> {
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Pack Extraction publication failed for binding {} beneath prefix operation path {:?} during {phase:?}: {cause}",
+    .destination.binding(),
+    .destination.operation_path(),
+)]
+pub struct PackExtractionPublicationError {
     destination: Location,
     policy: PublicationPolicy,
     failed_relative_path: Option<String>,
@@ -1094,10 +836,11 @@ pub struct PackExtractionPublicationError<E> {
     phase: OpenDalPublicationPhase,
     progress: PackExtractionPublicationProgress,
     commit_certainty: CommitCertainty,
-    cause: PackExtractionPublicationErrorCause<E>,
+    #[source]
+    cause: RedactedError<PackExtractionPublicationErrorCause>,
 }
 
-impl<E> PackExtractionPublicationError<E> {
+impl PackExtractionPublicationError {
     pub fn destination(&self) -> &Location {
         &self.destination
     }
@@ -1126,107 +869,47 @@ impl<E> PackExtractionPublicationError<E> {
         self.commit_certainty
     }
 
-    pub fn cause(&self) -> &PackExtractionPublicationErrorCause<E> {
-        &self.cause
-    }
-}
-
-impl<E> fmt::Display for PackExtractionPublicationError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "Pack Extraction publication failed for binding {} beneath prefix operation path {:?} during {:?}: {}",
-            self.destination.binding(),
-            self.destination.operation_path(),
-            self.phase,
-            self.cause.label(),
-        )
-    }
-}
-
-impl<E> fmt::Debug for PackExtractionPublicationError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PackExtractionPublicationError")
-            .field("binding", self.destination.binding())
-            .field("role", &"prefix")
-            .field("operation_path", &self.destination.operation_path())
-            .field("policy", &self.policy)
-            .field("failed_relative_path", &self.failed_relative_path)
-            .field("failed_destination_path", &self.failed_destination_path)
-            .field("phase", &self.phase)
-            .field("progress", &self.progress)
-            .field("commit_certainty", &self.commit_certainty)
-            .field("cause", &self.cause.label())
-            .finish()
-    }
-}
-
-impl<E: Error + 'static> Error for PackExtractionPublicationError<E> {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match &self.cause {
-            PackExtractionPublicationErrorCause::ResolveOperator(source) => Some(source),
-            PackExtractionPublicationErrorCause::PreflightRead(source)
-            | PackExtractionPublicationErrorCause::ConditionalCreate(source)
-            | PackExtractionPublicationErrorCause::RaceVerification(source)
-            | PackExtractionPublicationErrorCause::DirectWrite(source) => Some(source),
-            PackExtractionPublicationErrorCause::InvalidDestinationPath { .. }
-            | PackExtractionPublicationErrorCause::UnsupportedPolicy { .. }
-            | PackExtractionPublicationErrorCause::UnsupportedObjectSize { .. }
-            | PackExtractionPublicationErrorCause::ByteConflict { .. } => None,
-        }
+    pub fn cause(&self) -> &PackExtractionPublicationErrorCause {
+        self.cause.inner()
     }
 }
 
 /// The typed cause of an OpenDAL Pack Extraction publication failure.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum PackExtractionPublicationErrorCause<E> {
-    InvalidDestinationPath {
-        relative_path: String,
-    },
-    ResolveOperator(E),
-    UnsupportedPolicy {
-        policy: PublicationPolicy,
-    },
-    UnsupportedObjectSize {
-        byte_length: u64,
-    },
-    PreflightRead(::opendal::Error),
+pub enum PackExtractionPublicationErrorCause {
+    #[error("a composed destination path was invalid")]
+    InvalidDestinationPath { relative_path: String },
+    #[error("operator resolution failed")]
+    ResolveOperator(#[source] BoxError),
+    #[error("the publication policy is unsupported")]
+    UnsupportedPolicy { policy: PublicationPolicy },
+    #[error("an entry exceeds the advertised object size")]
+    UnsupportedObjectSize { byte_length: u64 },
+    #[error("a preflight read failed")]
+    PreflightRead(#[source] ::opendal::Error),
+    #[error("destination bytes conflict")]
     ByteConflict {
         expected_byte_length: u64,
         observed_byte_length_at_least: u64,
     },
-    ConditionalCreate(::opendal::Error),
-    RaceVerification(::opendal::Error),
-    DirectWrite(::opendal::Error),
+    #[error("a conditional create failed")]
+    ConditionalCreate(#[source] ::opendal::Error),
+    #[error("race verification failed")]
+    RaceVerification(#[source] ::opendal::Error),
+    #[error("a direct write failed")]
+    DirectWrite(#[source] ::opendal::Error),
 }
 
-impl<E> PackExtractionPublicationErrorCause<E> {
-    fn label(&self) -> &'static str {
-        match self {
-            Self::InvalidDestinationPath { .. } => "a composed destination path was invalid",
-            Self::ResolveOperator(_) => "operator resolution failed",
-            Self::UnsupportedPolicy { .. } => "the publication policy is unsupported",
-            Self::UnsupportedObjectSize { .. } => "an entry exceeds the advertised object size",
-            Self::PreflightRead(_) => "a preflight read failed",
-            Self::ByteConflict { .. } => "destination bytes conflict",
-            Self::ConditionalCreate(_) => "a conditional create failed",
-            Self::RaceVerification(_) => "race verification failed",
-            Self::DirectWrite(_) => "a direct write failed",
-        }
-    }
-}
-
-fn pack_extraction_publication_error<E>(
+fn pack_extraction_publication_error(
     request: &PackExtractionPublicationRequest,
     failed_relative_path: Option<String>,
     failed_destination_path: Option<String>,
     phase: OpenDalPublicationPhase,
     progress: &PackExtractionPublicationProgress,
     commit_certainty: CommitCertainty,
-    cause: PackExtractionPublicationErrorCause<E>,
-) -> PackExtractionPublicationError<E> {
+    cause: PackExtractionPublicationErrorCause,
+) -> PackExtractionPublicationError {
     PackExtractionPublicationError {
         destination: request.destination().clone(),
         policy: request.policy(),
@@ -1235,7 +918,7 @@ fn pack_extraction_publication_error<E>(
         phase,
         progress: progress.clone(),
         commit_certainty,
-        cause,
+        cause: RedactedError::new(cause),
     }
 }
 
@@ -1306,10 +989,7 @@ pub fn publish_compilation_artifacts<'a, R: OperatorResolver + ?Sized>(
     result: &'a CompilationResult,
     progress: &'a mut CompilationArtifactPublicationProgress,
 ) -> impl Future<
-    Output = Result<
-        CompilationArtifactPublicationReceipt,
-        CompilationArtifactPublicationError<R::Error>,
-    >,
+    Output = Result<CompilationArtifactPublicationReceipt, CompilationArtifactPublicationError>,
 > + 'a {
     progress.clear();
     async move {
@@ -1354,90 +1034,42 @@ pub fn publish_compilation_artifacts<'a, R: OperatorResolver + ?Sized>(
                 ExactKey::new(destination.operation_path(), artifact.bytes())
             })
             .collect::<Vec<_>>();
-        let execution = publish_exact_keys(
-            resolver,
-            request.destination().binding(),
-            request.policy(),
-            &keys,
-            |entry| {
-                let artifact_index = entry.index;
-                progress.push(CompilationArtifactPublicationEntry {
-                    artifact_index,
-                    key: request.artifact_keys()[artifact_index].clone(),
-                    destination_path: destinations[artifact_index].operation_path().to_owned(),
-                    outcome: entry.outcome,
-                });
-            },
-        )
-        .await;
-
-        match execution {
-            Ok(_) => Ok(CompilationArtifactPublicationReceipt {
-                compilation_result_identity: request.compilation_result_identity(),
-                destination: request.destination().clone(),
-                policy: request.policy(),
-                progress: progress.clone(),
-            }),
-            Err(error) => {
-                let failed_index = error.failed_index;
-                let failed_destination_path = error.failed_path;
-                let phase = error.phase;
-                let commit_certainty = error.commit_certainty;
-                let cause = match *error.cause {
-                    ExactKeyPublicationErrorCause::ResolveOperator(source) => {
-                        CompilationArtifactPublicationErrorCause::ResolveOperator(source)
-                    }
-                    ExactKeyPublicationErrorCause::UnsupportedPolicy => {
-                        CompilationArtifactPublicationErrorCause::UnsupportedPolicy {
-                            policy: request.policy(),
-                        }
-                    }
-                    ExactKeyPublicationErrorCause::UnsupportedObjectSize { byte_length } => {
-                        CompilationArtifactPublicationErrorCause::UnsupportedObjectSize {
-                            artifact_index: failed_index
-                                .expect("object-size failure identifies its artifact"),
-                            byte_length,
-                        }
-                    }
-                    ExactKeyPublicationErrorCause::PreflightRead(source) => {
-                        CompilationArtifactPublicationErrorCause::PreflightRead(source)
-                    }
-                    ExactKeyPublicationErrorCause::ByteConflict {
-                        expected_byte_length,
-                        observed_byte_length_at_least,
-                    } => CompilationArtifactPublicationErrorCause::ByteConflict {
-                        expected_byte_length,
-                        observed_byte_length_at_least,
-                    },
-                    ExactKeyPublicationErrorCause::ConditionalCreate(source) => {
-                        CompilationArtifactPublicationErrorCause::ConditionalCreate(source)
-                    }
-                    ExactKeyPublicationErrorCause::RaceVerification(source) => {
-                        CompilationArtifactPublicationErrorCause::RaceVerification(source)
-                    }
-                    ExactKeyPublicationErrorCause::DirectWrite(source) => {
-                        CompilationArtifactPublicationErrorCause::DirectWrite(source)
-                    }
-                };
-                Err(compilation_artifact_publication_error(
-                    request,
-                    failed_index,
-                    failed_destination_path,
-                    phase,
-                    progress,
-                    commit_certainty,
-                    cause,
-                ))
-            }
+        {
+            let mut operation = CompilationArtifactPublicationOperation {
+                request,
+                destinations: &destinations,
+                progress,
+            };
+            publish_exact_keys(
+                resolver,
+                request.destination().binding(),
+                request.policy(),
+                &keys,
+                &mut operation,
+            )
+            .await?;
         }
+
+        Ok(CompilationArtifactPublicationReceipt {
+            compilation_result_identity: request.compilation_result_identity(),
+            destination: request.destination().clone(),
+            policy: request.policy(),
+            progress: progress.clone(),
+        })
     }
 }
 
 /// A failure while publishing a Compilation Result's exact artifacts through OpenDAL.
 ///
-/// This error's own `Display` and `Debug` output omits native resolver and
+/// This error's own `Display` and `Debug` output omit native resolver and
 /// OpenDAL messages. Rendering its source chain may disclose backend context.
-pub struct CompilationArtifactPublicationError<E> {
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Compilation Output Artifact publication failed for binding {} beneath prefix operation path {:?} during {phase:?}: {cause}",
+    .destination.binding(),
+    .destination.operation_path(),
+)]
+pub struct CompilationArtifactPublicationError {
     compilation_result_identity: CompilationResultIdentity,
     destination: Location,
     policy: PublicationPolicy,
@@ -1447,10 +1079,11 @@ pub struct CompilationArtifactPublicationError<E> {
     phase: OpenDalPublicationPhase,
     progress: CompilationArtifactPublicationProgress,
     commit_certainty: CommitCertainty,
-    cause: CompilationArtifactPublicationErrorCause<E>,
+    #[source]
+    cause: RedactedError<CompilationArtifactPublicationErrorCause>,
 }
 
-impl<E> CompilationArtifactPublicationError<E> {
+impl CompilationArtifactPublicationError {
     pub const fn compilation_result_identity(&self) -> CompilationResultIdentity {
         self.compilation_result_identity
     }
@@ -1487,116 +1120,55 @@ impl<E> CompilationArtifactPublicationError<E> {
         self.commit_certainty
     }
 
-    pub const fn cause(&self) -> &CompilationArtifactPublicationErrorCause<E> {
-        &self.cause
-    }
-}
-
-impl<E> fmt::Display for CompilationArtifactPublicationError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "Compilation Output Artifact publication failed for binding {} beneath prefix operation path {:?} during {:?}: {}",
-            self.destination.binding(),
-            self.destination.operation_path(),
-            self.phase,
-            self.cause.label(),
-        )
-    }
-}
-
-impl<E> fmt::Debug for CompilationArtifactPublicationError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("CompilationArtifactPublicationError")
-            .field("binding", self.destination.binding())
-            .field("role", &"prefix")
-            .field("operation_path", &self.destination.operation_path())
-            .field("policy", &self.policy)
-            .field("failed_artifact_index", &self.failed_artifact_index)
-            .field("failed_key", &self.failed_key)
-            .field("failed_destination_path", &self.failed_destination_path)
-            .field("phase", &self.phase)
-            .field("progress", &self.progress)
-            .field("commit_certainty", &self.commit_certainty)
-            .field("cause", &self.cause.label())
-            .finish()
-    }
-}
-
-impl<E: Error + 'static> Error for CompilationArtifactPublicationError<E> {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match &self.cause {
-            CompilationArtifactPublicationErrorCause::ResolveOperator(source) => Some(source),
-            CompilationArtifactPublicationErrorCause::PreflightRead(source)
-            | CompilationArtifactPublicationErrorCause::ConditionalCreate(source)
-            | CompilationArtifactPublicationErrorCause::RaceVerification(source)
-            | CompilationArtifactPublicationErrorCause::DirectWrite(source) => Some(source),
-            CompilationArtifactPublicationErrorCause::CompilationResultMismatch { .. }
-            | CompilationArtifactPublicationErrorCause::InvalidDestinationPath { .. }
-            | CompilationArtifactPublicationErrorCause::UnsupportedPolicy { .. }
-            | CompilationArtifactPublicationErrorCause::UnsupportedObjectSize { .. }
-            | CompilationArtifactPublicationErrorCause::ByteConflict { .. } => None,
-        }
+    pub const fn cause(&self) -> &CompilationArtifactPublicationErrorCause {
+        self.cause.inner()
     }
 }
 
 /// The typed cause of an OpenDAL Compilation Output Artifact publication failure.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum CompilationArtifactPublicationErrorCause<E> {
+pub enum CompilationArtifactPublicationErrorCause {
+    #[error("the Compilation Result identity mismatched")]
     CompilationResultMismatch {
         expected: CompilationResultIdentity,
         actual: CompilationResultIdentity,
     },
-    InvalidDestinationPath {
-        artifact_index: usize,
-        key: String,
-    },
-    ResolveOperator(E),
-    UnsupportedPolicy {
-        policy: PublicationPolicy,
-    },
+    #[error("a composed destination path was invalid")]
+    InvalidDestinationPath { artifact_index: usize, key: String },
+    #[error("operator resolution failed")]
+    ResolveOperator(#[source] BoxError),
+    #[error("the publication policy is unsupported")]
+    UnsupportedPolicy { policy: PublicationPolicy },
+    #[error("an artifact exceeds the advertised object size")]
     UnsupportedObjectSize {
         artifact_index: usize,
         byte_length: u64,
     },
-    PreflightRead(::opendal::Error),
+    #[error("a preflight read failed")]
+    PreflightRead(#[source] ::opendal::Error),
+    #[error("destination bytes conflict")]
     ByteConflict {
         expected_byte_length: u64,
         observed_byte_length_at_least: u64,
     },
-    ConditionalCreate(::opendal::Error),
-    RaceVerification(::opendal::Error),
-    DirectWrite(::opendal::Error),
+    #[error("a conditional create failed")]
+    ConditionalCreate(#[source] ::opendal::Error),
+    #[error("race verification failed")]
+    RaceVerification(#[source] ::opendal::Error),
+    #[error("a direct write failed")]
+    DirectWrite(#[source] ::opendal::Error),
 }
 
-impl<E> CompilationArtifactPublicationErrorCause<E> {
-    fn label(&self) -> &'static str {
-        match self {
-            Self::CompilationResultMismatch { .. } => "the Compilation Result identity mismatched",
-            Self::InvalidDestinationPath { .. } => "a composed destination path was invalid",
-            Self::ResolveOperator(_) => "operator resolution failed",
-            Self::UnsupportedPolicy { .. } => "the publication policy is unsupported",
-            Self::UnsupportedObjectSize { .. } => "an artifact exceeds the advertised object size",
-            Self::PreflightRead(_) => "a preflight read failed",
-            Self::ByteConflict { .. } => "destination bytes conflict",
-            Self::ConditionalCreate(_) => "a conditional create failed",
-            Self::RaceVerification(_) => "race verification failed",
-            Self::DirectWrite(_) => "a direct write failed",
-        }
-    }
-}
-
-fn compilation_artifact_publication_error<E>(
+fn compilation_artifact_publication_error(
     request: &CompilationArtifactPublicationRequest,
     failed_artifact_index: Option<usize>,
     failed_destination_path: Option<String>,
     phase: OpenDalPublicationPhase,
     progress: &CompilationArtifactPublicationProgress,
     commit_certainty: CommitCertainty,
-    cause: CompilationArtifactPublicationErrorCause<E>,
-) -> CompilationArtifactPublicationError<E> {
+    cause: CompilationArtifactPublicationErrorCause,
+) -> CompilationArtifactPublicationError {
     let failed_key = failed_artifact_index.map(|index| request.artifact_keys()[index].clone());
     CompilationArtifactPublicationError {
         compilation_result_identity: request.compilation_result_identity(),
@@ -1608,7 +1180,7 @@ fn compilation_artifact_publication_error<E>(
         phase,
         progress: progress.clone(),
         commit_certainty,
-        cause,
+        cause: RedactedError::new(cause),
     }
 }
 
@@ -1837,42 +1409,353 @@ pub(crate) struct ExactKeyPublicationEntry {
     pub(crate) outcome: PublicationKeyOutcome,
 }
 
-#[derive(Debug)]
-pub(crate) struct ExactKeyPublicationError<E> {
-    pub(crate) phase: OpenDalPublicationPhase,
-    pub(crate) failed_index: Option<usize>,
-    pub(crate) failed_path: Option<String>,
-    pub(crate) commit_certainty: CommitCertainty,
-    pub(crate) cause: Box<ExactKeyPublicationErrorCause<E>>,
+struct ExactKeyPublicationFailure {
+    phase: OpenDalPublicationPhase,
+    failed_index: Option<usize>,
+    failed_path: Option<String>,
+    commit_certainty: CommitCertainty,
 }
 
-#[derive(Debug)]
-pub(crate) enum ExactKeyPublicationErrorCause<E> {
-    ResolveOperator(E),
-    UnsupportedPolicy,
-    UnsupportedObjectSize {
-        byte_length: u64,
-    },
-    PreflightRead(opendal::Error),
-    ByteConflict {
-        expected_byte_length: u64,
-        observed_byte_length_at_least: u64,
-    },
-    ConditionalCreate(opendal::Error),
-    RaceVerification(opendal::Error),
-    DirectWrite(opendal::Error),
+impl ExactKeyPublicationFailure {
+    fn operation(phase: OpenDalPublicationPhase) -> Self {
+        Self {
+            phase,
+            failed_index: None,
+            failed_path: None,
+            commit_certainty: CommitCertainty::NotCommitted,
+        }
+    }
+
+    fn key(
+        phase: OpenDalPublicationPhase,
+        index: usize,
+        key: &ExactKey<'_>,
+        commit_certainty: CommitCertainty,
+    ) -> Self {
+        Self {
+            phase,
+            failed_index: Some(index),
+            failed_path: Some(key.path.to_owned()),
+            commit_certainty,
+        }
+    }
 }
 
-pub(crate) async fn publish_exact_keys<R, F>(
+trait ExactKeyPublicationCause: Sized {
+    fn resolve_operator(source: BoxError) -> Self;
+    fn unsupported_policy(policy: PublicationPolicy) -> Self;
+    fn unsupported_object_size(index: usize, byte_length: u64) -> Self;
+    fn preflight_read(source: opendal::Error) -> Self;
+    fn byte_conflict(expected_byte_length: u64, observed_byte_length_at_least: u64) -> Self;
+    fn conditional_create(source: opendal::Error) -> Self;
+    fn race_verification(source: opendal::Error) -> Self;
+}
+
+trait ExactKeyOverwriteCause: ExactKeyPublicationCause {
+    fn direct_write(source: opendal::Error) -> Self;
+}
+
+trait ExactKeyPublicationOperation {
+    type Error;
+    type Cause: ExactKeyPublicationCause;
+
+    fn completed_entry(&mut self, entry: ExactKeyPublicationEntry);
+    fn error(&self, failure: ExactKeyPublicationFailure, cause: Self::Cause) -> Self::Error;
+}
+
+struct PackArchivePublicationOperation<'a> {
+    request: &'a PackArchivePublicationRequest,
+    progress: &'a mut PackArchivePublicationProgress,
+}
+
+impl ExactKeyPublicationOperation for PackArchivePublicationOperation<'_> {
+    type Error = PackArchivePublicationError;
+    type Cause = PackArchivePublicationErrorCause;
+
+    fn completed_entry(&mut self, entry: ExactKeyPublicationEntry) {
+        self.progress.push(PackArchivePublicationEntry {
+            destination_path: self.request.destination().operation_path().to_owned(),
+            outcome: entry.outcome,
+        });
+    }
+
+    fn error(&self, failure: ExactKeyPublicationFailure, cause: Self::Cause) -> Self::Error {
+        PackArchivePublicationError {
+            destination: self.request.destination().clone(),
+            policy: self.request.policy(),
+            failed_path: failure.failed_path,
+            phase: failure.phase,
+            progress: self.progress.clone(),
+            commit_certainty: failure.commit_certainty,
+            cause: RedactedError::new(cause),
+        }
+    }
+}
+
+impl ExactKeyPublicationCause for PackArchivePublicationErrorCause {
+    fn resolve_operator(source: BoxError) -> Self {
+        Self::ResolveOperator(source)
+    }
+
+    fn unsupported_policy(policy: PublicationPolicy) -> Self {
+        Self::UnsupportedPolicy { policy }
+    }
+
+    fn unsupported_object_size(_: usize, byte_length: u64) -> Self {
+        Self::UnsupportedObjectSize { byte_length }
+    }
+
+    fn preflight_read(source: opendal::Error) -> Self {
+        Self::PreflightRead(source)
+    }
+
+    fn byte_conflict(expected_byte_length: u64, observed_byte_length_at_least: u64) -> Self {
+        Self::ByteConflict {
+            expected_byte_length,
+            observed_byte_length_at_least,
+        }
+    }
+
+    fn conditional_create(source: opendal::Error) -> Self {
+        Self::ConditionalCreate(source)
+    }
+
+    fn race_verification(source: opendal::Error) -> Self {
+        Self::RaceVerification(source)
+    }
+}
+
+impl ExactKeyOverwriteCause for PackArchivePublicationErrorCause {
+    fn direct_write(source: opendal::Error) -> Self {
+        Self::DirectWrite(source)
+    }
+}
+
+struct PackageCacheArchivePublicationOperation<'a> {
+    request: &'a PackageCacheArchivePublicationRequest,
+    progress: &'a mut PackageCacheArchivePublicationProgress,
+}
+
+impl ExactKeyPublicationOperation for PackageCacheArchivePublicationOperation<'_> {
+    type Error = PackageCacheArchivePublicationError;
+    type Cause = PackageCacheArchivePublicationErrorCause;
+
+    fn completed_entry(&mut self, entry: ExactKeyPublicationEntry) {
+        self.progress.push(PackageCacheArchivePublicationEntry {
+            destination_path: self.request.destination().operation_path().to_owned(),
+            outcome: entry.outcome,
+        });
+    }
+
+    fn error(&self, failure: ExactKeyPublicationFailure, cause: Self::Cause) -> Self::Error {
+        PackageCacheArchivePublicationError {
+            destination: self.request.destination().clone(),
+            policy: self.request.policy(),
+            failed_path: failure.failed_path,
+            phase: failure.phase,
+            progress: self.progress.clone(),
+            commit_certainty: failure.commit_certainty,
+            cause: RedactedError::new(cause),
+        }
+    }
+}
+
+impl ExactKeyPublicationCause for PackageCacheArchivePublicationErrorCause {
+    fn resolve_operator(source: BoxError) -> Self {
+        Self::ResolveOperator(source)
+    }
+
+    fn unsupported_policy(policy: PublicationPolicy) -> Self {
+        Self::UnsupportedPolicy { policy }
+    }
+
+    fn unsupported_object_size(_: usize, byte_length: u64) -> Self {
+        Self::UnsupportedObjectSize { byte_length }
+    }
+
+    fn preflight_read(source: opendal::Error) -> Self {
+        Self::PreflightRead(source)
+    }
+
+    fn byte_conflict(expected_byte_length: u64, observed_byte_length_at_least: u64) -> Self {
+        Self::ByteConflict {
+            expected_byte_length,
+            observed_byte_length_at_least,
+        }
+    }
+
+    fn conditional_create(source: opendal::Error) -> Self {
+        Self::ConditionalCreate(source)
+    }
+
+    fn race_verification(source: opendal::Error) -> Self {
+        Self::RaceVerification(source)
+    }
+}
+
+struct PackExtractionPublicationOperation<'a> {
+    request: &'a PackExtractionPublicationRequest,
+    plan: &'a crate::PackExtractionPlan,
+    destinations: &'a [Location],
+    progress: &'a mut PackExtractionPublicationProgress,
+}
+
+impl ExactKeyPublicationOperation for PackExtractionPublicationOperation<'_> {
+    type Error = PackExtractionPublicationError;
+    type Cause = PackExtractionPublicationErrorCause;
+
+    fn completed_entry(&mut self, entry: ExactKeyPublicationEntry) {
+        let index = entry.index;
+        self.progress.push(PackExtractionPublicationEntry {
+            relative_path: self.plan.entries()[index].relative_path().to_owned(),
+            destination_path: self.destinations[index].operation_path().to_owned(),
+            outcome: entry.outcome,
+        });
+    }
+
+    fn error(&self, failure: ExactKeyPublicationFailure, cause: Self::Cause) -> Self::Error {
+        let failed_relative_path = failure
+            .failed_index
+            .map(|index| self.plan.entries()[index].relative_path().to_owned());
+        pack_extraction_publication_error(
+            self.request,
+            failed_relative_path,
+            failure.failed_path,
+            failure.phase,
+            self.progress,
+            failure.commit_certainty,
+            cause,
+        )
+    }
+}
+
+impl ExactKeyPublicationCause for PackExtractionPublicationErrorCause {
+    fn resolve_operator(source: BoxError) -> Self {
+        Self::ResolveOperator(source)
+    }
+
+    fn unsupported_policy(policy: PublicationPolicy) -> Self {
+        Self::UnsupportedPolicy { policy }
+    }
+
+    fn unsupported_object_size(_: usize, byte_length: u64) -> Self {
+        Self::UnsupportedObjectSize { byte_length }
+    }
+
+    fn preflight_read(source: opendal::Error) -> Self {
+        Self::PreflightRead(source)
+    }
+
+    fn byte_conflict(expected_byte_length: u64, observed_byte_length_at_least: u64) -> Self {
+        Self::ByteConflict {
+            expected_byte_length,
+            observed_byte_length_at_least,
+        }
+    }
+
+    fn conditional_create(source: opendal::Error) -> Self {
+        Self::ConditionalCreate(source)
+    }
+
+    fn race_verification(source: opendal::Error) -> Self {
+        Self::RaceVerification(source)
+    }
+}
+
+impl ExactKeyOverwriteCause for PackExtractionPublicationErrorCause {
+    fn direct_write(source: opendal::Error) -> Self {
+        Self::DirectWrite(source)
+    }
+}
+
+struct CompilationArtifactPublicationOperation<'a> {
+    request: &'a CompilationArtifactPublicationRequest,
+    destinations: &'a [Location],
+    progress: &'a mut CompilationArtifactPublicationProgress,
+}
+
+impl ExactKeyPublicationOperation for CompilationArtifactPublicationOperation<'_> {
+    type Error = CompilationArtifactPublicationError;
+    type Cause = CompilationArtifactPublicationErrorCause;
+
+    fn completed_entry(&mut self, entry: ExactKeyPublicationEntry) {
+        let artifact_index = entry.index;
+        self.progress.push(CompilationArtifactPublicationEntry {
+            artifact_index,
+            key: self.request.artifact_keys()[artifact_index].clone(),
+            destination_path: self.destinations[artifact_index]
+                .operation_path()
+                .to_owned(),
+            outcome: entry.outcome,
+        });
+    }
+
+    fn error(&self, failure: ExactKeyPublicationFailure, cause: Self::Cause) -> Self::Error {
+        compilation_artifact_publication_error(
+            self.request,
+            failure.failed_index,
+            failure.failed_path,
+            failure.phase,
+            self.progress,
+            failure.commit_certainty,
+            cause,
+        )
+    }
+}
+
+impl ExactKeyPublicationCause for CompilationArtifactPublicationErrorCause {
+    fn resolve_operator(source: BoxError) -> Self {
+        Self::ResolveOperator(source)
+    }
+
+    fn unsupported_policy(policy: PublicationPolicy) -> Self {
+        Self::UnsupportedPolicy { policy }
+    }
+
+    fn unsupported_object_size(artifact_index: usize, byte_length: u64) -> Self {
+        Self::UnsupportedObjectSize {
+            artifact_index,
+            byte_length,
+        }
+    }
+
+    fn preflight_read(source: opendal::Error) -> Self {
+        Self::PreflightRead(source)
+    }
+
+    fn byte_conflict(expected_byte_length: u64, observed_byte_length_at_least: u64) -> Self {
+        Self::ByteConflict {
+            expected_byte_length,
+            observed_byte_length_at_least,
+        }
+    }
+
+    fn conditional_create(source: opendal::Error) -> Self {
+        Self::ConditionalCreate(source)
+    }
+
+    fn race_verification(source: opendal::Error) -> Self {
+        Self::RaceVerification(source)
+    }
+}
+
+impl ExactKeyOverwriteCause for CompilationArtifactPublicationErrorCause {
+    fn direct_write(source: opendal::Error) -> Self {
+        Self::DirectWrite(source)
+    }
+}
+
+async fn publish_exact_keys<R, O>(
     resolver: &R,
     binding: &OperatorBinding,
     policy: PublicationPolicy,
     keys: &[ExactKey<'_>],
-    mut completed_entry: F,
-) -> Result<ExactKeyPublicationReceipt, ExactKeyPublicationError<R::Error>>
+    operation: &mut O,
+) -> Result<ExactKeyPublicationReceipt, O::Error>
 where
     R: OperatorResolver + ?Sized,
-    F: FnMut(ExactKeyPublicationEntry),
+    O: ExactKeyPublicationOperation,
+    O::Cause: ExactKeyOverwriteCause,
 {
     if keys.is_empty() {
         return Ok(ExactKeyPublicationReceipt {
@@ -1880,16 +1763,13 @@ where
         });
     }
 
-    let operator = resolver
-        .resolve(binding)
-        .map_err(|source| ExactKeyPublicationError {
-            phase: OpenDalPublicationPhase::ResolveOperator,
-            failed_index: None,
-            failed_path: None,
-            commit_certainty: CommitCertainty::NotCommitted,
-            cause: Box::new(ExactKeyPublicationErrorCause::ResolveOperator(source)),
-        })?;
-    appraise_capabilities(&operator, policy, keys)?;
+    let operator = resolver.resolve(binding).map_err(|source| {
+        operation.error(
+            ExactKeyPublicationFailure::operation(OpenDalPublicationPhase::ResolveOperator),
+            O::Cause::resolve_operator(Box::new(source)),
+        )
+    })?;
+    appraise_capabilities(&operator, policy, keys, operation)?;
 
     let mut completed = Vec::with_capacity(keys.len());
     match policy {
@@ -1898,75 +1778,108 @@ where
                 operator
                     .write(key.path, key.bytes.to_vec())
                     .await
-                    .map_err(|source| ExactKeyPublicationError {
-                        phase: OpenDalPublicationPhase::DirectWrite,
-                        failed_index: Some(index),
-                        failed_path: Some(key.path.to_owned()),
-                        commit_certainty: CommitCertainty::Indeterminate,
-                        cause: Box::new(ExactKeyPublicationErrorCause::DirectWrite(source)),
+                    .map_err(|source| {
+                        operation.error(
+                            ExactKeyPublicationFailure::key(
+                                OpenDalPublicationPhase::DirectWrite,
+                                index,
+                                key,
+                                CommitCertainty::Indeterminate,
+                            ),
+                            O::Cause::direct_write(source),
+                        )
                     })?;
                 let entry = ExactKeyPublicationEntry {
                     index,
                     outcome: PublicationKeyOutcome::Written,
                 };
-                completed_entry(entry.clone());
+                operation.completed_entry(entry.clone());
                 completed.push(entry);
             }
         }
         PublicationPolicy::CreateOrVerify => {
-            publish_create_or_verify(&operator, keys, &mut completed, &mut completed_entry).await?;
+            publish_create_or_verify(&operator, keys, &mut completed, operation).await?;
         }
     }
 
     Ok(ExactKeyPublicationReceipt { completed })
 }
 
-fn appraise_capabilities<E>(
+async fn publish_create_or_verify_exact_keys<R, O>(
+    resolver: &R,
+    binding: &OperatorBinding,
+    keys: &[ExactKey<'_>],
+    operation: &mut O,
+) -> Result<ExactKeyPublicationReceipt, O::Error>
+where
+    R: OperatorResolver + ?Sized,
+    O: ExactKeyPublicationOperation,
+{
+    if keys.is_empty() {
+        return Ok(ExactKeyPublicationReceipt {
+            completed: Vec::new(),
+        });
+    }
+
+    let operator = resolver.resolve(binding).map_err(|source| {
+        operation.error(
+            ExactKeyPublicationFailure::operation(OpenDalPublicationPhase::ResolveOperator),
+            O::Cause::resolve_operator(Box::new(source)),
+        )
+    })?;
+    appraise_capabilities(
+        &operator,
+        PublicationPolicy::CreateOrVerify,
+        keys,
+        operation,
+    )?;
+
+    let mut completed = Vec::with_capacity(keys.len());
+    publish_create_or_verify(&operator, keys, &mut completed, operation).await?;
+    Ok(ExactKeyPublicationReceipt { completed })
+}
+
+fn appraise_capabilities<O: ExactKeyPublicationOperation>(
     operator: &opendal::Operator,
     policy: PublicationPolicy,
     keys: &[ExactKey<'_>],
-) -> Result<(), ExactKeyPublicationError<E>> {
+    operation: &O,
+) -> Result<(), O::Error> {
     let capability = operator.info().capability();
     let policy_supported = capability.write
         && (!keys.iter().any(|key| key.bytes.is_empty()) || capability.write_can_empty)
         && (policy != PublicationPolicy::CreateOrVerify
             || (capability.read && capability.write_with_if_not_exists));
     if !policy_supported {
-        return Err(ExactKeyPublicationError {
-            phase: OpenDalPublicationPhase::CapabilityAppraisal,
-            failed_index: None,
-            failed_path: None,
-            commit_certainty: CommitCertainty::NotCommitted,
-            cause: Box::new(ExactKeyPublicationErrorCause::UnsupportedPolicy),
-        });
+        return Err(operation.error(
+            ExactKeyPublicationFailure::operation(OpenDalPublicationPhase::CapabilityAppraisal),
+            O::Cause::unsupported_policy(policy),
+        ));
     }
     if let Some(maximum) = capability.write_total_max_size {
         for (index, key) in keys.iter().enumerate() {
             if key.bytes.len() > maximum {
-                return Err(ExactKeyPublicationError {
-                    phase: OpenDalPublicationPhase::CapabilityAppraisal,
-                    failed_index: Some(index),
-                    failed_path: Some(key.path.to_owned()),
-                    commit_certainty: CommitCertainty::NotCommitted,
-                    cause: Box::new(ExactKeyPublicationErrorCause::UnsupportedObjectSize {
-                        byte_length: byte_length(key.bytes),
-                    }),
-                });
+                return Err(operation.error(
+                    ExactKeyPublicationFailure::key(
+                        OpenDalPublicationPhase::CapabilityAppraisal,
+                        index,
+                        key,
+                        CommitCertainty::NotCommitted,
+                    ),
+                    O::Cause::unsupported_object_size(index, byte_length(key.bytes)),
+                ));
             }
         }
     }
     Ok(())
 }
 
-async fn publish_create_or_verify<E, F>(
+async fn publish_create_or_verify<O: ExactKeyPublicationOperation>(
     operator: &opendal::Operator,
     keys: &[ExactKey<'_>],
     completed: &mut Vec<ExactKeyPublicationEntry>,
-    completed_entry: &mut F,
-) -> Result<(), ExactKeyPublicationError<E>>
-where
-    F: FnMut(ExactKeyPublicationEntry),
-{
+    operation: &mut O,
+) -> Result<(), O::Error> {
     let mut observations = Vec::with_capacity(keys.len());
     for (index, key) in keys.iter().enumerate() {
         let observation = match compare_object(operator, key.path, key.bytes).await {
@@ -1976,18 +1889,21 @@ where
                 observed_byte_length: 0,
             }) if source.kind() == ErrorKind::NotFound => ExistingObject::Absent,
             Err(CompareError::Read { source, .. }) => {
-                return Err(ExactKeyPublicationError {
-                    phase: OpenDalPublicationPhase::PreflightRead,
-                    failed_index: Some(index),
-                    failed_path: Some(key.path.to_owned()),
-                    commit_certainty: CommitCertainty::NotCommitted,
-                    cause: Box::new(ExactKeyPublicationErrorCause::PreflightRead(source)),
-                });
+                return Err(operation.error(
+                    ExactKeyPublicationFailure::key(
+                        OpenDalPublicationPhase::PreflightRead,
+                        index,
+                        key,
+                        CommitCertainty::NotCommitted,
+                    ),
+                    O::Cause::preflight_read(source),
+                ));
             }
             Err(CompareError::Conflict {
                 observed_byte_length_at_least,
             }) => {
                 return Err(byte_conflict_error(
+                    operation,
                     OpenDalPublicationPhase::PreflightRead,
                     index,
                     key,
@@ -2000,7 +1916,7 @@ where
                 index,
                 outcome: PublicationKeyOutcome::AlreadyMatching,
             };
-            completed_entry(entry.clone());
+            operation.completed_entry(entry.clone());
             completed.push(entry);
         }
         observations.push(observation);
@@ -2032,20 +1948,21 @@ where
                                 unreachable!("a successful comparison never reports absence")
                             }
                             Err(CompareError::Read { source, .. }) => {
-                                return Err(ExactKeyPublicationError {
-                                    phase: OpenDalPublicationPhase::RaceVerification,
-                                    failed_index: Some(index),
-                                    failed_path: Some(key.path.to_owned()),
-                                    commit_certainty: CommitCertainty::NotCommitted,
-                                    cause: Box::new(
-                                        ExactKeyPublicationErrorCause::RaceVerification(source),
+                                return Err(operation.error(
+                                    ExactKeyPublicationFailure::key(
+                                        OpenDalPublicationPhase::RaceVerification,
+                                        index,
+                                        key,
+                                        CommitCertainty::NotCommitted,
                                     ),
-                                });
+                                    O::Cause::race_verification(source),
+                                ));
                             }
                             Err(CompareError::Conflict {
                                 observed_byte_length_at_least,
                             }) => {
                                 return Err(byte_conflict_error(
+                                    operation,
                                     OpenDalPublicationPhase::RaceVerification,
                                     index,
                                     key,
@@ -2055,42 +1972,37 @@ where
                         }
                     }
                     Err(source) => {
-                        return Err(ExactKeyPublicationError {
-                            phase: OpenDalPublicationPhase::ConditionalCreate,
-                            failed_index: Some(index),
-                            failed_path: Some(key.path.to_owned()),
-                            commit_certainty: CommitCertainty::Indeterminate,
-                            cause: Box::new(ExactKeyPublicationErrorCause::ConditionalCreate(
-                                source,
-                            )),
-                        });
+                        return Err(operation.error(
+                            ExactKeyPublicationFailure::key(
+                                OpenDalPublicationPhase::ConditionalCreate,
+                                index,
+                                key,
+                                CommitCertainty::Indeterminate,
+                            ),
+                            O::Cause::conditional_create(source),
+                        ));
                     }
                 }
             }
         };
         let entry = ExactKeyPublicationEntry { index, outcome };
-        completed_entry(entry.clone());
+        operation.completed_entry(entry.clone());
         completed.push(entry);
     }
     Ok(())
 }
 
-fn byte_conflict_error<E>(
+fn byte_conflict_error<O: ExactKeyPublicationOperation>(
+    operation: &O,
     phase: OpenDalPublicationPhase,
     index: usize,
     key: &ExactKey<'_>,
     observed_byte_length_at_least: u64,
-) -> ExactKeyPublicationError<E> {
-    ExactKeyPublicationError {
-        phase,
-        failed_index: Some(index),
-        failed_path: Some(key.path.to_owned()),
-        commit_certainty: CommitCertainty::NotCommitted,
-        cause: Box::new(ExactKeyPublicationErrorCause::ByteConflict {
-            expected_byte_length: byte_length(key.bytes),
-            observed_byte_length_at_least,
-        }),
-    }
+) -> O::Error {
+    operation.error(
+        ExactKeyPublicationFailure::key(phase, index, key, CommitCertainty::NotCommitted),
+        O::Cause::byte_conflict(byte_length(key.bytes), observed_byte_length_at_least),
+    )
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2194,10 +2106,11 @@ mod tests {
 
     use super::{
         CompilationArtifactPublicationErrorCause, CompilationArtifactPublicationProgress,
-        CompilationArtifactPublicationRequest, ExactKey, ExactKeyPublicationErrorCause,
-        OpenDalPublicationPhase, PackArchivePublicationEntry, PackArchivePublicationProgress,
-        PublicationKeyOutcome, PublicationPolicy, publish_compilation_artifacts,
-        publish_exact_keys,
+        CompilationArtifactPublicationRequest, ExactKey, ExactKeyOverwriteCause,
+        ExactKeyPublicationCause, ExactKeyPublicationEntry, ExactKeyPublicationFailure,
+        ExactKeyPublicationOperation, OpenDalPublicationPhase, PackArchivePublicationEntry,
+        PackArchivePublicationProgress, PublicationKeyOutcome, PublicationPolicy,
+        publish_compilation_artifacts, publish_exact_keys,
     };
 
     #[test]
@@ -2206,12 +2119,13 @@ mod tests {
         let binding = binding();
         let mut completed = Vec::new();
         let receipt = {
+            let mut operation = TestPublicationOperation::new(&mut completed);
             let mut publication = pin!(publish_exact_keys(
                 &resolver,
                 &binding,
                 PublicationPolicy::OverwriteExactKeys,
                 &[],
-                |entry| completed.push(entry),
+                &mut operation,
             ));
             expect_ready(publication.as_mut()).unwrap()
         };
@@ -2281,7 +2195,7 @@ mod tests {
             &binding(),
             PublicationPolicy::OverwriteExactKeys,
             &keys,
-            |entry| completed.push(entry),
+            &mut TestPublicationOperation::new(&mut completed),
         )))
         .unwrap();
 
@@ -2347,7 +2261,7 @@ mod tests {
             &binding(),
             PublicationPolicy::CreateOrVerify,
             &keys,
-            |entry| completed.push(entry),
+            &mut TestPublicationOperation::new(&mut completed),
         )))
         .unwrap_err();
 
@@ -2355,8 +2269,8 @@ mod tests {
         assert_eq!(error.failed_index, Some(1));
         assert_eq!(error.commit_certainty, CommitCertainty::NotCommitted);
         assert!(matches!(
-            *error.cause,
-            ExactKeyPublicationErrorCause::ByteConflict {
+            error.cause,
+            TestPublicationErrorCause::ByteConflict {
                 expected_byte_length: 5,
                 observed_byte_length_at_least: 1,
             }
@@ -2401,7 +2315,7 @@ mod tests {
             &binding(),
             PublicationPolicy::CreateOrVerify,
             &keys,
-            |entry| completed.push(entry),
+            &mut TestPublicationOperation::new(&mut completed),
         )))
         .unwrap_err();
 
@@ -2438,7 +2352,7 @@ mod tests {
             &binding(),
             PublicationPolicy::CreateOrVerify,
             &keys,
-            |entry| completed.push(entry),
+            &mut TestPublicationOperation::new(&mut completed),
         )))
         .unwrap();
 
@@ -2486,14 +2400,14 @@ mod tests {
             &binding(),
             PublicationPolicy::CreateOrVerify,
             &keys,
-            |entry| completed.push(entry),
+            &mut TestPublicationOperation::new(&mut completed),
         )))
         .unwrap_err();
 
         assert_eq!(error.phase, OpenDalPublicationPhase::PreflightRead);
         assert!(matches!(
-            *error.cause,
-            ExactKeyPublicationErrorCause::PreflightRead(ref source)
+            error.cause,
+            TestPublicationErrorCause::PreflightRead(ref source)
                 if source.kind() == ErrorKind::NotFound
         ));
         assert!(completed.is_empty());
@@ -2534,12 +2448,13 @@ mod tests {
         let mut completed = Vec::new();
         let binding = binding();
         let receipt = {
+            let mut operation = TestPublicationOperation::new(&mut completed);
             let mut publication = pin!(publish_exact_keys(
                 &resolver,
                 &binding,
                 PublicationPolicy::CreateOrVerify,
                 &keys,
-                |entry| completed.push(entry),
+                &mut operation,
             ));
 
             assert!(matches!(poll_once(publication.as_mut()), Poll::Pending));
@@ -2607,14 +2522,14 @@ mod tests {
                 &binding(),
                 PublicationPolicy::CreateOrVerify,
                 &keys,
-                |entry| completed.push(entry),
+                &mut TestPublicationOperation::new(&mut completed),
             )))
             .unwrap_err();
 
             assert_eq!(error.phase, OpenDalPublicationPhase::CapabilityAppraisal);
             assert!(matches!(
-                *error.cause,
-                ExactKeyPublicationErrorCause::UnsupportedPolicy
+                error.cause,
+                TestPublicationErrorCause::UnsupportedPolicy { .. }
             ));
             assert!(service.log().entries().is_empty());
         }
@@ -2637,13 +2552,13 @@ mod tests {
             &binding(),
             PublicationPolicy::OverwriteExactKeys,
             &keys,
-            |entry| completed.push(entry),
+            &mut TestPublicationOperation::new(&mut completed),
         )))
         .unwrap_err();
 
         assert!(matches!(
-            *error.cause,
-            ExactKeyPublicationErrorCause::UnsupportedObjectSize { byte_length: 4 }
+            error.cause,
+            TestPublicationErrorCause::UnsupportedObjectSize { byte_length: 4 }
         ));
         assert!(service.log().entries().is_empty());
     }
@@ -2676,7 +2591,7 @@ mod tests {
             &binding(),
             PublicationPolicy::OverwriteExactKeys,
             &keys,
-            |entry| completed.push(entry),
+            &mut TestPublicationOperation::new(&mut completed),
         )))
         .unwrap_err();
 
@@ -2713,12 +2628,13 @@ mod tests {
         ];
         let mut completed = Vec::new();
         {
+            let mut operation = TestPublicationOperation::new(&mut completed);
             let mut publication = pin!(publish_exact_keys(
                 &resolver,
                 &binding,
                 PublicationPolicy::OverwriteExactKeys,
                 &keys,
-                |entry| completed.push(entry),
+                &mut operation,
             ));
             assert!(matches!(poll_once(publication.as_mut()), Poll::Pending));
             assert!(pending.was_observed());
@@ -2765,12 +2681,13 @@ mod tests {
         ];
         let mut completed = Vec::new();
         {
+            let mut operation = TestPublicationOperation::new(&mut completed);
             let mut publication = pin!(publish_exact_keys(
                 &resolver,
                 &binding,
                 PublicationPolicy::CreateOrVerify,
                 &keys,
-                |entry| completed.push(entry),
+                &mut operation,
             ));
             assert!(matches!(poll_once(publication.as_mut()), Poll::Pending));
             assert!(pending.was_observed());
@@ -2805,6 +2722,102 @@ mod tests {
             progress.attempted_effects_commit_certainty(),
             Some(CommitCertainty::Committed)
         );
+    }
+
+    #[derive(Debug)]
+    struct TestPublicationError {
+        phase: OpenDalPublicationPhase,
+        failed_index: Option<usize>,
+        failed_path: Option<String>,
+        commit_certainty: CommitCertainty,
+        cause: TestPublicationErrorCause,
+    }
+
+    #[derive(Debug)]
+    enum TestPublicationErrorCause {
+        ResolveOperator(crate::opendal::BoxError),
+        UnsupportedPolicy {
+            policy: PublicationPolicy,
+        },
+        UnsupportedObjectSize {
+            byte_length: u64,
+        },
+        PreflightRead(opendal::Error),
+        ByteConflict {
+            expected_byte_length: u64,
+            observed_byte_length_at_least: u64,
+        },
+        ConditionalCreate(opendal::Error),
+        RaceVerification(opendal::Error),
+        DirectWrite(opendal::Error),
+    }
+
+    impl ExactKeyPublicationCause for TestPublicationErrorCause {
+        fn resolve_operator(source: crate::opendal::BoxError) -> Self {
+            Self::ResolveOperator(source)
+        }
+
+        fn unsupported_policy(policy: PublicationPolicy) -> Self {
+            Self::UnsupportedPolicy { policy }
+        }
+
+        fn unsupported_object_size(_: usize, byte_length: u64) -> Self {
+            Self::UnsupportedObjectSize { byte_length }
+        }
+
+        fn preflight_read(source: opendal::Error) -> Self {
+            Self::PreflightRead(source)
+        }
+
+        fn byte_conflict(expected_byte_length: u64, observed_byte_length_at_least: u64) -> Self {
+            Self::ByteConflict {
+                expected_byte_length,
+                observed_byte_length_at_least,
+            }
+        }
+
+        fn conditional_create(source: opendal::Error) -> Self {
+            Self::ConditionalCreate(source)
+        }
+
+        fn race_verification(source: opendal::Error) -> Self {
+            Self::RaceVerification(source)
+        }
+    }
+
+    impl ExactKeyOverwriteCause for TestPublicationErrorCause {
+        fn direct_write(source: opendal::Error) -> Self {
+            Self::DirectWrite(source)
+        }
+    }
+
+    struct TestPublicationOperation<'a> {
+        completed: &'a mut Vec<ExactKeyPublicationEntry>,
+    }
+
+    impl<'a> TestPublicationOperation<'a> {
+        fn new(completed: &'a mut Vec<ExactKeyPublicationEntry>) -> Self {
+            Self { completed }
+        }
+    }
+
+    impl ExactKeyPublicationOperation for TestPublicationOperation<'_> {
+        type Error = TestPublicationError;
+        type Cause = TestPublicationErrorCause;
+
+        fn completed_entry(&mut self, entry: ExactKeyPublicationEntry) {
+            self.completed.push(entry);
+        }
+
+        fn error(&self, failure: ExactKeyPublicationFailure, cause: Self::Cause) -> Self::Error {
+            TestPublicationError {
+                phase: failure.phase,
+                failed_index: failure.failed_index,
+                failed_path: failure.failed_path,
+                commit_certainty: failure.commit_certainty,
+                cause,
+            }
+        }
     }
 
     fn expect_ready<F: Future>(future: std::pin::Pin<&mut F>) -> F::Output {

@@ -125,15 +125,29 @@ mod package;
 
 pub use package::*;
 
-use std::{error::Error, fmt};
+use std::fmt;
 
 use super::acquisition::recursive::{
-    RecursiveAcquisitionError, RecursiveAcquisitionLimits, RecursiveAcquisitionResource,
-    RecursiveAcquisitionSelection, RecursiveSourcesAcquisitionError, RecursiveSurveyIssue,
-    RecursiveSurveyIssueKind, acquire_recursive_prefix, acquire_recursive_prefixes,
+    RecursiveAcquisitionLimits, RecursiveAcquisitionOperation, RecursiveAcquisitionResource,
+    RecursiveAcquisitionSelection, RecursiveSurveyIssue, RecursiveSurveyIssueKind,
+    acquire_recursive_prefix, acquire_recursive_prefixes,
 };
-use super::{Location, LocationRoleError, OperatorResolver};
+use super::{BoxError, Location, LocationRoleError, OperatorResolver};
 use crate::FontDisposition;
+use crate::redacted_error::RedactedError;
+
+fn aggregate_issue_message<T: fmt::Display>(issues: &[T], summary: &str) -> String {
+    if let [issue] = issues {
+        issue.to_string()
+    } else {
+        format!("{summary} with {} issue(s)", issues.len())
+    }
+}
+
+fn failed_path_context(path: Option<&str>) -> String {
+    path.map(|path| format!(" while reading object operation path {path:?}"))
+        .unwrap_or_default()
+}
 
 /// Named finite ceilings for one OpenDAL Project Acquisition.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -416,7 +430,11 @@ pub enum ProjectAcquisitionIssue {
 }
 
 /// The nonempty canonical set of structural project survey issues.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error(
+    "{message}",
+    message = aggregate_issue_message(.issues.as_slice(), "project survey failed")
+)]
 pub struct ProjectAcquisitionSurveyError {
     issues: Vec<ProjectAcquisitionIssue>,
 }
@@ -427,22 +445,6 @@ impl ProjectAcquisitionSurveyError {
         &self.issues
     }
 }
-
-impl fmt::Display for ProjectAcquisitionSurveyError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let [issue] = self.issues.as_slice() {
-            issue.fmt(formatter)
-        } else {
-            write!(
-                formatter,
-                "project survey failed with {} issue(s)",
-                self.issues.len()
-            )
-        }
-    }
-}
-
-impl Error for ProjectAcquisitionSurveyError {}
 
 /// Acquires every file entry yielded below one project prefix.
 ///
@@ -494,16 +496,18 @@ impl Error for ProjectAcquisitionSurveyError {}
 pub async fn acquire_project<R: OperatorResolver + ?Sized>(
     resolver: &R,
     request: &ProjectAcquisitionRequest,
-) -> Result<ProjectAcquisition, ProjectAcquisitionError<R::Error>> {
+) -> Result<ProjectAcquisition, ProjectAcquisitionError> {
     let source = request.source().clone();
     let entries = acquire_recursive_prefix(
         resolver,
         request.source(),
         RecursiveAcquisitionSelection::AllFiles,
         request.limits().into(),
+        &ProjectAcquisitionOperation {
+            source_location: request.source(),
+        },
     )
-    .await
-    .map_err(|error| ProjectAcquisitionError::from_recursive(source.clone(), error))?
+    .await?
     .into_iter()
     .map(|object| ProjectAcquisitionEntry {
         relative_path: object.relative_path,
@@ -517,14 +521,22 @@ pub async fn acquire_project<R: OperatorResolver + ?Sized>(
 /// A failure while acquiring a project through OpenDAL.
 ///
 /// This error's own `Display` and `Debug` omit native resolver and OpenDAL
-/// messages. Rendering the complete source chain may disclose backend context.
-pub struct ProjectAcquisitionError<E> {
+/// messages. Rendering its complete source chain may disclose backend context.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Project Acquisition failed for binding {binding} at prefix operation path {operation_path:?}{failed_path}: {cause}",
+    binding = .source_location.binding(),
+    operation_path = .source_location.operation_path(),
+    failed_path = failed_path_context(.failed_path.as_deref()),
+)]
+pub struct ProjectAcquisitionError {
     source_location: Location,
     failed_path: Option<String>,
-    cause: ProjectAcquisitionErrorCause<E>,
+    #[source]
+    cause: RedactedError<ProjectAcquisitionErrorCause>,
 }
 
-impl<E> ProjectAcquisitionError<E> {
+impl ProjectAcquisitionError {
     /// The normalized project prefix whose acquisition failed.
     pub fn source_location(&self) -> &Location {
         &self.source_location
@@ -536,157 +548,158 @@ impl<E> ProjectAcquisitionError<E> {
     }
 
     /// The typed cause of this failure.
-    pub fn cause(&self) -> &ProjectAcquisitionErrorCause<E> {
-        &self.cause
+    pub fn cause(&self) -> &ProjectAcquisitionErrorCause {
+        self.cause.inner()
     }
 
-    fn from_recursive(source_location: Location, error: RecursiveAcquisitionError<E>) -> Self {
-        let (failed_path, cause) = match error {
-            RecursiveAcquisitionError::InvalidLocationRole(_) => {
-                unreachable!("ProjectAcquisitionRequest validates the prefix role")
-            }
-            RecursiveAcquisitionError::ResolveOperator(source) => {
-                (None, ProjectAcquisitionErrorCause::ResolveOperator(source))
-            }
-            RecursiveAcquisitionError::UnsupportedCapabilities {
-                list,
-                list_with_recursive,
-                read,
-            } => (
-                None,
-                ProjectAcquisitionErrorCause::UnsupportedCapabilities {
-                    list,
-                    list_with_recursive,
-                    read,
-                },
-            ),
-            RecursiveAcquisitionError::List(source) => {
-                (None, ProjectAcquisitionErrorCause::List(source))
-            }
-            RecursiveAcquisitionError::Read {
-                operation_path,
-                source,
-            } => (
-                Some(operation_path),
-                ProjectAcquisitionErrorCause::Read(source),
-            ),
-            RecursiveAcquisitionError::ListedObjectAbsent {
-                operation_path,
-                source,
-            } => (
-                Some(operation_path),
-                ProjectAcquisitionErrorCause::ListedObjectAbsent(source),
-            ),
-            RecursiveAcquisitionError::Structural(issues) => (
-                None,
-                ProjectAcquisitionErrorCause::Structural(ProjectAcquisitionSurveyError {
-                    issues: issues.into_iter().map(map_issue).collect(),
-                }),
-            ),
-            RecursiveAcquisitionError::InvalidPackageTree(_) => {
-                unreachable!("project acquisition does not run Package Tree preflight")
-            }
-            RecursiveAcquisitionError::Limit {
-                resource,
-                ceiling,
-                observed_at_least,
-            } => (
-                None,
-                ProjectAcquisitionErrorCause::Limit(ProjectAcquisitionLimitError::Exceeded {
-                    resource: map_resource(resource),
-                    ceiling,
-                    observed_at_least,
-                }),
-            ),
-            RecursiveAcquisitionError::AccountingOverflow { resource } => (
-                None,
-                ProjectAcquisitionErrorCause::Limit(
-                    ProjectAcquisitionLimitError::AccountingOverflow {
-                        resource: map_resource(resource),
-                    },
-                ),
-            ),
-        };
+    fn new(
+        source_location: &Location,
+        failed_path: Option<String>,
+        cause: ProjectAcquisitionErrorCause,
+    ) -> Self {
         Self {
-            source_location,
+            source_location: source_location.clone(),
             failed_path,
-            cause,
-        }
-    }
-}
-
-impl<E> fmt::Display for ProjectAcquisitionError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "Project Acquisition failed for binding {} at prefix operation path {:?}",
-            self.source_location.binding(),
-            self.source_location.operation_path(),
-        )?;
-        if let Some(path) = &self.failed_path {
-            write!(formatter, " while reading object operation path {path:?}")?;
-        }
-        write!(formatter, ": {}", self.cause.label())
-    }
-}
-
-impl<E> fmt::Debug for ProjectAcquisitionError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ProjectAcquisitionError")
-            .field("binding", self.source_location.binding())
-            .field("role", &"prefix")
-            .field("operation_path", &self.source_location.operation_path())
-            .field("failed_path", &self.failed_path)
-            .field("cause", &self.cause.label())
-            .finish()
-    }
-}
-
-impl<E: Error + 'static> Error for ProjectAcquisitionError<E> {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match &self.cause {
-            ProjectAcquisitionErrorCause::ResolveOperator(source) => Some(source),
-            ProjectAcquisitionErrorCause::UnsupportedCapabilities { .. } => None,
-            ProjectAcquisitionErrorCause::List(source)
-            | ProjectAcquisitionErrorCause::Read(source)
-            | ProjectAcquisitionErrorCause::ListedObjectAbsent(source) => Some(source),
-            ProjectAcquisitionErrorCause::Structural(source) => Some(source),
-            ProjectAcquisitionErrorCause::Limit(source) => Some(source),
+            cause: RedactedError::new(cause),
         }
     }
 }
 
 /// The typed cause of an OpenDAL Project Acquisition failure.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum ProjectAcquisitionErrorCause<E> {
-    ResolveOperator(E),
+pub enum ProjectAcquisitionErrorCause {
+    #[error("operator resolution failed")]
+    ResolveOperator(#[source] BoxError),
+    #[error("required listing or read capability is unsupported")]
     UnsupportedCapabilities {
         list: bool,
         list_with_recursive: bool,
         read: bool,
     },
-    List(::opendal::Error),
-    Read(::opendal::Error),
-    ListedObjectAbsent(::opendal::Error),
-    Structural(ProjectAcquisitionSurveyError),
-    Limit(ProjectAcquisitionLimitError),
+    #[error("the recursive listing failed")]
+    List(#[source] ::opendal::Error),
+    #[error("a listed object read failed")]
+    Read(#[source] ::opendal::Error),
+    #[error("a listed object was absent when read")]
+    ListedObjectAbsent(#[source] ::opendal::Error),
+    #[error("the completed listing had structural issues")]
+    Structural(#[source] ProjectAcquisitionSurveyError),
+    #[error("a Project Acquisition limit failed")]
+    Limit(#[source] ProjectAcquisitionLimitError),
 }
 
-impl<E> ProjectAcquisitionErrorCause<E> {
-    fn label(&self) -> &'static str {
-        match self {
-            Self::ResolveOperator(_) => "operator resolution failed",
-            Self::UnsupportedCapabilities { .. } => {
-                "required listing or read capability is unsupported"
-            }
-            Self::List(_) => "the recursive listing failed",
-            Self::Read(_) => "a listed object read failed",
-            Self::ListedObjectAbsent(_) => "a listed object was absent when read",
-            Self::Structural(_) => "the completed listing had structural issues",
-            Self::Limit(_) => "a Project Acquisition limit failed",
-        }
+struct ProjectAcquisitionOperation<'a> {
+    source_location: &'a Location,
+}
+
+impl RecursiveAcquisitionOperation for ProjectAcquisitionOperation<'_> {
+    type Error = ProjectAcquisitionError;
+
+    fn invalid_location_role(&self, _: usize, _: LocationRoleError) -> ProjectAcquisitionError {
+        unreachable!("ProjectAcquisitionRequest validates the prefix role")
+    }
+
+    fn resolve_operator(&self, _: usize, source: BoxError) -> ProjectAcquisitionError {
+        ProjectAcquisitionError::new(
+            self.source_location,
+            None,
+            ProjectAcquisitionErrorCause::ResolveOperator(source),
+        )
+    }
+
+    fn unsupported_capabilities(
+        &self,
+        _: usize,
+        list: bool,
+        list_with_recursive: bool,
+        read: bool,
+    ) -> ProjectAcquisitionError {
+        ProjectAcquisitionError::new(
+            self.source_location,
+            None,
+            ProjectAcquisitionErrorCause::UnsupportedCapabilities {
+                list,
+                list_with_recursive,
+                read,
+            },
+        )
+    }
+
+    fn list(&self, _: usize, source: ::opendal::Error) -> ProjectAcquisitionError {
+        ProjectAcquisitionError::new(
+            self.source_location,
+            None,
+            ProjectAcquisitionErrorCause::List(source),
+        )
+    }
+
+    fn read(
+        &self,
+        _: usize,
+        operation_path: String,
+        source: ::opendal::Error,
+    ) -> ProjectAcquisitionError {
+        ProjectAcquisitionError::new(
+            self.source_location,
+            Some(operation_path),
+            ProjectAcquisitionErrorCause::Read(source),
+        )
+    }
+
+    fn listed_object_absent(
+        &self,
+        _: usize,
+        operation_path: String,
+        source: ::opendal::Error,
+    ) -> ProjectAcquisitionError {
+        ProjectAcquisitionError::new(
+            self.source_location,
+            Some(operation_path),
+            ProjectAcquisitionErrorCause::ListedObjectAbsent(source),
+        )
+    }
+
+    fn structural(&self, _: usize, issues: Vec<RecursiveSurveyIssue>) -> ProjectAcquisitionError {
+        ProjectAcquisitionError::new(
+            self.source_location,
+            None,
+            ProjectAcquisitionErrorCause::Structural(ProjectAcquisitionSurveyError {
+                issues: issues.into_iter().map(map_issue).collect(),
+            }),
+        )
+    }
+
+    fn limit(
+        &self,
+        _: usize,
+        resource: RecursiveAcquisitionResource,
+        ceiling: u64,
+        observed_at_least: u64,
+    ) -> ProjectAcquisitionError {
+        ProjectAcquisitionError::new(
+            self.source_location,
+            None,
+            ProjectAcquisitionErrorCause::Limit(ProjectAcquisitionLimitError::Exceeded {
+                resource: map_resource(resource),
+                ceiling,
+                observed_at_least,
+            }),
+        )
+    }
+
+    fn accounting_overflow(
+        &self,
+        _: usize,
+        resource: RecursiveAcquisitionResource,
+    ) -> ProjectAcquisitionError {
+        ProjectAcquisitionError::new(
+            self.source_location,
+            None,
+            ProjectAcquisitionErrorCause::Limit(ProjectAcquisitionLimitError::AccountingOverflow {
+                resource: map_resource(resource),
+            }),
+        )
     }
 }
 
@@ -949,7 +962,11 @@ impl FontAcquisitionRequest {
 }
 
 /// Every invalid source role in a rejected Font Acquisition request.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error(
+    "{message}",
+    message = aggregate_issue_message(.issues.as_slice(), "Font Acquisition request rejected")
+)]
 pub struct FontAcquisitionRequestRejection {
     issues: Vec<FontAcquisitionRequestIssue>,
 }
@@ -960,22 +977,6 @@ impl FontAcquisitionRequestRejection {
         &self.issues
     }
 }
-
-impl fmt::Display for FontAcquisitionRequestRejection {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let [issue] = self.issues.as_slice() {
-            issue.fmt(formatter)
-        } else {
-            write!(
-                formatter,
-                "Font Acquisition request rejected with {} issue(s)",
-                self.issues.len()
-            )
-        }
-    }
-}
-
-impl Error for FontAcquisitionRequestRejection {}
 
 /// One invalid source role in a Font Acquisition request.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
@@ -1146,7 +1147,11 @@ pub enum FontAcquisitionIssue {
 }
 
 /// The nonempty canonical set of structural font survey issues.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
+#[error(
+    "{message}",
+    message = aggregate_issue_message(.issues.as_slice(), "font survey failed")
+)]
 pub struct FontAcquisitionSurveyError {
     issues: Vec<FontAcquisitionIssue>,
 }
@@ -1157,22 +1162,6 @@ impl FontAcquisitionSurveyError {
         &self.issues
     }
 }
-
-impl fmt::Display for FontAcquisitionSurveyError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if let [issue] = self.issues.as_slice() {
-            issue.fmt(formatter)
-        } else {
-            write!(
-                formatter,
-                "font survey failed with {} issue(s)",
-                self.issues.len()
-            )
-        }
-    }
-}
-
-impl Error for FontAcquisitionSurveyError {}
 
 /// Acquires suffix-selected Font Containers from caller-ordered prefixes.
 ///
@@ -1221,7 +1210,7 @@ impl Error for FontAcquisitionSurveyError {}
 pub async fn acquire_fonts<R: OperatorResolver + ?Sized>(
     resolver: &R,
     request: &FontAcquisitionRequest,
-) -> Result<FontAcquisition, FontAcquisitionError<R::Error>> {
+) -> Result<FontAcquisition, FontAcquisitionError> {
     let locations = request
         .sources()
         .iter()
@@ -1232,9 +1221,11 @@ pub async fn acquire_fonts<R: OperatorResolver + ?Sized>(
         &locations,
         RecursiveAcquisitionSelection::FontContainers,
         request.limits().into(),
+        &FontAcquisitionOperation {
+            sources: request.sources(),
+        },
     )
-    .await
-    .map_err(|error| FontAcquisitionError::from_recursive(request.sources(), error))?;
+    .await?;
 
     let sources = request.sources().to_vec();
     let entries = acquired
@@ -1258,15 +1249,23 @@ pub async fn acquire_fonts<R: OperatorResolver + ?Sized>(
 /// A failure while acquiring Font Containers through OpenDAL.
 ///
 /// This error's own `Display` and `Debug` omit native resolver and OpenDAL
-/// messages. Rendering the complete source chain may disclose backend context.
-pub struct FontAcquisitionError<E> {
+/// messages. Rendering its complete source chain may disclose backend context.
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "Font Acquisition failed at source {source_index} for binding {binding} at prefix operation path {operation_path:?}{failed_path}: {cause}",
+    binding = .source_location.binding(),
+    operation_path = .source_location.operation_path(),
+    failed_path = failed_path_context(.failed_path.as_deref()),
+)]
+pub struct FontAcquisitionError {
     source_index: usize,
     source_location: Location,
     failed_path: Option<String>,
-    cause: FontAcquisitionErrorCause<E>,
+    #[source]
+    cause: RedactedError<FontAcquisitionErrorCause>,
 }
 
-impl<E> FontAcquisitionError<E> {
+impl FontAcquisitionError {
     /// The caller-order index of the source at which acquisition failed.
     pub fn source_index(&self) -> usize {
         self.source_index
@@ -1283,160 +1282,176 @@ impl<E> FontAcquisitionError<E> {
     }
 
     /// The typed cause of this failure.
-    pub fn cause(&self) -> &FontAcquisitionErrorCause<E> {
-        &self.cause
+    pub fn cause(&self) -> &FontAcquisitionErrorCause {
+        self.cause.inner()
     }
 
-    fn from_recursive(sources: &[FontSource], error: RecursiveSourcesAcquisitionError<E>) -> Self {
-        let source_index = error.source_index;
-        let source_location = sources[source_index].source.clone();
-        let (failed_path, cause) = match error.source {
-            RecursiveAcquisitionError::InvalidLocationRole(_) => {
-                unreachable!("FontAcquisitionRequest validates every prefix role")
-            }
-            RecursiveAcquisitionError::ResolveOperator(source) => {
-                (None, FontAcquisitionErrorCause::ResolveOperator(source))
-            }
-            RecursiveAcquisitionError::UnsupportedCapabilities {
-                list,
-                list_with_recursive,
-                read,
-            } => (
-                None,
-                FontAcquisitionErrorCause::UnsupportedCapabilities {
-                    list,
-                    list_with_recursive,
-                    read,
-                },
-            ),
-            RecursiveAcquisitionError::List(source) => {
-                (None, FontAcquisitionErrorCause::List(source))
-            }
-            RecursiveAcquisitionError::Read {
-                operation_path,
-                source,
-            } => (
-                Some(operation_path),
-                FontAcquisitionErrorCause::Read(source),
-            ),
-            RecursiveAcquisitionError::ListedObjectAbsent {
-                operation_path,
-                source,
-            } => (
-                Some(operation_path),
-                FontAcquisitionErrorCause::ListedObjectAbsent(source),
-            ),
-            RecursiveAcquisitionError::Structural(issues) => (
-                None,
-                FontAcquisitionErrorCause::Structural(FontAcquisitionSurveyError {
-                    issues: issues.into_iter().map(map_font_issue).collect(),
-                }),
-            ),
-            RecursiveAcquisitionError::InvalidPackageTree(_) => {
-                unreachable!("font acquisition does not run Package Tree preflight")
-            }
-            RecursiveAcquisitionError::Limit {
-                resource,
-                ceiling,
-                observed_at_least,
-            } => (
-                None,
-                FontAcquisitionErrorCause::Limit(FontAcquisitionLimitError::Exceeded {
-                    resource: map_font_resource(resource),
-                    ceiling,
-                    observed_at_least,
-                }),
-            ),
-            RecursiveAcquisitionError::AccountingOverflow { resource } => (
-                None,
-                FontAcquisitionErrorCause::Limit(FontAcquisitionLimitError::AccountingOverflow {
-                    resource: map_font_resource(resource),
-                }),
-            ),
-        };
+    fn new(
+        source_index: usize,
+        source_location: &Location,
+        failed_path: Option<String>,
+        cause: FontAcquisitionErrorCause,
+    ) -> Self {
         Self {
             source_index,
-            source_location,
+            source_location: source_location.clone(),
             failed_path,
-            cause,
-        }
-    }
-}
-
-impl<E> fmt::Display for FontAcquisitionError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            formatter,
-            "Font Acquisition failed at source {} for binding {} at prefix operation path {:?}",
-            self.source_index,
-            self.source_location.binding(),
-            self.source_location.operation_path(),
-        )?;
-        if let Some(path) = &self.failed_path {
-            write!(formatter, " while reading object operation path {path:?}")?;
-        }
-        write!(formatter, ": {}", self.cause.label())
-    }
-}
-
-impl<E> fmt::Debug for FontAcquisitionError<E> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("FontAcquisitionError")
-            .field("source_index", &self.source_index)
-            .field("binding", self.source_location.binding())
-            .field("role", &"prefix")
-            .field("operation_path", &self.source_location.operation_path())
-            .field("failed_path", &self.failed_path)
-            .field("cause", &self.cause.label())
-            .finish()
-    }
-}
-
-impl<E: Error + 'static> Error for FontAcquisitionError<E> {
-    fn source(&self) -> Option<&(dyn Error + 'static)> {
-        match &self.cause {
-            FontAcquisitionErrorCause::ResolveOperator(source) => Some(source),
-            FontAcquisitionErrorCause::UnsupportedCapabilities { .. } => None,
-            FontAcquisitionErrorCause::List(source)
-            | FontAcquisitionErrorCause::Read(source)
-            | FontAcquisitionErrorCause::ListedObjectAbsent(source) => Some(source),
-            FontAcquisitionErrorCause::Structural(source) => Some(source),
-            FontAcquisitionErrorCause::Limit(source) => Some(source),
+            cause: RedactedError::new(cause),
         }
     }
 }
 
 /// The typed cause of an OpenDAL Font Acquisition failure.
-#[derive(Debug)]
+#[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum FontAcquisitionErrorCause<E> {
-    ResolveOperator(E),
+pub enum FontAcquisitionErrorCause {
+    #[error("operator resolution failed")]
+    ResolveOperator(#[source] BoxError),
+    #[error("required listing or read capability is unsupported")]
     UnsupportedCapabilities {
         list: bool,
         list_with_recursive: bool,
         read: bool,
     },
-    List(::opendal::Error),
-    Read(::opendal::Error),
-    ListedObjectAbsent(::opendal::Error),
-    Structural(FontAcquisitionSurveyError),
-    Limit(FontAcquisitionLimitError),
+    #[error("a recursive listing failed")]
+    List(#[source] ::opendal::Error),
+    #[error("a listed Font Container read failed")]
+    Read(#[source] ::opendal::Error),
+    #[error("a listed Font Container was absent when read")]
+    ListedObjectAbsent(#[source] ::opendal::Error),
+    #[error("the completed listings had structural issues")]
+    Structural(#[source] FontAcquisitionSurveyError),
+    #[error("a Font Acquisition limit failed")]
+    Limit(#[source] FontAcquisitionLimitError),
 }
 
-impl<E> FontAcquisitionErrorCause<E> {
-    fn label(&self) -> &'static str {
-        match self {
-            Self::ResolveOperator(_) => "operator resolution failed",
-            Self::UnsupportedCapabilities { .. } => {
-                "required listing or read capability is unsupported"
-            }
-            Self::List(_) => "a recursive listing failed",
-            Self::Read(_) => "a listed Font Container read failed",
-            Self::ListedObjectAbsent(_) => "a listed Font Container was absent when read",
-            Self::Structural(_) => "the completed listings had structural issues",
-            Self::Limit(_) => "a Font Acquisition limit failed",
-        }
+struct FontAcquisitionOperation<'a> {
+    sources: &'a [FontSource],
+}
+
+impl FontAcquisitionOperation<'_> {
+    fn error(
+        &self,
+        source_index: usize,
+        failed_path: Option<String>,
+        cause: FontAcquisitionErrorCause,
+    ) -> FontAcquisitionError {
+        FontAcquisitionError::new(
+            source_index,
+            self.sources[source_index].source(),
+            failed_path,
+            cause,
+        )
+    }
+}
+
+impl RecursiveAcquisitionOperation for FontAcquisitionOperation<'_> {
+    type Error = FontAcquisitionError;
+
+    fn invalid_location_role(&self, _: usize, _: LocationRoleError) -> FontAcquisitionError {
+        unreachable!("FontAcquisitionRequest validates every prefix role")
+    }
+
+    fn resolve_operator(&self, source_index: usize, source: BoxError) -> FontAcquisitionError {
+        self.error(
+            source_index,
+            None,
+            FontAcquisitionErrorCause::ResolveOperator(source),
+        )
+    }
+
+    fn unsupported_capabilities(
+        &self,
+        source_index: usize,
+        list: bool,
+        list_with_recursive: bool,
+        read: bool,
+    ) -> FontAcquisitionError {
+        self.error(
+            source_index,
+            None,
+            FontAcquisitionErrorCause::UnsupportedCapabilities {
+                list,
+                list_with_recursive,
+                read,
+            },
+        )
+    }
+
+    fn list(&self, source_index: usize, source: ::opendal::Error) -> FontAcquisitionError {
+        self.error(source_index, None, FontAcquisitionErrorCause::List(source))
+    }
+
+    fn read(
+        &self,
+        source_index: usize,
+        operation_path: String,
+        source: ::opendal::Error,
+    ) -> FontAcquisitionError {
+        self.error(
+            source_index,
+            Some(operation_path),
+            FontAcquisitionErrorCause::Read(source),
+        )
+    }
+
+    fn listed_object_absent(
+        &self,
+        source_index: usize,
+        operation_path: String,
+        source: ::opendal::Error,
+    ) -> FontAcquisitionError {
+        self.error(
+            source_index,
+            Some(operation_path),
+            FontAcquisitionErrorCause::ListedObjectAbsent(source),
+        )
+    }
+
+    fn structural(
+        &self,
+        source_index: usize,
+        issues: Vec<RecursiveSurveyIssue>,
+    ) -> FontAcquisitionError {
+        self.error(
+            source_index,
+            None,
+            FontAcquisitionErrorCause::Structural(FontAcquisitionSurveyError {
+                issues: issues.into_iter().map(map_font_issue).collect(),
+            }),
+        )
+    }
+
+    fn limit(
+        &self,
+        source_index: usize,
+        resource: RecursiveAcquisitionResource,
+        ceiling: u64,
+        observed_at_least: u64,
+    ) -> FontAcquisitionError {
+        self.error(
+            source_index,
+            None,
+            FontAcquisitionErrorCause::Limit(FontAcquisitionLimitError::Exceeded {
+                resource: map_font_resource(resource),
+                ceiling,
+                observed_at_least,
+            }),
+        )
+    }
+
+    fn accounting_overflow(
+        &self,
+        source_index: usize,
+        resource: RecursiveAcquisitionResource,
+    ) -> FontAcquisitionError {
+        self.error(
+            source_index,
+            None,
+            FontAcquisitionErrorCause::Limit(FontAcquisitionLimitError::AccountingOverflow {
+                resource: map_font_resource(resource),
+            }),
+        )
     }
 }
 

@@ -17,6 +17,8 @@ pub mod publication;
 #[path = "../tests/support/opendal.rs"]
 mod scripted_service;
 
+pub(crate) type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
 pub use ::opendal::Operator;
 pub use location::{
     Location, LocationError, LocationRoleError, OperatorBinding, OperatorBindingError,

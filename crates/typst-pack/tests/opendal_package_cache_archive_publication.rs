@@ -385,10 +385,13 @@ fn resolver_read_create_and_race_failures_cover_every_error_certainty() {
     .unwrap_err();
     assert_eq!(resolve.phase(), OpenDalPublicationPhase::ResolveOperator);
     assert_eq!(resolve.commit_certainty(), CommitCertainty::NotCommitted);
-    assert!(matches!(
-        resolve.cause(),
-        PackageCacheArchivePublicationErrorCause::ResolveOperator(ResolveError)
-    ));
+    let PackageCacheArchivePublicationErrorCause::ResolveOperator(source) = resolve.cause() else {
+        panic!("unexpected cause: {:?}", resolve.cause());
+    };
+    assert!(source.downcast_ref::<ResolveError>().is_some());
+    let cause = resolve.source().unwrap().source().unwrap();
+    assert!(cause.is::<PackageCacheArchivePublicationErrorCause>());
+    assert!(cause.source().unwrap().is::<ResolveError>());
 
     let read_service = PublicationService::new(
         PublicationCapabilities::all(),
@@ -576,12 +579,10 @@ fn outer_diagnostics_are_safe_and_operator_bindings_make_a_send_future() {
 
     for rendered in [error.to_string(), format!("{error:?}")] {
         assert!(rendered.contains("cache"));
-        assert!(rendered.contains("exact"));
         assert!(rendered.contains(cache_path()));
         assert!(!rendered.contains("sensitive"));
         assert!(!rendered.contains("resolver rejected"));
     }
-    assert!(error.source().is_some());
 
     let service = PublicationService::new(PublicationCapabilities::all(), [], [], [], 1);
     let bindings = bindings(&service);
