@@ -49,5 +49,8 @@ result limit, not a process-memory guarantee.
 - Peak-memory contracts describe payload allocations and bounded working memory,
   not allocator overhead, compiler internals, process RSS, elapsed time, or
   aggregate concurrency across independent invocations.
+- Allocation tests remain limited to operation-specific ownership seams;
+  a dedicated cross-type pointer-identity matrix is intentionally omitted
+  because it couples unrelated values to their current representations.
 - Hosts processing hostile Typst programs still need process isolation and
   external time or memory enforcement.

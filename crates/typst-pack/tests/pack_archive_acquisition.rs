@@ -35,6 +35,17 @@ fn stream_acquisition_handles_short_reads_and_preserves_exact_bytes() {
 }
 
 #[test]
+fn acquired_archive_debug_excludes_payload_bytes() {
+    let archive = acquire(
+        Cursor::new(b"secret archive bytes"),
+        AcquisitionLimits::reference_v1(),
+    )
+    .unwrap();
+
+    assert_eq!(format!("{archive:?}"), "PackArchiveBytes(20)");
+}
+
+#[test]
 fn stream_acquisition_accepts_the_boundary_and_probes_only_one_byte_past_it() {
     let bytes = b"12345";
     for ceiling in [bytes.len() as u64 + 1, bytes.len() as u64] {
