@@ -30,16 +30,16 @@ from that target.
 Pack Creation is adapter-neutral. Given a stabilized Project Snapshot, an
 ordered candidate font catalog, and resolved package trees, it runs one
 representative Typst request and returns one Pack plus representative-compile
-warnings. It acquires nothing itself, requires no crate feature, and runs
+warnings. It reads nothing itself, requires no crate feature, and runs
 wherever the core runs.
 
-Creation Preparation names the acquisition phase that obtains those inputs, and
-a Creation Adapter is what performs it. An adapter supplies only listing,
+Pack Assembly names the reading phase that obtains those inputs, and a Pack
+Assembler is what performs it. An adapter supplies only listing,
 reading, and fetching. Every transformation of bytes belongs to the core:
 ignore-policy matching, Project Snapshot assembly, font container expansion,
 package registry URL construction, and package archive expansion.
 
-Because package requirements can only be discovered by compiling, acquisition
+Because package requirements can only be discovered by compiling, package reading
 resolves through a resumable protocol rather than a callback. Creation reports
 the exact package specifications it observed as missing, the caller obtains
 those trees however its host allows, and invokes creation again with the same
@@ -70,15 +70,15 @@ enabled.
 
 Filesystem access and network egress become separately selectable capabilities,
 so a build can read a project from disk with no download capability compiled in
-at all. The existing filesystem path is reimplemented as the reference Creation
-Adapter over the core, with its public interface unchanged. That adapter
+at all. The existing filesystem path is reimplemented as the reference Pack
+Assembler over the core, with its public interface unchanged. That assembler
 resolves the creation timestamp, composes system fonts, Typst's embedded fonts,
 and scanned font directories into the candidate catalog in their current
 relative order, and continues to own the Creation Evidence Fence and its
 filesystem failure vocabulary.
 
-Establishing that acquired bytes represent one consistent source state is a
-Creation Adapter responsibility, and it is advisory. An adapter that acquires
+Establishing that read bytes represent one consistent source state is a Pack
+Assembler responsibility, and it is advisory. An adapter that reads
 from mutable storage without revalidating still conforms.
 
 This decision amends ADR-0006. The structural project closure and the Project

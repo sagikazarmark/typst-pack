@@ -15,7 +15,7 @@ callers to retry the wrong values, and flatten authoritative lower-module
 failures into duplicated outer enums.
 
 The lifecycle also spans a featureless semantic core, the Pack Archive format,
-concrete source gatherers and authorities, and destination adapters with
+concrete source readers and authorities, and destination adapters with
 different atomicity guarantees. A generic storage or error hierarchy would make
 each caller learn behavior that does not apply to its operation.
 
@@ -32,7 +32,7 @@ Use phase-specific vocabulary:
 - `Report` means immutable terminal evidence for an accepted operation.
 - `Receipt` and `Progress` are workflow-specific destination evidence.
 - `Failure` is reserved for domain data describing an external failed attempt,
-  such as `PackageAcquisitionFailure`, rather than used as a synonym for every
+  such as `PackageReadFailure`, rather than used as a synonym for every
   Rust error.
 
 Each module owns its public error names. Concise names such as `DecodeError` and
@@ -65,10 +65,10 @@ and limit error. These operation-specific types share the variants
 public limit error.
 
 Exact retry material has explicit ownership. Pack Archive decoding borrows
-`PackArchiveBytes`. A convenience acquisition-and-decode error returns the exact
-acquired bytes after decode failure, and a convenience encode-and-publication
-error returns the exact encoded bytes after publication failure. Semantic
-construction, archive transformation, gathering, expansion, and compilation
+`PackArchiveBytes`. A convenience read-and-decode error returns the exact
+read bytes after decode failure, and a convenience encode-and-write error
+returns the exact encoded bytes after write failure. Semantic
+construction, archive transformation, reading, expansion, and compilation
 export return no partial semantic value.
 
 Destination adapters validate requested policy before I/O and return a typed
@@ -80,8 +80,8 @@ Indeterminate}` where the target's visibility may be uncertain. Receipts,
 progress, and errors stay workflow-specific even when private implementation is
 shared.
 
-Use Pack Assembler, source-specific project gatherer, Package Authority, Font
-Authority, adapter, Acquisition, and Publication for host-side roles and byte
+Use Pack Assembler, source-specific project reader, Package Authority, Font
+Authority, adapter, Read, and Write for host-side roles and byte
 movement. "Persistence" may group operations in prose but names no public
 module, trait, or value. Capability appraisal is adapter implementation
 vocabulary; unsupported public behavior is expressed as unsupported requested

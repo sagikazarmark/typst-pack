@@ -5,37 +5,31 @@
 [![crates.io](https://img.shields.io/crates/v/typst-pack?style=flat-square)](https://crates.io/crates/typst-pack)
 [![docs.rs](https://img.shields.io/docsrs/typst-pack?style=flat-square)](https://docs.rs/typst-pack)
 
-**Portable single-file packs of Typst projects: sources, resources, packages, and fonts.**
+**Bundle a Typst project and its fonts and packages into one file that can
+compile on another machine.**
 
-A *pack* (`.typk`) captures the compilation contract of one Typst project:
+A pack (`.typk`) contains an entrypoint, the project's source and data files,
+and the exact package and font requirements found during a representative
+compile. Packages and fonts can be embedded for offline, portable compilation
+or recorded as external requirements for the receiving application to supply.
 
-- the packed project files: the entrypoint, other Typst sources, images, and
-  data files,
-- optionally the files of the [Typst Universe](https://typst.app/universe)
-  packages the project imports, so compiling needs no network access,
-- optionally the fonts the document uses, so compiling produces identical
-  output on machines without those fonts.
+Use the CLI to create, inspect, compile, and extract packs. Use the Rust library
+to build the same workflows in editors, web services, object-storage systems,
+and other applications.
 
-Use it as a CLI to distribute finished Typst projects, or as a library to
-produce and consume packs programmatically (e.g. offering a "download
-project" pack in a web-based Typst editor).
-
-Note: this is unrelated to Typst's own *bundle export* (the `typst-bundle`
-crate), which is a multi-file **output** target. A pack is an **input**
-archive: a portable form of a project's sources and resources.
+This is unrelated to Typst's bundle output (`typst-bundle`). A pack is portable
+**input** for later compilation, not a collection of rendered output files.
 
 ## Features
 
-- **Portable project archives**: bundle Typst sources, resources, packages, and
-  fonts into one `.typk` file.
-- **Structural project closure**: include every eligible regular file beneath
-  the selected project root, independently of compiler control flow.
-- **Reproducible compilation**: compile without network or system font access,
-  with support for fixed timestamps and vendored packages.
-- **Pack Overrides**: replace any contained project file for one compilation
-  without mutating the Pack.
-- **Library and CLI interfaces**: create, inspect, compile, and extract packs in
-  memory or on the file system.
+- Put a whole Typst project in one `.typk` file, including images and data.
+- Vendor imported Typst Universe packages so compilation works offline.
+- Embed selected fonts so output does not depend on fonts installed elsewhere.
+- Compile to PDF, PNG, SVG, or experimental HTML without reading ambient project files.
+- Replace a contained project file for one compile without changing the pack.
+- Inspect or extract a pack before using it.
+- Build packs from the filesystem, entirely in memory, or with caller-supplied OpenDAL storage.
+- Keep filesystem access and network download support as separate build choices.
 
 ## CLI
 
@@ -68,159 +62,79 @@ typst-pack compile project.typk reproducible.pdf --creation-timestamp 1700000000
 # Guarantee no network access (fails instead of downloading packages):
 typst-pack compile project.typk --offline
 
-# Experimental HTML export (the output format enables its required feature):
+# Experimental HTML export:
 typst-pack compile project.typk out.html
-
-# An HTML representative creation compile still selects the feature explicitly:
 typst-pack create project/main.typ --target html --features html
 
 # Unpack a pack back into an editable project directory:
 typst-pack extract project.typk -o project/
 ```
 
-For Page Formats, `{p}` expands to the one-based Source Page Number, `{0p}` and
-`{n}` are zero-padded aliases, and `{t}` is the total source-document page
-count before page selection. Multi-page output requires an explicit `{p}`,
-`{0p}`, or `{n}` template. All target paths are checked for duplicates before
-writing. Document Format output paths are literal.
+For PNG and SVG output, `{p}` is the one-based source page number, `{0p}` and
+`{n}` are zero-padded aliases, and `{t}` is the source-document page count.
+Multi-page output needs a page placeholder. All output paths are checked for
+duplicates before anything is written.
 
 ### Project files
 
-`create` stabilizes every eligible regular file beneath the physical project
-root before compiling. Project membership is independent of the representative
-compile's target, inputs, date, features, and control flow. The root
-`.typkignore` applies Gitignore-style ordered rules; it is always packed, nested
-`.typkignore` files are ordinary project files, and every `.typk` path is always
-excluded. Symlinks and other unignored non-regular entries are rejected.
+`create` includes every eligible regular file beneath the project root, not
+only files reached by the representative compile. A root `.typkignore` uses
+Gitignore-style ordered rules. It is included in the pack; nested
+`.typkignore` files are ordinary files. Symlinks, unsupported entries, and any
+path containing a `.typk` component are rejected.
 
-The `.typk` exclusion is a canonical path invariant rather than a walker rule,
-so it binds every route into a pack, including direct in-memory construction and
-reading one back. A pack built in memory before that invariant existed, holding
-a project path with a `.typk` segment, no longer reads.
+The representative compile selects package and font requirements. Its target,
+inputs, date, features, and control flow do not change which project files are
+included. Pack a valid placeholder when a document needs per-recipient data,
+then replace it with `--override PACK_PATH FILE` at compile time.
 
-Creation runs one representative compile from those stabilized bytes to select
-exact package and font dependencies. `--target paged|html` is optional and
-defaults to `paged`; it does not restrict later output formats. This concrete
-evaluation is a temporary dependency-selection mechanism because Typst does not
-report every package or font a different request might reach.
+### Packages and fonts
 
-Every project path in a Pack has contained bytes. For per-document variation,
-pack a valid placeholder and use compile-time `--override PACK_PATH FILE`.
-Overrides may replace source, assets, data, or the entrypoint, but cannot add or
-delete paths or authorize undeclared packages and fonts.
+Observed packages are embedded by default. `--no-vendor-packages` records each
+exact package and complete tree identity instead; compilation then requires the
+application's configured package sources to provide a matching tree. `--offline`
+prevents downloads during both creation and compilation.
 
-### Packages
-
-All observed package dependencies are vendored into the pack by default.
-With `--no-vendor-packages`, each dependency is instead recorded as an exact
-package specification and Package Tree identity. Compilation acquires
-the whole tree from the configured package directory, cache, or Typst Universe,
-verifies it before invoking Typst, and exposes only the verified paths and bytes.
-Undeclared package locations and ambient caches cannot satisfy imports.
-
-`--offline` (on both `create` and `compile`) disables the download step
-entirely: dependencies must come from the pack or the local package
-directories, and anything else fails as not found. Use
-`typst-pack compile --offline` to verify that a pack is truly
-self-contained.
-
-### Fonts
-
-Every selected face is recorded in the ordered Pack Font Catalog with its exact
-container identity. Fonts are *not* embedded by default: compilation must find
-the declared exact containers among the configured system, Typst-embedded, or
-`--font-path` sources. Other available fonts are not exposed to Typst.
-
-With `--embed-fonts`, selected containers are stored in the pack, except the
-ones Typst itself ships. Pass `--include-typst-embedded-fonts` to store those
-too. Embedding follows where a container came from, not what its bytes are: a
-`--font-path` directory holding a copy of one of Typst's containers is embedded
-like any other scanned container. Mind font licenses when redistributing
-embedded containers; licensing and acquisition metadata do not change font
-selection.
-
-The Font Catalog creation selects from is one explicit ordered sequence:
-`FontContainer` validates exact bytes before `FontCatalog` pairs each position
-with an embedded-or-external `FontDisposition`, so one pack can embed a
-redistributable container and reference a restrictively licensed one. Repeated
-container identities remain distinct positions. Faces are expanded in
-container-local index order, catalog order decides which container wins a
-family, and nothing joins a catalog implicitly:
-`typst_embedded_font_containers` yields Typst's own containers for a caller to
-splice in where it wants. `FilesystemPackAssembler` composes its catalog from
-system fonts, Typst's embedded fonts, and configured font directories, in that
-order.
+Fonts are external by default. `--embed-fonts` stores selected font containers
+except those shipped by Typst; `--include-typst-embedded-fonts` stores those as
+well. Mind font licenses when redistributing embedded files.
 
 ### Output formats
 
-PDF and HTML are Document Formats and produce one Compilation Output Artifact
-without a Source Page Number. PNG and SVG are Page Formats and produce one
-artifact per selected source page. Page artifacts retain their original Source
-Page Number and are emitted once each in source-document order.
-
-HTML export is experimental in Typst itself, and Typst emits a warning that its
-behavior may change. Pack compilation derives the required engine feature from
-`CompilationOutputSpecification::Html`; HTML creation still requires
-`--features html` (or `TYPST_FEATURES=html`).
-
-The Dagger `compile` function returns a directory for every format. Document
-Formats use `output.pdf` or `output.html`; Page Formats use deterministic names
-such as `page-2.png`, derived from Source Page Numbers. Its typed mapping,
-staging, failure boundary, and intentional transport omissions are documented
-in the [Dagger adapter contract](docs/dagger-adapter.md).
-
-Maintainers changing the embedded compiler must follow the
-[embedded Typst upgrade procedure](docs/embedded-typst-upgrade.md). CI enforces
-the approved crate graph, classified differential matrix, official CLI oracle,
-and the packaged release binary.
+PDF and HTML produce one artifact. PNG and SVG produce one artifact for each
+selected source page. HTML is experimental in Typst. The complete intentional
+differences from `typst compile` are listed in the
+[CLI parity inventory](docs/cli-parity.md).
 
 ## Library
 
-Add the crate with filesystem-backed packing support and Typst's embedded
-fonts:
+The core in-memory packing, creation, and compilation APIs need no crate
+features. Add filesystem support when the library should read local projects,
+package directories, and system fonts:
 
 ```toml
 [dependencies]
-typst-pack = { version = "0.4", features = ["embedded-fonts", "fs"] }
+typst-pack = { version = "0.6", features = ["embedded-fonts", "fs"] }
 ```
 
-The core in-memory packing and compilation APIs require no crate features.
+The `fs` feature links no network client. Add `egress` only when filesystem
+assembly should download missing Typst Universe packages.
 
-Filesystem access and network egress are separately selectable, so the build
-above reads projects, local package directories, and system fonts from disk with
-no download capability compiled in at all: nothing in its dependency graph can
-reach the network. Add the `egress` feature to let filesystem creation download
-the packages a project imports.
+The [library contract](docs/library-contract.md) describes identity,
+dependency fulfillment, environment independence, write policies, retry
+material, and partial effects. The [OpenDAL guide](docs/opendal-integration.md)
+documents asynchronous storage integration.
 
-OpenDAL storage integration is separately opt-in. The application selects its
-service and runtime support on its own direct dependencies:
-
-```toml
-[dependencies]
-typst-pack = { version = "0.5", features = ["opendal"] }
-
-# Caller-selected backend and runtime support:
-opendal = { version = "0.58", default-features = false, features = ["services-s3"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
-```
-
-The application constructs and supplies each `opendal::Operator`. typst-pack
-enables no service, transport, TLS implementation, executor, runtime, layer, or
-retry policy; it owns no runtime and exposes no blocking facade. OpenDAL's
-`services-memory` feature is an empty no-op, and `opendal::services::Memory`
-compiles unconditionally, so in-memory conformance needs no service feature.
+### Assemble from the filesystem
 
 ```rust,ignore
 use std::path::Path;
-
-use typst_pack::pack_archive::{DecodeLimits, decode, encode};
+use typst_pack::pack_archive::encode;
 use typst_pack::{
-    compile, CompilationOutputSpecification, FilesystemPackAssembler,
-    FilesystemPackAssemblerConfig, FilesystemPackAssemblyRequest, OutputFormat,
-    Pack, PackCompilationRequest, PdfOutputSpecification,
+    FilesystemPackAssembler, FilesystemPackAssemblerConfig,
+    FilesystemPackAssemblyRequest,
 };
 
-// Pack a project directory (requires the `fs` feature).
 let assembler = FilesystemPackAssembler::new(FilesystemPackAssemblerConfig::new());
 let report = assembler.assemble(
     FilesystemPackAssemblyRequest::new(
@@ -229,62 +143,10 @@ let report = assembler.assemble(
     )
     .embed_fonts(true),
 )?;
-let bytes = encode(report.pack())?;
-
-// ... ship the bytes somewhere, then compile without a file system:
-let pack = decode(&bytes, DecodeLimits::reference_v1())?;
-let request = PackCompilationRequest::new(
-    pack,
-    CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
-);
-let report = compile(request)?;
-let output = report.result().expect("semantic compilation result");
-assert_eq!(output.engine_identity().implementation(), "typst");
-assert_eq!(output.exporter_identity().implementation(), "typst-pdf");
-let artifact = output.artifacts().first().expect("PDF artifact");
-assert_eq!(artifact.format(), OutputFormat::Pdf);
-assert_eq!(artifact.source_page_number(), None);
-let pdf = artifact.bytes();
+let archive = encode(report.pack())?;
 ```
 
-Large immutable project, package, font, and compilation artifact payloads are
-shared across semantic clones and projections. Their public accessors expose
-borrowed byte slices without exposing the private sharing representation. Pack
-Archive bytes are the exception: `pack_archive::encode` returns the distinct,
-non-cloneable `PackArchiveBytes` value so exact retry material has explicit
-unique ownership.
-
-`pack_archive::read_pack` and `write_pack` compose bounded stream acquisition
-and exact stream publication with decoding and encoding. With the `fs` feature,
-`open_pack` performs known-size preflight plus incrementally metered reads, while
-`save_pack` uses same-directory staging with an explicit `CreateNew` or
-`ReplaceExisting` atomic publication policy. Decode failures return the acquired
-bytes, publication failures return the encoded bytes, and publication evidence
-reports the completed phase, visible prefix or staging residue, and Commit
-Certainty. A strict filesystem policy is rejected before staging on platforms
-where the adapter cannot guarantee it.
-
-`PackAssemblyReport::warnings` retains warnings from the representative
-creation compile. Inspect `PackAssemblyReport::pack` for authoritative project
-files, package requirements and their embedding disposition, and the Pack Font
-Catalog; that static inventory is not duplicated in the assembly report.
-
-`compile` always returns a `CompilationReport` after accepting the semantic
-request. Its outcome contains either the immutable semantic result or an
-operational dependency failure, and its fulfillment report retains
-caller-supplied package and font provenance, cache disposition, and licensing
-metadata without including those operational values in Compilation Identity or
-Compilation Result Identity. Request rejection is the outer error and retains
-the complete ordered issue set. Every semantic result also exposes its document
-summary and canonical Compilation Access Trace.
-
-For PNG and SVG, `source_page_number()` identifies each artifact independently
-of its collection position. `bytes()` borrows the artifact bytes and
-`into_bytes()` extracts an owned vector, reusing its buffer when the artifact is
-uniquely owned and materializing a copy when another semantic clone shares it.
-
-Packs can also be assembled fully in memory, with no file system involved, which
-is what a web editor wants:
+### Build in memory
 
 ```rust,ignore
 use typst_pack::Pack;
@@ -294,335 +156,215 @@ let pack = Pack::builder("main.typ")
     .file("main.typ", source_text.as_bytes().to_vec())?
     .file("figure.png", image_bytes)?
     .build()?;
-let bytes = encode(&pack)?;
+let archive = encode(&pack)?;
 ```
 
-Building a pack by hand gives up Dependency Discovery. `create` keeps it and
-still needs no crate feature: it borrows the validated values a caller already
-holds, runs one representative Typst request, and returns the pack it selected.
-It acquires nothing itself and consults no wall clock. The Discovery
-Specification explicitly supplies the run's Document Time. Project
-Snapshot assembly accepts entries already selected by the caller; source-specific
-ignore policy and resource limits belong to the gatherer that obtains them:
+Building directly with `Pack::builder` does not discover dependencies. Use
+`create` with a `ProjectSnapshot`, `PackageCatalog`, and `FontCatalog` when the
+library should run dependency discovery over values already held by the caller.
+
+### Resume creation when packages are missing
+
+Pack creation is stateless and resumable. If the representative compile reaches
+a package that is not in the supplied catalog, read or fetch that exact package,
+insert its tree, and call `create` again:
 
 ```rust,ignore
 use typst_pack::{
-    create, DiscoverySpecification, DocumentTime, FontCatalog, FontCatalogEntry,
-    FontContainer, FontDisposition, PackCreationInput, PackCreationOutcome,
-    PackageAcquisitionFailures, PackageCatalog, PackageDisposition, PackageTree,
-    ProjectSnapshotAssembly, TypstTarget,
-};
-use typst_pack::pack_archive::encode;
-
-let project = ProjectSnapshotAssembly::new("main.typ").assemble([
-    ("main.typ", source_text.as_bytes().to_vec()),
-    ("figure.png", image_bytes),
-])?;
-
-let packages = PackageCatalog::from_entries([(
-    spec,
-    PackageTree::from_owned_entries(package_files)?,
-    PackageDisposition::Embedded,
-)])?;
-let fonts = FontCatalog::from_iter([FontCatalogEntry::new(
-    FontContainer::new(font_bytes)?,
-    FontDisposition::Embedded,
-)]);
-let package_failures = PackageAcquisitionFailures::new();
-let discovery = DiscoverySpecification::new(
-    TypstTarget::Paged,
-    typst::foundations::Dict::new(),
-    DocumentTime::UnixTimestamp(creation_timestamp),
-    [],
-)?;
-let PackCreationOutcome::Created { pack, warnings } = create(PackCreationInput {
-    project: &project,
-    packages: &packages,
-    fonts: &fonts,
-    package_failures: &package_failures,
-    discovery: &discovery,
-    metadata: None,
-})? else {
-    panic!("no package is missing");
-};
-let bytes = encode(&pack)?;
-```
-
-Compiler observations select package and font requirements; project files come
-from the Project Snapshot alone. Each supplied package tree and font container
-carries its own embedded-or-external disposition, which is what the pack's
-Package Requirements and Font Requirements record. The `Created` outcome
-retains Dependency Discovery warnings, and a discovery run that does not compile
-fails creation instead of returning an incomplete pack. The operation borrows
-all inputs and retains nothing, so the same values can be used again.
-Obtaining its inputs belongs to Pack Assembly. `FilesystemPackAssembler` is the
-reference filesystem implementation over `create`; reusable
-`FilesystemPackAssemblerConfig` host policy is separate from each
-`FilesystemPackAssemblyRequest`.
-
-Creation borrows validated acquired bytes and has nothing to re-read. An adapter
-may therefore issue a pack describing values that never existed simultaneously
-in mutable storage; `FilesystemPackAssembler` does not reread package sources
-solely to detect later mutation.
-
-How far the adapter's own acquisition reaches is a build-time choice. With `fs`
-alone it resolves reported specifications from configured local package
-directories and the package cache; with `egress` it downloads the rest from the
-Typst Universe registry unless assembly is offline. The assembler configuration
-owns package paths, cache, offline policy, certificate, font sources, clock, and
-the named finite profile. The per-run request owns roots, discovery controls,
-embedding choices, timings, and Pack metadata. Certificate configuration needs
-`egress`; offline configuration does not, because a build without egress already
-resolves that way.
-
-Package requirements can only be discovered by compiling, so creation resolves
-package acquisition through a resumable protocol rather than a callback. A
-discovery run that read a package no supplied tree covers reports that exact
-specification instead of issuing a pack, which is a normal outcome and not a
-failure. The caller resolves it however its host allows and invokes creation
-again with the same borrowed values and the tree added:
-
-```rust,ignore
-use typst_pack::{
-    create, PackCreationInput, PackCreationOutcome, PackageAcquisitionFailures,
-    PackageCatalog, PackageDisposition,
+    PackCreationInput, PackCreationOutcome, PackageCatalog, PackageDisposition,
+    PackageReadFailures, create,
 };
 
-let mut catalog = PackageCatalog::new();
-let package_failures = PackageAcquisitionFailures::new();
+let mut packages = PackageCatalog::new();
+let package_failures = PackageReadFailures::new();
 let pack = loop {
     match create(PackCreationInput {
         project: &project,
-        packages: &catalog,
+        packages: &packages,
         fonts: &fonts,
         package_failures: &package_failures,
         discovery: &discovery,
         metadata: None,
     })? {
         PackCreationOutcome::Created { pack, .. } => break pack,
-        // Acquire each reported specification however this host allows: from a
-        // cache, over an asynchronous transport, or in a later request.
         PackCreationOutcome::MissingPackageSpecifications(missing) => {
             for spec in missing {
-                let tree = acquire_tree(&spec)?;
-                catalog.insert(spec, tree, PackageDisposition::Embedded)?;
+                let tree = read_tree(&spec)?;
+                packages.insert(spec, tree, PackageDisposition::Embedded)?;
             }
         }
     }
 };
 ```
 
-Reported specifications come from the package file requests the compiler made,
-never from diagnostic text, and always carry an exact version, because a Typst
-import specification always does. Because a failed import ends module
-evaluation, one round reports what that round reached, and a project needing
-several packages completes over repeated invocation. Nothing is retained
-between invocations, so a resume step is valid across a host request boundary
-and nothing in the core is `async`. `PackageCatalog::insert` eagerly rejects a
-tree whose `typst.toml` does not declare the claimed name and version, so a loop
-that would otherwise never progress gets a diagnosis before creation runs.
+The `package-reading` feature provides official registry URL construction and
+bounded `.tar.gz` expansion without choosing an HTTP client. OpenDAL provides
+`read_package` and `insert_read_package` for the same lifecycle over configured
+operators.
 
-A specification the caller cannot resolve is recorded in
-`PackageAcquisitionFailures` with a typst-pack-owned
-`PackageAcquisitionFailureReason`. Creation stops reporting that specification
-and rejects the next Dependency Discovery at the import that needed it, carrying
-that failure as its diagnostic. This is how an acquisition failure keeps a
-source location: the specifications creation reports name a package, never the
-file that imported one, so only a failed representative request can point at the
-import. `FilesystemPackAssembler` drives it, which is why an unresolvable
-package still fails with `FilesystemPackAssemblyError::Creation` and a spanned
-diagnostic rather than beside the source that asked for it.
-
-Resolving a reported specification against the Typst Universe registry needs
-the registry layout and the archive encoding, not an HTTP client. The
-`package-acquisition` feature supplies both halves, so the loop above keeps its
-own transport — including one whose only network access is asynchronous:
+### Compile with a Pack Override
 
 ```rust,ignore
 use typst_pack::{
-    expand_package_archive, package_archive_url, PackageExpansionLimits,
+    CompilationOutputSpecification, PackCompilationRequest, PackOverrideSet,
+    PdfOutputSpecification, compile,
 };
 
-let url = package_archive_url(&spec)?;
-// Fetch the archive with whatever primitive this host provides.
-let archive = fetch(&url)?;
-let tree = expand_package_archive(
-    spec,
-    &archive,
-    // Required, so every expansion bound is a deliberate choice.
-    PackageExpansionLimits::reference_v1(),
-)?;
-```
-
-Expansion bounds compressed bytes, raw members, member names, one expanded
-member, and total expanded bytes. It fails with
-`PackageAcquisitionError::ExpansionLimit` before materializing what lies past a
-ceiling, so a caller-named package cannot exhaust the process. Every archive
-member is charged, but only addressable regular files become tree entries, and a
-member whose path cannot name a package file is rejected. A specification in a
-namespace the registry does not serve has no URL there and is reported as such.
-
-Compilation-time Pack Overrides replace contained project-file bytes in memory:
-
-```rust,ignore
-let pack = Pack::builder("main.typ")
-    .file("main.typ", source_text.as_bytes().to_vec())?
-    .file("assets/logo.png", placeholder_png)?
-    .build()?;
 let overrides = PackOverrideSet::new(&pack)
-    .replace("assets/logo.png", customer_png)?;
+    .replace("assets/logo.png", customer_logo)?;
 let request = PackCompilationRequest::new(
     pack,
     CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
-).overrides(overrides);
+)
+.overrides(overrides);
 let report = compile(request)?;
-let output = report.result().expect("semantic compilation result");
+let pdf = report.result().expect("semantic result").artifacts()[0].bytes();
 ```
 
-### Compilation authority
-
-The public compilation boundary accepts only a validated `Pack` bound into a
-`PackCompilationRequest`. The Pack-backed Typst `World`, compilation kernel,
-and embedded compiler and exporter adapter are private. In particular, callers
-cannot substitute a `typst::World`, language library, compiler, or exporter:
-
-```compile_fail
-use typst_pack::PackWorld;
-```
-
-```compile_fail
-use typst_pack::compile_pack;
-```
-
-```compile_fail
-use typst_pack::compile;
-
-fn arbitrary_world(world: &dyn typst::World) {
-    let _ = compile(world);
-}
-```
-
-Destinations remain adapter facts rather than semantic compilation request
-values:
-
-```compile_fail
-use typst_pack::PackCompilationRequest;
-
-fn add_destination(request: PackCompilationRequest) {
-    let _ = request.destination("output.pdf");
-}
-```
-
-Typst 0.15.1 owns language evaluation, layout, official diagnostics, document
-structures, and PDF, PNG, SVG, and HTML export behavior. typst-pack owns Pack
-creation and validity, the fixed set of contained project paths, exact package
-and font verification, Pack Overrides, request identities and reports, and later
-CLI or Dagger publication. Artifact bytes and official diagnostics are not
-reinterpreted by destination, transport, cache, or presentation code.
-
-Intentional differences from `typst compile` are Pack confinement, Pack input
-instead of a source root, a fixed contained project namespace, exact dependency
-fulfillment, Pack Overrides, unsupported Bundle output, and publication rules
-for immutable artifacts. The complete version-bound inventory is in
-[`docs/cli-parity.md`](docs/cli-parity.md).
-
-### Migrating to 0.4
-
-Version 0.4 makes clean naming and invariant-boundary breaks without retaining
-compatibility aliases:
-
-- Remove Resource Slot and Resource Provider APIs; pack valid baseline
-  placeholders and replace contained files with Pack Overrides.
-- Rename Dagger arguments: `source` -> `project`, `entrypoint` -> `input`,
-  `inputs` -> `sysInputs`, `noPackages` -> `noVendorPackages`,
-  `sourceDateEpoch` -> `creationTimestamp`, and `CreationTarget` ->
-  `TypstTarget`. Removed resource and inclusion arguments have no replacements.
-- Change creation from a directory plus `--entrypoint`/`--output` to
-  `create <INPUT> [OUTPUT]`.
-- Replace `compile_pack(request)` with `compile(request)`, which uses the
-  first-party `CompilationLimits::reference_v1()` profile. Use
-  `compile_with_limits(request, limits)` to supply explicit finite ceilings. The provisional
-  arbitrary-`World` `compile` overload and public `PackWorld` builder are
-  removed; configure semantic values on `PackCompilationRequest`.
-- `compile` returns `CompilationReport`; inspect `report.outcome()` or
-  `report.result()`. `compile_report`, `PackCompileError`, `CompilationAttempt`,
-  and the empty `CompilationExecutionControls` are removed. Request rejection
-  now owns its inventory and ordered `CompilationRequestIssue` values.
-- Replace `CreationTarget` and `CompilationTarget` with `TypstTarget`.
-- Configure document time with one `DocumentTime` value. `Absent`, `Fixed`, and
-  `UnixTimestamp` replace the former date/timestamp fields and setters.
-- Replace `Packer` with reusable `FilesystemPackAssemblerConfig` and
-  `FilesystemPackAssembler`, and put roots, discovery controls, embedding
-  choices, and metadata in `FilesystemPackAssemblyRequest`.
-- Read representative-compile warnings from `PackAssemblyReport::warnings`;
-  the one-field `PackReport` is removed.
-- Pack inspection exposes domain values rather than Pack Manifest records. Use
-  `pack.entrypoint()`, `pack.metadata()`, `pack.package_requirements()`,
-  `pack.font_catalog()`, and `font.identity()`/`font.data()`/`font.info()`.
-- Shared Pack consistency failures are aggregated in canonical domain order as
-  `PackInvariantIssue` values exposed by `PackInvariantError::issues()`. The
-  error is wrapped by `PackBuildError::Invariant` or
-  `pack_archive::DecodeError::InvalidPack`.
-- Replace `OutputFormat` plus `CompileOptions` request construction with the
-  corresponding `CompilationOutputSpecification` variant and format-specific
-  structure. PDF creation time is configured through
-  `PdfOutputSpecification::creation_timestamp`; use `CreationTimestamp::Omit`
-  to suppress PDF creation datetime metadata.
-- Replace `extract` and its boolean destination policy with
-  `plan_pack_extraction` followed by
-  `publish_pack_extraction_plan_to_filesystem` and one explicit
-  `FilesystemMergePolicy`.
-
-The unstable Pack format remains version 1, but discovery and Resource Slot
-fields are removed in place. Old fields and aliases are not accepted.
+A Pack Override can replace only a project path already contained in the pack.
+It cannot add a path or change package or font requirements.
 
 ### Feature flags
 
-- `fs`: `FilesystemPackAssembler`, concrete filesystem plan publication, local
-  package directories and cache, system font scanning. Requires a file system,
-  so disable this for wasm targets. It links no transport, so a build with this
-  feature alone cannot download under any runtime configuration.
-- `egress`: package downloading during filesystem creation, with the custom
-  certificate and package cache directory only a download needs. Implies `fs`,
-  builds on `package-acquisition`, and is what links an HTTP client and TLS
-  roots, so the absence of network egress is verifiable from the dependency
-  graph rather than from a runtime flag.
-- `package-acquisition`: registry URL construction and bounded package archive
-  expansion, for a caller that supplies its own transport. Pulls compression and
-  archive support but no HTTP client.
-- `opendal`: caller-polled asynchronous storage integration over caller-supplied
-  Operators. Does not imply `package-acquisition` or select a backend, transport,
-  TLS implementation, executor, runtime, layer, retry policy, or blocking API.
-- `embedded-fonts`: make Typst's bundled fonts available as intentional
-  creation and external-fulfillment sources.
-- `diagnostics`: retain source context for first-party diagnostic presentation
-  adapters.
-- `parallel`: export independent page artifacts in parallel.
+- `fs`: Read projects, local packages, caches, and system fonts from the filesystem; unavailable on wasm targets.
+- `egress`: Download missing packages during filesystem assembly; implies `fs` and `package-reading` and links HTTP/TLS dependencies.
+- `package-reading`: Construct registry URLs, read bounded package archives, and expand them without choosing a transport.
+- `opendal`: Use caller-polled OpenDAL reads and writes with caller-supplied operators and runtime support.
+- `embedded-fonts`: Make Typst's bundled fonts available to assembly and external fulfillment.
+- `diagnostics`: Retain source context for first-party diagnostic presentation adapters.
+- `parallel`: Export independent page artifacts in parallel.
 
-All library crate features are opt-in. Pack Creation over supplied inputs
-(`create`) and fixed timestamp conversion for `DocumentTime` are part of the
-featureless core and remain available on wasm targets.
+All features are opt-in. Featureless creation and compilation remain available
+on `wasm32-unknown-unknown`.
 
-Every enabled crate feature is attested in Engine and Exporter identities.
-Enabling `opendal` therefore changes Compilation Identity and Compilation Result
-Identity even though storage locations, Operators, and acquisition/publication
-evidence remain operational rather than semantic values.
+## Migrating
+
+### Migrating to 0.6
+
+Version 0.6 standardizes storage vocabulary on **read** and **write**. The
+rename was generated from `git diff fb610cb..HEAD`; there are no compatibility
+aliases.
+
+| Before 0.6 | 0.6 |
+| --- | --- |
+| Feature `package-acquisition` | `package-reading` |
+| Module `typst_pack::opendal::publication` | `typst_pack::opendal::write` |
+| `gather_filesystem_project` | `read_filesystem_project` |
+| `gather_filesystem_font_catalog` | `read_filesystem_fonts` |
+| `gather_filesystem_package` | `read_filesystem_package` |
+| `FilesystemPackageAuthority::acquire` | `FilesystemPackageAuthority::read` |
+| `acquire_package_archive` | `read_package_archive` |
+| `opendal::pack_assembly::acquire_project` | `read_project` |
+| `opendal::pack_assembly::acquire_fonts` | `read_fonts` |
+| `opendal::pack_assembly::acquire_package` | `read_package` |
+| `opendal::pack_archive::acquire_pack_archive` | `read_pack_archive` |
+| `opendal::publication::publish_pack_archive` | `opendal::write::write_pack_archive` |
+| `publish_package_cache_archive` | `write_package_cache_archive` |
+| `publish_pack_extraction_plan` | `write_pack_extraction_plan` |
+| `publish_compilation_artifacts` | `write_compilation_artifacts` |
+| `publish_pack_extraction_plan_to_filesystem` | `write_pack_extraction_plan_to_filesystem` |
+| `publish_pack_extraction_plan_to_filesystem_with_fault_probe` | `write_pack_extraction_plan_to_filesystem_with_fault_probe` |
+| `publish_compilation_artifacts_to_filesystem_paths` | `write_compilation_artifacts_to_filesystem_paths` |
+| `resolve_filesystem_publication_paths` | `resolve_filesystem_write_paths` |
+| `CompilationArtifactPathPublicationError::publication_error` | `CompilationArtifactPathWriteError::write_error` |
+| `insert_acquired_package` | `insert_read_package` |
+| `pack_archive::acquire` / `acquire_file` | `pack_archive::read` / `read_file` |
+| `pack_archive::publish` / `publish_file` | `pack_archive::write` / `write_file` |
+
+Type families follow the same mechanical rules:
+
+| Before 0.6 | 0.6 |
+| --- | --- |
+| `*Acquisition*` | `*Read*` |
+| `*Publication*` | `*Write*` |
+| `*GatherError` | `*ReadError` |
+| `Acquired*` | `Read*` |
+| `PublicationPolicy` | `WritePolicy` |
+| `PublicationKeyOutcome` | `WriteKeyOutcome` |
+| `PackArchiveAcquisitionError` | `PackArchiveReadError` |
+| `ProjectAcquisitionRequest` | `ProjectReadRequest` |
+| `PackageAcquisitionLimits` | `PackageReadLimits` |
+| `AcquiredPackageInsertionError` | `ReadPackageInsertionError` |
+| `FilesystemPackageAcquisitionError` | `FilesystemPackageAuthorityReadError` |
+| `PackExtractionPublicationProgress` | `PackExtractionWriteProgress` |
+| `CompilationArtifactPublicationReceipt` | `CompilationArtifactWriteReceipt` |
+| `FilePublicationPolicy` | `FileWritePolicy` |
+
+OpenDAL operation errors are no longer generic over an `OperatorResolver` error
+type. Resolver failures are retained as boxed sources. Match the operation's
+typed cause, then downcast the source to the concrete error supplied by your
+resolver:
+
+```rust,ignore
+use typst_pack::opendal::pack_assembly::ProjectReadErrorCause;
+
+if let ProjectReadErrorCause::ResolveOperator(source) = error.cause() {
+    if let Some(resolver_error) = source.downcast_ref::<MyResolverError>() {
+        handle_resolver_error(resolver_error);
+    }
+}
+```
+
+Compilation and encoding now have convenient reference limits. Use
+`compile(request)` and `pack_archive::encode(pack)` for the built-in profiles;
+use `compile_with_limits`, `encode_with_limits`, `write_pack_with_limits`, or
+`save_pack_with_limits` to narrow them. Limits remain required at trust
+boundaries, including archive decoding, package expansion, stream/file reads,
+and filesystem or OpenDAL read requests.
+
+Pack Extraction and Compilation Output Artifact writes now share the crate-root
+`*WriteEntry`, `*WriteProgress`, and `*WriteReceipt` types across filesystem and
+OpenDAL adapters. Write errors retain progress where relevant and expose
+`CommitCertainty`; successful receipts do not make an atomicity claim.
+
+The request-origin and inventory wrappers were removed:
+`CompilationRequestInventory`, `TypstInputsInventory`, `PackOverridesInventory`,
+`PackOverrideInventoryEntry`, `EffectiveRequestValue`, `RequestValueOrigin`, and
+`CompilationOutputOrigins`. Configure values directly on
+`PackCompilationRequest`. Fulfillment provenance remains available through
+`PackageTreeFulfillment`, `FontContainerFulfillment`, and the fulfillment report;
+`CompilationAccessTrace` also remains available on a result.
+
+### Migrating to 0.5
+
+Version 0.5 added the optional OpenDAL adapter. Existing builds that do not
+enable `opendal` are unaffected. Applications that enable it must select their
+own backend, transport, runtime, credentials, and retry behavior. See
+[Migrating to 0.5](docs/opendal-integration.md#migrating-to-05) for dependency,
+composition, target, identity, and cache guidance.
+
+### Migrating to 0.4
+
+Version 0.4 made clean breaks without compatibility aliases:
+
+- Remove Resource Slot and Resource Provider APIs; pack placeholders and replace them with Pack Overrides.
+- Rename Dagger arguments: `source` -> `project`, `entrypoint` -> `input`, `inputs` -> `sysInputs`, `noPackages` -> `noVendorPackages`, `sourceDateEpoch` -> `creationTimestamp`, and `CreationTarget` -> `TypstTarget`.
+- Change creation from a directory plus `--entrypoint`/`--output` to `create <INPUT> [OUTPUT]`.
+- Replace `compile_pack(request)` with `compile(request)`; the arbitrary-`World` overload and public `PackWorld` builder are removed.
+- Read accepted compilation results from `CompilationReport::outcome()` or `result()`; `compile_report`, `PackCompileError`, `CompilationAttempt`, and `CompilationExecutionControls` are removed.
+- Replace `CreationTarget` and `CompilationTarget` with `TypstTarget`, and configure time with one `DocumentTime`.
+- Replace `Packer` with `FilesystemPackAssemblerConfig`, `FilesystemPackAssembler`, and `FilesystemPackAssemblyRequest`.
+- Read representative-compile warnings from `PackAssemblyReport::warnings`; `PackReport` is removed.
+- Inspect domain values through `Pack` accessors rather than Pack Manifest records.
+- Handle shared Pack consistency failures through `PackInvariantError::issues()`.
+- Replace `OutputFormat` plus `CompileOptions` request construction with a `CompilationOutputSpecification` variant.
+- Replace `extract` with `plan_pack_extraction` followed by `write_pack_extraction_plan_to_filesystem` and an explicit `FilesystemMergePolicy`.
+
+The unstable Pack format remains version 1, but discovery and Resource Slot
+fields were removed in place. Old fields and aliases are not accepted.
 
 ## Pack format
 
-A pack is a Zip archive, conventionally named `*.typk`, with this semantic
-layout. The encoder uses Deflate and emits the manifest first; readers also
-accept interoperable ZIP encodings and member orderings that preserve the same
-layout:
+A pack is a Zip archive, conventionally named `*.typk`, with this layout:
 
 ```text
-typst-pack.toml                     manifest
-project/<path>                      project files, root-relative
-packages/<ns>/<name>/<version>/<path>   vendored package files
-fonts/<file>                        embedded font files
+typst-pack.toml                         manifest
+project/<path>                          project files, root-relative
+packages/<ns>/<name>/<version>/<path>   embedded package files
+fonts/<file>                            embedded font files
 ```
 
-The manifest looks like this:
+Example manifest:
 
 ```toml
 format-version = 1
@@ -639,15 +381,6 @@ tree-identity-algorithm = "typst-hash128-0.15"
 file-count = 12
 byte-length = 34567
 
-[[packages.unvendored]]
-spec = "@preview/tablex:0.0.9"
-tree-digest = "fedcba9876543210fedcba9876543210"
-tree-identity-kind = "complete-package-tree"
-tree-identity-schema = "typst-pack-complete-package-tree-v1"
-tree-identity-algorithm = "typst-hash128-0.15"
-file-count = 8
-byte-length = 23456
-
 [[fonts]]
 path = "fonts/ibm-plex-sans.ttf"
 families = ["IBM Plex Sans"]
@@ -657,20 +390,12 @@ name = "Quarterly report"
 authors = ["Jane Doe"]
 ```
 
-Readers ignore safe unknown regular-file and directory entries and reject
-manifests whose `format-version` is not the exact supported version. Raw member
-names must be well-formed for their declared ZIP encoding, member paths must be
-safe root-relative virtual paths, and non-directory members must be regular
-files. Unknown entries are not Pack semantics and may disappear after decoding
-and re-encoding. Pack Archive compatibility is semantic; exact ZIP bytes,
-compression details, timestamps, and member ordering are not preserved.
-
-Extraction rejects existing symlinked entries within the selected destination
-before writing.
-
-The format version remains 1 and is explicitly unstable: readers reject old
-discovery, Resource Slot, `external-resources`, and `packages.external` fields
-rather than retaining aliases.
+The encoder writes Deflate-compressed version-1 archives. Readers accept safe
+interoperable ZIP encodings and member orderings, ignore safe unknown entries,
+and reject unknown format versions, unsafe paths, unsupported entry kinds, and
+inconsistent manifests. Decoding and re-encoding preserves Pack semantics, not
+exact ZIP bytes, compression settings, timestamps, unknown entries, or member
+order. Format version 1 is explicitly unstable.
 
 ## Development
 
@@ -679,21 +404,10 @@ Minimum verification:
 - `cargo fmt --all -- --check`
 - `cargo clippy --workspace --all-targets --all-features -- -D warnings`
 - `cargo test --workspace --all-features`
-
-Run CI's containerized checks with [Dagger](https://dagger.io):
-
 - `dagger check`
 
-The containerized suite includes the
-[embedded Typst CLI differential gate](docs/cli-parity.md), pinned to the exact
-official release used by the library. It also verifies the build configurations
-the crate features promise: the featureless core for `wasm32-unknown-unknown`,
-and a filesystem build whose resolved dependency graph contains no HTTP client.
-It also builds OpenDAL-only documentation and audits a fresh consumer of the
-packaged crate without the workspace lockfile. That audit inspects normal/build
-edges separately and proves the minimal OpenDAL/Tokio graph; behavioral tests
-necessarily run under Cargo's dev/test feature-unified superset graph and do not
-claim behavioral feature isolation.
+Maintainers changing the embedded compiler must follow the
+[embedded Typst upgrade procedure](docs/embedded-typst-upgrade.md).
 
 ## License
 

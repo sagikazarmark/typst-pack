@@ -106,9 +106,24 @@ fn replay_incrementally_distinguishes_empty_exact_shorter_divergent_and_longer_s
             vec![0..2, 2..4],
             None,
         ),
-        (b"abcd".as_slice(), b"abc".as_slice(), vec![0..3], Some(3)),
-        (b"abcd".as_slice(), b"abXd".as_slice(), vec![0..4], Some(3)),
-        (b"abcd".as_slice(), b"abcde".as_slice(), vec![0..5], Some(5)),
+        (
+            b"abcd".as_slice(),
+            b"abc".as_slice(),
+            std::iter::once(0..3).collect(),
+            Some(3),
+        ),
+        (
+            b"abcd".as_slice(),
+            b"abXd".as_slice(),
+            std::iter::once(0..4).collect(),
+            Some(3),
+        ),
+        (
+            b"abcd".as_slice(),
+            b"abcde".as_slice(),
+            std::iter::once(0..5).collect(),
+            Some(5),
+        ),
     ] {
         let service = WriteService::new(
             WriteCapabilities::all(),

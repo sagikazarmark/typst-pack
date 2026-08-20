@@ -24,7 +24,7 @@ not the operation faces untrusted input.
 
 Resource ceilings remain required parameters only at trust boundaries: any
 operation whose input bytes originate outside the caller's control, such as
-Pack Archive decoding, package archive expansion, and bounded acquisition
+Pack Archive decoding, package archive expansion, and bounded reading
 from storage. Operations over caller-controlled values, such as compilation
 and encoding, resolve documented default ceilings; an explicit
 `*_with_limits` variant remains for callers that need different bounds.

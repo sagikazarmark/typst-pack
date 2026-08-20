@@ -10,7 +10,7 @@ crate set and classified differential matrix live in
 The process differential gate is `crates/typst-pack-cli/tests/official_typst_cli.rs`. Dagger downloads
 the official Typst 0.15.1 release artifact, verifies its published SHA-256
 digest, and exposes it through `TYPST_PACK_OFFICIAL_TYPST`. The test then checks
-the binary's version against the `EngineIdentity` produced by public Pack
+the binary's version against the engine `ImplementationIdentity` produced by public Pack
 compilation. Missing oracle and packaged binaries are permitted only outside
 that dedicated gate; missing, replaced, or version-mismatched tooling fails it.
 
@@ -72,12 +72,12 @@ test in the same Typst upgrade.
 | Pack compilation derives the HTML feature from HTML output | The tagged output specification fully determines the official Typst target and its required feature | Pack derivation and direct-official rejection cases in `crates/typst-pack/tests/official_typst_oracle.rs` |
 | Watch and deprecated `--make-deps` are absent | Watch needs Pack-aware provenance; deprecated compatibility is not adopted | command and help omission cases in `crates/typst-pack-cli/tests/cli.rs` |
 | Creation structurally packs the selected root and uses one optional representative target | Pack issuance needs a stable entrypoint, complete project snapshot, and selected dependency closure | create stdin, root, ignore-policy, target, and vendoring cases in `crates/typst-pack-cli/tests/cli.rs` |
-| Multi-output paths are collision-preflighted and stdout requires one artifact | Publication must not expose ambiguous or partial output | template collision, stdout, and empty/single/multiple artifact cases in `crates/typst-pack-cli/tests/cli.rs` |
+| Multi-output paths are collision-preflighted and stdout requires one artifact | Writing must not expose ambiguous or partial output | template collision, stdout, and empty/single/multiple artifact cases in `crates/typst-pack-cli/tests/cli.rs` |
 
 ## Adapter boundary
 
 Destination paths, templates, collision checks, stdout constraints, dependency
-files, terminal color and rendering, timings, viewer launch, and publication are
+files, terminal color and rendering, timings, viewer launch, and writing are
 performed only after compilation has produced immutable artifact bytes and
 diagnostics. These values do not enter `CompilationIdentity` or alter a
 `CompilationResult`. The process differential gate checks the shared observable

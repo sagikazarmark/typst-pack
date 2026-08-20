@@ -1067,13 +1067,16 @@ fn conform_failure_object_storage(fixture: &Fixture) -> Failure {
 }
 
 /// Everything about a Pack the corpus asserts on, as one comparable value.
+type ProjectFiles = Vec<(String, Vec<u8>)>;
+type EmbeddedPackages = Vec<(String, ProjectFiles)>;
+
 #[derive(Debug, PartialEq)]
 struct Projection {
     identity: CanonicalIdentity,
     entrypoint: String,
     metadata: Option<PackMetadata>,
-    project: Vec<(String, Vec<u8>)>,
-    embedded_packages: Vec<(String, Vec<(String, Vec<u8>)>)>,
+    project: ProjectFiles,
+    embedded_packages: EmbeddedPackages,
     packages: Vec<(String, CanonicalIdentity, u64, u64, bool)>,
     embedded_fonts: Vec<(CanonicalIdentity, u32, Vec<u8>)>,
     font_catalog: Vec<(CanonicalIdentity, u32, bool)>,

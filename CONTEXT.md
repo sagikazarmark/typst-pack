@@ -27,7 +27,7 @@ _Avoid_: Creation Discovery, Precompilation
 Pack Assembly obtains a Project Snapshot, fonts, and requested Package Trees,
 then repeats Pack Creation until it produces a Pack or fails. A Pack Assembler
 performs that workflow for configured sources and policies.
-_Avoid_: acquisition, gathering, gatherer, Creation Preparation, Creation Adapter
+_Avoid_: acquire, acquisition, gather, gathering, gatherer, Creation Preparation, Creation Adapter
 
 **Project Snapshot**:
 One source-selected set of canonical root-relative project paths and exact bytes,

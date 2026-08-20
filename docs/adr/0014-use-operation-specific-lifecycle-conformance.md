@@ -7,7 +7,7 @@ Accepted, amended by ADR-0016
 ## Context
 
 The Pack lifecycle spans semantic construction, a versioned archive format,
-embedded compilation, source-specific gathering, and destination adapters with
+embedded compilation, source-specific reading, and destination adapters with
 different policies and guarantees. These modules need reusable conformance
 evidence, including for future OpenDAL adapters, without introducing generic
 storage or lifecycle interfaces solely to make tests shareable.

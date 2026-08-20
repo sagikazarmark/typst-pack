@@ -7,7 +7,7 @@ Accepted, amended by ADR-0017
 ## Context
 
 Lifecycle values contain large immutable byte payloads, while archive parsing,
-package expansion, source acquisition, and artifact export can amplify external
+package expansion, source reading, and artifact export can amplify external
 input. Adding an independent budget to every value and collection would spread
 policy across semantic interfaces without preventing allocation that already
 happened. Removing all limits would leave compressed and generated workloads able
@@ -18,8 +18,8 @@ to exhaust the host.
 Resource ceilings are operational policy, not semantic validity. They do not
 contribute to canonical identities, and the same logical input may succeed under
 a larger profile. Low-level operations require finite typed limits only where
-they acquire external input or amplify work: source-specific traversal and
-reads, Pack Archive acquisition, decoding and encoding, Package Archive
+they read external input or amplify work: source-specific traversal and
+reads, Pack Archive reading, decoding and encoding, Package Archive
 Expansion, and compilation artifact export. Already-materialized Project
 Snapshot, Package Tree, catalog, fulfillment, override, and semantic plan
 construction receives no additional resource profile.
@@ -45,7 +45,7 @@ result limit, not a process-memory guarantee.
 ## Consequences
 
 - Project Snapshot assembly no longer owns a separate budget; each source
-  gatherer bounds traversal and reads before assembly.
+  reader bounds traversal and reads before assembly.
 - Peak-memory contracts describe payload allocations and bounded working memory,
   not allocator overhead, compiler internals, process RSS, elapsed time, or
   aggregate concurrency across independent invocations.

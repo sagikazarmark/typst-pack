@@ -10,8 +10,8 @@ The target decisions are:
 
 - Ordinary in-process native library use supports Trusted and Partially Trusted operations. It must refuse Hostile operations.
 - A native CLI supports Hostile operations only when a trusted launcher establishes a verified operating-system sandbox or virtual machine before any complex input interpretation. The ordinary CLI must refuse Hostile operations.
-- An ordinary OCI or Dagger container supports Trusted and Partially Trusted operations. It must refuse Hostile operations unless the deployment separately verifies a complete hardened shared-kernel sandbox or a VM/microVM runtime, all required quotas, deny-by-default capabilities, and parent-side verification and publication.
-- An ordinary in-process or ordinary-container multi-tenant service must refuse Hostile operations. A service supports Hostile operations only through per-attempt confined workers and a trusted parent that verifies the terminal protocol before publication.
+- An ordinary OCI or Dagger container supports Trusted and Partially Trusted operations. It must refuse Hostile operations unless the deployment separately verifies a complete hardened shared-kernel sandbox or a VM/microVM runtime, all required quotas, deny-by-default capabilities, and parent-side verification and output writing.
+- An ordinary in-process or ordinary-container multi-tenant service must refuse Hostile operations. A service supports Hostile operations only through per-attempt confined workers and a trusted parent that verifies the terminal protocol before writing output.
 - A browser main thread and a standard browser Dedicated Worker, including one running a fixed WebAssembly guest, must refuse Hostile operations. A Dedicated Worker plus fixed WebAssembly is useful Partially Trusted isolation, but Web standards expose neither a hard whole-worker CPU and memory contract nor a verifiable renderer containment boundary.
 - A server-side WebAssembly/WASI runtime can support Hostile operations only conditionally: imports must be deny-by-default, guest work must be metered and interruptible, and an outer process or VM must enforce total memory, blocking host calls, deadline, forced termination, and reaping.
 
@@ -45,7 +45,7 @@ The matrix uses three outcomes:
 | Native CLI in its ordinary process | Supported | Supported | Refuse | Require an isolated launcher/worker mode |
 | Native CLI with a verified OS sandbox or VM established before parsing | Supported | Supported | Conditional | Admit only the platform policies described below |
 | Ordinary OCI container | Supported | Supported | Refuse | A container name, namespace set, or default profile is insufficient |
-| OCI/Dagger execution under a verified hardened runtime or microVM | Supported | Supported | Conditional | Verify runtime class, policy, quotas, capabilities, network, mounts, handles, kill, reap, protocol, and publication |
+| OCI/Dagger execution under a verified hardened runtime or microVM | Supported | Supported | Conditional | Verify runtime class, policy, quotas, capabilities, network, mounts, handles, kill, reap, protocol, and output writing |
 | Service compiling in the request process | Supported | Supported | Refuse | Route Hostile work to an isolated worker or reject it |
 | Service with per-attempt confined workers and trusted supervision | Supported | Supported | Conditional | The worker boundary must begin before complex parsing |
 | Browser main thread | Supported | Supported only within the page's availability tolerance | Refuse | Never run Hostile work on the main thread |
@@ -57,7 +57,7 @@ The matrix uses three outcomes:
 
 ## Hostile Operation Shape
 
-The trusted outer layer must be intentionally small. It may authenticate the caller, choose policy, perform bounded admission, count and hash raw bytes, spool them into stable enforcement-owned storage, construct the sandbox, supervise it, verify a bounded terminal response, and publish verified artifacts. Hashing hostile bytes does not make them trusted.
+The trusted outer layer must be intentionally small. It may authenticate the caller, choose policy, perform bounded admission, count and hash raw bytes, spool them into stable enforcement-owned storage, construct the sandbox, supervise it, verify a bounded terminal response, and write verified artifacts. Hashing hostile bytes does not make them trusted.
 
 ```text
 caller or authority
@@ -82,7 +82,7 @@ immutable bytes or narrowly scoped read-only handles
 bounded framing and semantic-envelope verification         trusted parent
         |
         v
-private staging and atomic publication where supported     trusted parent
+private staging and atomic destination commit where supported     trusted parent
 ```
 
 ### Stage Placement
@@ -90,7 +90,7 @@ private staging and atomic publication where supported     trusted parent
 | Stage | Hostile placement | Reason |
 | --- | --- | --- |
 | Profile selection and capability appraisal | Trusted parent, before input interpretation | A worker cannot choose or weaken its own containment contract |
-| Authentication, authorization, credentials, and network acquisition | Trusted parent or separately confined acquisition service | Credentials and broad network authority must not enter the hostile worker |
+| Authentication, authorization, credentials, and network reading | Trusted parent or separately confined read service | Credentials and broad network authority must not enter the hostile worker |
 | Raw transport byte count, bounded spool, and cryptographic hash | Trusted parent, using simple bounded code | These establish stable bytes without claiming semantic validity |
 | Pack Archive framing, range planning, decompression, and entry interpretation | Inside hostile boundary | Archive parsers and decompressors are deliberate attack targets |
 | Pack Control Record decoding, schema validation, and whole-Pack construction | Inside hostile boundary | Canonical CBOR and semantic validators are complex hostile-byte interpreters |
@@ -100,7 +100,7 @@ private staging and atomic publication where supported     trusted parent
 | Typst source/data interpretation, compilation, and all exporters | Inside hostile boundary | Hostile explicitly includes attacks on the compiler and exporters |
 | Temporary expansion, compiler scratch space, and output staging | Inside quota-backed worker storage | The worker must not receive a host destination or unbounded temporary directory |
 | Worker protocol parsing and verification | Trusted parent, with a small bounded parser | Worker compromise makes every returned byte hostile |
-| Destination selection, filesystem projection, and Compilation Delivery | Trusted parent after verification | Hostile data must not choose host paths or publish partial output |
+| Destination selection, filesystem projection, and Compilation Delivery | Trusted parent after verification | Hostile data must not choose host paths or expose partial output |
 | Terminal, log, HTML, or JSON rendering | Final trusted presentation boundary | Diagnostics and worker messages remain untrusted strings |
 
 The parent may repeat a hash or simple length check, but Hostile correctness cannot depend on semantic validation performed before confinement. The exact bytes validated inside the boundary must be the bytes later executed. A mutable path that is checked and reopened is not sufficient.
@@ -129,13 +129,13 @@ The containment trusted-computing base consists of:
 - the OS kernel, hypervisor, or language runtime that enforces the admitted boundary;
 - the exact sandbox policy and deployment control plane that selects it;
 - the bounded parent-side worker protocol verifier; and
-- the private staging and publication adapter.
+- the private staging and write adapter.
 
 Pack readers, decompressors, package and font validators, Typst, exporters, and worker protocol producer are not trusted for containment. They are placed inside the boundary because Hostile assumes one of them may be compromised.
 
 ### Semantic-Correctness TCB
 
-The same parsers, validators, compiler, and exporters remain trusted for semantic honesty. If hostile input fully compromises the worker, parent-side framing, length, identity, role, and terminal-completeness checks can prevent unauthorized host effects and malformed publication, but they cannot prove that a forged Compilation Result is semantically correct. Hostile is a containment claim, not proof-carrying computation.
+The same parsers, validators, compiler, and exporters remain trusted for semantic honesty. If hostile input fully compromises the worker, parent-side framing, length, identity, role, and terminal-completeness checks can prevent unauthorized host effects and malformed output, but they cannot prove that a forged Compilation Result is semantically correct. Hostile is a containment claim, not proof-carrying computation.
 
 Output consumers are also outside the claim. A valid artifact can still attack a later PDF, SVG, image, HTML, terminal, or archive consumer.
 
@@ -165,7 +165,7 @@ A Windows native CLI or service worker may conditionally admit Hostile operation
 - Use a restricted token as defense in depth to remove privileges, mark SIDs deny-only, and add restricting SIDs. A restricted token alone is not a complete sandbox, and Microsoft warns that a restricted application on the default desktop can attack unrestricted applications through window messages ([restricted tokens](https://learn.microsoft.com/en-us/windows/win32/secauthz/restricted-tokens)).
 - Create the process suspended, place it in a Job Object before it executes worker code, prohibit breakaway, and configure process-tree, CPU-time, active-process, and memory limits. Job Objects manage associated processes as a unit, normally include child processes, can enforce limits, and support kill-on-close ([Job Objects](https://learn.microsoft.com/en-us/windows/win32/procthread/job-objects)). Job-wide committed-memory limits are distinct from per-process limits ([extended job limits](https://learn.microsoft.com/en-us/windows/win32/api/winnt/ns-winnt-jobobject_extended_limit_information)).
 - Pass only the protocol and immutable input handles through an explicit inherited-handle list. Do not inherit the environment, current directory, console, standard handles, or ambient file mappings without an explicit need.
-- Deny network capabilities and broker access, use private quota-backed temporary storage, and retain destination and publication handles only in the parent.
+- Deny network capabilities and broker access, use private quota-backed temporary storage, and retain destination and write handles only in the parent.
 - On interruption, call `TerminateJobObject`, wait for all job processes, and discard staging. Associated processes cannot postpone or handle job termination ([`TerminateJobObject`](https://learn.microsoft.com/en-us/windows/win32/api/jobapi2/nf-jobapi2-terminatejobobject)).
 
 The admitted scope must identify the AppContainer capabilities, token restrictions, Job Object limits, inherited handles, and temporary-storage quota. If those settings cannot be queried and verified, or if the Windows kernel is not an accepted containment TCB, the target must refuse Hostile and use an externally enforced VM boundary.
@@ -190,18 +190,18 @@ Consequently, `docker run`, an OCI image, or an ordinary Kubernetes Pod is not e
 
 Dagger documents that Functions do not receive host filesystems, services, sockets, secrets, or other host resources unless the top-level call grants typed arguments ([Dagger sandboxed runtime](https://docs.dagger.io/features/sandbox/)). This is a valuable least-authority adapter rule, but it is not a complete claim about hostile parser containment, shared-kernel escape, hard quotas, or worker protocol verification.
 
-The Dagger `Container` is OCI-compatible and can copy or mount directories and files, mount caches, attach registry authentication, bind services, open an interactive terminal, export to the host, or publish to a registry ([Dagger Container](https://docs.dagger.io/getting-started/types/container/)). Dagger services explicitly enable container-to-container, container-to-host, and host-to-container networking when bound ([Dagger services](https://docs.dagger.io/features/services/)). Each such grant changes the available authority.
+The Dagger `Container` is OCI-compatible and can copy or mount directories and files, mount caches, attach registry authentication, bind services, open an interactive terminal, export to the host, or push to a registry ([Dagger Container](https://docs.dagger.io/getting-started/types/container/)). Dagger services explicitly enable container-to-container, container-to-host, and host-to-container networking when bound ([Dagger services](https://docs.dagger.io/features/services/)). Each such grant changes the available authority.
 
 The ordinary Dagger function must therefore refuse Hostile. A Dagger deployment may conditionally admit it only if the operator verifies all of these facts outside the function:
 
 - the actual execution runtime is a separately accepted hardened sandbox such as gVisor, or a VM/microVM boundary such as Firecracker, rather than an assumed ordinary OCI runtime;
-- the worker has no Secret, Socket, Service, cache, registry credential, host directory, host file, interactive terminal, privileged device, host namespace, or publication capability;
+- the worker has no Secret, Socket, Service, cache, registry credential, host directory, host file, interactive terminal, privileged device, host namespace, or output-write capability;
 - input is a stable immutable Dagger value or is copied into one before worker parsing, and is exposed read-only;
 - memory, CPU bandwidth and deadline, process count, I/O, temporary storage, and output bytes have actual enforced limits;
 - network is structurally denied, not merely unused;
 - all capabilities are dropped, privilege escalation is disabled, and a narrow seccomp/LSM policy is active where relevant;
 - forced termination kills and reaps the complete runtime scope; and
-- the Dagger caller receives only a bounded response for parent-side verification and performs host export or publication afterward.
+- the Dagger caller receives only a bounded response for parent-side verification and writes or exports host output afterward.
 
 If the Dagger API or engine cannot inspect and prove these properties for the active deployment, `Hostile` is unavailable. The function must not infer it from Dagger's general "sandboxed" wording.
 
@@ -209,13 +209,13 @@ If the Dagger API or engine cannot inspect and prove these properties for the ac
 
 An in-process service has the same refusal as the native library. An ordinary container-per-request service has the same refusal as the ordinary container. A multi-tenant service may conditionally support Hostile only through this architecture:
 
-- The trusted request tier authenticates and authorizes, selects Hostile before content parsing, enforces request-body and queue admission limits, and acquires external bytes without giving credentials to the worker.
-- Every attempt receives a fresh or provably reset isolation scope. Different tenants and concurrently hostile attempts never share a writable filesystem, runtime Store, process, temporary directory, output buffer, or publication capability.
+- The trusted request tier authenticates and authorizes, selects Hostile before content parsing, enforces request-body and queue admission limits, and reads external bytes without giving credentials to the worker.
+- Every attempt receives a fresh or provably reset isolation scope. Different tenants and concurrently hostile attempts never share a writable filesystem, runtime Store, process, temporary directory, output buffer, or output-write capability.
 - The platform scheduler establishes quotas and deny-by-default network, filesystem, process, handle, IPC, and device policy before worker execution. The worker cannot select its runtime class or weaken its policy.
 - The complete parsing-through-export pipeline runs inside that scope. The existing Compilation Kernel can remain the inner semantic path.
 - A trusted supervisor owns the deadline, cancellation race, forced termination, complete-tree reaping, and staging cleanup. No hidden work survives the attempt's return.
 - The trusted parent accepts one bounded, versioned terminal response; independently verifies framing, implementation identities, Compilation Identity, result status, diagnostic and artifact counts, artifact roles, lengths, content identities, and terminal completeness; and rejects trailing, duplicate, or inconsistent material.
-- Only the parent maps verified artifact roles to an authorized destination and performs atomic publication where the sink permits.
+- Only the parent maps verified artifact roles to an authorized destination and performs an atomic destination commit where the sink permits.
 
 The service control plane, worker image selection, sandbox policy distribution, node/runtime selection, queue, and parent verifier are part of the containment TCB. An untrusted plugin or authority must have its own boundary; a Rust trait, service account, or container sidecar does not make executable deployment code trusted.
 
@@ -259,13 +259,13 @@ A conforming typst-pack deployment needs all of the following:
 - Meter running guest code with fuel for deterministic work limits or epoch interruption for lower-overhead deadline checks. Both can trap non-cooperative Wasm execution ([Wasmtime interruption](https://docs.wasmtime.dev/examples-interrupting-wasm.html)).
 - Make every host import bounded, non-blocking or independently cancellable, and charge guest-triggered host work. Wasmtime documents that fuel and epochs do not interrupt a guest blocked in a host call ([epoch interruption](https://docs.rs/wasmtime/latest/wasmtime/struct.Config.html#method.epoch_interruption)).
 - Place the entire runtime in an outer OS-confined process, cgroup/Job Object, hardened container runtime, or VM. The outer boundary limits total native memory, JIT/compiler work, file descriptors, threads, temporary storage, and host calls, and provides forced kill and reap if the runtime or a host function fails.
-- Return a bounded ABI response to a separate trusted parent for verification and publication.
+- Return a bounded ABI response to a separate trusted parent for verification and output writing.
 
 Without the outer boundary, server-side Wasm supports Partially Trusted work but must refuse Hostile because runtime compromise, untracked native memory, blocking host code, and process lifecycle remain in the service's trust boundary.
 
-## Protocol Verification and Publication
+## Protocol Verification and Output Writing
 
-The hostile worker receives no destination path, host output directory, object-store credential, publication token, terminal, or direct response stream. Its only output is a bounded protocol channel or staging object owned by the supervisor.
+The hostile worker receives no destination path, host output directory, object-store credential, write token, terminal, or direct response stream. Its only output is a bounded protocol channel or staging object owned by the supervisor.
 
 Before exposing any result, the parent must verify:
 
@@ -281,7 +281,7 @@ Before exposing any result, the parent must verify:
 
 Verification failure, worker crash, panic, abnormal exit, quota event, deadline, incomplete response, or confinement setup failure is a typed operational outcome. It never produces a partial Compilation Result and never retries in-process.
 
-Publication uses private parent-owned staging and an authorized destination selected independently of worker bytes. On Linux, ordinary `rename` atomically replaces an existing destination, while `renameat2(RENAME_NOREPLACE)` fails if the destination exists when the filesystem supports it ([`rename(2)`](https://man7.org/linux/man-pages/man2/rename.2.html)). Adapters must report only the atomicity their sink actually supplies and retain the absent-destination, complete-plan, and no-partial-publication rules from [issue 35](https://github.com/sagikazarmark/typst-pack/issues/35).
+Output writing uses private parent-owned staging and an authorized destination selected independently of worker bytes. On Linux, ordinary `rename` atomically replaces an existing destination, while `renameat2(RENAME_NOREPLACE)` fails if the destination exists when the filesystem supports it ([`rename(2)`](https://man7.org/linux/man-pages/man2/rename.2.html)). Adapters must report only the atomicity their sink actually supplies and retain the absent-destination, complete-plan, and no-partial-output rules from [issue 35](https://github.com/sagikazarmark/typst-pack/issues/35).
 
 ## Admission and Operational Inventory
 
@@ -294,7 +294,7 @@ Every operation records, without secrets:
 - immutable input handoff mechanism;
 - interruption strength, complete-tree kill mechanism, and reaping result;
 - worker protocol and parent-verification version;
-- publication mechanism and claimed atomicity; and
+- write mechanism and claimed atomicity; and
 - any unsupported or unverifiable property that caused refusal.
 
 This is operational evidence, not remote attestation. A worker's self-report cannot prove its own sandbox. The trusted launcher or deployment control plane must inspect the active enforcement state.
@@ -305,7 +305,7 @@ Hostile support should remain disabled until the target has automated deployment
 
 - Linux tests inspect actual cgroup membership and controller values, namespace and mount topology, capabilities, `no_new_privs`, seccomp and LSM activation, open descriptors, network denial, temporary quota, complete-tree kill, and empty/reaped state after termination.
 - Windows tests inspect the AppContainer SID and capabilities, restricted token, Job Object membership and limits, breakaway policy, inherited handles, network denial, temporary quota, and complete-job termination.
-- Container and Dagger tests inspect the actual runtime class and OCI policy rather than an image label, and prove no host mounts, sockets, credentials, service bindings, network path, privilege, or host publication capability are present.
+- Container and Dagger tests inspect the actual runtime class and OCI policy rather than an image label, and prove no host mounts, sockets, credentials, service bindings, network path, privilege, or host write capability are present.
 - Service tests inject crashes, hangs, fork attempts, memory and temporary-storage exhaustion, malformed protocols, trailing messages, false hashes, duplicate artifacts, cancellation races, and worker-selected paths.
 - Server-Wasm tests exhaust fuel and epochs, attempt every denied import and WASI capability, exercise host-call deadlines, exceed guest and outer memory independently, and kill a wedged runtime process.
 - Browser tests may verify the Partially Trusted Worker/Wasm behavior, but the browser adapter always reports Hostile unavailable.
@@ -320,29 +320,29 @@ The implementation and adapters must make these refusal rules explicit:
 - The ordinary CLI refuses Hostile if it cannot launch the broad pre-parse boundary or if any required mechanism is unavailable.
 - A CLI or service never falls back from a failed sandbox launch to the in-process Compilation Kernel.
 - Ordinary Dagger and OCI execution refuses Hostile even when described as sandboxed.
-- A container runtime refuses Hostile when limits are absent, soft-only, or not introspectable; when network denial is contractual only; or when host mounts, sockets, credentials, privileges, devices, or publication handles are present.
+- A container runtime refuses Hostile when limits are absent, soft-only, or not introspectable; when network denial is contractual only; or when host mounts, sockets, credentials, privileges, devices, or write handles are present.
 - An App Sandbox-only macOS deployment refuses Hostile.
 - Browser main-thread, Dedicated Worker, and browser-Wasm execution refuse Hostile.
 - Server-Wasm execution refuses Hostile without outer total-resource and process-lifecycle enforcement.
-- Any target refuses Hostile when immutable handoff, complete kill/reap, bounded protocol verification, or parent-owned publication is unavailable.
+- Any target refuses Hostile when immutable handoff, complete kill/reap, bounded protocol verification, or parent-owned output writing is unavailable.
 - Unknown input classification is handled as Hostile or rejected. Successful parsing, a digest match, a valid Pack, or publisher authentication never permits promotion to a weaker profile.
 
 ## Architecture Recommendations
 
 1. Introduce one target-neutral hostile-operation facility whose contract begins with immutable raw inputs and ends with a bounded untrusted terminal response. Do not overload the current Isolated Compilation Worker contract, which legitimately begins later and serves a different purpose.
-2. Keep the synchronous Compilation Kernel and semantic model unchanged inside that facility. Drivers may still acquire bytes asynchronously outside, but all complex validation required for Hostile admission runs again from the same immutable bytes inside confinement.
+2. Keep the synchronous Compilation Kernel and semantic model unchanged inside that facility. Drivers may still read bytes asynchronously outside, but all complex validation required for Hostile admission runs again from the same immutable bytes inside confinement.
 3. Define versioned platform policy bundles for Linux, Windows, hardened OCI/Dagger, service workers, and server-side Wasm. A policy bundle states exact required mechanisms and has a fail-closed admission probe.
 4. Make available profiles a runtime capability query, not a compile-time target claim. `Hostile` is absent until the active deployment verifies its policy.
 5. Keep the parent protocol verifier small, bounded, format-specific, and independent of worker implementation. It must be fuzzed as part of the containment TCB.
 6. Treat browser Worker/Wasm as the strongest browser Partially Trusted implementation and expose its exact interruption and resource caveats. Do not create a browser-specific weakened meaning of Hostile.
-7. Keep acquisition, credentials, mutable caches, and publication outside every hostile worker. Offline policy remains orthogonal: parent network acquisition means the whole attempt is not offline even when worker network is denied.
+7. Keep reading, credentials, mutable caches, and writing outside every hostile worker. Offline policy remains orthogonal: parent network reads mean the whole attempt is not offline even when worker network is denied.
 
 ## Residual Caveats
 
 - Every conditional Hostile claim names and trusts an OS kernel, hypervisor, application kernel, or Wasm runtime. It is not an absolute claim against defects in that enforcement TCB.
 - Hardware and microarchitectural side channels require separate deployment policy. gVisor, for example, explicitly leaves hardware side-channel defense to the host ([gVisor security model](https://gvisor.dev/docs/architecture_guide/security/)).
 - CPU and deadline enforcement has platform-specific granularity and bounded overshoot. Reports must state that granularity rather than claim instantaneous termination.
-- Parent verification limits output and publication effects but cannot establish semantic honesty after complete worker compromise.
+- Parent verification limits output and write effects but cannot establish semantic honesty after complete worker compromise.
 - Publisher signatures and expected Pack Identity protect authenticity or replacement policy, not parser safety or confinement.
 - A Hostile result does not make PDF, HTML, SVG, PNG, diagnostics, or archives safe for downstream consumers.
 - Confinement does not provide confidentiality between files intentionally granted to the same compilation. Typst code authorized to read content may influence artifacts and diagnostics.
@@ -356,7 +356,7 @@ Those tickets should add implementation tasks for the broader pre-parse hostile-
 
 ## Primary Sources
 
-### Linux and Publication
+### Linux and Writes
 
 - [Linux control group v2](https://docs.kernel.org/admin-guide/cgroup-v2.html)
 - [Linux seccomp BPF](https://docs.kernel.org/userspace-api/seccomp_filter.html)

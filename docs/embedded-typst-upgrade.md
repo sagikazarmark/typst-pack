@@ -34,7 +34,8 @@ issue:
    `typst` and `typst-*` crate.
 2. Update every `[[crate]]` entry in
    `crates/typst-pack/embedded-typst.toml`, including transitive crates,
-   checksums, the Engine baseline, and all Exporter Identity sources.
+   checksums, the engine baseline, and all exporter `ImplementationIdentity`
+   sources.
    Do not add an exception implicitly; explain intentional patch-version splits
    such as `typst-timing` in the upgrade change.
 3. Update `[official-cli]` in `crates/typst-pack/embedded-typst.toml`, the one
@@ -85,7 +86,7 @@ tests exercise the download, digest, extraction, and version checks while
 verifying representative adapter delegation, and deliberately leave native
 semantic coverage to the Rust differential matrix. The release workflow
 extracts the cargo-dist Linux archive and reruns the same mandatory process gate
-against that exact binary before `host` can publish any artifact. A missing or
+against that exact binary before `host` can release any artifact. A missing or
 replaced reference binary, digest or version mismatch, artifact difference,
 diagnostic difference, unclassified semantic, or incomplete matrix fails the
 release.

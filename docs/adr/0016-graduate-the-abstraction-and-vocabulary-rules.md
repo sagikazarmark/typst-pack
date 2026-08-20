@@ -36,7 +36,7 @@ The abstraction ban is graduated, not absolute:
   and resource vocabularies, receipt/progress/entry shapes, error cores, and
   other types with no implementors and no polymorphic production call sites.
 - **Shared behavioral traits remain forbidden** in production code: no
-  universal storage, source, sink, gatherer, authority, scheduler, or
+  universal storage, source, sink, reader, authority, scheduler, or
   conformance trait.
 - **Test code is exempt from the ban entirely.** Test-only scaffolding cannot
   leak into the public API, so cross-adapter test helpers may be shared.
@@ -50,7 +50,7 @@ deterministic refusal before semantic acceptance), and **Issue** (one
 independently detectable fact, aggregated in canonical order). Receipt,
 Outcome, and Report are no longer mandated categories; a successful operation
 returns a plain value. Progress reporting survives only where a genuine
-partial-effect story exists (multi-key publication), as one shared type.
+partial-effect story exists (multi-key writing), as one shared type.
 Commit certainty is a field on the relevant error, not a concept family.
 
 Adapter error types are not generic over caller-supplied resolver or

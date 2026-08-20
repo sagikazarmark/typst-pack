@@ -30,7 +30,7 @@ capability.
 | Hand-written Debug/Display/Error impls (OpenDAL) | 85 (~1,800 lines; caused by generic `E` on error types) |
 | `*Limits` families | 13 structs / ~39 types; 25 `reference_v1()` profiles; zero custom-limit call sites in the repo |
 | OpenDAL module | ~10,400 production lines for ~450 lines of actual I/O (~77% ceremony/duplication/dead) |
-| Dead code | `src/opendal/compilation/` subtree: 2,687 production lines (4,563 with tests); its documented entry point `acquire_compilation_bundle` does not exist |
+| Dead code | `src/opendal/compilation/` subtree: 2,687 production lines (4,563 with tests); its documented compilation-read entry point does not exist |
 | compile.rs | 3,742 lines; ~2 lines of identity/inventory/fulfillment/report machinery per line of compilation |
 | Library tests | 27,238 lines; ~34–43% ceremony pinning (mock self-tests, CI-YAML/Cargo.toml text asserts, pointer-equality tests) |
 | Glossary | CONTEXT.md defines ~60 capitalized terms in 490 lines |
@@ -43,10 +43,10 @@ Other load-bearing findings:
   types.
 - `Pack::identity()` rehashes every project file and is triggered five times
   per `compile()` call.
-- Success-path "evidence" accessors (`FilePublicationReceipt::commit_certainty`
+- Success-path commit-certainty accessors on former filesystem write receipts
   et al.) return compile-time constants.
 - Two identically named `workflow_evidence!` macros generate two incompatible
-  `PackExtractionPublicationReceipt` types, distinguished only by module path.
+  Pack Extraction write-receipt types, distinguished only by module path.
 - The live OpenDAL read path is sequential; the GAT-based scheduling protocol
   that would provide bounded fan-out has no production caller.
 - The wasm guarantee is a featureless `cargo build` only; the `opendal`
@@ -71,10 +71,10 @@ Target: CONTEXT.md from ~60 terms to ~25.
 
 - Delete the "Lifecycle" meta-vocabulary as glossary entries (coding
   convention, not domain).
-- Demote Publication Receipt / Progress / Commit Certainty to a field on the
+- Demote write receipt / progress / commit certainty to a field on the
   error type.
-- Unify verbs across adapters (one acquire/publish or read–write pair; no
-  `gather_*` vs `acquire_*` split needing an equivalence table).
+- Unify verbs across adapters as one read/write pair, with no adapter-specific
+  synonym table.
 - Merge Engine Identity and Exporter Identity into one implementation
   identity with a role; one shared canonical-identity newtype instead of ~32
   constant accessors across 8 types.
@@ -111,8 +111,16 @@ Result: backlog 13 → ~5 issues, critical path 7 → 3 deep.
 | 5 | Core slimming: delete provenance layer; merge Engine/Exporter identity; fold inventory types into digest computation; cache `PackIdentity`; split compile.rs; shared `paths.rs` | −700+ lines, −10+ exported types | 0.6 |
 | 6 | Test diet: drop mock self-tests, CI-text asserts, pointer tests; keep conformance corpus, differential oracle, fuzzing | −2,400 lines | ongoing |
 | 7 | ADR revision: make ADR-0012/0013/0014/0015 graduated ("shared data shapes allowed, shared behavioral traits not"); add code review to the spec-first process | curbs future growth | before steps 3–4 |
-| 8 | Library helpers from CLI pain points: override-path preflight, font-requirement resolution, publication path matching | −200 lines CLI ceremony | as needed |
+| 8 | Library helpers from CLI pain points: override-path preflight, font-requirement resolution, write-path matching | −200 lines CLI ceremony | as needed |
 | 9 | Glossary diet per the terminology direction; rewrite README "Features" in user language | readability | with 0.6 |
 
 Steps 3 and 4 are blocked by step 7: as written, ADR-0014/0015 forbid the
 shared shapes those steps introduce.
+
+## Terminology outcome
+
+Issue #240 selected **read/write** for every storage adapter. Filesystem and
+OpenDAL functions, modules, errors, limits, progress, and receipts now use that
+pair; the old adapter-specific verb split has no compatibility aliases. Pack
+Archive convenience names that already used `read_pack`, `write_pack`,
+`open_pack`, and `save_pack` remain unchanged.
