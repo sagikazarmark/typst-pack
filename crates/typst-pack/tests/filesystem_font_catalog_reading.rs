@@ -1,4 +1,4 @@
-//! Font Catalog gathering from the reference filesystem sources.
+//! Font Catalog reading from the reference filesystem sources.
 
 #![cfg(feature = "fs")]
 
@@ -9,9 +9,9 @@ mod font_bytes;
 use std::fs;
 
 use typst_pack::{
-    FilesystemFontEntryKind, FilesystemFontGatherError, FilesystemFontIssue, FilesystemFontLimits,
-    FilesystemFontLimitsError, FilesystemFontOperation, FilesystemFontResource,
-    FilesystemFontSource, FontDisposition, gather_filesystem_font_catalog,
+    FilesystemFontEntryKind, FilesystemFontIssue, FilesystemFontLimits, FilesystemFontLimitsError,
+    FilesystemFontOperation, FilesystemFontReadError, FilesystemFontResource, FilesystemFontSource,
+    FontDisposition, read_filesystem_fonts,
 };
 
 #[cfg(feature = "embedded-fonts")]
@@ -71,7 +71,7 @@ fn configured_sources_and_paths_compose_in_order_with_explicit_dispositions() {
     fs::write(first_root.join("a.ttf"), &first).unwrap();
     fs::write(second_root.join("same.ttf"), &first).unwrap();
 
-    let catalog = gather_filesystem_font_catalog(
+    let catalog = read_filesystem_fonts(
         [
             FilesystemFontSource::directory(&first_root, FontDisposition::External),
             FilesystemFontSource::directory(&second_root, FontDisposition::Embedded),
@@ -105,7 +105,7 @@ fn configured_sources_and_paths_compose_in_order_with_explicit_dispositions() {
 
 #[test]
 fn no_font_source_is_added_implicitly() {
-    let catalog = gather_filesystem_font_catalog(
+    let catalog = read_filesystem_fonts(
         std::iter::empty::<FilesystemFontSource>(),
         FilesystemFontLimits::reference_v1(),
     )
@@ -123,7 +123,7 @@ fn typst_embedded_fonts_join_only_at_the_explicit_source_position() {
     let data = typst_container();
     fs::write(root.join("font.ttf"), &data).unwrap();
 
-    let catalog = gather_filesystem_font_catalog(
+    let catalog = read_filesystem_fonts(
         [
             FilesystemFontSource::directory(&root, FontDisposition::External),
             FilesystemFontSource::typst_embedded(FontDisposition::Embedded),
@@ -153,7 +153,7 @@ fn typst_embedded_fonts_join_only_at_the_explicit_source_position() {
 #[test]
 #[cfg(feature = "embedded-fonts")]
 fn already_materialized_embedded_containers_do_not_consume_filesystem_limits() {
-    let catalog = gather_filesystem_font_catalog(
+    let catalog = read_filesystem_fonts(
         [FilesystemFontSource::typst_embedded(
             FontDisposition::External,
         )],
@@ -169,7 +169,7 @@ fn unavailable_explicit_roots_retain_the_native_inspection_failure() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("missing");
 
-    let error = gather_filesystem_font_catalog(
+    let error = read_filesystem_fonts(
         [FilesystemFontSource::directory(
             &missing,
             FontDisposition::External,
@@ -180,7 +180,7 @@ fn unavailable_explicit_roots_retain_the_native_inspection_failure() {
 
     assert!(matches!(
         error,
-        FilesystemFontGatherError::Io {
+        FilesystemFontReadError::Io {
             operation: FilesystemFontOperation::InspectRoot,
             path,
             source,
@@ -196,7 +196,7 @@ fn assert_limit(
     ceiling: u64,
     observed: u64,
 ) {
-    let error = gather_filesystem_font_catalog(
+    let error = read_filesystem_fonts(
         [FilesystemFontSource::directory(
             root,
             FontDisposition::External,
@@ -207,7 +207,7 @@ fn assert_limit(
     assert!(
         matches!(
             error,
-            FilesystemFontGatherError::Limit {
+            FilesystemFontReadError::Limit {
                 source: FilesystemFontLimitError::Exceeded {
                     resource: reported,
                     ceiling: reported_ceiling,
@@ -245,7 +245,7 @@ fn generated_boundaries_cover_every_font_source_resource() {
         for ceiling in [observed + 1, observed] {
             let mut values = exact;
             values[index] = ceiling;
-            gather_filesystem_font_catalog(
+            read_filesystem_fonts(
                 [FilesystemFontSource::directory(
                     root,
                     FontDisposition::External,
@@ -268,7 +268,7 @@ fn malformed_eligible_font_bytes_retain_the_container_validation_cause() {
     fs::write(&first, b"not a font").unwrap();
     fs::write(&second, b"also not a font").unwrap();
 
-    let error = gather_filesystem_font_catalog(
+    let error = read_filesystem_fonts(
         [FilesystemFontSource::directory(
             dir.path(),
             FontDisposition::External,
@@ -279,7 +279,7 @@ fn malformed_eligible_font_bytes_retain_the_container_validation_cause() {
 
     assert!(matches!(
         error,
-        FilesystemFontGatherError::InvalidContainers(ref validation)
+        FilesystemFontReadError::InvalidContainers(ref validation)
             if validation
                 .issues()
                 .iter()
@@ -317,7 +317,7 @@ fn only_supported_font_container_suffixes_are_selected_case_insensitively() {
         .collect::<Vec<_>>();
     selected.sort();
 
-    let error = gather_filesystem_font_catalog(
+    let error = read_filesystem_fonts(
         [FilesystemFontSource::directory(
             dir.path(),
             FontDisposition::External,
@@ -328,7 +328,7 @@ fn only_supported_font_container_suffixes_are_selected_case_insensitively() {
 
     // Every selected container holds bytes no Font Container accepts, so the
     // validation issues name exactly what selection accepted.
-    let FilesystemFontGatherError::InvalidContainers(validation) = error else {
+    let FilesystemFontReadError::InvalidContainers(validation) = error else {
         panic!("expected the selected containers to fail validation");
     };
     assert_eq!(
@@ -352,7 +352,7 @@ fn aliases_remain_typed_survey_failures() {
     fs::write(&target, b"font").unwrap();
     symlink(&target, &alias).unwrap();
 
-    let error = gather_filesystem_font_catalog(
+    let error = read_filesystem_fonts(
         [FilesystemFontSource::directory(
             dir.path(),
             FontDisposition::External,
@@ -363,7 +363,7 @@ fn aliases_remain_typed_survey_failures() {
 
     assert!(matches!(
         error,
-        FilesystemFontGatherError::Survey(ref survey)
+        FilesystemFontReadError::Survey(ref survey)
             if matches!(survey.issues(), [FilesystemFontIssue::Alias { path }] if path == &alias)
     ));
 }
@@ -380,7 +380,7 @@ fn unsupported_eligible_entries_remain_typed_survey_failures() {
     // SAFETY: `path` is a valid NUL-terminated filesystem path.
     assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
 
-    let error = gather_filesystem_font_catalog(
+    let error = read_filesystem_fonts(
         [FilesystemFontSource::directory(
             dir.path(),
             FontDisposition::External,
@@ -391,7 +391,7 @@ fn unsupported_eligible_entries_remain_typed_survey_failures() {
 
     assert!(matches!(
         error,
-        FilesystemFontGatherError::Survey(ref survey)
+        FilesystemFontReadError::Survey(ref survey)
             if matches!(survey.issues(), [FilesystemFontIssue::UnsupportedEntry {
                 path,
                 kind: FilesystemFontEntryKind::Fifo,

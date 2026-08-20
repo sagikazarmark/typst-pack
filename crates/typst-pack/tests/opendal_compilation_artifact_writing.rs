@@ -10,22 +10,21 @@ use std::pin::pin;
 use std::task::{Context, Poll, Waker};
 
 use scripted_opendal::{
-    PendingPoint, PublicationCapabilities, PublicationOperationLogEntry, PublicationReadScript,
-    PublicationReadStep, PublicationService, WriteCondition, WriteScript, WriteStep,
+    PendingPoint, WriteCapabilities, WriteCondition, WriteOperationLogEntry, WriteReadScript,
+    WriteReadStep, WriteScript, WriteService, WriteStep,
 };
-use typst_pack::opendal::publication::{
-    CompilationArtifactKeyIssue, CompilationArtifactPublicationErrorCause,
-    CompilationArtifactPublicationRequest, CompilationArtifactPublicationRequestIssue,
-    OpenDalPublicationPhase, PublicationKeyOutcome, PublicationPolicy,
-    publish_compilation_artifacts,
+use typst_pack::opendal::write::{
+    CompilationArtifactKeyIssue, CompilationArtifactWriteErrorCause,
+    CompilationArtifactWriteRequest, CompilationArtifactWriteRequestIssue, OpenDalWritePhase,
+    WriteKeyOutcome, WritePolicy, write_compilation_artifacts,
 };
 use typst_pack::opendal::{
     Location, LocationRoleError, OperatorBinding, OperatorBindings, OperatorResolver,
 };
 use typst_pack::pack_archive::CommitCertainty;
 use typst_pack::{
-    CompilationArtifactPublicationProgress, CompilationArtifactPublicationReceipt,
-    CompilationLimits, CompilationOutputSpecification, CompilationResult, CompilationStatus, Pack,
+    CompilationArtifactWriteProgress, CompilationArtifactWriteReceipt, CompilationLimits,
+    CompilationOutputSpecification, CompilationResult, CompilationStatus, Pack,
     PackCompilationRequest, SvgOutputSpecification, compile_with_limits,
 };
 
@@ -34,7 +33,7 @@ fn request_aggregates_rejection_issues_in_canonical_order() {
     let result = rejected_result();
     let destination: Location = "artifacts:/output".parse().unwrap();
 
-    let rejection = CompilationArtifactPublicationRequest::new(
+    let rejection = CompilationArtifactWriteRequest::new(
         &result,
         destination.clone(),
         [
@@ -48,7 +47,7 @@ fn request_aggregates_rejection_issues_in_canonical_order() {
             "control\u{7f}",
             " alias",
         ],
-        PublicationPolicy::CreateOrVerify,
+        WritePolicy::CreateOrVerify,
     )
     .unwrap_err();
 
@@ -59,61 +58,61 @@ fn request_aggregates_rejection_issues_in_canonical_order() {
     assert_eq!(
         rejection.issues(),
         [
-            CompilationArtifactPublicationRequestIssue::ResultNotSucceeded,
-            CompilationArtifactPublicationRequestIssue::InvalidDestinationRole {
+            CompilationArtifactWriteRequestIssue::ResultNotSucceeded,
+            CompilationArtifactWriteRequestIssue::InvalidDestinationRole {
                 location: destination,
                 source: LocationRoleError::PrefixMissingTrailingSlash,
             },
-            CompilationArtifactPublicationRequestIssue::ArtifactKeyCountMismatch {
+            CompilationArtifactWriteRequestIssue::ArtifactKeyCountMismatch {
                 expected: 0,
                 actual: 9,
             },
-            CompilationArtifactPublicationRequestIssue::InvalidArtifactKey {
+            CompilationArtifactWriteRequestIssue::InvalidArtifactKey {
                 artifact_index: 0,
                 key: String::new(),
                 reason: CompilationArtifactKeyIssue::Empty,
             },
-            CompilationArtifactPublicationRequestIssue::InvalidArtifactKey {
+            CompilationArtifactWriteRequestIssue::InvalidArtifactKey {
                 artifact_index: 1,
                 key: "/bad".to_owned(),
                 reason: CompilationArtifactKeyIssue::LeadingSlash,
             },
-            CompilationArtifactPublicationRequestIssue::InvalidArtifactKey {
+            CompilationArtifactWriteRequestIssue::InvalidArtifactKey {
                 artifact_index: 2,
                 key: "/bad".to_owned(),
                 reason: CompilationArtifactKeyIssue::LeadingSlash,
             },
-            CompilationArtifactPublicationRequestIssue::DuplicateArtifactKey {
+            CompilationArtifactWriteRequestIssue::DuplicateArtifactKey {
                 key: "/bad".to_owned(),
                 first_artifact_index: 1,
                 duplicate_artifact_index: 2,
             },
-            CompilationArtifactPublicationRequestIssue::InvalidArtifactKey {
+            CompilationArtifactWriteRequestIssue::InvalidArtifactKey {
                 artifact_index: 3,
                 key: "trailing/".to_owned(),
                 reason: CompilationArtifactKeyIssue::TrailingSlash,
             },
-            CompilationArtifactPublicationRequestIssue::InvalidArtifactKey {
+            CompilationArtifactWriteRequestIssue::InvalidArtifactKey {
                 artifact_index: 4,
                 key: "repeated//separator".to_owned(),
                 reason: CompilationArtifactKeyIssue::RepeatedSeparator,
             },
-            CompilationArtifactPublicationRequestIssue::InvalidArtifactKey {
+            CompilationArtifactWriteRequestIssue::InvalidArtifactKey {
                 artifact_index: 5,
                 key: "dot/../segment".to_owned(),
                 reason: CompilationArtifactKeyIssue::DotSegment,
             },
-            CompilationArtifactPublicationRequestIssue::InvalidArtifactKey {
+            CompilationArtifactWriteRequestIssue::InvalidArtifactKey {
                 artifact_index: 6,
                 key: "back\\slash".to_owned(),
                 reason: CompilationArtifactKeyIssue::Backslash,
             },
-            CompilationArtifactPublicationRequestIssue::InvalidArtifactKey {
+            CompilationArtifactWriteRequestIssue::InvalidArtifactKey {
                 artifact_index: 7,
                 key: "control\u{7f}".to_owned(),
                 reason: CompilationArtifactKeyIssue::ControlCharacter,
             },
-            CompilationArtifactPublicationRequestIssue::InvalidArtifactKey {
+            CompilationArtifactWriteRequestIssue::InvalidArtifactKey {
                 artifact_index: 8,
                 key: " alias".to_owned(),
                 reason: CompilationArtifactKeyIssue::NormalizationAlias { index: 0 },
@@ -131,11 +130,11 @@ fn request_accepts_literal_percent_and_ancestor_keys_without_uri_decoding() {
     let result = two_page_result();
     let destination: Location = "artifacts:/output/".parse().unwrap();
 
-    let request = CompilationArtifactPublicationRequest::new(
+    let request = CompilationArtifactWriteRequest::new(
         &result,
         destination.clone(),
         ["tree%", "tree%/page%2F.svg"],
-        PublicationPolicy::OverwriteExactKeys,
+        WritePolicy::OverwriteExactKeys,
     )
     .unwrap();
 
@@ -145,7 +144,7 @@ fn request_accepts_literal_percent_and_ancestor_keys_without_uri_decoding() {
     );
     assert_eq!(request.destination(), &destination);
     assert_eq!(request.artifact_keys(), ["tree%", "tree%/page%2F.svg"]);
-    assert_eq!(request.policy(), PublicationPolicy::OverwriteExactKeys);
+    assert_eq!(request.policy(), WritePolicy::OverwriteExactKeys);
 }
 
 #[test]
@@ -167,16 +166,16 @@ fn artifact_key_reasons_use_documented_variant_precedence() {
             CompilationArtifactKeyIssue::Backslash,
         ),
     ] {
-        let rejection = CompilationArtifactPublicationRequest::new(
+        let rejection = CompilationArtifactWriteRequest::new(
             &result,
             destination.clone(),
             [key, "valid.svg"],
-            PublicationPolicy::CreateOrVerify,
+            WritePolicy::CreateOrVerify,
         )
         .unwrap_err();
         assert!(matches!(
             rejection.issues(),
-            [CompilationArtifactPublicationRequestIssue::InvalidArtifactKey {
+            [CompilationArtifactWriteRequestIssue::InvalidArtifactKey {
                 artifact_index: 0,
                 reason,
                 ..
@@ -186,10 +185,10 @@ fn artifact_key_reasons_use_documented_variant_precedence() {
 }
 
 #[test]
-fn overwrite_publishes_exact_artifact_bytes_and_complete_evidence_in_order() {
+fn overwrite_writes_exact_artifact_bytes_and_complete_evidence_in_order() {
     let result = two_page_result();
-    let service = PublicationService::new(
-        PublicationCapabilities::all(),
+    let service = WriteService::new(
+        WriteCapabilities::all(),
         [("unrelated.bin".to_owned(), b"untouched".to_vec())],
         [],
         [
@@ -199,19 +198,22 @@ fn overwrite_publishes_exact_artifact_bytes_and_complete_evidence_in_order() {
         32,
     );
     let bindings = bindings(&service);
-    let request = CompilationArtifactPublicationRequest::new(
+    let request = CompilationArtifactWriteRequest::new(
         &result,
         "artifacts:/output/".parse().unwrap(),
         ["document.svg", "pages/2.svg"],
-        PublicationPolicy::OverwriteExactKeys,
+        WritePolicy::OverwriteExactKeys,
     )
     .unwrap();
     let identity = result.result_identity();
-    let mut progress = CompilationArtifactPublicationProgress::new();
+    let mut progress = CompilationArtifactWriteProgress::new();
 
-    let receipt: CompilationArtifactPublicationReceipt = expect_ready(pin!(
-        publish_compilation_artifacts(&bindings, &request, &result, &mut progress,)
-    ))
+    let receipt: CompilationArtifactWriteReceipt = expect_ready(pin!(write_compilation_artifacts(
+        &bindings,
+        &request,
+        &result,
+        &mut progress,
+    )))
     .unwrap();
 
     assert_eq!(result.result_identity(), identity);
@@ -223,10 +225,7 @@ fn overwrite_publishes_exact_artifact_bytes_and_complete_evidence_in_order() {
             .iter()
             .map(|entry| (entry.artifact_index(), entry.outcome()))
             .collect::<Vec<_>>(),
-        [
-            (0, PublicationKeyOutcome::Written),
-            (1, PublicationKeyOutcome::Written),
-        ]
+        [(0, WriteKeyOutcome::Written), (1, WriteKeyOutcome::Written),]
     );
     assert_eq!(
         service.destination().object("output/document.svg"),
@@ -246,16 +245,16 @@ fn overwrite_publishes_exact_artifact_bytes_and_complete_evidence_in_order() {
 fn result_mismatch_fails_before_operator_resolution() {
     let expected = two_page_result();
     let actual = compilation_result("different");
-    let request = CompilationArtifactPublicationRequest::new(
+    let request = CompilationArtifactWriteRequest::new(
         &expected,
         "artifacts:/output/".parse().unwrap(),
         ["one.svg", "two.svg"],
-        PublicationPolicy::CreateOrVerify,
+        WritePolicy::CreateOrVerify,
     )
     .unwrap();
-    let mut progress = CompilationArtifactPublicationProgress::new();
+    let mut progress = CompilationArtifactWriteProgress::new();
 
-    let error = expect_ready(pin!(publish_compilation_artifacts(
+    let error = expect_ready(pin!(write_compilation_artifacts(
         &RejectingResolver,
         &request,
         &actual,
@@ -263,12 +262,12 @@ fn result_mismatch_fails_before_operator_resolution() {
     )))
     .unwrap_err();
 
-    assert_eq!(error.phase(), OpenDalPublicationPhase::ResultValidation);
+    assert_eq!(error.phase(), OpenDalWritePhase::ResultValidation);
     assert_eq!(error.commit_certainty(), CommitCertainty::NotCommitted);
     assert!(error.progress().completed().is_empty());
     assert!(matches!(
         error.cause(),
-        CompilationArtifactPublicationErrorCause::CompilationResultMismatch {
+        CompilationArtifactWriteErrorCause::CompilationResultMismatch {
             expected: expected_identity,
             actual: actual_identity,
         } if *expected_identity == expected.result_identity()
@@ -277,11 +276,11 @@ fn result_mismatch_fails_before_operator_resolution() {
 }
 
 #[test]
-fn dropping_mid_publication_leaves_the_completed_prefix_in_caller_progress() {
+fn dropping_mid_write_leaves_the_completed_prefix_in_caller_progress() {
     let result = two_page_result();
     let pending = PendingPoint::new();
-    let service = PublicationService::new(
-        PublicationCapabilities::all(),
+    let service = WriteService::new(
+        WriteCapabilities::all(),
         [],
         [],
         [
@@ -295,46 +294,43 @@ fn dropping_mid_publication_leaves_the_completed_prefix_in_caller_progress() {
         32,
     );
     let bindings = bindings(&service);
-    let request = CompilationArtifactPublicationRequest::new(
+    let request = CompilationArtifactWriteRequest::new(
         &result,
         "artifacts:/output/".parse().unwrap(),
         ["one.svg", "two.svg"],
-        PublicationPolicy::OverwriteExactKeys,
+        WritePolicy::OverwriteExactKeys,
     )
     .unwrap();
-    let mut progress = CompilationArtifactPublicationProgress::new();
+    let mut progress = CompilationArtifactWriteProgress::new();
     {
-        let mut publication = pin!(publish_compilation_artifacts(
+        let mut write = pin!(write_compilation_artifacts(
             &bindings,
             &request,
             &result,
             &mut progress,
         ));
-        assert!(matches!(poll_once(publication.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(write.as_mut()), Poll::Pending));
         assert!(pending.was_observed());
     }
 
     assert_eq!(progress.completed().len(), 1);
     assert_eq!(progress.completed()[0].artifact_index(), 0);
-    assert_eq!(
-        progress.completed()[0].outcome(),
-        PublicationKeyOutcome::Written
-    );
+    assert_eq!(progress.completed()[0].outcome(), WriteKeyOutcome::Written);
 }
 
 #[test]
 fn create_or_verify_completes_all_comparisons_before_creating_absent_artifacts() {
     let result = two_page_result();
     let first_bytes = result.artifacts()[0].bytes().to_vec();
-    let service = PublicationService::new(
-        PublicationCapabilities::all(),
+    let service = WriteService::new(
+        WriteCapabilities::all(),
         [("output/one.svg".to_owned(), first_bytes.clone())],
-        [PublicationReadScript::new(
+        [WriteReadScript::new(
             "output/one.svg",
             2,
             [
-                PublicationReadStep::chunk(0..1),
-                PublicationReadStep::chunk(1..first_bytes.len()),
+                WriteReadStep::chunk(0..1),
+                WriteReadStep::chunk(1..first_bytes.len()),
             ],
         )
         .unwrap()],
@@ -346,16 +342,16 @@ fn create_or_verify_completes_all_comparisons_before_creating_absent_artifacts()
         32,
     );
     let bindings = bindings(&service);
-    let request = CompilationArtifactPublicationRequest::new(
+    let request = CompilationArtifactWriteRequest::new(
         &result,
         "artifacts:/output/".parse().unwrap(),
         ["one.svg", "two.svg"],
-        PublicationPolicy::CreateOrVerify,
+        WritePolicy::CreateOrVerify,
     )
     .unwrap();
-    let mut progress = CompilationArtifactPublicationProgress::new();
+    let mut progress = CompilationArtifactWriteProgress::new();
 
-    let receipt = expect_ready(pin!(publish_compilation_artifacts(
+    let receipt = expect_ready(pin!(write_compilation_artifacts(
         &bindings,
         &request,
         &result,
@@ -369,21 +365,18 @@ fn create_or_verify_completes_all_comparisons_before_creating_absent_artifacts()
             .iter()
             .map(|entry| entry.outcome())
             .collect::<Vec<_>>(),
-        [
-            PublicationKeyOutcome::AlreadyMatching,
-            PublicationKeyOutcome::Created,
-        ]
+        [WriteKeyOutcome::AlreadyMatching, WriteKeyOutcome::Created,]
     );
     let log = service.log();
     let second_read = log
         .entries()
         .iter()
-        .position(|entry| matches!(entry, PublicationOperationLogEntry::ReadInvoked { path, .. } if path == "output/two.svg"))
+        .position(|entry| matches!(entry, WriteOperationLogEntry::ReadInvoked { path, .. } if path == "output/two.svg"))
         .unwrap();
     let first_write = log
         .entries()
         .iter()
-        .position(|entry| matches!(entry, PublicationOperationLogEntry::WriteInvoked { .. }))
+        .position(|entry| matches!(entry, WriteOperationLogEntry::WriteInvoked { .. }))
         .unwrap();
     assert!(second_read < first_write);
 }
@@ -392,23 +385,23 @@ fn create_or_verify_completes_all_comparisons_before_creating_absent_artifacts()
 fn matching_create_or_verify_receipt_reports_the_read_only_outcome() {
     let result = compilation_result("matching");
     let bytes = result.artifacts()[0].bytes().to_vec();
-    let service = PublicationService::new(
-        PublicationCapabilities::all(),
+    let service = WriteService::new(
+        WriteCapabilities::all(),
         [("output/document.svg".to_owned(), bytes.clone())],
-        [PublicationReadScript::new(
+        [WriteReadScript::new(
             "output/document.svg",
             1,
-            [PublicationReadStep::chunk(0..bytes.len())],
+            [WriteReadStep::chunk(0..bytes.len())],
         )
         .unwrap()],
         [],
         16,
     );
     let bindings = bindings(&service);
-    let request = request_for(&result, ["document.svg"], PublicationPolicy::CreateOrVerify);
-    let mut progress = CompilationArtifactPublicationProgress::new();
+    let request = request_for(&result, ["document.svg"], WritePolicy::CreateOrVerify);
+    let mut progress = CompilationArtifactWriteProgress::new();
 
-    let receipt = expect_ready(pin!(publish_compilation_artifacts(
+    let receipt = expect_ready(pin!(write_compilation_artifacts(
         &bindings,
         &request,
         &result,
@@ -418,7 +411,7 @@ fn matching_create_or_verify_receipt_reports_the_read_only_outcome() {
 
     assert_eq!(
         receipt.completed()[0].outcome(),
-        PublicationKeyOutcome::AlreadyMatching
+        WriteKeyOutcome::AlreadyMatching
     );
 }
 
@@ -427,19 +420,19 @@ fn mutable_comparison_and_conditional_race_project_read_only_success_evidence() 
     let mutable_result = compilation_result("mutable comparison");
     let mutable_bytes = mutable_result.artifacts()[0].bytes().to_vec();
     let split = mutable_bytes.len() / 2;
-    let mutable_service = PublicationService::new(
-        PublicationCapabilities::all(),
+    let mutable_service = WriteService::new(
+        WriteCapabilities::all(),
         [("output/document.svg".to_owned(), mutable_bytes.clone())],
-        [PublicationReadScript::new(
+        [WriteReadScript::new(
             "output/document.svg",
             2,
             [
-                PublicationReadStep::chunk(0..split),
-                PublicationReadStep::mutate(scripted_opendal::DestinationMutation::set(
+                WriteReadStep::chunk(0..split),
+                WriteReadStep::mutate(scripted_opendal::DestinationMutation::set(
                     "output/document.svg",
                     &mutable_bytes,
                 )),
-                PublicationReadStep::chunk(split..mutable_bytes.len()),
+                WriteReadStep::chunk(split..mutable_bytes.len()),
             ],
         )
         .unwrap()],
@@ -450,10 +443,10 @@ fn mutable_comparison_and_conditional_race_project_read_only_success_evidence() 
     let mutable_request = request_for(
         &mutable_result,
         ["document.svg"],
-        PublicationPolicy::CreateOrVerify,
+        WritePolicy::CreateOrVerify,
     );
-    let mut mutable_progress = CompilationArtifactPublicationProgress::new();
-    let mutable_receipt = expect_ready(pin!(publish_compilation_artifacts(
+    let mut mutable_progress = CompilationArtifactWriteProgress::new();
+    let mutable_receipt = expect_ready(pin!(write_compilation_artifacts(
         &mutable_bindings,
         &mutable_request,
         &mutable_result,
@@ -462,26 +455,26 @@ fn mutable_comparison_and_conditional_race_project_read_only_success_evidence() 
     .unwrap();
     assert_eq!(
         mutable_receipt.completed()[0].outcome(),
-        PublicationKeyOutcome::AlreadyMatching
+        WriteKeyOutcome::AlreadyMatching
     );
 
     let race_result = compilation_result("race verification");
     let race_bytes = race_result.artifacts()[0].bytes().to_vec();
     let pending = PendingPoint::new();
-    let race_service = PublicationService::new(
-        PublicationCapabilities::all(),
+    let race_service = WriteService::new(
+        WriteCapabilities::all(),
         [],
         [
-            PublicationReadScript::new(
+            WriteReadScript::new(
                 "output/document.svg",
                 0,
-                [PublicationReadStep::failure(opendal::ErrorKind::NotFound)],
+                [WriteReadStep::failure(opendal::ErrorKind::NotFound)],
             )
             .unwrap(),
-            PublicationReadScript::new(
+            WriteReadScript::new(
                 "output/document.svg",
                 1,
-                [PublicationReadStep::chunk(0..race_bytes.len())],
+                [WriteReadStep::chunk(0..race_bytes.len())],
             )
             .unwrap(),
         ],
@@ -493,55 +486,46 @@ fn mutable_comparison_and_conditional_race_project_read_only_success_evidence() 
         32,
     );
     let race_bindings = bindings(&race_service);
-    let race_request = request_for(
-        &race_result,
-        ["document.svg"],
-        PublicationPolicy::CreateOrVerify,
-    );
-    let mut race_progress = CompilationArtifactPublicationProgress::new();
+    let race_request = request_for(&race_result, ["document.svg"], WritePolicy::CreateOrVerify);
+    let mut race_progress = CompilationArtifactWriteProgress::new();
     let race_receipt = {
-        let mut publication = pin!(publish_compilation_artifacts(
+        let mut write = pin!(write_compilation_artifacts(
             &race_bindings,
             &race_request,
             &race_result,
             &mut race_progress,
         ));
-        assert!(matches!(poll_once(publication.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(write.as_mut()), Poll::Pending));
         race_service.mutate(scripted_opendal::DestinationMutation::set(
             "output/document.svg",
             race_bytes,
         ));
         pending.release();
-        expect_ready(publication.as_mut()).unwrap()
+        expect_ready(write.as_mut()).unwrap()
     };
     assert_eq!(
         race_receipt.completed()[0].outcome(),
-        PublicationKeyOutcome::AlreadyMatching
+        WriteKeyOutcome::AlreadyMatching
     );
 }
 
 #[test]
 fn failed_race_verification_retains_typed_cause_and_not_committed_certainty() {
     let result = compilation_result("failed race verification");
-    let request = request_for(&result, ["document.svg"], PublicationPolicy::CreateOrVerify);
+    let request = request_for(&result, ["document.svg"], WritePolicy::CreateOrVerify);
 
     let conflict_pending = PendingPoint::new();
-    let conflict_service = PublicationService::new(
-        PublicationCapabilities::all(),
+    let conflict_service = WriteService::new(
+        WriteCapabilities::all(),
         [],
         [
-            PublicationReadScript::new(
+            WriteReadScript::new(
                 "output/document.svg",
                 0,
-                [PublicationReadStep::failure(opendal::ErrorKind::NotFound)],
+                [WriteReadStep::failure(opendal::ErrorKind::NotFound)],
             )
             .unwrap(),
-            PublicationReadScript::new(
-                "output/document.svg",
-                1,
-                [PublicationReadStep::chunk(0..1)],
-            )
-            .unwrap(),
+            WriteReadScript::new("output/document.svg", 1, [WriteReadStep::chunk(0..1)]).unwrap(),
         ],
         [WriteScript::new(
             "output/document.svg",
@@ -554,49 +538,47 @@ fn failed_race_verification_retains_typed_cause_and_not_committed_certainty() {
         32,
     );
     let conflict_bindings = bindings(&conflict_service);
-    let mut conflict_progress = CompilationArtifactPublicationProgress::new();
+    let mut conflict_progress = CompilationArtifactWriteProgress::new();
     let conflict = {
-        let mut publication = pin!(publish_compilation_artifacts(
+        let mut write = pin!(write_compilation_artifacts(
             &conflict_bindings,
             &request,
             &result,
             &mut conflict_progress,
         ));
-        assert!(matches!(poll_once(publication.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(write.as_mut()), Poll::Pending));
         conflict_service.mutate(scripted_opendal::DestinationMutation::set(
             "output/document.svg",
             b"wrong",
         ));
         conflict_pending.release();
-        expect_ready(publication.as_mut()).unwrap_err()
+        expect_ready(write.as_mut()).unwrap_err()
     };
-    assert_eq!(conflict.phase(), OpenDalPublicationPhase::RaceVerification);
+    assert_eq!(conflict.phase(), OpenDalWritePhase::RaceVerification);
     assert_eq!(conflict.failed_artifact_index(), Some(0));
     assert_eq!(conflict.failed_key(), Some("document.svg"));
     assert_eq!(conflict.commit_certainty(), CommitCertainty::NotCommitted);
     assert!(conflict.progress().completed().is_empty());
     assert!(matches!(
         conflict.cause(),
-        CompilationArtifactPublicationErrorCause::ByteConflict { .. }
+        CompilationArtifactWriteErrorCause::ByteConflict { .. }
     ));
 
     let read_pending = PendingPoint::new();
-    let read_service = PublicationService::new(
-        PublicationCapabilities::all(),
+    let read_service = WriteService::new(
+        WriteCapabilities::all(),
         [],
         [
-            PublicationReadScript::new(
+            WriteReadScript::new(
                 "output/document.svg",
                 0,
-                [PublicationReadStep::failure(opendal::ErrorKind::NotFound)],
+                [WriteReadStep::failure(opendal::ErrorKind::NotFound)],
             )
             .unwrap(),
-            PublicationReadScript::new(
+            WriteReadScript::new(
                 "output/document.svg",
                 0,
-                [PublicationReadStep::failure(
-                    opendal::ErrorKind::PermissionDenied,
-                )],
+                [WriteReadStep::failure(opendal::ErrorKind::PermissionDenied)],
             )
             .unwrap(),
         ],
@@ -611,31 +593,28 @@ fn failed_race_verification_retains_typed_cause_and_not_committed_certainty() {
         32,
     );
     let read_bindings = bindings(&read_service);
-    let mut read_progress = CompilationArtifactPublicationProgress::new();
+    let mut read_progress = CompilationArtifactWriteProgress::new();
     let read_error = {
-        let mut publication = pin!(publish_compilation_artifacts(
+        let mut write = pin!(write_compilation_artifacts(
             &read_bindings,
             &request,
             &result,
             &mut read_progress,
         ));
-        assert!(matches!(poll_once(publication.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(write.as_mut()), Poll::Pending));
         read_service.mutate(scripted_opendal::DestinationMutation::set(
             "output/document.svg",
             b"racing object",
         ));
         read_pending.release();
-        expect_ready(publication.as_mut()).unwrap_err()
+        expect_ready(write.as_mut()).unwrap_err()
     };
-    assert_eq!(
-        read_error.phase(),
-        OpenDalPublicationPhase::RaceVerification
-    );
+    assert_eq!(read_error.phase(), OpenDalWritePhase::RaceVerification);
     assert_eq!(read_error.commit_certainty(), CommitCertainty::NotCommitted);
     assert!(read_error.progress().completed().is_empty());
     assert!(matches!(
         read_error.cause(),
-        CompilationArtifactPublicationErrorCause::RaceVerification(source)
+        CompilationArtifactWriteErrorCause::RaceVerification(source)
             if source.kind() == opendal::ErrorKind::PermissionDenied
     ));
 }
@@ -643,24 +622,17 @@ fn failed_race_verification_retains_typed_cause_and_not_committed_certainty() {
 #[test]
 fn conflict_and_write_failure_retain_failed_artifact_context_and_contiguous_progress() {
     let result = two_page_result();
-    let conflict_service = PublicationService::new(
-        PublicationCapabilities::all(),
+    let conflict_service = WriteService::new(
+        WriteCapabilities::all(),
         [("output/one.svg".to_owned(), b"different".to_vec())],
-        [
-            PublicationReadScript::new("output/one.svg", 1, [PublicationReadStep::chunk(0..1)])
-                .unwrap(),
-        ],
+        [WriteReadScript::new("output/one.svg", 1, [WriteReadStep::chunk(0..1)]).unwrap()],
         [],
         16,
     );
     let conflict_bindings = bindings(&conflict_service);
-    let create_request = request_for(
-        &result,
-        ["one.svg", "two.svg"],
-        PublicationPolicy::CreateOrVerify,
-    );
-    let mut conflict_progress = CompilationArtifactPublicationProgress::new();
-    let conflict = expect_ready(pin!(publish_compilation_artifacts(
+    let create_request = request_for(&result, ["one.svg", "two.svg"], WritePolicy::CreateOrVerify);
+    let mut conflict_progress = CompilationArtifactWriteProgress::new();
+    let conflict = expect_ready(pin!(write_compilation_artifacts(
         &conflict_bindings,
         &create_request,
         &result,
@@ -670,15 +642,15 @@ fn conflict_and_write_failure_retain_failed_artifact_context_and_contiguous_prog
     assert_eq!(conflict.failed_artifact_index(), Some(0));
     assert_eq!(conflict.failed_key(), Some("one.svg"));
     assert_eq!(conflict.failed_destination_path(), Some("output/one.svg"));
-    assert_eq!(conflict.phase(), OpenDalPublicationPhase::PreflightRead);
+    assert_eq!(conflict.phase(), OpenDalWritePhase::PreflightRead);
     assert_eq!(conflict.commit_certainty(), CommitCertainty::NotCommitted);
     assert!(matches!(
         conflict.cause(),
-        CompilationArtifactPublicationErrorCause::ByteConflict { .. }
+        CompilationArtifactWriteErrorCause::ByteConflict { .. }
     ));
 
-    let failure_service = PublicationService::new(
-        PublicationCapabilities::all(),
+    let failure_service = WriteService::new(
+        WriteCapabilities::all(),
         [],
         [],
         [
@@ -695,10 +667,10 @@ fn conflict_and_write_failure_retain_failed_artifact_context_and_contiguous_prog
     let overwrite_request = request_for(
         &result,
         ["one.svg", "two.svg"],
-        PublicationPolicy::OverwriteExactKeys,
+        WritePolicy::OverwriteExactKeys,
     );
-    let mut failure_progress = CompilationArtifactPublicationProgress::new();
-    let failure = expect_ready(pin!(publish_compilation_artifacts(
+    let mut failure_progress = CompilationArtifactWriteProgress::new();
+    let failure = expect_ready(pin!(write_compilation_artifacts(
         &failure_bindings,
         &overwrite_request,
         &result,
@@ -708,12 +680,12 @@ fn conflict_and_write_failure_retain_failed_artifact_context_and_contiguous_prog
     assert_eq!(failure.failed_artifact_index(), Some(1));
     assert_eq!(failure.failed_key(), Some("two.svg"));
     assert_eq!(failure.failed_destination_path(), Some("output/two.svg"));
-    assert_eq!(failure.phase(), OpenDalPublicationPhase::DirectWrite);
+    assert_eq!(failure.phase(), OpenDalWritePhase::DirectWrite);
     assert_eq!(failure.commit_certainty(), CommitCertainty::Indeterminate);
     assert_eq!(failure.progress().completed().len(), 1);
     assert!(matches!(
         failure.cause(),
-        CompilationArtifactPublicationErrorCause::DirectWrite(source)
+        CompilationArtifactWriteErrorCause::DirectWrite(source)
             if source.kind() == opendal::ErrorKind::PermissionDenied
     ));
 }
@@ -721,11 +693,11 @@ fn conflict_and_write_failure_retain_failed_artifact_context_and_contiguous_prog
 #[test]
 fn capability_and_size_failures_are_projected_without_effects() {
     let result = compilation_result("capabilities");
-    let request = request_for(&result, ["document.svg"], PublicationPolicy::CreateOrVerify);
-    let unsupported_service = PublicationService::new(
-        PublicationCapabilities {
+    let request = request_for(&result, ["document.svg"], WritePolicy::CreateOrVerify);
+    let unsupported_service = WriteService::new(
+        WriteCapabilities {
             read: false,
-            ..PublicationCapabilities::all()
+            ..WriteCapabilities::all()
         },
         [],
         [],
@@ -733,8 +705,8 @@ fn capability_and_size_failures_are_projected_without_effects() {
         8,
     );
     let unsupported_bindings = bindings(&unsupported_service);
-    let mut progress = CompilationArtifactPublicationProgress::new();
-    let unsupported = expect_ready(pin!(publish_compilation_artifacts(
+    let mut progress = CompilationArtifactWriteProgress::new();
+    let unsupported = expect_ready(pin!(write_compilation_artifacts(
         &unsupported_bindings,
         &request,
         &result,
@@ -743,8 +715,8 @@ fn capability_and_size_failures_are_projected_without_effects() {
     .unwrap_err();
     assert!(matches!(
         unsupported.cause(),
-        CompilationArtifactPublicationErrorCause::UnsupportedPolicy {
-            policy: PublicationPolicy::CreateOrVerify,
+        CompilationArtifactWriteErrorCause::UnsupportedPolicy {
+            policy: WritePolicy::CreateOrVerify,
         }
     ));
     assert_eq!(
@@ -753,10 +725,10 @@ fn capability_and_size_failures_are_projected_without_effects() {
     );
     assert!(unsupported_service.log().entries().is_empty());
 
-    let size_service = PublicationService::new(
-        PublicationCapabilities {
+    let size_service = WriteService::new(
+        WriteCapabilities {
             write_total_max_size: Some(0),
-            ..PublicationCapabilities::all()
+            ..WriteCapabilities::all()
         },
         [],
         [],
@@ -764,13 +736,9 @@ fn capability_and_size_failures_are_projected_without_effects() {
         8,
     );
     let size_bindings = bindings(&size_service);
-    let overwrite_request = request_for(
-        &result,
-        ["document.svg"],
-        PublicationPolicy::OverwriteExactKeys,
-    );
-    let mut progress = CompilationArtifactPublicationProgress::new();
-    let size = expect_ready(pin!(publish_compilation_artifacts(
+    let overwrite_request = request_for(&result, ["document.svg"], WritePolicy::OverwriteExactKeys);
+    let mut progress = CompilationArtifactWriteProgress::new();
+    let size = expect_ready(pin!(write_compilation_artifacts(
         &size_bindings,
         &overwrite_request,
         &result,
@@ -779,7 +747,7 @@ fn capability_and_size_failures_are_projected_without_effects() {
     .unwrap_err();
     assert!(matches!(
         size.cause(),
-        CompilationArtifactPublicationErrorCause::UnsupportedObjectSize {
+        CompilationArtifactWriteErrorCause::UnsupportedObjectSize {
             artifact_index: 0,
             byte_length,
         } if *byte_length == result.artifacts()[0].bytes().len() as u64
@@ -794,10 +762,10 @@ fn empty_succeeded_results_skip_resolution_and_unpolled_futures_clear_stale_prog
     let empty_request = request_for(
         &empty,
         std::iter::empty::<&str>(),
-        PublicationPolicy::CreateOrVerify,
+        WritePolicy::CreateOrVerify,
     );
-    let mut progress = CompilationArtifactPublicationProgress::new();
-    let receipt = expect_ready(pin!(publish_compilation_artifacts(
+    let mut progress = CompilationArtifactWriteProgress::new();
+    let receipt = expect_ready(pin!(write_compilation_artifacts(
         &RejectingResolver,
         &empty_request,
         &empty,
@@ -807,8 +775,8 @@ fn empty_succeeded_results_skip_resolution_and_unpolled_futures_clear_stale_prog
     assert!(receipt.completed().is_empty());
 
     let result = compilation_result("stale progress");
-    let service = PublicationService::new(
-        PublicationCapabilities::all(),
+    let service = WriteService::new(
+        WriteCapabilities::all(),
         [],
         [],
         [WriteScript::new(
@@ -819,12 +787,8 @@ fn empty_succeeded_results_skip_resolution_and_unpolled_futures_clear_stale_prog
         8,
     );
     let bindings = bindings(&service);
-    let request = request_for(
-        &result,
-        ["document.svg"],
-        PublicationPolicy::OverwriteExactKeys,
-    );
-    expect_ready(pin!(publish_compilation_artifacts(
+    let request = request_for(&result, ["document.svg"], WritePolicy::OverwriteExactKeys);
+    expect_ready(pin!(write_compilation_artifacts(
         &bindings,
         &request,
         &result,
@@ -832,7 +796,7 @@ fn empty_succeeded_results_skip_resolution_and_unpolled_futures_clear_stale_prog
     )))
     .unwrap();
     assert_eq!(progress.completed().len(), 1);
-    drop(publish_compilation_artifacts(
+    drop(write_compilation_artifacts(
         &RejectingResolver,
         &request,
         &result,
@@ -842,14 +806,14 @@ fn empty_succeeded_results_skip_resolution_and_unpolled_futures_clear_stale_prog
 }
 
 #[test]
-fn operator_bindings_produce_a_send_publication_future() {
+fn operator_bindings_produce_a_send_write_future() {
     let result = compilation_result("send");
-    let service = PublicationService::new(PublicationCapabilities::all(), [], [], [], 1);
+    let service = WriteService::new(WriteCapabilities::all(), [], [], [], 1);
     let bindings = bindings(&service);
-    let request = request_for(&result, ["document.svg"], PublicationPolicy::CreateOrVerify);
-    let mut progress = CompilationArtifactPublicationProgress::new();
+    let request = request_for(&result, ["document.svg"], WritePolicy::CreateOrVerify);
+    let mut progress = CompilationArtifactWriteProgress::new();
 
-    assert_send(publish_compilation_artifacts(
+    assert_send(write_compilation_artifacts(
         &bindings,
         &request,
         &result,
@@ -860,10 +824,10 @@ fn operator_bindings_produce_a_send_publication_future() {
 #[test]
 fn resolver_failure_is_boxed_beneath_the_public_cause() {
     let result = compilation_result("resolver failure");
-    let request = request_for(&result, ["document.svg"], PublicationPolicy::CreateOrVerify);
-    let mut progress = CompilationArtifactPublicationProgress::new();
+    let request = request_for(&result, ["document.svg"], WritePolicy::CreateOrVerify);
+    let mut progress = CompilationArtifactWriteProgress::new();
 
-    let error = expect_ready(pin!(publish_compilation_artifacts(
+    let error = expect_ready(pin!(write_compilation_artifacts(
         &FailingResolver,
         &request,
         &result,
@@ -871,15 +835,15 @@ fn resolver_failure_is_boxed_beneath_the_public_cause() {
     )))
     .unwrap_err();
 
-    assert_eq!(error.phase(), OpenDalPublicationPhase::ResolveOperator);
+    assert_eq!(error.phase(), OpenDalWritePhase::ResolveOperator);
     assert_eq!(error.commit_certainty(), CommitCertainty::NotCommitted);
-    let CompilationArtifactPublicationErrorCause::ResolveOperator(source) = error.cause() else {
+    let CompilationArtifactWriteErrorCause::ResolveOperator(source) = error.cause() else {
         panic!("unexpected cause: {:?}", error.cause());
     };
     assert!(source.downcast_ref::<ResolveError>().is_some());
     assert!(!format!("{error:?}").contains("resolver rejected"));
     let cause = error.source().unwrap().source().unwrap();
-    assert!(cause.is::<CompilationArtifactPublicationErrorCause>());
+    assert!(cause.is::<CompilationArtifactWriteErrorCause>());
     assert!(cause.source().unwrap().is::<ResolveError>());
 }
 
@@ -939,7 +903,7 @@ fn compilation_result(source: &str) -> CompilationResult {
     .clone()
 }
 
-fn bindings(service: &PublicationService) -> OperatorBindings {
+fn bindings(service: &WriteService) -> OperatorBindings {
     OperatorBindings::new([(
         OperatorBinding::new("artifacts").unwrap(),
         service.operator(),
@@ -950,9 +914,9 @@ fn bindings(service: &PublicationService) -> OperatorBindings {
 fn request_for(
     result: &CompilationResult,
     keys: impl IntoIterator<Item = &'static str>,
-    policy: PublicationPolicy,
-) -> CompilationArtifactPublicationRequest {
-    CompilationArtifactPublicationRequest::new(
+    policy: WritePolicy,
+) -> CompilationArtifactWriteRequest {
+    CompilationArtifactWriteRequest::new(
         result,
         "artifacts:/output/".parse().unwrap(),
         keys,

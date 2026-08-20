@@ -136,7 +136,7 @@ fn public_compilation_attests_the_approved_engine_and_exporters() {
             (cfg!(feature = "embedded-fonts"), "embedded-fonts"),
             (cfg!(feature = "fs"), "fs"),
             (cfg!(feature = "opendal"), "opendal"),
-            (cfg!(feature = "package-acquisition"), "package-acquisition"),
+            (cfg!(feature = "package-reading"), "package-reading"),
             (cfg!(feature = "parallel"), "parallel"),
         ] {
             if enabled {

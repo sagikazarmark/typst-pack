@@ -1,18 +1,18 @@
 use futures_util::StreamExt;
 
 use super::super::BoxError;
-use super::super::acquisition::{
-    ExactPathAcquisitionOperation, ResolvedOperator, ResolvedOperators, acquire_exact_path,
-    exact_path_absent_error,
-};
 use super::super::location::{Location, LocationRoleError, OperatorResolver};
-use crate::acquisition_layout;
+use super::super::read::{
+    ExactPathReadOperation, ResolvedOperator, ResolvedOperators, exact_path_absent_error,
+    read_exact_path,
+};
 use crate::limits::{Limits, ResourceKind};
 use crate::package_catalog::{
     PackageTreeError, PackageTreePathPreflightError, preflight_package_tree_paths,
 };
+use crate::read_layout;
 
-pub(crate) type RecursiveAcquisitionResource = ResourceKind<8>;
+pub(crate) type RecursiveReadResource = ResourceKind<8>;
 
 #[allow(non_upper_case_globals)]
 impl ResourceKind<8> {
@@ -24,9 +24,9 @@ impl ResourceKind<8> {
     pub(crate) const TotalBytes: Self = Self::new(5);
 }
 
-pub(crate) type RecursiveAcquisitionLimits = Limits<RecursiveAcquisitionResource>;
+pub(crate) type RecursiveReadLimits = Limits<RecursiveReadResource>;
 
-impl Limits<RecursiveAcquisitionResource> {
+impl Limits<RecursiveReadResource> {
     pub(crate) const fn new(
         listed_entries: u64,
         listed_path_bytes: u64,
@@ -72,7 +72,7 @@ impl Limits<RecursiveAcquisitionResource> {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum RecursiveAcquisitionSelection {
+pub(crate) enum RecursiveReadSelection {
     AllFiles,
     FontContainers,
     PackageTree,
@@ -102,7 +102,7 @@ pub(crate) struct RecursiveSurveyedObject {
     pub(crate) bytes: Vec<u8>,
 }
 
-pub(crate) trait RecursiveAcquisitionOperation {
+pub(crate) trait RecursiveReadOperation {
     type Error;
 
     fn invalid_location_role(&self, source_index: usize, source: LocationRoleError) -> Self::Error;
@@ -131,49 +131,47 @@ pub(crate) trait RecursiveAcquisitionOperation {
     fn limit(
         &self,
         source_index: usize,
-        resource: RecursiveAcquisitionResource,
+        resource: RecursiveReadResource,
         ceiling: u64,
         observed_at_least: u64,
     ) -> Self::Error;
     fn accounting_overflow(
         &self,
         source_index: usize,
-        resource: RecursiveAcquisitionResource,
+        resource: RecursiveReadResource,
     ) -> Self::Error;
 }
 
-pub(crate) trait PackageTreeRecursiveAcquisitionOperation:
-    RecursiveAcquisitionOperation
-{
+pub(crate) trait PackageTreeRecursiveReadOperation: RecursiveReadOperation {
     fn invalid_package_tree(&self, source_index: usize, source: PackageTreeError) -> Self::Error;
 }
 
-pub(crate) async fn acquire_recursive_prefix<R, O>(
+pub(crate) async fn read_recursive_prefix<R, O>(
     resolver: &R,
     location: &Location,
-    selection: RecursiveAcquisitionSelection,
-    limits: RecursiveAcquisitionLimits,
+    selection: RecursiveReadSelection,
+    limits: RecursiveReadLimits,
     operation: &O,
 ) -> Result<Vec<RecursiveSurveyedObject>, O::Error>
 where
     R: OperatorResolver + ?Sized,
-    O: RecursiveAcquisitionOperation,
+    O: RecursiveReadOperation,
 {
-    debug_assert_ne!(selection, RecursiveAcquisitionSelection::PackageTree);
+    debug_assert_ne!(selection, RecursiveReadSelection::PackageTree);
     let mut sources =
-        acquire_recursive_prefixes(resolver, &[location], selection, limits, operation).await?;
+        read_recursive_prefixes(resolver, &[location], selection, limits, operation).await?;
     Ok(sources.pop().expect("one requested prefix has one result"))
 }
 
-pub(crate) async fn acquire_first_present_package_tree_prefix_with_resolved<R, O>(
+pub(crate) async fn read_first_present_package_tree_prefix_with_resolved<R, O>(
     resolved: &mut ResolvedOperators<'_, R>,
     locations: impl IntoIterator<Item = Result<Location, LocationRoleError>>,
-    limits: RecursiveAcquisitionLimits,
+    limits: RecursiveReadLimits,
     operation: &O,
 ) -> Result<Option<(usize, Location, Vec<RecursiveSurveyedObject>)>, O::Error>
 where
     R: OperatorResolver + ?Sized,
-    O: PackageTreeRecursiveAcquisitionOperation,
+    O: PackageTreeRecursiveReadOperation,
 {
     let mut accounting = SurveyAccounting::new(limits);
     let mut retained_bytes = 0u64;
@@ -186,7 +184,7 @@ where
             resolved,
             &location,
             source_index,
-            RecursiveAcquisitionSelection::PackageTree,
+            RecursiveReadSelection::PackageTree,
             &mut accounting,
             &mut issues,
             operation,
@@ -207,18 +205,18 @@ where
 }
 
 #[cfg(test)]
-async fn acquire_package_tree_recursive_prefix<R, O>(
+async fn read_package_tree_recursive_prefix<R, O>(
     resolver: &R,
     location: &Location,
-    limits: RecursiveAcquisitionLimits,
+    limits: RecursiveReadLimits,
     operation: &O,
 ) -> Result<Vec<RecursiveSurveyedObject>, O::Error>
 where
     R: OperatorResolver + ?Sized,
-    O: PackageTreeRecursiveAcquisitionOperation,
+    O: PackageTreeRecursiveReadOperation,
 {
     let mut resolved = ResolvedOperators::new(resolver);
-    Ok(acquire_first_present_package_tree_prefix_with_resolved(
+    Ok(read_first_present_package_tree_prefix_with_resolved(
         &mut resolved,
         [Ok(location.clone())],
         limits,
@@ -229,18 +227,18 @@ where
     .unwrap_or_default())
 }
 
-pub(crate) async fn acquire_recursive_prefixes<R, O>(
+pub(crate) async fn read_recursive_prefixes<R, O>(
     resolver: &R,
     locations: &[&Location],
-    selection: RecursiveAcquisitionSelection,
-    limits: RecursiveAcquisitionLimits,
+    selection: RecursiveReadSelection,
+    limits: RecursiveReadLimits,
     operation: &O,
 ) -> Result<Vec<Vec<RecursiveSurveyedObject>>, O::Error>
 where
     R: OperatorResolver + ?Sized,
-    O: RecursiveAcquisitionOperation,
+    O: RecursiveReadOperation,
 {
-    debug_assert_ne!(selection, RecursiveAcquisitionSelection::PackageTree);
+    debug_assert_ne!(selection, RecursiveReadSelection::PackageTree);
     let mut accounting = SurveyAccounting::new(limits);
     let mut issues = Vec::new();
     let mut resolved = ResolvedOperators::new(resolver);
@@ -277,14 +275,14 @@ async fn survey_recursive_prefix<R, O>(
     resolved: &mut ResolvedOperators<'_, R>,
     location: &Location,
     source_index: usize,
-    selection: RecursiveAcquisitionSelection,
+    selection: RecursiveReadSelection,
     accounting: &mut SurveyAccounting,
     issues: &mut Vec<RecursiveSurveyIssue>,
     operation: &O,
 ) -> Result<RecursiveSurveyPlan, O::Error>
 where
     R: OperatorResolver + ?Sized,
-    O: RecursiveAcquisitionOperation,
+    O: RecursiveReadOperation,
 {
     location
         .require_prefix()
@@ -304,11 +302,11 @@ where
     .await
 }
 
-async fn survey_recursive_prefix_with_operator<O: RecursiveAcquisitionOperation>(
+async fn survey_recursive_prefix_with_operator<O: RecursiveReadOperation>(
     resolved: ResolvedOperator,
     location: &Location,
     source_index: usize,
-    selection: RecursiveAcquisitionSelection,
+    selection: RecursiveReadSelection,
     accounting: &mut SurveyAccounting,
     issues: &mut Vec<RecursiveSurveyIssue>,
     operation: &O,
@@ -384,7 +382,7 @@ async fn survey_recursive_prefix_with_operator<O: RecursiveAcquisitionOperation>
             }
         };
 
-        if selection != RecursiveAcquisitionSelection::PackageTree
+        if selection != RecursiveReadSelection::PackageTree
             && Location::from_operation_path(location.binding().clone(), operation_path).is_err()
         {
             retain_issue(
@@ -442,7 +440,7 @@ async fn survey_recursive_prefix_with_operator<O: RecursiveAcquisitionOperation>
     }
 
     selected.sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-    if selection != RecursiveAcquisitionSelection::PackageTree {
+    if selection != RecursiveReadSelection::PackageTree {
         let mut last_duplicate = None;
         for duplicate in selected
             .windows(2)
@@ -470,7 +468,7 @@ async fn survey_recursive_prefix_with_operator<O: RecursiveAcquisitionOperation>
     })
 }
 
-fn check_survey_limits_and_envelope_issues<O: RecursiveAcquisitionOperation>(
+fn check_survey_limits_and_envelope_issues<O: RecursiveReadOperation>(
     accounting: &SurveyAccounting,
     issues: &mut Vec<RecursiveSurveyIssue>,
     operation: &O,
@@ -491,7 +489,7 @@ fn check_survey_limits_and_envelope_issues<O: RecursiveAcquisitionOperation>(
     Ok(())
 }
 
-fn preflight_package_tree_plan<O: PackageTreeRecursiveAcquisitionOperation>(
+fn preflight_package_tree_plan<O: PackageTreeRecursiveReadOperation>(
     accounting: &mut SurveyAccounting,
     source_index: usize,
     plan: &mut RecursiveSurveyPlan,
@@ -521,8 +519,8 @@ fn preflight_package_tree_plan<O: PackageTreeRecursiveAcquisitionOperation>(
     }
 }
 
-async fn read_source_plan<O: RecursiveAcquisitionOperation>(
-    limits: RecursiveAcquisitionLimits,
+async fn read_source_plan<O: RecursiveReadOperation>(
+    limits: RecursiveReadLimits,
     source_index: usize,
     plan: RecursiveSurveyPlan,
     retained_bytes: &mut u64,
@@ -537,8 +535,7 @@ async fn read_source_plan<O: RecursiveAcquisitionOperation>(
             .total_bytes()
             .checked_sub(*retained_bytes)
             .ok_or_else(|| {
-                operation
-                    .accounting_overflow(source_index, RecursiveAcquisitionResource::TotalBytes)
+                operation.accounting_overflow(source_index, RecursiveReadResource::TotalBytes)
             })?;
         let ceiling = limits.object_bytes().min(remaining);
         let exact_operation = RecursiveExactPathOperation {
@@ -548,7 +545,7 @@ async fn read_source_plan<O: RecursiveAcquisitionOperation>(
             limits,
             remaining,
         };
-        let bytes = acquire_exact_path(
+        let bytes = read_exact_path(
             &plan.operator,
             &path.operation_path,
             ceiling,
@@ -564,10 +561,10 @@ async fn read_source_plan<O: RecursiveAcquisitionOperation>(
             )
         })?;
         let length = u64::try_from(bytes.len()).map_err(|_| {
-            operation.accounting_overflow(source_index, RecursiveAcquisitionResource::TotalBytes)
+            operation.accounting_overflow(source_index, RecursiveReadResource::TotalBytes)
         })?;
         *retained_bytes = retained_bytes.checked_add(length).ok_or_else(|| {
-            operation.accounting_overflow(source_index, RecursiveAcquisitionResource::TotalBytes)
+            operation.accounting_overflow(source_index, RecursiveReadResource::TotalBytes)
         })?;
         objects.push(RecursiveSurveyedObject {
             operation_path: path.operation_path,
@@ -582,13 +579,11 @@ struct RecursiveExactPathOperation<'a, O> {
     operation: &'a O,
     source_index: usize,
     operation_path: &'a str,
-    limits: RecursiveAcquisitionLimits,
+    limits: RecursiveReadLimits,
     remaining: u64,
 }
 
-impl<O: RecursiveAcquisitionOperation> ExactPathAcquisitionOperation
-    for RecursiveExactPathOperation<'_, O>
-{
+impl<O: RecursiveReadOperation> ExactPathReadOperation for RecursiveExactPathOperation<'_, O> {
     type Error = O::Error;
 
     fn read(&self, source: opendal::Error) -> O::Error {
@@ -599,14 +594,11 @@ impl<O: RecursiveAcquisitionOperation> ExactPathAcquisitionOperation
     fn limit_exceeded(&self, _: u64, observed_at_least: u64) -> O::Error {
         let (resource, ceiling) = if observed_at_least > self.limits.object_bytes() {
             (
-                RecursiveAcquisitionResource::ObjectBytes,
+                RecursiveReadResource::ObjectBytes,
                 self.limits.object_bytes(),
             )
         } else {
-            (
-                RecursiveAcquisitionResource::TotalBytes,
-                self.limits.total_bytes(),
-            )
+            (RecursiveReadResource::TotalBytes, self.limits.total_bytes())
         };
         self.operation.limit(
             self.source_index,
@@ -620,9 +612,9 @@ impl<O: RecursiveAcquisitionOperation> ExactPathAcquisitionOperation
         self.operation.accounting_overflow(
             self.source_index,
             if self.limits.object_bytes() <= self.remaining {
-                RecursiveAcquisitionResource::ObjectBytes
+                RecursiveReadResource::ObjectBytes
             } else {
-                RecursiveAcquisitionResource::TotalBytes
+                RecursiveReadResource::TotalBytes
             },
         )
     }
@@ -654,7 +646,7 @@ enum Violation {
 }
 
 struct SurveyAccounting {
-    limits: RecursiveAcquisitionLimits,
+    limits: RecursiveReadLimits,
     listed_entries: u64,
     retained_path_bytes: u64,
     selected_objects: u64,
@@ -662,7 +654,7 @@ struct SurveyAccounting {
 }
 
 impl SurveyAccounting {
-    fn new(limits: RecursiveAcquisitionLimits) -> Self {
+    fn new(limits: RecursiveReadLimits) -> Self {
         Self {
             limits,
             listed_entries: 0,
@@ -775,12 +767,12 @@ impl SurveyAccounting {
         }
     }
 
-    fn error<O: RecursiveAcquisitionOperation>(&self, operation: &O) -> Option<O::Error> {
+    fn error<O: RecursiveReadOperation>(&self, operation: &O) -> Option<O::Error> {
         let resources = [
-            RecursiveAcquisitionResource::ListedEntries,
-            RecursiveAcquisitionResource::ListedPathBytes,
-            RecursiveAcquisitionResource::TotalListedPathBytes,
-            RecursiveAcquisitionResource::SelectedObjects,
+            RecursiveReadResource::ListedEntries,
+            RecursiveReadResource::ListedPathBytes,
+            RecursiveReadResource::TotalListedPathBytes,
+            RecursiveReadResource::SelectedObjects,
         ];
         self.violations
             .iter()
@@ -799,11 +791,11 @@ impl SurveyAccounting {
     }
 }
 
-impl RecursiveAcquisitionSelection {
+impl RecursiveReadSelection {
     fn selects(self, relative_path: &str) -> bool {
         match self {
             Self::AllFiles | Self::PackageTree => true,
-            Self::FontContainers => acquisition_layout::is_font_container_key(relative_path),
+            Self::FontContainers => read_layout::is_font_container_key(relative_path),
         }
     }
 }
@@ -858,16 +850,16 @@ mod tests {
 
     static TEST_OPERATION: TestOperation = TestOperation;
 
-    async fn acquire_recursive_prefix<R: OperatorResolver + ?Sized>(
+    async fn read_recursive_prefix<R: OperatorResolver + ?Sized>(
         resolver: &R,
         location: &Location,
-        selection: RecursiveAcquisitionSelection,
-        limits: RecursiveAcquisitionLimits,
+        selection: RecursiveReadSelection,
+        limits: RecursiveReadLimits,
     ) -> Result<Vec<RecursiveSurveyedObject>, TestError> {
-        if selection == RecursiveAcquisitionSelection::PackageTree {
-            acquire_package_tree_recursive_prefix(resolver, location, limits, &TEST_OPERATION).await
+        if selection == RecursiveReadSelection::PackageTree {
+            read_package_tree_recursive_prefix(resolver, location, limits, &TEST_OPERATION).await
         } else {
-            super::acquire_recursive_prefix(resolver, location, selection, limits, &TEST_OPERATION)
+            super::read_recursive_prefix(resolver, location, selection, limits, &TEST_OPERATION)
                 .await
         }
     }
@@ -892,18 +884,18 @@ mod tests {
         Structural(Vec<RecursiveSurveyIssue>),
         InvalidPackageTree(PackageTreeError),
         Limit {
-            resource: RecursiveAcquisitionResource,
+            resource: RecursiveReadResource,
             ceiling: u64,
             observed_at_least: u64,
         },
         AccountingOverflow {
-            resource: RecursiveAcquisitionResource,
+            resource: RecursiveReadResource,
         },
     }
 
     struct TestOperation;
 
-    impl RecursiveAcquisitionOperation for TestOperation {
+    impl RecursiveReadOperation for TestOperation {
         type Error = TestError;
 
         fn invalid_location_role(&self, _: usize, _: LocationRoleError) -> TestError {
@@ -958,7 +950,7 @@ mod tests {
         fn limit(
             &self,
             _: usize,
-            resource: RecursiveAcquisitionResource,
+            resource: RecursiveReadResource,
             ceiling: u64,
             observed_at_least: u64,
         ) -> TestError {
@@ -969,16 +961,12 @@ mod tests {
             }
         }
 
-        fn accounting_overflow(
-            &self,
-            _: usize,
-            resource: RecursiveAcquisitionResource,
-        ) -> TestError {
+        fn accounting_overflow(&self, _: usize, resource: RecursiveReadResource) -> TestError {
             TestError::AccountingOverflow { resource }
         }
     }
 
-    impl PackageTreeRecursiveAcquisitionOperation for TestOperation {
+    impl PackageTreeRecursiveReadOperation for TestOperation {
         fn invalid_package_tree(&self, _: usize, source: PackageTreeError) -> TestError {
             TestError::InvalidPackageTree(source)
         }
@@ -1003,14 +991,14 @@ mod tests {
         let service = ScriptedService::new(Capabilities::all(), [list], reads, 16);
         let resolver = DirectResolver(service.operator());
         let location = location("");
-        let mut acquisition = pin!(acquire_recursive_prefix(
+        let mut read = pin!(read_recursive_prefix(
             &resolver,
             &location,
-            RecursiveAcquisitionSelection::AllFiles,
+            RecursiveReadSelection::AllFiles,
             limits(),
         ));
 
-        let objects = expect_ready(acquisition.as_mut()).unwrap();
+        let objects = expect_ready(read.as_mut()).unwrap();
         assert_eq!(
             objects
                 .iter()
@@ -1051,14 +1039,14 @@ mod tests {
         let service = ScriptedService::new(Capabilities::all(), [list], [], 16);
         let resolver = DirectResolver(service.operator());
         let location = location("project/");
-        let mut acquisition = pin!(acquire_recursive_prefix(
+        let mut read = pin!(read_recursive_prefix(
             &resolver,
             &location,
-            RecursiveAcquisitionSelection::AllFiles,
+            RecursiveReadSelection::AllFiles,
             limits(),
         ));
 
-        let error = expect_ready(acquisition.as_mut()).unwrap_err();
+        let error = expect_ready(read.as_mut()).unwrap_err();
         let TestError::Structural(issues) = error else {
             panic!("unexpected error: {error:?}");
         };
@@ -1103,19 +1091,19 @@ mod tests {
             let list = ListScript::new("p/", 3, [ListStep::page(entries)]).unwrap();
             let service = ScriptedService::new(Capabilities::all(), [list], [], 8);
             let resolver = DirectResolver(service.operator());
-            let constrained = RecursiveAcquisitionLimits::new(2, 6, 5, 1, 128, 1024);
+            let constrained = RecursiveReadLimits::new(2, 6, 5, 1, 128, 1024);
             let location = location("p/");
-            let mut acquisition = pin!(acquire_recursive_prefix(
+            let mut read = pin!(read_recursive_prefix(
                 &resolver,
                 &location,
-                RecursiveAcquisitionSelection::AllFiles,
+                RecursiveReadSelection::AllFiles,
                 constrained,
             ));
 
             assert!(matches!(
-                expect_ready(acquisition.as_mut()).unwrap_err(),
+                expect_ready(read.as_mut()).unwrap_err(),
                 TestError::Limit {
-                    resource: RecursiveAcquisitionResource::ListedEntries,
+                    resource: RecursiveReadResource::ListedEntries,
                     ceiling: 2,
                     observed_at_least: 3,
                 }
@@ -1136,19 +1124,19 @@ mod tests {
             let list = ListScript::new("p/", 2, [ListStep::page(entries)]).unwrap();
             let service = ScriptedService::new(Capabilities::all(), [list], [], 8);
             let resolver = DirectResolver(service.operator());
-            let constrained = RecursiveAcquisitionLimits::new(32, 128, 10, 1, 128, 1024);
+            let constrained = RecursiveReadLimits::new(32, 128, 10, 1, 128, 1024);
             let prefix = location("p/");
-            let mut acquisition = pin!(acquire_recursive_prefix(
+            let mut read = pin!(read_recursive_prefix(
                 &resolver,
                 &prefix,
-                RecursiveAcquisitionSelection::AllFiles,
+                RecursiveReadSelection::AllFiles,
                 constrained,
             ));
 
             assert!(matches!(
-                expect_ready(acquisition.as_mut()).unwrap_err(),
+                expect_ready(read.as_mut()).unwrap_err(),
                 TestError::Limit {
-                    resource: RecursiveAcquisitionResource::TotalListedPathBytes,
+                    resource: RecursiveReadResource::TotalListedPathBytes,
                     ceiling: 10,
                     observed_at_least: 11,
                 }
@@ -1160,41 +1148,41 @@ mod tests {
     fn every_finite_survey_limit_accepts_exact_and_rejects_plus_one() {
         let cases = [
             (
-                RecursiveAcquisitionResource::ListedEntries,
-                RecursiveAcquisitionLimits::new(1, 128, 1024, 32, 128, 1024),
+                RecursiveReadResource::ListedEntries,
+                RecursiveReadLimits::new(1, 128, 1024, 32, 128, 1024),
             ),
             (
-                RecursiveAcquisitionResource::ListedPathBytes,
-                RecursiveAcquisitionLimits::new(32, 6, 1024, 32, 128, 1024),
+                RecursiveReadResource::ListedPathBytes,
+                RecursiveReadLimits::new(32, 6, 1024, 32, 128, 1024),
             ),
             (
-                RecursiveAcquisitionResource::TotalListedPathBytes,
-                RecursiveAcquisitionLimits::new(32, 128, 4, 32, 128, 1024),
+                RecursiveReadResource::TotalListedPathBytes,
+                RecursiveReadLimits::new(32, 128, 4, 32, 128, 1024),
             ),
             (
-                RecursiveAcquisitionResource::SelectedObjects,
-                RecursiveAcquisitionLimits::new(32, 128, 1024, 1, 128, 1024),
+                RecursiveReadResource::SelectedObjects,
+                RecursiveReadLimits::new(32, 128, 1024, 1, 128, 1024),
             ),
         ];
 
         for (resource, constrained) in cases {
             let exact_entries = match resource {
-                RecursiveAcquisitionResource::ListedEntries => {
+                RecursiveReadResource::ListedEntries => {
                     vec![ListEntry::directory("p/dir/")]
                 }
-                RecursiveAcquisitionResource::ListedPathBytes => {
+                RecursiveReadResource::ListedPathBytes => {
                     vec![ListEntry::directory("p/dir/")]
                 }
-                RecursiveAcquisitionResource::TotalListedPathBytes
-                | RecursiveAcquisitionResource::SelectedObjects => {
+                RecursiveReadResource::TotalListedPathBytes
+                | RecursiveReadResource::SelectedObjects => {
                     vec![ListEntry::file("p/a")]
                 }
                 _ => unreachable!(),
             };
             let exact_reads = matches!(
                 resource,
-                RecursiveAcquisitionResource::TotalListedPathBytes
-                    | RecursiveAcquisitionResource::SelectedObjects
+                RecursiveReadResource::TotalListedPathBytes
+                    | RecursiveReadResource::SelectedObjects
             )
             .then(|| ReadScript::new("p/a", 1, [ReadStep::chunk(b"a")]).unwrap());
             let exact_list =
@@ -1204,25 +1192,25 @@ mod tests {
                 ScriptedService::new(Capabilities::all(), [exact_list], exact_reads, 4);
             let exact_resolver = DirectResolver(exact_service.operator());
             let prefix = location("p/");
-            let mut exact = pin!(acquire_recursive_prefix(
+            let mut exact = pin!(read_recursive_prefix(
                 &exact_resolver,
                 &prefix,
-                RecursiveAcquisitionSelection::AllFiles,
+                RecursiveReadSelection::AllFiles,
                 constrained,
             ));
             expect_ready(exact.as_mut()).unwrap();
 
             let over_entries = match resource {
-                RecursiveAcquisitionResource::ListedEntries => {
+                RecursiveReadResource::ListedEntries => {
                     vec![ListEntry::directory("p/a/"), ListEntry::directory("p/b/")]
                 }
-                RecursiveAcquisitionResource::ListedPathBytes => {
+                RecursiveReadResource::ListedPathBytes => {
                     vec![ListEntry::directory("p/long/")]
                 }
-                RecursiveAcquisitionResource::TotalListedPathBytes => {
+                RecursiveReadResource::TotalListedPathBytes => {
                     vec![ListEntry::file("p/ab")]
                 }
-                RecursiveAcquisitionResource::SelectedObjects => {
+                RecursiveReadResource::SelectedObjects => {
                     vec![ListEntry::file("p/a"), ListEntry::file("p/b")]
                 }
                 _ => unreachable!(),
@@ -1232,10 +1220,10 @@ mod tests {
             let over_service = ScriptedService::new(Capabilities::all(), [over_list], [], 4);
             let over_resolver = DirectResolver(over_service.operator());
             let prefix = location("p/");
-            let mut over = pin!(acquire_recursive_prefix(
+            let mut over = pin!(read_recursive_prefix(
                 &over_resolver,
                 &prefix,
-                RecursiveAcquisitionSelection::AllFiles,
+                RecursiveReadSelection::AllFiles,
                 constrained,
             ));
             assert!(matches!(
@@ -1252,18 +1240,8 @@ mod tests {
     fn payload_limits_use_per_object_before_total_and_preserve_exact_boundaries() {
         for (name, object_bytes, total_bytes, expected) in [
             ("exact", 4, 4, None),
-            (
-                "object",
-                3,
-                8,
-                Some(RecursiveAcquisitionResource::ObjectBytes),
-            ),
-            (
-                "both",
-                3,
-                3,
-                Some(RecursiveAcquisitionResource::ObjectBytes),
-            ),
+            ("object", 3, 8, Some(RecursiveReadResource::ObjectBytes)),
+            ("both", 3, 3, Some(RecursiveReadResource::ObjectBytes)),
         ] {
             let path = format!("p/{name}");
             let list = ListScript::new("p/", 1, [ListStep::page([ListEntry::file(path.clone())])])
@@ -1273,21 +1251,18 @@ mod tests {
             let resolver = DirectResolver(service.operator());
             let location = location("p/");
             let constrained =
-                RecursiveAcquisitionLimits::new(32, 128, 1024, 32, object_bytes, total_bytes);
-            let mut acquisition = pin!(acquire_recursive_prefix(
+                RecursiveReadLimits::new(32, 128, 1024, 32, object_bytes, total_bytes);
+            let mut read = pin!(read_recursive_prefix(
                 &resolver,
                 &location,
-                RecursiveAcquisitionSelection::AllFiles,
+                RecursiveReadSelection::AllFiles,
                 constrained,
             ));
 
             match expected {
-                None => assert_eq!(
-                    expect_ready(acquisition.as_mut()).unwrap()[0].bytes,
-                    b"four"
-                ),
+                None => assert_eq!(expect_ready(read.as_mut()).unwrap()[0].bytes, b"four"),
                 Some(resource) => assert!(matches!(
-                    expect_ready(acquisition.as_mut()).unwrap_err(),
+                    expect_ready(read.as_mut()).unwrap_err(),
                     TestError::Limit {
                         resource: actual,
                         observed_at_least: 4,
@@ -1316,18 +1291,18 @@ mod tests {
         let service = ScriptedService::new(Capabilities::all(), [list], reads, 16);
         let resolver = DirectResolver(service.operator());
         let location = location("p/");
-        let constrained = RecursiveAcquisitionLimits::new(32, 128, 1024, 32, 5, 7);
-        let mut acquisition = pin!(acquire_recursive_prefix(
+        let constrained = RecursiveReadLimits::new(32, 128, 1024, 32, 5, 7);
+        let mut read = pin!(read_recursive_prefix(
             &resolver,
             &location,
-            RecursiveAcquisitionSelection::AllFiles,
+            RecursiveReadSelection::AllFiles,
             constrained,
         ));
 
         assert!(matches!(
-            expect_ready(acquisition.as_mut()).unwrap_err(),
+            expect_ready(read.as_mut()).unwrap_err(),
             TestError::Limit {
-                resource: RecursiveAcquisitionResource::ObjectBytes,
+                resource: RecursiveReadResource::ObjectBytes,
                 ceiling: 5,
                 observed_at_least: 6,
             }
@@ -1348,18 +1323,18 @@ mod tests {
             let service = ScriptedService::new(Capabilities::all(), [list], reads, 16);
             let resolver = DirectResolver(service.operator());
             let location = location("p/");
-            let constrained = RecursiveAcquisitionLimits::new(32, 128, 1024, 32, 5, 7);
-            let mut acquisition = pin!(acquire_recursive_prefix(
+            let constrained = RecursiveReadLimits::new(32, 128, 1024, 32, 5, 7);
+            let mut read = pin!(read_recursive_prefix(
                 &resolver,
                 &location,
-                RecursiveAcquisitionSelection::AllFiles,
+                RecursiveReadSelection::AllFiles,
                 constrained,
             ));
 
             assert!(matches!(
-                expect_ready(acquisition.as_mut()).unwrap_err(),
+                expect_ready(read.as_mut()).unwrap_err(),
                 TestError::Limit {
-                    resource: RecursiveAcquisitionResource::TotalBytes,
+                    resource: RecursiveReadResource::TotalBytes,
                     ceiling: 7,
                     observed_at_least: 8,
                 }
@@ -1382,15 +1357,15 @@ mod tests {
         let service = ScriptedService::new(Capabilities::all(), [list], reads, 16);
         let resolver = DirectResolver(service.operator());
         let location = location("p/");
-        let exact = RecursiveAcquisitionLimits::new(32, 128, 1024, 32, 5, 8);
-        let mut acquisition = pin!(acquire_recursive_prefix(
+        let exact = RecursiveReadLimits::new(32, 128, 1024, 32, 5, 8);
+        let mut read = pin!(read_recursive_prefix(
             &resolver,
             &location,
-            RecursiveAcquisitionSelection::AllFiles,
+            RecursiveReadSelection::AllFiles,
             exact,
         ));
         assert_eq!(
-            expect_ready(acquisition.as_mut())
+            expect_ready(read.as_mut())
                 .unwrap()
                 .iter()
                 .map(|object| object.bytes.len())
@@ -1407,24 +1382,18 @@ mod tests {
         assert!(matches!(
             accounting.error(&TEST_OPERATION),
             Some(TestError::AccountingOverflow {
-                resource: RecursiveAcquisitionResource::ListedEntries,
+                resource: RecursiveReadResource::ListedEntries,
             })
         ));
 
-        let mut accounting = SurveyAccounting::new(RecursiveAcquisitionLimits::new(
-            32,
-            128,
-            u64::MAX,
-            32,
-            128,
-            1024,
-        ));
+        let mut accounting =
+            SurveyAccounting::new(RecursiveReadLimits::new(32, 128, u64::MAX, 32, 128, 1024));
         accounting.retained_path_bytes = u64::MAX;
         assert!(!accounting.retain_paths(0, &[1]));
         assert!(matches!(
             accounting.error(&TEST_OPERATION),
             Some(TestError::AccountingOverflow {
-                resource: RecursiveAcquisitionResource::TotalListedPathBytes,
+                resource: RecursiveReadResource::TotalListedPathBytes,
             })
         ));
     }
@@ -1446,14 +1415,14 @@ mod tests {
             let service = ScriptedService::new(capabilities, [], [], 4);
             let resolver = DirectResolver(service.operator());
             let location = location("p/");
-            let mut acquisition = pin!(acquire_recursive_prefix(
+            let mut read = pin!(read_recursive_prefix(
                 &resolver,
                 &location,
-                RecursiveAcquisitionSelection::AllFiles,
+                RecursiveReadSelection::AllFiles,
                 limits(),
             ));
             assert!(matches!(
-                expect_ready(acquisition.as_mut()).unwrap_err(),
+                expect_ready(read.as_mut()).unwrap_err(),
                 TestError::UnsupportedCapabilities { .. }
             ));
             assert!(service.log().entries().is_empty());
@@ -1471,14 +1440,14 @@ mod tests {
         );
         let resolver = DirectResolver(service.operator());
         let source = location("p/");
-        let mut acquisition = pin!(acquire_recursive_prefix(
+        let mut read = pin!(read_recursive_prefix(
             &resolver,
             &source,
-            RecursiveAcquisitionSelection::AllFiles,
+            RecursiveReadSelection::AllFiles,
             limits(),
         ));
         assert!(matches!(
-            expect_ready(acquisition.as_mut()).unwrap_err(),
+            expect_ready(read.as_mut()).unwrap_err(),
             TestError::UnsupportedCapabilities {
                 list: true,
                 list_with_recursive: true,
@@ -1506,14 +1475,14 @@ mod tests {
         let service = ScriptedService::new(Capabilities::all(), [list], [read], 8);
         let resolver = DirectResolver(service.operator());
         let location = location("p/");
-        let mut acquisition = pin!(acquire_recursive_prefix(
+        let mut read = pin!(read_recursive_prefix(
             &resolver,
             &location,
-            RecursiveAcquisitionSelection::AllFiles,
+            RecursiveReadSelection::AllFiles,
             limits(),
         ));
         assert!(matches!(
-            expect_ready(acquisition.as_mut()).unwrap_err(),
+            expect_ready(read.as_mut()).unwrap_err(),
             TestError::List(source)
                 if source.kind() == ErrorKind::PermissionDenied
         ));
@@ -1545,15 +1514,15 @@ mod tests {
         let service = ScriptedService::new(Capabilities::all(), [list], reads, 16);
         let resolver = DirectResolver(service.operator());
         let location = location("fonts/");
-        let mut acquisition = pin!(acquire_recursive_prefix(
+        let mut read = pin!(read_recursive_prefix(
             &resolver,
             &location,
-            RecursiveAcquisitionSelection::FontContainers,
+            RecursiveReadSelection::FontContainers,
             limits(),
         ));
 
         assert_eq!(
-            expect_ready(acquisition.as_mut())
+            expect_ready(read.as_mut())
                 .unwrap()
                 .into_iter()
                 .map(|object| object.relative_path)
@@ -1574,14 +1543,14 @@ mod tests {
         let service = ScriptedService::new(Capabilities::all(), [list], [read], 8);
         let resolver = DirectResolver(service.operator());
         let location = location("package/");
-        let mut acquisition = pin!(acquire_recursive_prefix(
+        let mut read = pin!(read_recursive_prefix(
             &resolver,
             &location,
-            RecursiveAcquisitionSelection::PackageTree,
+            RecursiveReadSelection::PackageTree,
             limits(),
         ));
 
-        let objects = expect_ready(acquisition.as_mut()).unwrap();
+        let objects = expect_ready(read.as_mut()).unwrap();
         assert_eq!(objects[0].operation_path, "package/./lib.typ");
         assert_eq!(objects[0].relative_path, "lib.typ");
         assert_eq!(objects[0].bytes, b"library");
@@ -1613,15 +1582,15 @@ mod tests {
         let service = ScriptedService::new(Capabilities::all(), [list], [original], 8);
         let resolver = DirectResolver(service.operator());
         let location = location("race/");
-        let mut acquisition = pin!(acquire_recursive_prefix(
+        let mut read = pin!(read_recursive_prefix(
             &resolver,
             &location,
-            RecursiveAcquisitionSelection::AllFiles,
+            RecursiveReadSelection::AllFiles,
             limits(),
         ));
 
         assert_eq!(
-            expect_ready(acquisition.as_mut()).unwrap()[0].bytes,
+            expect_ready(read.as_mut()).unwrap()[0].bytes,
             b"value after listing"
         );
         assert!(matches!(
@@ -1647,18 +1616,18 @@ mod tests {
         let service = ScriptedService::new(Capabilities::all(), [list], [], 4);
         let resolver = DirectResolver(service.operator());
         let location = location("p/");
-        let constrained = RecursiveAcquisitionLimits::new(32, 4, 1024, 32, 128, 1024);
-        let mut acquisition = pin!(acquire_recursive_prefix(
+        let constrained = RecursiveReadLimits::new(32, 4, 1024, 32, 128, 1024);
+        let mut read = pin!(read_recursive_prefix(
             &resolver,
             &location,
-            RecursiveAcquisitionSelection::AllFiles,
+            RecursiveReadSelection::AllFiles,
             constrained,
         ));
 
         assert!(matches!(
-            expect_ready(acquisition.as_mut()).unwrap_err(),
+            expect_ready(read.as_mut()).unwrap_err(),
             TestError::Limit {
-                resource: RecursiveAcquisitionResource::ListedPathBytes,
+                resource: RecursiveReadResource::ListedPathBytes,
                 ceiling: 4,
                 observed_at_least: 5,
             }
@@ -1675,14 +1644,14 @@ mod tests {
             }
             let resolver = DirectResolver(operator);
             let location = location(prefix);
-            let mut acquisition = pin!(acquire_recursive_prefix(
+            let mut read = pin!(read_recursive_prefix(
                 &resolver,
                 &location,
-                RecursiveAcquisitionSelection::AllFiles,
+                RecursiveReadSelection::AllFiles,
                 limits(),
             ));
 
-            let objects = expect_ready(acquisition.as_mut()).unwrap();
+            let objects = expect_ready(read.as_mut()).unwrap();
             assert_eq!(objects.len(), 1);
             assert_eq!(objects[0].bytes, b"memory bytes");
         }
@@ -1702,14 +1671,14 @@ mod tests {
         let service = ScriptedService::new(Capabilities::all(), [list], [], 8);
         let resolver = DirectResolver(service.operator());
         let location = location("package/");
-        let mut acquisition = pin!(acquire_recursive_prefix(
+        let mut read = pin!(read_recursive_prefix(
             &resolver,
             &location,
-            RecursiveAcquisitionSelection::PackageTree,
+            RecursiveReadSelection::PackageTree,
             limits(),
         ));
 
-        let error = expect_ready(acquisition.as_mut()).unwrap_err();
+        let error = expect_ready(read.as_mut()).unwrap_err();
         assert!(matches!(
             error,
             TestError::InvalidPackageTree(source)
@@ -1735,15 +1704,15 @@ mod tests {
         let service = ScriptedService::new(Capabilities::all(), [list], [], 8);
         let resolver = DirectResolver(service.operator());
         let location = location("race/");
-        let mut acquisition = pin!(acquire_recursive_prefix(
+        let mut read = pin!(read_recursive_prefix(
             &resolver,
             &location,
-            RecursiveAcquisitionSelection::AllFiles,
+            RecursiveReadSelection::AllFiles,
             limits(),
         ));
 
         assert!(matches!(
-            expect_ready(acquisition.as_mut()).unwrap_err(),
+            expect_ready(read.as_mut()).unwrap_err(),
             TestError::ListedObjectAbsent { operation_path, .. }
                 if operation_path == "race/gone.typ"
         ));
@@ -1769,15 +1738,15 @@ mod tests {
         let service = ScriptedService::new(Capabilities::all(), [list], [read], 8);
         let resolver = DirectResolver(service.operator());
         let location = location("race/");
-        let mut acquisition = pin!(acquire_recursive_prefix(
+        let mut read = pin!(read_recursive_prefix(
             &resolver,
             &location,
-            RecursiveAcquisitionSelection::AllFiles,
+            RecursiveReadSelection::AllFiles,
             limits(),
         ));
 
         assert!(matches!(
-            expect_ready(acquisition.as_mut()).unwrap_err(),
+            expect_ready(read.as_mut()).unwrap_err(),
             TestError::Read { operation_path, source }
                 if operation_path == "race/partial.typ" && source.kind() == ErrorKind::NotFound
         ));
@@ -1800,13 +1769,13 @@ mod tests {
         let resolver = DirectResolver(service.operator());
         {
             let location = location("pending/");
-            let mut acquisition = pin!(acquire_recursive_prefix(
+            let mut read = pin!(read_recursive_prefix(
                 &resolver,
                 &location,
-                RecursiveAcquisitionSelection::AllFiles,
+                RecursiveReadSelection::AllFiles,
                 limits(),
             ));
-            assert!(matches!(poll_once(acquisition.as_mut()), Poll::Pending));
+            assert!(matches!(poll_once(read.as_mut()), Poll::Pending));
             assert!(pending.was_observed());
         }
 
@@ -1819,8 +1788,8 @@ mod tests {
         );
     }
 
-    fn limits() -> RecursiveAcquisitionLimits {
-        RecursiveAcquisitionLimits::new(32, 128, 1024, 32, 128, 1024)
+    fn limits() -> RecursiveReadLimits {
+        RecursiveReadLimits::new(32, 128, 1024, 32, 128, 1024)
     }
 
     fn issue(path: &str, kind: RecursiveSurveyIssueKind) -> RecursiveSurveyIssue {

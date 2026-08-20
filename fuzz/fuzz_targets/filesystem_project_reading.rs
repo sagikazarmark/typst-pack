@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use typst_pack::{FilesystemProjectLimits, gather_filesystem_project};
+use typst_pack::{FilesystemProjectLimits, read_filesystem_project};
 
 fuzz_target!(|data: &[u8]| {
     let directory = tempfile::tempdir().unwrap();
@@ -62,5 +62,5 @@ fuzz_target!(|data: &[u8]| {
         FilesystemProjectLimits::new(value(1), value(2), value(3), value(4), value(5)).unwrap()
     };
 
-    let _ = gather_filesystem_project(root, "main.typ", limits);
+    let _ = read_filesystem_project(root, "main.typ", limits);
 });

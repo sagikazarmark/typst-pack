@@ -3,8 +3,8 @@
 use std::sync::OnceLock;
 
 use libfuzzer_sys::fuzz_target;
-use typst_pack::opendal::publication::{
-    CompilationArtifactPublicationRequest, PublicationPolicy,
+use typst_pack::opendal::write::{
+    CompilationArtifactWriteRequest, WritePolicy,
 };
 use typst_pack::opendal::{Location, OperatorBinding};
 use typst_pack::{
@@ -28,13 +28,13 @@ fuzz_target!(|data: &[u8]| {
         Location::parse("fuzz:/artifacts").unwrap()
     };
     let policy = if data.get(1).is_some_and(|byte| byte & 1 == 0) {
-        PublicationPolicy::CreateOrVerify
+        WritePolicy::CreateOrVerify
     } else {
-        PublicationPolicy::OverwriteExactKeys
+        WritePolicy::OverwriteExactKeys
     };
 
     if let Ok(request) =
-        CompilationArtifactPublicationRequest::new(result, destination, keys.clone(), policy)
+        CompilationArtifactWriteRequest::new(result, destination, keys.clone(), policy)
     {
         assert_eq!(request.compilation_result_identity(), result.result_identity());
         assert_eq!(request.artifact_keys(), keys);
@@ -48,7 +48,7 @@ fuzz_target!(|data: &[u8]| {
         }
     }
 
-    let literal_percent = CompilationArtifactPublicationRequest::new(
+    let literal_percent = CompilationArtifactWriteRequest::new(
         result,
         Location::parse("fuzz:/artifacts/").unwrap(),
         ["tree%", "tree%/page%2F.svg"],

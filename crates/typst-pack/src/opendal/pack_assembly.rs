@@ -1,4 +1,4 @@
-//! OpenDAL acquisition for Pack Assembly inputs.
+//! OpenDAL read for Pack Assembly inputs.
 //!
 //! # Complete Pack Assembly
 //!
@@ -6,49 +6,49 @@
 //! owned values compose through the existing synchronous Pack Creation loop:
 //!
 //! ```no_run
-//! # #[cfg(feature = "package-acquisition")]
+//! # #[cfg(feature = "package-reading")]
 //! # mod complete {
 //! use std::collections::HashSet;
 //!
 //! use typst::foundations::Dict;
 //! use typst_pack::opendal::{Location, OperatorBindings};
 //! use typst_pack::opendal::pack_assembly::{
-//!     FontAcquisitionEntry, FontAcquisitionLimits, FontAcquisitionRequest, FontSource,
-//!     PackageAcquisitionLimits, PackageAcquisitionRequest, PackageTreeSource,
-//!     ProjectAcquisitionEntry, ProjectAcquisitionLimits, ProjectAcquisitionRequest,
-//!     acquire_fonts, acquire_package, acquire_project, insert_acquired_package,
+//!     FontReadEntry, FontReadLimits, FontReadRequest, FontSource,
+//!     PackageReadLimits, PackageReadRequest, PackageTreeSource,
+//!     ProjectReadEntry, ProjectReadLimits, ProjectReadRequest,
+//!     read_fonts, read_package, read_project, insert_read_package,
 //! };
-//! use typst_pack::opendal::publication::{
-//!     PackageCacheArchivePublicationRequest, publish_package_cache_archive,
+//! use typst_pack::opendal::write::{
+//!     PackageCacheArchiveWriteRequest, write_package_cache_archive,
 //! };
 //! use typst_pack::{
 //!     DiscoverySpecification, DocumentTime, FontCatalog, FontCatalogEntry, FontContainer,
 //!     FontDisposition, Pack, PackCreationInput, PackCreationOutcome,
-//!     PackageAcquisitionFailures, PackageCatalog, PackageDisposition,
+//!     PackageReadFailures, PackageCatalog, PackageDisposition,
 //!     PackageExpansionLimits, ProjectSnapshotAssembly, TypstTarget, create,
 //! };
 //!
 //! async fn assemble(bindings: &OperatorBindings) -> Result<Pack, Box<dyn std::error::Error>> {
-//!     let project_request = ProjectAcquisitionRequest::new(
+//!     let project_request = ProjectReadRequest::new(
 //!         "project:/sources/document/".parse::<Location>()?,
-//!         ProjectAcquisitionLimits::reference_v1(),
+//!         ProjectReadLimits::reference_v1(),
 //!     )?;
-//!     let (_, project_entries) = acquire_project(bindings, &project_request).await?.into_parts();
+//!     let (_, project_entries) = read_project(bindings, &project_request).await?.into_parts();
 //!     let project = ProjectSnapshotAssembly::new("main.typ").assemble(
-//!         project_entries.into_iter().map(ProjectAcquisitionEntry::into_parts),
+//!         project_entries.into_iter().map(ProjectReadEntry::into_parts),
 //!     )?;
 //!
-//!     let font_request = FontAcquisitionRequest::new(
+//!     let font_request = FontReadRequest::new(
 //!         [FontSource::new(
 //!             "fonts:/catalog/".parse::<Location>()?,
 //!             FontDisposition::Embedded,
 //!         )],
-//!         FontAcquisitionLimits::reference_v1(),
+//!         FontReadLimits::reference_v1(),
 //!     )?;
-//!     let (_, font_entries) = acquire_fonts(bindings, &font_request).await?.into_parts();
+//!     let (_, font_entries) = read_fonts(bindings, &font_request).await?.into_parts();
 //!     let mut fonts = FontCatalog::new();
 //!     for entry in font_entries {
-//!         let (_, _, _, disposition, bytes) = FontAcquisitionEntry::into_parts(entry);
+//!         let (_, _, _, disposition, bytes) = FontReadEntry::into_parts(entry);
 //!         fonts.push(FontCatalogEntry::new(FontContainer::new(bytes)?, disposition));
 //!     }
 //!
@@ -62,7 +62,7 @@
 //!         [],
 //!     )?;
 //!     let mut packages = PackageCatalog::new();
-//!     let mut failures = PackageAcquisitionFailures::new();
+//!     let mut failures = PackageReadFailures::new();
 //!     let mut attempted = HashSet::new();
 //!
 //!     loop {
@@ -80,36 +80,36 @@
 //!                     if !attempted.insert(spec.to_string()) {
 //!                         return Err("Pack Creation repeated an attempted specification".into());
 //!                     }
-//!                     let request = PackageAcquisitionRequest::new(
+//!                     let request = PackageReadRequest::new(
 //!                         spec,
 //!                         [tree_source.clone()],
 //!                         Some(archive_cache.clone()),
 //!                         Some(registry.clone()),
-//!                         PackageAcquisitionLimits::reference_v1(),
+//!                         PackageReadLimits::reference_v1(),
 //!                     )?;
-//!                     let acquisition = acquire_package(bindings, &request).await?;
-//!                     let insertion = insert_acquired_package(
+//!                     let read = read_package(bindings, &request).await?;
+//!                     let insertion = insert_read_package(
 //!                         &mut packages,
 //!                         &mut failures,
-//!                         acquisition,
+//!                         read,
 //!                         PackageDisposition::Embedded,
 //!                         PackageExpansionLimits::reference_v1(),
 //!                     );
 //!                     match insertion {
 //!                         Ok(Some(residue)) => {
-//!                             let publication = PackageCacheArchivePublicationRequest::new(
+//!                             let write = PackageCacheArchiveWriteRequest::new(
 //!                                 residue.destination().clone(),
 //!                             )?;
-//!                             let _cache_result = publish_package_cache_archive(
+//!                             let _cache_result = write_package_cache_archive(
 //!                                 bindings,
-//!                                 &publication,
+//!                                 &write,
 //!                                 residue.bytes(),
 //!                             ).await;
 //!                             // Cache failure is separate evidence and does not
 //!                             // invalidate the inserted Package Tree.
 //!                         }
 //!                         Ok(None) => {}
-//!                         // Insertion retained the mapped Package Acquisition Failure.
+//!                         // Insertion retained the mapped Package Read Failure.
 //!                         // Resume so Dependency Discovery can attach it to the import.
 //!                         Err(_error) => {}
 //!                     }
@@ -127,10 +127,9 @@ pub use package::*;
 
 use std::fmt;
 
-use super::acquisition::recursive::{
-    RecursiveAcquisitionLimits, RecursiveAcquisitionOperation, RecursiveAcquisitionResource,
-    RecursiveAcquisitionSelection, RecursiveSurveyIssue, RecursiveSurveyIssueKind,
-    acquire_recursive_prefix, acquire_recursive_prefixes,
+use super::read::recursive::{
+    RecursiveReadLimits, RecursiveReadOperation, RecursiveReadResource, RecursiveReadSelection,
+    RecursiveSurveyIssue, RecursiveSurveyIssueKind, read_recursive_prefix, read_recursive_prefixes,
 };
 use super::{BoxError, Location, LocationRoleError, OperatorResolver};
 use crate::FontDisposition;
@@ -150,9 +149,9 @@ fn failed_path_context(path: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
-/// Named finite ceilings for one OpenDAL Project Acquisition.
+/// Named finite ceilings for one OpenDAL Project Read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct ProjectAcquisitionCeilings {
+pub struct ProjectReadCeilings {
     pub listed_entries: u64,
     pub listed_path_bytes: u64,
     pub total_listed_path_bytes: u64,
@@ -161,8 +160,8 @@ pub struct ProjectAcquisitionCeilings {
     pub total_bytes: u64,
 }
 
-impl ProjectAcquisitionCeilings {
-    /// The first-party version-1 Project Acquisition profile.
+impl ProjectReadCeilings {
+    /// The first-party version-1 Project Read profile.
     pub const fn reference_v1() -> Self {
         Self {
             listed_entries: 1_000_000,
@@ -175,8 +174,8 @@ impl ProjectAcquisitionCeilings {
     }
 }
 
-/// A resource bounded during OpenDAL Project Acquisition.
-pub type ProjectAcquisitionResource = ResourceKind<9>;
+/// A resource bounded during OpenDAL Project Read.
+pub type ProjectReadResource = ResourceKind<9>;
 
 #[allow(non_upper_case_globals)]
 impl ResourceKind<9> {
@@ -188,17 +187,15 @@ impl ResourceKind<9> {
     pub const TotalBytes: Self = Self::new(5);
 }
 
-/// A supplied Project Acquisition ceiling is internally inconsistent.
-pub type ProjectAcquisitionLimitsError = LimitsError<ProjectAcquisitionResource>;
+/// A supplied Project Read ceiling is internally inconsistent.
+pub type ProjectReadLimitsError = LimitsError<ProjectReadResource>;
 
-/// Mandatory finite limits for OpenDAL Project Acquisition.
-pub type ProjectAcquisitionLimits = Limits<ProjectAcquisitionResource>;
+/// Mandatory finite limits for OpenDAL Project Read.
+pub type ProjectReadLimits = Limits<ProjectReadResource>;
 
-impl Limits<ProjectAcquisitionResource> {
-    /// Validates all named acquisition ceilings.
-    pub fn new(
-        ceilings: ProjectAcquisitionCeilings,
-    ) -> Result<Self, ProjectAcquisitionLimitsError> {
+impl Limits<ProjectReadResource> {
+    /// Validates all named read ceilings.
+    pub fn new(ceilings: ProjectReadCeilings) -> Result<Self, ProjectReadLimitsError> {
         let limits = Self::from_ceilings([
             ceilings.listed_entries,
             ceilings.listed_path_bytes,
@@ -209,11 +206,11 @@ impl Limits<ProjectAcquisitionResource> {
             0,
         ])
         .validate_probe_resources([
-            ProjectAcquisitionResource::ObjectBytes,
-            ProjectAcquisitionResource::TotalBytes,
+            ProjectReadResource::ObjectBytes,
+            ProjectReadResource::TotalBytes,
         ])?;
         if ceilings.object_bytes > ceilings.total_bytes {
-            return Err(ProjectAcquisitionLimitsError::ObjectBytesExceedTotalBytes {
+            return Err(ProjectReadLimitsError::ObjectBytesExceedTotalBytes {
                 object_bytes: ceilings.object_bytes,
                 total_bytes: ceilings.total_bytes,
             });
@@ -221,7 +218,7 @@ impl Limits<ProjectAcquisitionResource> {
         Ok(limits)
     }
 
-    /// The validated first-party version-1 Project Acquisition limits.
+    /// The validated first-party version-1 Project Read limits.
     pub const fn reference_v1() -> Self {
         Self::from_ceilings([
             1_000_000,
@@ -259,24 +256,24 @@ impl Limits<ProjectAcquisitionResource> {
     }
 }
 
-/// Project Acquisition exceeded or could not account for a mandatory limit.
-pub type ProjectAcquisitionLimitError = LimitError<ProjectAcquisitionResource>;
+/// Project Read exceeded or could not account for a mandatory limit.
+pub type ProjectReadLimitError = LimitError<ProjectReadResource>;
 
-/// A validated request to acquire every yielded file below one prefix.
+/// A validated request to read every yielded file below one prefix.
 #[derive(Clone, Debug)]
-pub struct ProjectAcquisitionRequest {
+pub struct ProjectReadRequest {
     source: Location,
-    limits: ProjectAcquisitionLimits,
+    limits: ProjectReadLimits,
 }
 
-impl ProjectAcquisitionRequest {
+impl ProjectReadRequest {
     /// Validates a prefix source and retains its mandatory limits.
     pub fn new(
         source: Location,
-        limits: ProjectAcquisitionLimits,
-    ) -> Result<Self, ProjectAcquisitionRequestError> {
+        limits: ProjectReadLimits,
+    ) -> Result<Self, ProjectReadRequestError> {
         if let Err(role_error) = source.require_prefix() {
-            return Err(ProjectAcquisitionRequestError::InvalidSourceRole {
+            return Err(ProjectReadRequestError::InvalidSourceRole {
                 location: source,
                 source: role_error,
             });
@@ -289,16 +286,16 @@ impl ProjectAcquisitionRequest {
         &self.source
     }
 
-    /// The mandatory finite Project Acquisition limits.
-    pub const fn limits(&self) -> ProjectAcquisitionLimits {
+    /// The mandatory finite Project Read limits.
+    pub const fn limits(&self) -> ProjectReadLimits {
         self.limits
     }
 }
 
-/// A reason a Project Acquisition request is invalid.
+/// A reason a Project Read request is invalid.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[non_exhaustive]
-pub enum ProjectAcquisitionRequestError {
+pub enum ProjectReadRequestError {
     #[error("project source {location} is not a prefix: {source}")]
     InvalidSourceRole {
         location: Location,
@@ -307,13 +304,13 @@ pub enum ProjectAcquisitionRequestError {
     },
 }
 
-/// One exact path-and-byte entry acquired below a project prefix.
-pub struct ProjectAcquisitionEntry {
+/// One exact path-and-byte entry read below a project prefix.
+pub struct ProjectReadEntry {
     relative_path: String,
     bytes: Vec<u8>,
 }
 
-impl ProjectAcquisitionEntry {
+impl ProjectReadEntry {
     /// The operation path relative to the requested prefix.
     pub fn relative_path(&self) -> &str {
         &self.relative_path
@@ -324,12 +321,12 @@ impl ProjectAcquisitionEntry {
         &self.bytes
     }
 
-    /// The acquired byte length.
+    /// The read byte length.
     pub fn len(&self) -> u64 {
         self.bytes.len() as u64
     }
 
-    /// Whether this acquired object was empty.
+    /// Whether this read object was empty.
     pub fn is_empty(&self) -> bool {
         self.bytes.is_empty()
     }
@@ -340,43 +337,43 @@ impl ProjectAcquisitionEntry {
     }
 }
 
-impl fmt::Debug for ProjectAcquisitionEntry {
+impl fmt::Debug for ProjectReadEntry {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("ProjectAcquisitionEntry")
+            .debug_struct("ProjectReadEntry")
             .field("relative_path", &self.relative_path)
             .field("byte_length", &self.bytes.len())
             .finish()
     }
 }
 
-/// Exact entries acquired from one project prefix.
-pub struct ProjectAcquisition {
+/// Exact entries read from one project prefix.
+pub struct ProjectRead {
     source: Location,
-    entries: Vec<ProjectAcquisitionEntry>,
+    entries: Vec<ProjectReadEntry>,
 }
 
-impl ProjectAcquisition {
-    /// The normalized prefix from which entries were acquired.
+impl ProjectRead {
+    /// The normalized prefix from which entries were read.
     pub fn source(&self) -> &Location {
         &self.source
     }
 
-    /// Acquired entries in relative operation-path order.
-    pub fn entries(&self) -> &[ProjectAcquisitionEntry] {
+    /// Read entries in relative operation-path order.
+    pub fn entries(&self) -> &[ProjectReadEntry] {
         &self.entries
     }
 
     /// Recovers the source and owned entries for Project Snapshot assembly.
-    pub fn into_parts(self) -> (Location, Vec<ProjectAcquisitionEntry>) {
+    pub fn into_parts(self) -> (Location, Vec<ProjectReadEntry>) {
         (self.source, self.entries)
     }
 }
 
-impl fmt::Debug for ProjectAcquisition {
+impl fmt::Debug for ProjectRead {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("ProjectAcquisition")
+            .debug_struct("ProjectRead")
             .field("source", &self.source)
             .field("entries", &self.entries)
             .finish()
@@ -386,14 +383,14 @@ impl fmt::Debug for ProjectAcquisition {
 /// An unsupported yielded OpenDAL entry kind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-pub enum ProjectAcquisitionEntryKind {
+pub enum ProjectReadEntryKind {
     Unknown,
 }
 
 /// One structural issue found while surveying a project prefix.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[non_exhaustive]
-pub enum ProjectAcquisitionIssue {
+pub enum ProjectReadIssue {
     #[error("listed operation path {operation_path:?} is outside the project prefix")]
     ListedPathOutsidePrefix { operation_path: String },
     #[error("listed operation path {operation_path:?} is a prefix marker where a file is required")]
@@ -407,7 +404,7 @@ pub enum ProjectAcquisitionIssue {
     #[error("listed operation path {operation_path:?} has unsupported kind {kind:?}")]
     UnsupportedEntryKind {
         operation_path: String,
-        kind: ProjectAcquisitionEntryKind,
+        kind: ProjectReadEntryKind,
     },
 }
 
@@ -417,18 +414,18 @@ pub enum ProjectAcquisitionIssue {
     "{message}",
     message = aggregate_issue_message(.issues.as_slice(), "project survey failed")
 )]
-pub struct ProjectAcquisitionSurveyError {
-    issues: Vec<ProjectAcquisitionIssue>,
+pub struct ProjectReadSurveyError {
+    issues: Vec<ProjectReadIssue>,
 }
 
-impl ProjectAcquisitionSurveyError {
+impl ProjectReadSurveyError {
     /// Every independently detectable issue in canonical order.
-    pub fn issues(&self) -> &[ProjectAcquisitionIssue] {
+    pub fn issues(&self) -> &[ProjectReadIssue] {
         &self.issues
     }
 }
 
-/// Acquires every file entry yielded below one project prefix.
+/// Reads every file entry yielded below one project prefix.
 ///
 /// Directory markers are ignored. `.typkignore` is an ordinary file; Project
 /// Snapshot assembly remains authoritative for canonical project paths,
@@ -439,25 +436,25 @@ impl ProjectAcquisitionSurveyError {
 /// use typst::foundations::Dict;
 /// use typst_pack::{
 ///     DiscoverySpecification, DocumentTime, FontCatalog, PackCreationInput,
-///     PackageAcquisitionFailures, PackageCatalog, ProjectSnapshotAssembly,
+///     PackageReadFailures, PackageCatalog, ProjectSnapshotAssembly,
 ///     TypstTarget, create,
 /// };
 /// use typst_pack::opendal::OperatorBindings;
 /// use typst_pack::opendal::pack_assembly::{
-///     ProjectAcquisitionEntry, ProjectAcquisitionRequest, acquire_project,
+///     ProjectReadEntry, ProjectReadRequest, read_project,
 /// };
 ///
-/// async fn acquire_and_create(
+/// async fn read_and_create(
 ///     bindings: &OperatorBindings,
-///     request: &ProjectAcquisitionRequest,
+///     request: &ProjectReadRequest,
 /// ) -> Result<(), Box<dyn std::error::Error>> {
-///     let (_, entries) = acquire_project(bindings, request).await?.into_parts();
+///     let (_, entries) = read_project(bindings, request).await?.into_parts();
 ///     let project = ProjectSnapshotAssembly::new("main.typ").assemble(
-///         entries.into_iter().map(ProjectAcquisitionEntry::into_parts),
+///         entries.into_iter().map(ProjectReadEntry::into_parts),
 ///     )?;
 ///     let packages = PackageCatalog::new();
 ///     let fonts = FontCatalog::new();
-///     let package_failures = PackageAcquisitionFailures::new();
+///     let package_failures = PackageReadFailures::new();
 ///     let discovery = DiscoverySpecification::new(
 ///         TypstTarget::Paged,
 ///         Dict::new(),
@@ -475,51 +472,51 @@ impl ProjectAcquisitionSurveyError {
 ///     Ok(())
 /// }
 /// ```
-pub async fn acquire_project<R: OperatorResolver + ?Sized>(
+pub async fn read_project<R: OperatorResolver + ?Sized>(
     resolver: &R,
-    request: &ProjectAcquisitionRequest,
-) -> Result<ProjectAcquisition, ProjectAcquisitionError> {
+    request: &ProjectReadRequest,
+) -> Result<ProjectRead, ProjectReadError> {
     let source = request.source().clone();
-    let entries = acquire_recursive_prefix(
+    let entries = read_recursive_prefix(
         resolver,
         request.source(),
-        RecursiveAcquisitionSelection::AllFiles,
+        RecursiveReadSelection::AllFiles,
         request.limits().into(),
-        &ProjectAcquisitionOperation {
+        &ProjectReadOperation {
             source_location: request.source(),
         },
     )
     .await?
     .into_iter()
-    .map(|object| ProjectAcquisitionEntry {
+    .map(|object| ProjectReadEntry {
         relative_path: object.relative_path,
         bytes: object.bytes,
     })
     .collect();
 
-    Ok(ProjectAcquisition { source, entries })
+    Ok(ProjectRead { source, entries })
 }
 
-/// A failure while acquiring a project through OpenDAL.
+/// A failure while reading a project through OpenDAL.
 ///
 /// This error's own `Display` and `Debug` omit native resolver and OpenDAL
 /// messages. Rendering its complete source chain may disclose backend context.
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "Project Acquisition failed for binding {binding} at prefix operation path {operation_path:?}{failed_path}: {cause}",
+    "Project Read failed for binding {binding} at prefix operation path {operation_path:?}{failed_path}: {cause}",
     binding = .source_location.binding(),
     operation_path = .source_location.operation_path(),
     failed_path = failed_path_context(.failed_path.as_deref()),
 )]
-pub struct ProjectAcquisitionError {
+pub struct ProjectReadError {
     source_location: Location,
     failed_path: Option<String>,
     #[source]
-    cause: RedactedError<ProjectAcquisitionErrorCause>,
+    cause: RedactedError<ProjectReadErrorCause>,
 }
 
-impl ProjectAcquisitionError {
-    /// The normalized project prefix whose acquisition failed.
+impl ProjectReadError {
+    /// The normalized project prefix whose read failed.
     pub fn source_location(&self) -> &Location {
         &self.source_location
     }
@@ -530,14 +527,14 @@ impl ProjectAcquisitionError {
     }
 
     /// The typed cause of this failure.
-    pub fn cause(&self) -> &ProjectAcquisitionErrorCause {
+    pub fn cause(&self) -> &ProjectReadErrorCause {
         self.cause.inner()
     }
 
     fn new(
         source_location: &Location,
         failed_path: Option<String>,
-        cause: ProjectAcquisitionErrorCause,
+        cause: ProjectReadErrorCause,
     ) -> Self {
         Self {
             source_location: source_location.clone(),
@@ -547,10 +544,10 @@ impl ProjectAcquisitionError {
     }
 }
 
-/// The typed cause of an OpenDAL Project Acquisition failure.
+/// The typed cause of an OpenDAL Project Read failure.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum ProjectAcquisitionErrorCause {
+pub enum ProjectReadErrorCause {
     #[error("operator resolution failed")]
     ResolveOperator(#[source] BoxError),
     #[error("required listing or read capability is unsupported")]
@@ -566,27 +563,27 @@ pub enum ProjectAcquisitionErrorCause {
     #[error("a listed object was absent when read")]
     ListedObjectAbsent(#[source] ::opendal::Error),
     #[error("the completed listing had structural issues")]
-    Structural(#[source] ProjectAcquisitionSurveyError),
-    #[error("a Project Acquisition limit failed")]
-    Limit(#[source] ProjectAcquisitionLimitError),
+    Structural(#[source] ProjectReadSurveyError),
+    #[error("a Project Read limit failed")]
+    Limit(#[source] ProjectReadLimitError),
 }
 
-struct ProjectAcquisitionOperation<'a> {
+struct ProjectReadOperation<'a> {
     source_location: &'a Location,
 }
 
-impl RecursiveAcquisitionOperation for ProjectAcquisitionOperation<'_> {
-    type Error = ProjectAcquisitionError;
+impl RecursiveReadOperation for ProjectReadOperation<'_> {
+    type Error = ProjectReadError;
 
-    fn invalid_location_role(&self, _: usize, _: LocationRoleError) -> ProjectAcquisitionError {
-        unreachable!("ProjectAcquisitionRequest validates the prefix role")
+    fn invalid_location_role(&self, _: usize, _: LocationRoleError) -> ProjectReadError {
+        unreachable!("ProjectReadRequest validates the prefix role")
     }
 
-    fn resolve_operator(&self, _: usize, source: BoxError) -> ProjectAcquisitionError {
-        ProjectAcquisitionError::new(
+    fn resolve_operator(&self, _: usize, source: BoxError) -> ProjectReadError {
+        ProjectReadError::new(
             self.source_location,
             None,
-            ProjectAcquisitionErrorCause::ResolveOperator(source),
+            ProjectReadErrorCause::ResolveOperator(source),
         )
     }
 
@@ -596,11 +593,11 @@ impl RecursiveAcquisitionOperation for ProjectAcquisitionOperation<'_> {
         list: bool,
         list_with_recursive: bool,
         read: bool,
-    ) -> ProjectAcquisitionError {
-        ProjectAcquisitionError::new(
+    ) -> ProjectReadError {
+        ProjectReadError::new(
             self.source_location,
             None,
-            ProjectAcquisitionErrorCause::UnsupportedCapabilities {
+            ProjectReadErrorCause::UnsupportedCapabilities {
                 list,
                 list_with_recursive,
                 read,
@@ -608,24 +605,19 @@ impl RecursiveAcquisitionOperation for ProjectAcquisitionOperation<'_> {
         )
     }
 
-    fn list(&self, _: usize, source: ::opendal::Error) -> ProjectAcquisitionError {
-        ProjectAcquisitionError::new(
+    fn list(&self, _: usize, source: ::opendal::Error) -> ProjectReadError {
+        ProjectReadError::new(
             self.source_location,
             None,
-            ProjectAcquisitionErrorCause::List(source),
+            ProjectReadErrorCause::List(source),
         )
     }
 
-    fn read(
-        &self,
-        _: usize,
-        operation_path: String,
-        source: ::opendal::Error,
-    ) -> ProjectAcquisitionError {
-        ProjectAcquisitionError::new(
+    fn read(&self, _: usize, operation_path: String, source: ::opendal::Error) -> ProjectReadError {
+        ProjectReadError::new(
             self.source_location,
             Some(operation_path),
-            ProjectAcquisitionErrorCause::Read(source),
+            ProjectReadErrorCause::Read(source),
         )
     }
 
@@ -634,19 +626,19 @@ impl RecursiveAcquisitionOperation for ProjectAcquisitionOperation<'_> {
         _: usize,
         operation_path: String,
         source: ::opendal::Error,
-    ) -> ProjectAcquisitionError {
-        ProjectAcquisitionError::new(
+    ) -> ProjectReadError {
+        ProjectReadError::new(
             self.source_location,
             Some(operation_path),
-            ProjectAcquisitionErrorCause::ListedObjectAbsent(source),
+            ProjectReadErrorCause::ListedObjectAbsent(source),
         )
     }
 
-    fn structural(&self, _: usize, issues: Vec<RecursiveSurveyIssue>) -> ProjectAcquisitionError {
-        ProjectAcquisitionError::new(
+    fn structural(&self, _: usize, issues: Vec<RecursiveSurveyIssue>) -> ProjectReadError {
+        ProjectReadError::new(
             self.source_location,
             None,
-            ProjectAcquisitionErrorCause::Structural(ProjectAcquisitionSurveyError {
+            ProjectReadErrorCause::Structural(ProjectReadSurveyError {
                 issues: issues.into_iter().map(map_issue).collect(),
             }),
         )
@@ -655,37 +647,33 @@ impl RecursiveAcquisitionOperation for ProjectAcquisitionOperation<'_> {
     fn limit(
         &self,
         _: usize,
-        resource: RecursiveAcquisitionResource,
+        resource: RecursiveReadResource,
         ceiling: u64,
         _: u64,
-    ) -> ProjectAcquisitionError {
-        ProjectAcquisitionError::new(
+    ) -> ProjectReadError {
+        ProjectReadError::new(
             self.source_location,
             None,
-            ProjectAcquisitionErrorCause::Limit(ProjectAcquisitionLimitError::exceeded(
+            ProjectReadErrorCause::Limit(ProjectReadLimitError::exceeded(
                 map_resource(resource),
                 ceiling,
             )),
         )
     }
 
-    fn accounting_overflow(
-        &self,
-        _: usize,
-        resource: RecursiveAcquisitionResource,
-    ) -> ProjectAcquisitionError {
-        ProjectAcquisitionError::new(
+    fn accounting_overflow(&self, _: usize, resource: RecursiveReadResource) -> ProjectReadError {
+        ProjectReadError::new(
             self.source_location,
             None,
-            ProjectAcquisitionErrorCause::Limit(ProjectAcquisitionLimitError::AccountingOverflow {
+            ProjectReadErrorCause::Limit(ProjectReadLimitError::AccountingOverflow {
                 resource: map_resource(resource),
             }),
         )
     }
 }
 
-impl From<ProjectAcquisitionLimits> for RecursiveAcquisitionLimits {
-    fn from(limits: ProjectAcquisitionLimits) -> Self {
+impl From<ProjectReadLimits> for RecursiveReadLimits {
+    fn from(limits: ProjectReadLimits) -> Self {
         Self::new(
             limits.listed_entries(),
             limits.listed_path_bytes(),
@@ -697,52 +685,46 @@ impl From<ProjectAcquisitionLimits> for RecursiveAcquisitionLimits {
     }
 }
 
-fn map_resource(resource: RecursiveAcquisitionResource) -> ProjectAcquisitionResource {
+fn map_resource(resource: RecursiveReadResource) -> ProjectReadResource {
     match resource {
-        RecursiveAcquisitionResource::ListedEntries => ProjectAcquisitionResource::ListedEntries,
-        RecursiveAcquisitionResource::ListedPathBytes => {
-            ProjectAcquisitionResource::ListedPathBytes
-        }
-        RecursiveAcquisitionResource::TotalListedPathBytes => {
-            ProjectAcquisitionResource::TotalListedPathBytes
-        }
-        RecursiveAcquisitionResource::SelectedObjects => ProjectAcquisitionResource::SelectedFiles,
-        RecursiveAcquisitionResource::ObjectBytes => ProjectAcquisitionResource::ObjectBytes,
-        RecursiveAcquisitionResource::TotalBytes => ProjectAcquisitionResource::TotalBytes,
-        _ => unreachable!("unknown recursive acquisition resource"),
+        RecursiveReadResource::ListedEntries => ProjectReadResource::ListedEntries,
+        RecursiveReadResource::ListedPathBytes => ProjectReadResource::ListedPathBytes,
+        RecursiveReadResource::TotalListedPathBytes => ProjectReadResource::TotalListedPathBytes,
+        RecursiveReadResource::SelectedObjects => ProjectReadResource::SelectedFiles,
+        RecursiveReadResource::ObjectBytes => ProjectReadResource::ObjectBytes,
+        RecursiveReadResource::TotalBytes => ProjectReadResource::TotalBytes,
+        _ => unreachable!("unknown recursive read resource"),
     }
 }
 
-fn map_issue(issue: RecursiveSurveyIssue) -> ProjectAcquisitionIssue {
+fn map_issue(issue: RecursiveSurveyIssue) -> ProjectReadIssue {
     let operation_path = issue.operation_path;
     match issue.kind {
         RecursiveSurveyIssueKind::ListedPathOutsidePrefix => {
-            ProjectAcquisitionIssue::ListedPathOutsidePrefix { operation_path }
+            ProjectReadIssue::ListedPathOutsidePrefix { operation_path }
         }
         RecursiveSurveyIssueKind::PrefixMarkerWhereFileRequired => {
-            ProjectAcquisitionIssue::PrefixMarkerWhereFileRequired { operation_path }
+            ProjectReadIssue::PrefixMarkerWhereFileRequired { operation_path }
         }
         RecursiveSurveyIssueKind::EmptyRelativeOperationPath => {
-            ProjectAcquisitionIssue::EmptyRelativeOperationPath { operation_path }
+            ProjectReadIssue::EmptyRelativeOperationPath { operation_path }
         }
         RecursiveSurveyIssueKind::InvalidRelativeOperationPath => {
-            ProjectAcquisitionIssue::InvalidRelativeOperationPath { operation_path }
+            ProjectReadIssue::InvalidRelativeOperationPath { operation_path }
         }
         RecursiveSurveyIssueKind::DuplicateListedObject => {
-            ProjectAcquisitionIssue::DuplicateListedObject { operation_path }
+            ProjectReadIssue::DuplicateListedObject { operation_path }
         }
-        RecursiveSurveyIssueKind::UnsupportedEntryKind => {
-            ProjectAcquisitionIssue::UnsupportedEntryKind {
-                operation_path,
-                kind: ProjectAcquisitionEntryKind::Unknown,
-            }
-        }
+        RecursiveSurveyIssueKind::UnsupportedEntryKind => ProjectReadIssue::UnsupportedEntryKind {
+            operation_path,
+            kind: ProjectReadEntryKind::Unknown,
+        },
     }
 }
 
-/// Named finite ceilings for one OpenDAL Font Acquisition.
+/// Named finite ceilings for one OpenDAL Font Read.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FontAcquisitionCeilings {
+pub struct FontReadCeilings {
     pub listed_entries: u64,
     pub listed_path_bytes: u64,
     pub total_listed_path_bytes: u64,
@@ -751,8 +733,8 @@ pub struct FontAcquisitionCeilings {
     pub total_bytes: u64,
 }
 
-impl FontAcquisitionCeilings {
-    /// The first-party version-1 Font Acquisition profile.
+impl FontReadCeilings {
+    /// The first-party version-1 Font Read profile.
     pub const fn reference_v1() -> Self {
         Self {
             listed_entries: 100_000,
@@ -765,8 +747,8 @@ impl FontAcquisitionCeilings {
     }
 }
 
-/// A resource bounded across one OpenDAL Font Acquisition.
-pub type FontAcquisitionResource = ResourceKind<10>;
+/// A resource bounded across one OpenDAL Font Read.
+pub type FontReadResource = ResourceKind<10>;
 
 #[allow(non_upper_case_globals)]
 impl ResourceKind<10> {
@@ -778,15 +760,15 @@ impl ResourceKind<10> {
     pub const TotalBytes: Self = Self::new(5);
 }
 
-/// A supplied Font Acquisition ceiling is internally inconsistent.
-pub type FontAcquisitionLimitsError = LimitsError<FontAcquisitionResource>;
+/// A supplied Font Read ceiling is internally inconsistent.
+pub type FontReadLimitsError = LimitsError<FontReadResource>;
 
-/// Mandatory finite limits for OpenDAL Font Acquisition.
-pub type FontAcquisitionLimits = Limits<FontAcquisitionResource>;
+/// Mandatory finite limits for OpenDAL Font Read.
+pub type FontReadLimits = Limits<FontReadResource>;
 
-impl Limits<FontAcquisitionResource> {
-    /// Validates all named acquisition ceilings.
-    pub fn new(ceilings: FontAcquisitionCeilings) -> Result<Self, FontAcquisitionLimitsError> {
+impl Limits<FontReadResource> {
+    /// Validates all named read ceilings.
+    pub fn new(ceilings: FontReadCeilings) -> Result<Self, FontReadLimitsError> {
         let limits = Self::from_ceilings([
             ceilings.listed_entries,
             ceilings.listed_path_bytes,
@@ -797,11 +779,11 @@ impl Limits<FontAcquisitionResource> {
             0,
         ])
         .validate_probe_resources([
-            FontAcquisitionResource::ContainerBytes,
-            FontAcquisitionResource::TotalBytes,
+            FontReadResource::ContainerBytes,
+            FontReadResource::TotalBytes,
         ])?;
         if ceilings.container_bytes > ceilings.total_bytes {
-            return Err(FontAcquisitionLimitsError::ContainerBytesExceedTotalBytes {
+            return Err(FontReadLimitsError::ContainerBytesExceedTotalBytes {
                 container_bytes: ceilings.container_bytes,
                 total_bytes: ceilings.total_bytes,
             });
@@ -809,7 +791,7 @@ impl Limits<FontAcquisitionResource> {
         Ok(limits)
     }
 
-    /// The validated first-party version-1 Font Acquisition limits.
+    /// The validated first-party version-1 Font Read limits.
     pub const fn reference_v1() -> Self {
         Self::from_ceilings([
             100_000,
@@ -847,8 +829,8 @@ impl Limits<FontAcquisitionResource> {
     }
 }
 
-/// Font Acquisition exceeded or could not account for a mandatory limit.
-pub type FontAcquisitionLimitError = LimitError<FontAcquisitionResource>;
+/// Font Read exceeded or could not account for a mandatory limit.
+pub type FontReadLimitError = LimitError<FontReadResource>;
 
 /// One explicitly configured OpenDAL prefix of Font Containers.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -877,26 +859,26 @@ impl FontSource {
     }
 }
 
-/// A validated request to acquire caller-ordered OpenDAL font prefixes.
+/// A validated request to read caller-ordered OpenDAL font prefixes.
 #[derive(Clone, Debug)]
-pub struct FontAcquisitionRequest {
+pub struct FontReadRequest {
     sources: Vec<FontSource>,
-    limits: FontAcquisitionLimits,
+    limits: FontReadLimits,
 }
 
-impl FontAcquisitionRequest {
+impl FontReadRequest {
     /// Validates every source role before accepting the request.
     pub fn new(
         sources: impl IntoIterator<Item = FontSource>,
-        limits: FontAcquisitionLimits,
-    ) -> Result<Self, FontAcquisitionRequestRejection> {
+        limits: FontReadLimits,
+    ) -> Result<Self, FontReadRequestRejection> {
         let sources = sources.into_iter().collect::<Vec<_>>();
         let issues = sources
             .iter()
             .enumerate()
             .filter_map(|(source_index, configured)| {
                 configured.source.require_prefix().err().map(|source| {
-                    FontAcquisitionRequestIssue::InvalidSourceRole {
+                    FontReadRequestIssue::InvalidSourceRole {
                         source_index,
                         location: configured.source.clone(),
                         source,
@@ -905,7 +887,7 @@ impl FontAcquisitionRequest {
             })
             .collect::<Vec<_>>();
         if !issues.is_empty() {
-            return Err(FontAcquisitionRequestRejection { issues });
+            return Err(FontReadRequestRejection { issues });
         }
         Ok(Self { sources, limits })
     }
@@ -916,32 +898,32 @@ impl FontAcquisitionRequest {
     }
 
     /// The mandatory finite limits shared across every configured source.
-    pub const fn limits(&self) -> FontAcquisitionLimits {
+    pub const fn limits(&self) -> FontReadLimits {
         self.limits
     }
 }
 
-/// Every invalid source role in a rejected Font Acquisition request.
+/// Every invalid source role in a rejected Font Read request.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[error(
     "{message}",
-    message = aggregate_issue_message(.issues.as_slice(), "Font Acquisition request rejected")
+    message = aggregate_issue_message(.issues.as_slice(), "Font Read request rejected")
 )]
-pub struct FontAcquisitionRequestRejection {
-    issues: Vec<FontAcquisitionRequestIssue>,
+pub struct FontReadRequestRejection {
+    issues: Vec<FontReadRequestIssue>,
 }
 
-impl FontAcquisitionRequestRejection {
+impl FontReadRequestRejection {
     /// Invalid source roles in caller source order.
-    pub fn issues(&self) -> &[FontAcquisitionRequestIssue] {
+    pub fn issues(&self) -> &[FontReadRequestIssue] {
         &self.issues
     }
 }
 
-/// One invalid source role in a Font Acquisition request.
+/// One invalid source role in a Font Read request.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[non_exhaustive]
-pub enum FontAcquisitionRequestIssue {
+pub enum FontReadRequestIssue {
     #[error("font source {source_index} at {location} is not a prefix: {source}")]
     InvalidSourceRole {
         source_index: usize,
@@ -951,8 +933,8 @@ pub enum FontAcquisitionRequestIssue {
     },
 }
 
-/// One exact Font Container selected and acquired from a configured source.
-pub struct FontAcquisitionEntry {
+/// One exact Font Container selected and read from a configured source.
+pub struct FontReadEntry {
     source_index: usize,
     source: Location,
     relative_path: String,
@@ -960,13 +942,13 @@ pub struct FontAcquisitionEntry {
     bytes: Vec<u8>,
 }
 
-impl FontAcquisitionEntry {
+impl FontReadEntry {
     /// The configured source's caller-order index.
     pub fn source_index(&self) -> usize {
         self.source_index
     }
 
-    /// The normalized prefix from which this entry was acquired.
+    /// The normalized prefix from which this entry was read.
     pub fn source(&self) -> &Location {
         &self.source
     }
@@ -986,12 +968,12 @@ impl FontAcquisitionEntry {
         &self.bytes
     }
 
-    /// The acquired byte length.
+    /// The read byte length.
     pub fn len(&self) -> u64 {
         self.bytes.len() as u64
     }
 
-    /// Whether this acquired container is empty.
+    /// Whether this read container is empty.
     pub fn is_empty(&self) -> bool {
         self.bytes.is_empty()
     }
@@ -1008,10 +990,10 @@ impl FontAcquisitionEntry {
     }
 }
 
-impl fmt::Debug for FontAcquisitionEntry {
+impl fmt::Debug for FontReadEntry {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("FontAcquisitionEntry")
+            .debug_struct("FontReadEntry")
             .field("source_index", &self.source_index)
             .field("source", &self.source)
             .field("relative_path", &self.relative_path)
@@ -1021,33 +1003,33 @@ impl fmt::Debug for FontAcquisitionEntry {
     }
 }
 
-/// Exact Font Containers acquired from caller-ordered sources.
-pub struct FontAcquisition {
+/// Exact Font Containers read from caller-ordered sources.
+pub struct FontRead {
     sources: Vec<FontSource>,
-    entries: Vec<FontAcquisitionEntry>,
+    entries: Vec<FontReadEntry>,
 }
 
-impl FontAcquisition {
+impl FontRead {
     /// Configured font sources in caller order.
     pub fn sources(&self) -> &[FontSource] {
         &self.sources
     }
 
-    /// Acquired entries in source order, then relative operation-path order.
-    pub fn entries(&self) -> &[FontAcquisitionEntry] {
+    /// Read entries in source order, then relative operation-path order.
+    pub fn entries(&self) -> &[FontReadEntry] {
         &self.entries
     }
 
-    /// Recovers the configured sources and exact acquired entries.
-    pub fn into_parts(self) -> (Vec<FontSource>, Vec<FontAcquisitionEntry>) {
+    /// Recovers the configured sources and exact read entries.
+    pub fn into_parts(self) -> (Vec<FontSource>, Vec<FontReadEntry>) {
         (self.sources, self.entries)
     }
 }
 
-impl fmt::Debug for FontAcquisition {
+impl fmt::Debug for FontRead {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("FontAcquisition")
+            .debug_struct("FontRead")
             .field("sources", &self.sources)
             .field("entries", &self.entries)
             .finish()
@@ -1057,14 +1039,14 @@ impl fmt::Debug for FontAcquisition {
 /// An unsupported yielded OpenDAL entry kind.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-pub enum FontAcquisitionEntryKind {
+pub enum FontReadEntryKind {
     Unknown,
 }
 
 /// One structural issue found while surveying configured font prefixes.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[non_exhaustive]
-pub enum FontAcquisitionIssue {
+pub enum FontReadIssue {
     #[error(
         "font source {source_index} listed operation path {operation_path:?} outside its prefix"
     )]
@@ -1102,7 +1084,7 @@ pub enum FontAcquisitionIssue {
     UnsupportedEntryKind {
         source_index: usize,
         operation_path: String,
-        kind: FontAcquisitionEntryKind,
+        kind: FontReadEntryKind,
     },
 }
 
@@ -1112,18 +1094,18 @@ pub enum FontAcquisitionIssue {
     "{message}",
     message = aggregate_issue_message(.issues.as_slice(), "font survey failed")
 )]
-pub struct FontAcquisitionSurveyError {
-    issues: Vec<FontAcquisitionIssue>,
+pub struct FontReadSurveyError {
+    issues: Vec<FontReadIssue>,
 }
 
-impl FontAcquisitionSurveyError {
+impl FontReadSurveyError {
     /// Every independently detectable issue in source and path order.
-    pub fn issues(&self) -> &[FontAcquisitionIssue] {
+    pub fn issues(&self) -> &[FontReadIssue] {
         &self.issues
     }
 }
 
-/// Acquires suffix-selected Font Containers from caller-ordered prefixes.
+/// Reads suffix-selected Font Containers from caller-ordered prefixes.
 ///
 /// `.ttf`, `.ttc`, `.otf`, and `.otc` suffixes are matched
 /// case-insensitively. Directory markers and non-font entries are ignored. All
@@ -1133,25 +1115,25 @@ impl FontAcquisitionSurveyError {
 /// ```no_run
 /// use typst_pack::{
 ///     DiscoverySpecification, FontCatalog, FontCatalogEntry, FontContainer,
-///     PackCreationInput, PackageAcquisitionFailures, PackageCatalog,
+///     PackCreationInput, PackageReadFailures, PackageCatalog,
 ///     ProjectSnapshot, create,
 /// };
 /// use typst_pack::opendal::OperatorBindings;
 /// use typst_pack::opendal::pack_assembly::{
-///     FontAcquisitionRequest, acquire_fonts,
+///     FontReadRequest, read_fonts,
 /// };
 ///
-/// async fn acquire_fonts_and_create(
+/// async fn read_fonts_and_create(
 ///     bindings: &OperatorBindings,
-///     request: &FontAcquisitionRequest,
+///     request: &FontReadRequest,
 ///     project: &ProjectSnapshot,
 ///     packages: &PackageCatalog,
-///     package_failures: &PackageAcquisitionFailures,
+///     package_failures: &PackageReadFailures,
 ///     discovery: &DiscoverySpecification,
 /// ) -> Result<(), Box<dyn std::error::Error>> {
-///     let (_, acquired) = acquire_fonts(bindings, request).await?.into_parts();
+///     let (_, read) = read_fonts(bindings, request).await?.into_parts();
 ///     let mut fonts = FontCatalog::new();
-///     for entry in acquired {
+///     for entry in read {
 ///         let (_, _, _, disposition, bytes) = entry.into_parts();
 ///         let container = FontContainer::new(bytes)?;
 ///         fonts.push(FontCatalogEntry::new(container, disposition));
@@ -1167,33 +1149,33 @@ impl FontAcquisitionSurveyError {
 ///     Ok(())
 /// }
 /// ```
-pub async fn acquire_fonts<R: OperatorResolver + ?Sized>(
+pub async fn read_fonts<R: OperatorResolver + ?Sized>(
     resolver: &R,
-    request: &FontAcquisitionRequest,
-) -> Result<FontAcquisition, FontAcquisitionError> {
+    request: &FontReadRequest,
+) -> Result<FontRead, FontReadError> {
     let locations = request
         .sources()
         .iter()
         .map(FontSource::source)
         .collect::<Vec<_>>();
-    let acquired = acquire_recursive_prefixes(
+    let read = read_recursive_prefixes(
         resolver,
         &locations,
-        RecursiveAcquisitionSelection::FontContainers,
+        RecursiveReadSelection::FontContainers,
         request.limits().into(),
-        &FontAcquisitionOperation {
+        &FontReadOperation {
             sources: request.sources(),
         },
     )
     .await?;
 
     let sources = request.sources().to_vec();
-    let entries = acquired
+    let entries = read
         .into_iter()
         .enumerate()
         .flat_map(|(source_index, objects)| {
             let source = sources[source_index].clone();
-            objects.into_iter().map(move |object| FontAcquisitionEntry {
+            objects.into_iter().map(move |object| FontReadEntry {
                 source_index,
                 source: source.source.clone(),
                 relative_path: object.relative_path,
@@ -1203,35 +1185,35 @@ pub async fn acquire_fonts<R: OperatorResolver + ?Sized>(
         })
         .collect();
 
-    Ok(FontAcquisition { sources, entries })
+    Ok(FontRead { sources, entries })
 }
 
-/// A failure while acquiring Font Containers through OpenDAL.
+/// A failure while reading Font Containers through OpenDAL.
 ///
 /// This error's own `Display` and `Debug` omit native resolver and OpenDAL
 /// messages. Rendering its complete source chain may disclose backend context.
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "Font Acquisition failed at source {source_index} for binding {binding} at prefix operation path {operation_path:?}{failed_path}: {cause}",
+    "Font Read failed at source {source_index} for binding {binding} at prefix operation path {operation_path:?}{failed_path}: {cause}",
     binding = .source_location.binding(),
     operation_path = .source_location.operation_path(),
     failed_path = failed_path_context(.failed_path.as_deref()),
 )]
-pub struct FontAcquisitionError {
+pub struct FontReadError {
     source_index: usize,
     source_location: Location,
     failed_path: Option<String>,
     #[source]
-    cause: RedactedError<FontAcquisitionErrorCause>,
+    cause: RedactedError<FontReadErrorCause>,
 }
 
-impl FontAcquisitionError {
-    /// The caller-order index of the source at which acquisition failed.
+impl FontReadError {
+    /// The caller-order index of the source at which read failed.
     pub fn source_index(&self) -> usize {
         self.source_index
     }
 
-    /// The normalized font prefix at which acquisition failed.
+    /// The normalized font prefix at which read failed.
     pub fn source_location(&self) -> &Location {
         &self.source_location
     }
@@ -1242,7 +1224,7 @@ impl FontAcquisitionError {
     }
 
     /// The typed cause of this failure.
-    pub fn cause(&self) -> &FontAcquisitionErrorCause {
+    pub fn cause(&self) -> &FontReadErrorCause {
         self.cause.inner()
     }
 
@@ -1250,7 +1232,7 @@ impl FontAcquisitionError {
         source_index: usize,
         source_location: &Location,
         failed_path: Option<String>,
-        cause: FontAcquisitionErrorCause,
+        cause: FontReadErrorCause,
     ) -> Self {
         Self {
             source_index,
@@ -1261,10 +1243,10 @@ impl FontAcquisitionError {
     }
 }
 
-/// The typed cause of an OpenDAL Font Acquisition failure.
+/// The typed cause of an OpenDAL Font Read failure.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum FontAcquisitionErrorCause {
+pub enum FontReadErrorCause {
     #[error("operator resolution failed")]
     ResolveOperator(#[source] BoxError),
     #[error("required listing or read capability is unsupported")]
@@ -1280,23 +1262,23 @@ pub enum FontAcquisitionErrorCause {
     #[error("a listed Font Container was absent when read")]
     ListedObjectAbsent(#[source] ::opendal::Error),
     #[error("the completed listings had structural issues")]
-    Structural(#[source] FontAcquisitionSurveyError),
-    #[error("a Font Acquisition limit failed")]
-    Limit(#[source] FontAcquisitionLimitError),
+    Structural(#[source] FontReadSurveyError),
+    #[error("a Font Read limit failed")]
+    Limit(#[source] FontReadLimitError),
 }
 
-struct FontAcquisitionOperation<'a> {
+struct FontReadOperation<'a> {
     sources: &'a [FontSource],
 }
 
-impl FontAcquisitionOperation<'_> {
+impl FontReadOperation<'_> {
     fn error(
         &self,
         source_index: usize,
         failed_path: Option<String>,
-        cause: FontAcquisitionErrorCause,
-    ) -> FontAcquisitionError {
-        FontAcquisitionError::new(
+        cause: FontReadErrorCause,
+    ) -> FontReadError {
+        FontReadError::new(
             source_index,
             self.sources[source_index].source(),
             failed_path,
@@ -1305,18 +1287,18 @@ impl FontAcquisitionOperation<'_> {
     }
 }
 
-impl RecursiveAcquisitionOperation for FontAcquisitionOperation<'_> {
-    type Error = FontAcquisitionError;
+impl RecursiveReadOperation for FontReadOperation<'_> {
+    type Error = FontReadError;
 
-    fn invalid_location_role(&self, _: usize, _: LocationRoleError) -> FontAcquisitionError {
-        unreachable!("FontAcquisitionRequest validates every prefix role")
+    fn invalid_location_role(&self, _: usize, _: LocationRoleError) -> FontReadError {
+        unreachable!("FontReadRequest validates every prefix role")
     }
 
-    fn resolve_operator(&self, source_index: usize, source: BoxError) -> FontAcquisitionError {
+    fn resolve_operator(&self, source_index: usize, source: BoxError) -> FontReadError {
         self.error(
             source_index,
             None,
-            FontAcquisitionErrorCause::ResolveOperator(source),
+            FontReadErrorCause::ResolveOperator(source),
         )
     }
 
@@ -1326,11 +1308,11 @@ impl RecursiveAcquisitionOperation for FontAcquisitionOperation<'_> {
         list: bool,
         list_with_recursive: bool,
         read: bool,
-    ) -> FontAcquisitionError {
+    ) -> FontReadError {
         self.error(
             source_index,
             None,
-            FontAcquisitionErrorCause::UnsupportedCapabilities {
+            FontReadErrorCause::UnsupportedCapabilities {
                 list,
                 list_with_recursive,
                 read,
@@ -1338,8 +1320,8 @@ impl RecursiveAcquisitionOperation for FontAcquisitionOperation<'_> {
         )
     }
 
-    fn list(&self, source_index: usize, source: ::opendal::Error) -> FontAcquisitionError {
-        self.error(source_index, None, FontAcquisitionErrorCause::List(source))
+    fn list(&self, source_index: usize, source: ::opendal::Error) -> FontReadError {
+        self.error(source_index, None, FontReadErrorCause::List(source))
     }
 
     fn read(
@@ -1347,11 +1329,11 @@ impl RecursiveAcquisitionOperation for FontAcquisitionOperation<'_> {
         source_index: usize,
         operation_path: String,
         source: ::opendal::Error,
-    ) -> FontAcquisitionError {
+    ) -> FontReadError {
         self.error(
             source_index,
             Some(operation_path),
-            FontAcquisitionErrorCause::Read(source),
+            FontReadErrorCause::Read(source),
         )
     }
 
@@ -1360,23 +1342,19 @@ impl RecursiveAcquisitionOperation for FontAcquisitionOperation<'_> {
         source_index: usize,
         operation_path: String,
         source: ::opendal::Error,
-    ) -> FontAcquisitionError {
+    ) -> FontReadError {
         self.error(
             source_index,
             Some(operation_path),
-            FontAcquisitionErrorCause::ListedObjectAbsent(source),
+            FontReadErrorCause::ListedObjectAbsent(source),
         )
     }
 
-    fn structural(
-        &self,
-        source_index: usize,
-        issues: Vec<RecursiveSurveyIssue>,
-    ) -> FontAcquisitionError {
+    fn structural(&self, source_index: usize, issues: Vec<RecursiveSurveyIssue>) -> FontReadError {
         self.error(
             source_index,
             None,
-            FontAcquisitionErrorCause::Structural(FontAcquisitionSurveyError {
+            FontReadErrorCause::Structural(FontReadSurveyError {
                 issues: issues.into_iter().map(map_font_issue).collect(),
             }),
         )
@@ -1385,14 +1363,14 @@ impl RecursiveAcquisitionOperation for FontAcquisitionOperation<'_> {
     fn limit(
         &self,
         source_index: usize,
-        resource: RecursiveAcquisitionResource,
+        resource: RecursiveReadResource,
         ceiling: u64,
         _: u64,
-    ) -> FontAcquisitionError {
+    ) -> FontReadError {
         self.error(
             source_index,
             None,
-            FontAcquisitionErrorCause::Limit(FontAcquisitionLimitError::exceeded(
+            FontReadErrorCause::Limit(FontReadLimitError::exceeded(
                 map_font_resource(resource),
                 ceiling,
             )),
@@ -1402,20 +1380,20 @@ impl RecursiveAcquisitionOperation for FontAcquisitionOperation<'_> {
     fn accounting_overflow(
         &self,
         source_index: usize,
-        resource: RecursiveAcquisitionResource,
-    ) -> FontAcquisitionError {
+        resource: RecursiveReadResource,
+    ) -> FontReadError {
         self.error(
             source_index,
             None,
-            FontAcquisitionErrorCause::Limit(FontAcquisitionLimitError::AccountingOverflow {
+            FontReadErrorCause::Limit(FontReadLimitError::AccountingOverflow {
                 resource: map_font_resource(resource),
             }),
         )
     }
 }
 
-impl From<FontAcquisitionLimits> for RecursiveAcquisitionLimits {
-    fn from(limits: FontAcquisitionLimits) -> Self {
+impl From<FontReadLimits> for RecursiveReadLimits {
+    fn from(limits: FontReadLimits) -> Self {
         Self::new(
             limits.listed_entries(),
             limits.listed_path_bytes(),
@@ -1427,62 +1405,54 @@ impl From<FontAcquisitionLimits> for RecursiveAcquisitionLimits {
     }
 }
 
-fn map_font_resource(resource: RecursiveAcquisitionResource) -> FontAcquisitionResource {
+fn map_font_resource(resource: RecursiveReadResource) -> FontReadResource {
     match resource {
-        RecursiveAcquisitionResource::ListedEntries => FontAcquisitionResource::ListedEntries,
-        RecursiveAcquisitionResource::ListedPathBytes => FontAcquisitionResource::ListedPathBytes,
-        RecursiveAcquisitionResource::TotalListedPathBytes => {
-            FontAcquisitionResource::TotalListedPathBytes
-        }
-        RecursiveAcquisitionResource::SelectedObjects => {
-            FontAcquisitionResource::SelectedContainers
-        }
-        RecursiveAcquisitionResource::ObjectBytes => FontAcquisitionResource::ContainerBytes,
-        RecursiveAcquisitionResource::TotalBytes => FontAcquisitionResource::TotalBytes,
-        _ => unreachable!("unknown recursive acquisition resource"),
+        RecursiveReadResource::ListedEntries => FontReadResource::ListedEntries,
+        RecursiveReadResource::ListedPathBytes => FontReadResource::ListedPathBytes,
+        RecursiveReadResource::TotalListedPathBytes => FontReadResource::TotalListedPathBytes,
+        RecursiveReadResource::SelectedObjects => FontReadResource::SelectedContainers,
+        RecursiveReadResource::ObjectBytes => FontReadResource::ContainerBytes,
+        RecursiveReadResource::TotalBytes => FontReadResource::TotalBytes,
+        _ => unreachable!("unknown recursive read resource"),
     }
 }
 
-fn map_font_issue(issue: RecursiveSurveyIssue) -> FontAcquisitionIssue {
+fn map_font_issue(issue: RecursiveSurveyIssue) -> FontReadIssue {
     let source_index = issue.source_index;
     let operation_path = issue.operation_path;
     match issue.kind {
         RecursiveSurveyIssueKind::ListedPathOutsidePrefix => {
-            FontAcquisitionIssue::ListedPathOutsidePrefix {
+            FontReadIssue::ListedPathOutsidePrefix {
                 source_index,
                 operation_path,
             }
         }
         RecursiveSurveyIssueKind::PrefixMarkerWhereFileRequired => {
-            FontAcquisitionIssue::PrefixMarkerWhereFileRequired {
+            FontReadIssue::PrefixMarkerWhereFileRequired {
                 source_index,
                 operation_path,
             }
         }
         RecursiveSurveyIssueKind::EmptyRelativeOperationPath => {
-            FontAcquisitionIssue::EmptyRelativeOperationPath {
+            FontReadIssue::EmptyRelativeOperationPath {
                 source_index,
                 operation_path,
             }
         }
         RecursiveSurveyIssueKind::InvalidRelativeOperationPath => {
-            FontAcquisitionIssue::InvalidRelativeOperationPath {
+            FontReadIssue::InvalidRelativeOperationPath {
                 source_index,
                 operation_path,
             }
         }
-        RecursiveSurveyIssueKind::DuplicateListedObject => {
-            FontAcquisitionIssue::DuplicateListedObject {
-                source_index,
-                operation_path,
-            }
-        }
-        RecursiveSurveyIssueKind::UnsupportedEntryKind => {
-            FontAcquisitionIssue::UnsupportedEntryKind {
-                source_index,
-                operation_path,
-                kind: FontAcquisitionEntryKind::Unknown,
-            }
-        }
+        RecursiveSurveyIssueKind::DuplicateListedObject => FontReadIssue::DuplicateListedObject {
+            source_index,
+            operation_path,
+        },
+        RecursiveSurveyIssueKind::UnsupportedEntryKind => FontReadIssue::UnsupportedEntryKind {
+            source_index,
+            operation_path,
+            kind: FontReadEntryKind::Unknown,
+        },
     }
 }

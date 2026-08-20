@@ -1,4 +1,4 @@
-//! OpenDAL exact-key publication vocabulary and crate-private execution.
+//! OpenDAL exact-key writing vocabulary and crate-private execution.
 
 use std::{collections::BTreeMap, future::Future};
 
@@ -14,25 +14,25 @@ use crate::{
     CanonicalIdentity, CommitCertainty, CompilationResult, CompilationStatus, PackArchiveBytes,
 };
 pub use crate::{
-    CompilationArtifactPublicationEntry, CompilationArtifactPublicationProgress,
-    CompilationArtifactPublicationReceipt, PackExtractionPublicationEntry,
-    PackExtractionPublicationProgress, PackExtractionPublicationReceipt, PublicationKeyOutcome,
+    CompilationArtifactWriteEntry, CompilationArtifactWriteProgress,
+    CompilationArtifactWriteReceipt, PackExtractionWriteEntry, PackExtractionWriteProgress,
+    PackExtractionWriteReceipt, WriteKeyOutcome,
 };
 
-/// The exact-key conflict policy for an OpenDAL publication operation.
+/// The exact-key conflict policy for an OpenDAL write operation.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-pub enum PublicationPolicy {
+pub enum WritePolicy {
     /// Create absent objects and accept existing objects only when their bytes match.
     CreateOrVerify,
     /// Write every exact key without inspecting its existing value.
     OverwriteExactKeys,
 }
 
-/// The OpenDAL adapter phase reached by a publication attempt.
+/// The OpenDAL adapter phase reached by a write attempt.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-pub enum OpenDalPublicationPhase {
+pub enum OpenDalWritePhase {
     ResultValidation,
     DestinationValidation,
     ResolveOperator,
@@ -44,21 +44,21 @@ pub enum OpenDalPublicationPhase {
     Complete,
 }
 
-/// A validated request to publish one exact Pack Archive object.
+/// A validated request to write one exact Pack Archive object.
 #[derive(Clone, Debug)]
-pub struct PackArchivePublicationRequest {
+pub struct PackArchiveWriteRequest {
     destination: Location,
-    policy: PublicationPolicy,
+    policy: WritePolicy,
 }
 
-impl PackArchivePublicationRequest {
+impl PackArchiveWriteRequest {
     /// Validates an exact-object destination and retains the explicit policy.
     pub fn new(
         destination: Location,
-        policy: PublicationPolicy,
-    ) -> Result<Self, PackArchivePublicationRequestError> {
+        policy: WritePolicy,
+    ) -> Result<Self, PackArchiveWriteRequestError> {
         destination.require_object().map_err(|source| {
-            PackArchivePublicationRequestError::InvalidDestinationRole {
+            PackArchiveWriteRequestError::InvalidDestinationRole {
                 location: destination.clone(),
                 source,
             }
@@ -74,15 +74,15 @@ impl PackArchivePublicationRequest {
         &self.destination
     }
 
-    pub const fn policy(&self) -> PublicationPolicy {
+    pub const fn policy(&self) -> WritePolicy {
         self.policy
     }
 }
 
-/// A reason a Pack Archive publication request cannot be accepted.
+/// A reason a Pack Archive write request cannot be accepted.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[non_exhaustive]
-pub enum PackArchivePublicationRequestError {
+pub enum PackArchiveWriteRequestError {
     #[error("Pack Archive destination {location} is not an exact object: {source}")]
     InvalidDestinationRole {
         location: Location,
@@ -91,7 +91,7 @@ pub enum PackArchivePublicationRequestError {
     },
 }
 
-/// Publishes exact borrowed Pack Archive bytes to one normalized object.
+/// Writes exact borrowed Pack Archive bytes to one normalized object.
 ///
 /// Dropping the returned future yields no receipt, and already-issued storage
 /// work may have occurred. The caller retains `archive`; full replay with the
@@ -101,71 +101,71 @@ pub enum PackArchivePublicationRequestError {
 /// use typst_pack::{Pack, PackArchiveBytes};
 /// use typst_pack::opendal::{Location, OperatorBindings};
 /// use typst_pack::opendal::pack_archive::{
-///     PackArchiveAcquisitionRequest, acquire_pack_archive,
+///     PackArchiveReadRequest, read_pack_archive,
 /// };
-/// use typst_pack::opendal::publication::{
-///     PackArchivePublicationRequest, PublicationPolicy, publish_pack_archive,
+/// use typst_pack::opendal::write::{
+///     PackArchiveWriteRequest, WritePolicy, write_pack_archive,
 /// };
-/// use typst_pack::pack_archive::{AcquisitionLimits, DecodeError, DecodeLimits, decode};
+/// use typst_pack::pack_archive::{ReadLimits, DecodeError, DecodeLimits, decode};
 ///
-/// enum PublishThenAcquireOutcome {
+/// enum WriteThenReadOutcome {
 ///     Matching {
-///         acquired: PackArchiveBytes,
+///         read: PackArchiveBytes,
 ///         decoded: Result<Pack, DecodeError>,
 ///     },
 ///     DestinationChanged {
-///         acquired: PackArchiveBytes,
+///         read: PackArchiveBytes,
 ///     },
 /// }
 ///
-/// async fn publish_replay_and_acquire(
+/// async fn write_replay_and_read(
 ///     bindings: &OperatorBindings,
 ///     destination: Location,
 ///     archive: &PackArchiveBytes,
-/// ) -> Result<PublishThenAcquireOutcome, Box<dyn std::error::Error>> {
-///     let overwrite = PackArchivePublicationRequest::new(
+/// ) -> Result<WriteThenReadOutcome, Box<dyn std::error::Error>> {
+///     let overwrite = PackArchiveWriteRequest::new(
 ///         destination.clone(),
-///         PublicationPolicy::OverwriteExactKeys,
+///         WritePolicy::OverwriteExactKeys,
 ///     )?;
-///     publish_pack_archive(bindings, &overwrite, archive).await?;
+///     write_pack_archive(bindings, &overwrite, archive).await?;
 ///
-///     let replay = PackArchivePublicationRequest::new(
+///     let replay = PackArchiveWriteRequest::new(
 ///         destination.clone(),
-///         PublicationPolicy::CreateOrVerify,
+///         WritePolicy::CreateOrVerify,
 ///     )?;
-///     publish_pack_archive(bindings, &replay, archive).await?;
-///     publish_pack_archive(bindings, &replay, archive).await?;
+///     write_pack_archive(bindings, &replay, archive).await?;
+///     write_pack_archive(bindings, &replay, archive).await?;
 ///
-///     let acquisition = PackArchiveAcquisitionRequest::new(
+///     let read = PackArchiveReadRequest::new(
 ///         destination,
-///         AcquisitionLimits::reference_v1(),
+///         ReadLimits::reference_v1(),
 ///     )?;
-///     let acquired = acquire_pack_archive(bindings, &acquisition).await?;
+///     let read = read_pack_archive(bindings, &read).await?;
 ///
-///     // The caller still owns `archive`; preserve the independently acquired
+///     // The caller still owns `archive`; preserve the independently read
 ///     // bytes and do not decode when the mutable destination changed.
-///     if archive.as_slice() != acquired.as_slice() {
-///         return Ok(PublishThenAcquireOutcome::DestinationChanged { acquired });
+///     if archive.as_slice() != read.as_slice() {
+///         return Ok(WriteThenReadOutcome::DestinationChanged { read });
 ///     }
 ///
-///     let decoded = decode(&acquired, DecodeLimits::reference_v1());
-///     Ok(PublishThenAcquireOutcome::Matching { acquired, decoded })
+///     let decoded = decode(&read, DecodeLimits::reference_v1());
+///     Ok(WriteThenReadOutcome::Matching { read, decoded })
 /// }
 /// ```
-pub async fn publish_pack_archive<R: OperatorResolver + ?Sized>(
+pub async fn write_pack_archive<R: OperatorResolver + ?Sized>(
     resolver: &R,
-    request: &PackArchivePublicationRequest,
+    request: &PackArchiveWriteRequest,
     archive: &PackArchiveBytes,
-) -> Result<PackArchivePublicationReceipt, PackArchivePublicationError> {
-    let mut progress = PackArchivePublicationProgress::new();
+) -> Result<PackArchiveWriteReceipt, PackArchiveWriteError> {
+    let mut progress = PackArchiveWriteProgress::new();
     let destination_path = request.destination().operation_path();
     let keys = [ExactKey::new(destination_path, archive.as_slice())];
     {
-        let mut operation = PackArchivePublicationOperation {
+        let mut operation = PackArchiveWriteOperation {
             request,
             progress: &mut progress,
         };
-        publish_exact_keys(
+        write_exact_keys(
             resolver,
             request.destination().binding(),
             request.policy(),
@@ -175,40 +175,40 @@ pub async fn publish_pack_archive<R: OperatorResolver + ?Sized>(
         .await?;
     }
 
-    Ok(PackArchivePublicationReceipt {
+    Ok(PackArchiveWriteReceipt {
         destination: request.destination().clone(),
         policy: request.policy(),
         progress,
     })
 }
 
-/// A failure while publishing exact Pack Archive bytes through OpenDAL.
+/// A failure while writing exact Pack Archive bytes through OpenDAL.
 ///
 /// This error's own `Display` and `Debug` output omit native resolver and
 /// OpenDAL messages. Rendering its source chain may disclose backend context.
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "Pack Archive publication failed for binding {} at exact-object operation path {:?} during {phase:?}: {cause}",
+    "Pack Archive write failed for binding {} at exact-object operation path {:?} during {phase:?}: {cause}",
     .destination.binding(),
     .destination.operation_path(),
 )]
-pub struct PackArchivePublicationError {
+pub struct PackArchiveWriteError {
     destination: Location,
-    policy: PublicationPolicy,
+    policy: WritePolicy,
     failed_path: Option<String>,
-    phase: OpenDalPublicationPhase,
-    progress: PackArchivePublicationProgress,
+    phase: OpenDalWritePhase,
+    progress: PackArchiveWriteProgress,
     commit_certainty: CommitCertainty,
     #[source]
-    cause: RedactedError<PackArchivePublicationErrorCause>,
+    cause: RedactedError<PackArchiveWriteErrorCause>,
 }
 
-impl PackArchivePublicationError {
+impl PackArchiveWriteError {
     pub fn destination(&self) -> &Location {
         &self.destination
     }
 
-    pub const fn policy(&self) -> PublicationPolicy {
+    pub const fn policy(&self) -> WritePolicy {
         self.policy
     }
 
@@ -216,11 +216,11 @@ impl PackArchivePublicationError {
         self.failed_path.as_deref()
     }
 
-    pub const fn phase(&self) -> OpenDalPublicationPhase {
+    pub const fn phase(&self) -> OpenDalWritePhase {
         self.phase
     }
 
-    pub fn progress(&self) -> &PackArchivePublicationProgress {
+    pub fn progress(&self) -> &PackArchiveWriteProgress {
         &self.progress
     }
 
@@ -228,19 +228,19 @@ impl PackArchivePublicationError {
         self.commit_certainty
     }
 
-    pub fn cause(&self) -> &PackArchivePublicationErrorCause {
+    pub fn cause(&self) -> &PackArchiveWriteErrorCause {
         self.cause.inner()
     }
 }
 
-/// The typed cause of an OpenDAL Pack Archive publication failure.
+/// The typed cause of an OpenDAL Pack Archive write failure.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum PackArchivePublicationErrorCause {
+pub enum PackArchiveWriteErrorCause {
     #[error("operator resolution failed")]
     ResolveOperator(#[source] BoxError),
-    #[error("the publication policy is unsupported")]
-    UnsupportedPolicy { policy: PublicationPolicy },
+    #[error("the write policy is unsupported")]
+    UnsupportedPolicy { policy: WritePolicy },
     #[error("the archive exceeds the advertised object size")]
     UnsupportedObjectSize { byte_length: u64 },
     #[error("a preflight read failed")]
@@ -258,21 +258,21 @@ pub enum PackArchivePublicationErrorCause {
     DirectWrite(#[source] ::opendal::Error),
 }
 
-/// A validated request to publish caller-supplied bytes to one package-cache object.
+/// A validated request to write caller-supplied bytes to one package-cache object.
 ///
-/// This request fixes [`PublicationPolicy::CreateOrVerify`]. It does not offer a
+/// This request fixes [`WritePolicy::CreateOrVerify`]. It does not offer a
 /// replacement mode and does not represent Package Archive Expansion or Package
 /// Catalog insertion.
 #[derive(Clone, Debug)]
-pub struct PackageCacheArchivePublicationRequest {
+pub struct PackageCacheArchiveWriteRequest {
     destination: Location,
 }
 
-impl PackageCacheArchivePublicationRequest {
+impl PackageCacheArchiveWriteRequest {
     /// Validates and retains a normalized exact-object cache destination.
-    pub fn new(destination: Location) -> Result<Self, PackageCacheArchivePublicationRequestError> {
+    pub fn new(destination: Location) -> Result<Self, PackageCacheArchiveWriteRequestError> {
         destination.require_object().map_err(|source| {
-            PackageCacheArchivePublicationRequestError::InvalidDestinationRole {
+            PackageCacheArchiveWriteRequestError::InvalidDestinationRole {
                 location: destination.clone(),
                 source,
             }
@@ -285,15 +285,15 @@ impl PackageCacheArchivePublicationRequest {
         &self.destination
     }
 
-    pub const fn policy(&self) -> PublicationPolicy {
-        PublicationPolicy::CreateOrVerify
+    pub const fn policy(&self) -> WritePolicy {
+        WritePolicy::CreateOrVerify
     }
 }
 
-/// A reason a package-cache archive publication request cannot be accepted.
+/// A reason a package-cache archive write request cannot be accepted.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[non_exhaustive]
-pub enum PackageCacheArchivePublicationRequestError {
+pub enum PackageCacheArchiveWriteRequestError {
     #[error("package-cache archive destination {location} is not an exact object: {source}")]
     InvalidDestinationRole {
         location: Location,
@@ -302,12 +302,12 @@ pub enum PackageCacheArchivePublicationRequestError {
     },
 }
 
-/// Publishes caller-supplied exact archive bytes to one package-cache object.
+/// Writes caller-supplied exact archive bytes to one package-cache object.
 ///
 /// This low-level operation does not expand the archive, validate a Package
 /// Tree, or insert it into a Package Catalog. Direct use with unvalidated bytes
 /// can poison a cache because a present malformed cache candidate is terminal.
-/// Callers should publish registry bytes only after successful expansion,
+/// Callers should write registry bytes only after successful expansion,
 /// validation, and insertion.
 ///
 /// Dropping the returned future yields no receipt, and already-issued storage
@@ -315,42 +315,42 @@ pub enum PackageCacheArchivePublicationRequestError {
 /// same exact bytes is the recovery contract.
 ///
 /// ```no_run
-/// # #[cfg(feature = "package-acquisition")]
+/// # #[cfg(feature = "package-reading")]
 /// # mod example {
 /// use std::error::Error;
 /// use typst_pack::{
-///     PackageAcquisitionFailures, PackageCatalog, PackageDisposition,
+///     PackageReadFailures, PackageCatalog, PackageDisposition,
 ///     PackageExpansionLimits,
 /// };
 /// use typst_pack::opendal::OperatorBindings;
 /// use typst_pack::opendal::pack_assembly::{
-///     PackageAcquisition, RegistryArchiveResidue, insert_acquired_package,
+///     PackageRead, RegistryArchiveResidue, insert_read_package,
 /// };
-/// use typst_pack::opendal::publication::{
-///     PackageCacheArchivePublicationRequest, publish_package_cache_archive,
+/// use typst_pack::opendal::write::{
+///     PackageCacheArchiveWriteRequest, write_package_cache_archive,
 /// };
 ///
-/// async fn insert_then_publish_registry_archive(
+/// async fn insert_then_write_registry_archive(
 ///     bindings: &OperatorBindings,
 ///     catalog: &mut PackageCatalog,
-///     failures: &mut PackageAcquisitionFailures,
-///     acquisition: PackageAcquisition,
+///     failures: &mut PackageReadFailures,
+///     read: PackageRead,
 /// ) -> Result<Option<RegistryArchiveResidue>, Box<dyn Error>> {
-///     let Some(residue) = insert_acquired_package(
+///     let Some(residue) = insert_read_package(
 ///         catalog,
 ///         failures,
-///         acquisition,
+///         read,
 ///         PackageDisposition::Embedded,
 ///         PackageExpansionLimits::reference_v1(),
 ///     )? else {
 ///         return Ok(None);
 ///     };
 ///
-///     let request = PackageCacheArchivePublicationRequest::new(
+///     let request = PackageCacheArchiveWriteRequest::new(
 ///         residue.destination().clone(),
 ///     )?;
 ///     if let Err(cache_failure) =
-///         publish_package_cache_archive(bindings, &request, residue.bytes()).await
+///         write_package_cache_archive(bindings, &request, residue.bytes()).await
 ///     {
 ///         // Insertion remains successful. The residue retains the exact bytes
 ///         // and destination so the caller can report and replay independently.
@@ -361,20 +361,20 @@ pub enum PackageCacheArchivePublicationRequestError {
 /// }
 /// # }
 /// ```
-pub async fn publish_package_cache_archive<R: OperatorResolver + ?Sized>(
+pub async fn write_package_cache_archive<R: OperatorResolver + ?Sized>(
     resolver: &R,
-    request: &PackageCacheArchivePublicationRequest,
+    request: &PackageCacheArchiveWriteRequest,
     archive: &[u8],
-) -> Result<PackageCacheArchivePublicationReceipt, PackageCacheArchivePublicationError> {
-    let mut progress = PackageCacheArchivePublicationProgress::new();
+) -> Result<PackageCacheArchiveWriteReceipt, PackageCacheArchiveWriteError> {
+    let mut progress = PackageCacheArchiveWriteProgress::new();
     let destination_path = request.destination().operation_path();
     let keys = [ExactKey::new(destination_path, archive)];
     {
-        let mut operation = PackageCacheArchivePublicationOperation {
+        let mut operation = PackageCacheArchiveWriteOperation {
             request,
             progress: &mut progress,
         };
-        publish_create_or_verify_exact_keys(
+        write_create_or_verify_exact_keys(
             resolver,
             request.destination().binding(),
             &keys,
@@ -383,40 +383,40 @@ pub async fn publish_package_cache_archive<R: OperatorResolver + ?Sized>(
         .await?;
     }
 
-    Ok(PackageCacheArchivePublicationReceipt {
+    Ok(PackageCacheArchiveWriteReceipt {
         destination: request.destination().clone(),
         policy: request.policy(),
         progress,
     })
 }
 
-/// A failure while publishing caller-supplied package-cache archive bytes.
+/// A failure while writing caller-supplied package-cache archive bytes.
 ///
 /// This error's own `Display` and `Debug` output omit native resolver and
 /// OpenDAL messages. Rendering its source chain may disclose backend context.
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "package-cache archive publication failed for binding {} at exact-object operation path {:?} during {phase:?}: {cause}",
+    "package-cache archive write failed for binding {} at exact-object operation path {:?} during {phase:?}: {cause}",
     .destination.binding(),
     .destination.operation_path(),
 )]
-pub struct PackageCacheArchivePublicationError {
+pub struct PackageCacheArchiveWriteError {
     destination: Location,
-    policy: PublicationPolicy,
+    policy: WritePolicy,
     failed_path: Option<String>,
-    phase: OpenDalPublicationPhase,
-    progress: PackageCacheArchivePublicationProgress,
+    phase: OpenDalWritePhase,
+    progress: PackageCacheArchiveWriteProgress,
     commit_certainty: CommitCertainty,
     #[source]
-    cause: RedactedError<PackageCacheArchivePublicationErrorCause>,
+    cause: RedactedError<PackageCacheArchiveWriteErrorCause>,
 }
 
-impl PackageCacheArchivePublicationError {
+impl PackageCacheArchiveWriteError {
     pub fn destination(&self) -> &Location {
         &self.destination
     }
 
-    pub const fn policy(&self) -> PublicationPolicy {
+    pub const fn policy(&self) -> WritePolicy {
         self.policy
     }
 
@@ -424,11 +424,11 @@ impl PackageCacheArchivePublicationError {
         self.failed_path.as_deref()
     }
 
-    pub const fn phase(&self) -> OpenDalPublicationPhase {
+    pub const fn phase(&self) -> OpenDalWritePhase {
         self.phase
     }
 
-    pub fn progress(&self) -> &PackageCacheArchivePublicationProgress {
+    pub fn progress(&self) -> &PackageCacheArchiveWriteProgress {
         &self.progress
     }
 
@@ -436,19 +436,19 @@ impl PackageCacheArchivePublicationError {
         self.commit_certainty
     }
 
-    pub fn cause(&self) -> &PackageCacheArchivePublicationErrorCause {
+    pub fn cause(&self) -> &PackageCacheArchiveWriteErrorCause {
         self.cause.inner()
     }
 }
 
-/// The typed cause of an OpenDAL package-cache archive publication failure.
+/// The typed cause of an OpenDAL package-cache archive write failure.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum PackageCacheArchivePublicationErrorCause {
+pub enum PackageCacheArchiveWriteErrorCause {
     #[error("operator resolution failed")]
     ResolveOperator(#[source] BoxError),
-    #[error("the publication policy is unsupported")]
-    UnsupportedPolicy { policy: PublicationPolicy },
+    #[error("the write policy is unsupported")]
+    UnsupportedPolicy { policy: WritePolicy },
     #[error("the archive exceeds the advertised object size")]
     UnsupportedObjectSize { byte_length: u64 },
     #[error("a preflight read failed")]
@@ -464,21 +464,21 @@ pub enum PackageCacheArchivePublicationErrorCause {
     RaceVerification(#[source] ::opendal::Error),
 }
 
-/// A validated request to publish one Pack Extraction Plan beneath a prefix.
+/// A validated request to write one Pack Extraction Plan beneath a prefix.
 #[derive(Clone, Debug)]
-pub struct PackExtractionPublicationRequest {
+pub struct PackExtractionWriteRequest {
     destination: Location,
-    policy: PublicationPolicy,
+    policy: WritePolicy,
 }
 
-impl PackExtractionPublicationRequest {
+impl PackExtractionWriteRequest {
     /// Validates a normalized prefix destination and retains the explicit policy.
     pub fn new(
         destination: Location,
-        policy: PublicationPolicy,
-    ) -> Result<Self, PackExtractionPublicationRequestError> {
+        policy: WritePolicy,
+    ) -> Result<Self, PackExtractionWriteRequestError> {
         destination.require_prefix().map_err(|source| {
-            PackExtractionPublicationRequestError::InvalidDestinationRole {
+            PackExtractionWriteRequestError::InvalidDestinationRole {
                 location: destination.clone(),
                 source,
             }
@@ -494,15 +494,15 @@ impl PackExtractionPublicationRequest {
         &self.destination
     }
 
-    pub const fn policy(&self) -> PublicationPolicy {
+    pub const fn policy(&self) -> WritePolicy {
         self.policy
     }
 }
 
-/// A reason a Pack Extraction publication request cannot be accepted.
+/// A reason a Pack Extraction write request cannot be accepted.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[non_exhaustive]
-pub enum PackExtractionPublicationRequestError {
+pub enum PackExtractionWriteRequestError {
     #[error("Pack Extraction destination {location} is not a prefix: {source}")]
     InvalidDestinationRole {
         location: Location,
@@ -511,23 +511,23 @@ pub enum PackExtractionPublicationRequestError {
     },
 }
 
-/// A validated request to publish every artifact in one succeeded Compilation Result.
+/// A validated request to write every artifact in one succeeded Compilation Result.
 #[derive(Clone, Debug)]
-pub struct CompilationArtifactPublicationRequest {
+pub struct CompilationArtifactWriteRequest {
     compilation_result_identity: CanonicalIdentity,
     destination: Location,
     artifact_keys: Vec<String>,
-    policy: PublicationPolicy,
+    policy: WritePolicy,
 }
 
-impl CompilationArtifactPublicationRequest {
+impl CompilationArtifactWriteRequest {
     /// Validates a prefix destination and one decoded relative key per canonical artifact.
     pub fn new(
         result: &CompilationResult,
         destination: Location,
         artifact_keys: impl IntoIterator<Item = impl Into<String>>,
-        policy: PublicationPolicy,
-    ) -> Result<Self, CompilationArtifactPublicationRequestRejection> {
+        policy: WritePolicy,
+    ) -> Result<Self, CompilationArtifactWriteRequestRejection> {
         let compilation_result_identity = result.result_identity();
         let artifact_keys = artifact_keys
             .into_iter()
@@ -536,11 +536,11 @@ impl CompilationArtifactPublicationRequest {
         let mut issues = Vec::new();
 
         if result.status() != CompilationStatus::Succeeded {
-            issues.push(CompilationArtifactPublicationRequestIssue::ResultNotSucceeded);
+            issues.push(CompilationArtifactWriteRequestIssue::ResultNotSucceeded);
         }
         if let Err(source) = destination.require_prefix() {
             issues.push(
-                CompilationArtifactPublicationRequestIssue::InvalidDestinationRole {
+                CompilationArtifactWriteRequestIssue::InvalidDestinationRole {
                     location: destination.clone(),
                     source,
                 },
@@ -548,7 +548,7 @@ impl CompilationArtifactPublicationRequest {
         }
         if result.artifacts().len() != artifact_keys.len() {
             issues.push(
-                CompilationArtifactPublicationRequestIssue::ArtifactKeyCountMismatch {
+                CompilationArtifactWriteRequestIssue::ArtifactKeyCountMismatch {
                     expected: result.artifacts().len(),
                     actual: artifact_keys.len(),
                 },
@@ -557,29 +557,25 @@ impl CompilationArtifactPublicationRequest {
         let mut first_indices = BTreeMap::new();
         for (artifact_index, key) in artifact_keys.iter().enumerate() {
             if let Err(reason) = validate_artifact_key(key) {
-                issues.push(
-                    CompilationArtifactPublicationRequestIssue::InvalidArtifactKey {
-                        artifact_index,
-                        key: key.clone(),
-                        reason,
-                    },
-                );
+                issues.push(CompilationArtifactWriteRequestIssue::InvalidArtifactKey {
+                    artifact_index,
+                    key: key.clone(),
+                    reason,
+                });
             }
             if let Some(&first_artifact_index) = first_indices.get(key) {
-                issues.push(
-                    CompilationArtifactPublicationRequestIssue::DuplicateArtifactKey {
-                        key: key.clone(),
-                        first_artifact_index,
-                        duplicate_artifact_index: artifact_index,
-                    },
-                );
+                issues.push(CompilationArtifactWriteRequestIssue::DuplicateArtifactKey {
+                    key: key.clone(),
+                    first_artifact_index,
+                    duplicate_artifact_index: artifact_index,
+                });
             } else {
                 first_indices.insert(key.clone(), artifact_index);
             }
         }
 
         if !issues.is_empty() {
-            return Err(CompilationArtifactPublicationRequestRejection {
+            return Err(CompilationArtifactWriteRequestRejection {
                 compilation_result_identity,
                 destination,
                 issues: issues.into_boxed_slice(),
@@ -606,40 +602,40 @@ impl CompilationArtifactPublicationRequest {
         &self.artifact_keys
     }
 
-    pub const fn policy(&self) -> PublicationPolicy {
+    pub const fn policy(&self) -> WritePolicy {
         self.policy
     }
 }
 
-/// Complete deterministic rejection of a Compilation Output Artifact publication request.
+/// Complete deterministic rejection of a Compilation Output Artifact write request.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[error(
-    "Compilation Output Artifact publication request rejected for binding {} beneath prefix operation path {:?} with {} issue(s)",
+    "Compilation Output Artifact write request rejected for binding {} beneath prefix operation path {:?} with {} issue(s)",
     .destination.binding(),
     .destination.operation_path(),
     .issues.len(),
 )]
-pub struct CompilationArtifactPublicationRequestRejection {
+pub struct CompilationArtifactWriteRequestRejection {
     compilation_result_identity: CanonicalIdentity,
     destination: Location,
-    issues: Box<[CompilationArtifactPublicationRequestIssue]>,
+    issues: Box<[CompilationArtifactWriteRequestIssue]>,
 }
 
-impl CompilationArtifactPublicationRequestRejection {
+impl CompilationArtifactWriteRequestRejection {
     pub const fn compilation_result_identity(&self) -> CanonicalIdentity {
         self.compilation_result_identity
     }
 
-    pub fn issues(&self) -> &[CompilationArtifactPublicationRequestIssue] {
+    pub fn issues(&self) -> &[CompilationArtifactWriteRequestIssue] {
         &self.issues
     }
 }
 
-/// One independently detectable issue in a Compilation Output Artifact publication request.
+/// One independently detectable issue in a Compilation Output Artifact write request.
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[non_exhaustive]
-pub enum CompilationArtifactPublicationRequestIssue {
-    #[error("a rejected Compilation Result cannot be published")]
+pub enum CompilationArtifactWriteRequestIssue {
+    #[error("a rejected Compilation Result cannot be written")]
     ResultNotSucceeded,
     #[error("Compilation Output Artifact destination {location} is not a prefix: {source}")]
     InvalidDestinationRole {
@@ -709,7 +705,7 @@ fn validate_artifact_key(key: &str) -> Result<(), CompilationArtifactKeyIssue> {
     })
 }
 
-/// Publishes every entry in one Pack Extraction Plan beneath the request's prefix.
+/// Writes every entry in one Pack Extraction Plan beneath the request's prefix.
 ///
 /// The caller-owned progress is cleared synchronously before the returned future
 /// can be polled or dropped. Replaying the same plan with `CreateOrVerify`
@@ -718,39 +714,38 @@ fn validate_artifact_key(key: &str) -> Result<(), CompilationArtifactKeyIssue> {
 /// ```no_run
 /// use typst_pack::PackExtractionPlan;
 /// use typst_pack::opendal::OperatorBindings;
-/// use typst_pack::opendal::publication::{
-///     PackExtractionPublicationProgress, PackExtractionPublicationRequest,
-///     PublicationPolicy, publish_pack_extraction_plan,
+/// use typst_pack::opendal::write::{
+///     PackExtractionWriteProgress, PackExtractionWriteRequest,
+///     WritePolicy, write_pack_extraction_plan,
 /// };
 ///
-/// async fn publish_and_replay_partial_attempt(
+/// async fn write_and_replay_partial_attempt(
 ///     bindings: &OperatorBindings,
 ///     plan: &PackExtractionPlan,
 /// ) -> Result<(), Box<dyn std::error::Error>> {
-///     let request = PackExtractionPublicationRequest::new(
+///     let request = PackExtractionWriteRequest::new(
 ///         "project:/extracted/".parse()?,
-///         PublicationPolicy::CreateOrVerify,
+///         WritePolicy::CreateOrVerify,
 ///     )?;
-///     let mut progress = PackExtractionPublicationProgress::new();
+///     let mut progress = PackExtractionWriteProgress::new();
 ///
 ///     if let Err(error) =
-///         publish_pack_extraction_plan(bindings, &request, plan, &mut progress).await
+///         write_pack_extraction_plan(bindings, &request, plan, &mut progress).await
 ///     {
 ///         // The caller retains the exact completed prefix after a partial attempt.
 ///         assert_eq!(error.progress(), &progress);
-///         publish_pack_extraction_plan(bindings, &request, plan, &mut progress).await?;
+///         write_pack_extraction_plan(bindings, &request, plan, &mut progress).await?;
 ///     }
 ///
 ///     Ok(())
 /// }
 /// ```
-pub fn publish_pack_extraction_plan<'a, R: OperatorResolver + ?Sized>(
+pub fn write_pack_extraction_plan<'a, R: OperatorResolver + ?Sized>(
     resolver: &'a R,
-    request: &'a PackExtractionPublicationRequest,
+    request: &'a PackExtractionWriteRequest,
     plan: &'a crate::PackExtractionPlan,
-    progress: &'a mut PackExtractionPublicationProgress,
-) -> impl Future<Output = Result<PackExtractionPublicationReceipt, PackExtractionPublicationError>> + 'a
-{
+    progress: &'a mut PackExtractionWriteProgress,
+) -> impl Future<Output = Result<PackExtractionWriteReceipt, PackExtractionWriteError>> + 'a {
     progress.clear();
     async move {
         let mut destinations = Vec::with_capacity(plan.entries().len());
@@ -759,14 +754,14 @@ pub fn publish_pack_extraction_plan<'a, R: OperatorResolver + ?Sized>(
                 .destination()
                 .compose(entry.relative_path())
                 .map_err(|_| {
-                    pack_extraction_publication_error(
+                    pack_extraction_write_error(
                         request,
                         Some(entry.relative_path().to_owned()),
                         None,
-                        OpenDalPublicationPhase::DestinationValidation,
+                        OpenDalWritePhase::DestinationValidation,
                         progress,
                         CommitCertainty::NotCommitted,
-                        PackExtractionPublicationErrorCause::InvalidDestinationPath {
+                        PackExtractionWriteErrorCause::InvalidDestinationPath {
                             relative_path: entry.relative_path().to_owned(),
                         },
                     )
@@ -780,12 +775,12 @@ pub fn publish_pack_extraction_plan<'a, R: OperatorResolver + ?Sized>(
             .map(|(destination, entry)| ExactKey::new(destination.operation_path(), entry.bytes()))
             .collect::<Vec<_>>();
         {
-            let mut operation = PackExtractionPublicationOperation {
+            let mut operation = PackExtractionWriteOperation {
                 request,
                 plan,
                 progress,
             };
-            publish_exact_keys(
+            write_exact_keys(
                 resolver,
                 request.destination().binding(),
                 request.policy(),
@@ -795,41 +790,41 @@ pub fn publish_pack_extraction_plan<'a, R: OperatorResolver + ?Sized>(
             .await?;
         }
 
-        Ok(PackExtractionPublicationReceipt::new(
+        Ok(PackExtractionWriteReceipt::new(
             *plan.pack_identity(),
             progress.clone(),
         ))
     }
 }
 
-/// A failure while publishing a Pack Extraction Plan through OpenDAL.
+/// A failure while writing a Pack Extraction Plan through OpenDAL.
 ///
 /// This error's own `Display` and `Debug` output omit native resolver and
 /// OpenDAL messages. Rendering its source chain may disclose backend context.
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "Pack Extraction publication failed for binding {} beneath prefix operation path {:?} during {phase:?}: {cause}",
+    "Pack Extraction write failed for binding {} beneath prefix operation path {:?} during {phase:?}: {cause}",
     .destination.binding(),
     .destination.operation_path(),
 )]
-pub struct PackExtractionPublicationError {
+pub struct PackExtractionWriteError {
     destination: Location,
-    policy: PublicationPolicy,
+    policy: WritePolicy,
     failed_relative_path: Option<String>,
     failed_destination_path: Option<String>,
-    phase: OpenDalPublicationPhase,
-    progress: PackExtractionPublicationProgress,
+    phase: OpenDalWritePhase,
+    progress: PackExtractionWriteProgress,
     commit_certainty: CommitCertainty,
     #[source]
-    cause: RedactedError<PackExtractionPublicationErrorCause>,
+    cause: RedactedError<PackExtractionWriteErrorCause>,
 }
 
-impl PackExtractionPublicationError {
+impl PackExtractionWriteError {
     pub fn destination(&self) -> &Location {
         &self.destination
     }
 
-    pub const fn policy(&self) -> PublicationPolicy {
+    pub const fn policy(&self) -> WritePolicy {
         self.policy
     }
 
@@ -841,11 +836,11 @@ impl PackExtractionPublicationError {
         self.failed_destination_path.as_deref()
     }
 
-    pub const fn phase(&self) -> OpenDalPublicationPhase {
+    pub const fn phase(&self) -> OpenDalWritePhase {
         self.phase
     }
 
-    pub fn progress(&self) -> &PackExtractionPublicationProgress {
+    pub fn progress(&self) -> &PackExtractionWriteProgress {
         &self.progress
     }
 
@@ -853,21 +848,21 @@ impl PackExtractionPublicationError {
         self.commit_certainty
     }
 
-    pub fn cause(&self) -> &PackExtractionPublicationErrorCause {
+    pub fn cause(&self) -> &PackExtractionWriteErrorCause {
         self.cause.inner()
     }
 }
 
-/// The typed cause of an OpenDAL Pack Extraction publication failure.
+/// The typed cause of an OpenDAL Pack Extraction write failure.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum PackExtractionPublicationErrorCause {
+pub enum PackExtractionWriteErrorCause {
     #[error("a composed destination path was invalid")]
     InvalidDestinationPath { relative_path: String },
     #[error("operator resolution failed")]
     ResolveOperator(#[source] BoxError),
-    #[error("the publication policy is unsupported")]
-    UnsupportedPolicy { policy: PublicationPolicy },
+    #[error("the write policy is unsupported")]
+    UnsupportedPolicy { policy: WritePolicy },
     #[error("an entry exceeds the advertised object size")]
     UnsupportedObjectSize { byte_length: u64 },
     #[error("a preflight read failed")]
@@ -885,16 +880,16 @@ pub enum PackExtractionPublicationErrorCause {
     DirectWrite(#[source] ::opendal::Error),
 }
 
-fn pack_extraction_publication_error(
-    request: &PackExtractionPublicationRequest,
+fn pack_extraction_write_error(
+    request: &PackExtractionWriteRequest,
     failed_relative_path: Option<String>,
     failed_destination_path: Option<String>,
-    phase: OpenDalPublicationPhase,
-    progress: &PackExtractionPublicationProgress,
+    phase: OpenDalWritePhase,
+    progress: &PackExtractionWriteProgress,
     commit_certainty: CommitCertainty,
-    cause: PackExtractionPublicationErrorCause,
-) -> PackExtractionPublicationError {
-    PackExtractionPublicationError {
+    cause: PackExtractionWriteErrorCause,
+) -> PackExtractionWriteError {
+    PackExtractionWriteError {
         destination: request.destination().clone(),
         policy: request.policy(),
         failed_relative_path,
@@ -906,7 +901,7 @@ fn pack_extraction_publication_error(
     }
 }
 
-/// Publishes every canonical artifact beneath the request's normalized prefix.
+/// Writes every canonical artifact beneath the request's normalized prefix.
 ///
 /// The caller-owned progress is cleared synchronously before the returned future
 /// can be polled or dropped. Replaying the same result with `CreateOrVerify`
@@ -915,43 +910,43 @@ fn pack_extraction_publication_error(
 /// ```no_run
 /// use typst_pack::CompilationResult;
 /// use typst_pack::opendal::OperatorBindings;
-/// use typst_pack::opendal::publication::{
-///     CompilationArtifactPublicationProgress, CompilationArtifactPublicationRequest,
-///     PublicationPolicy, publish_compilation_artifacts,
+/// use typst_pack::opendal::write::{
+///     CompilationArtifactWriteProgress, CompilationArtifactWriteRequest,
+///     WritePolicy, write_compilation_artifacts,
 /// };
 ///
-/// async fn publish_and_replay(
+/// async fn write_and_replay(
 ///     bindings: &OperatorBindings,
 ///     document_result: &CompilationResult,
 ///     page_result: &CompilationResult,
 /// ) -> Result<(), Box<dyn std::error::Error>> {
-///     let document_request = CompilationArtifactPublicationRequest::new(
+///     let document_request = CompilationArtifactWriteRequest::new(
 ///         document_result,
 ///         "artifacts:/document/".parse()?,
 ///         ["document.pdf"],
-///         PublicationPolicy::CreateOrVerify,
+///         WritePolicy::CreateOrVerify,
 ///     )?;
 ///     let page_keys = page_result
 ///         .artifacts()
 ///         .iter()
 ///         .map(|artifact| format!("page-{}.svg", artifact.source_page_number().unwrap()))
 ///         .collect::<Vec<_>>();
-///     let page_request = CompilationArtifactPublicationRequest::new(
+///     let page_request = CompilationArtifactWriteRequest::new(
 ///         page_result,
 ///         "artifacts:/pages/".parse()?,
 ///         page_keys,
-///         PublicationPolicy::CreateOrVerify,
+///         WritePolicy::CreateOrVerify,
 ///     )?;
 ///
-///     let mut document_progress = CompilationArtifactPublicationProgress::new();
-///     publish_compilation_artifacts(
+///     let mut document_progress = CompilationArtifactWriteProgress::new();
+///     write_compilation_artifacts(
 ///         bindings,
 ///         &document_request,
 ///         document_result,
 ///         &mut document_progress,
 ///     )
 ///     .await?;
-///     publish_compilation_artifacts(
+///     write_compilation_artifacts(
 ///         bindings,
 ///         &document_request,
 ///         document_result,
@@ -959,33 +954,32 @@ fn pack_extraction_publication_error(
 ///     )
 ///     .await?;
 ///
-///     let mut page_progress = CompilationArtifactPublicationProgress::new();
-///     publish_compilation_artifacts(bindings, &page_request, page_result, &mut page_progress)
+///     let mut page_progress = CompilationArtifactWriteProgress::new();
+///     write_compilation_artifacts(bindings, &page_request, page_result, &mut page_progress)
 ///         .await?;
-///     publish_compilation_artifacts(bindings, &page_request, page_result, &mut page_progress)
+///     write_compilation_artifacts(bindings, &page_request, page_result, &mut page_progress)
 ///         .await?;
 ///     Ok(())
 /// }
 /// ```
-pub fn publish_compilation_artifacts<'a, R: OperatorResolver + ?Sized>(
+pub fn write_compilation_artifacts<'a, R: OperatorResolver + ?Sized>(
     resolver: &'a R,
-    request: &'a CompilationArtifactPublicationRequest,
+    request: &'a CompilationArtifactWriteRequest,
     result: &'a CompilationResult,
-    progress: &'a mut CompilationArtifactPublicationProgress,
-) -> impl Future<
-    Output = Result<CompilationArtifactPublicationReceipt, CompilationArtifactPublicationError>,
-> + 'a {
+    progress: &'a mut CompilationArtifactWriteProgress,
+) -> impl Future<Output = Result<CompilationArtifactWriteReceipt, CompilationArtifactWriteError>> + 'a
+{
     progress.clear();
     async move {
         if request.compilation_result_identity() != result.result_identity() {
-            return Err(compilation_artifact_publication_error(
+            return Err(compilation_artifact_write_error(
                 request,
                 None,
                 None,
-                OpenDalPublicationPhase::ResultValidation,
+                OpenDalWritePhase::ResultValidation,
                 progress,
                 CommitCertainty::NotCommitted,
-                CompilationArtifactPublicationErrorCause::CompilationResultMismatch {
+                CompilationArtifactWriteErrorCause::CompilationResultMismatch {
                     expected: request.compilation_result_identity(),
                     actual: result.result_identity(),
                 },
@@ -995,14 +989,14 @@ pub fn publish_compilation_artifacts<'a, R: OperatorResolver + ?Sized>(
         let mut destinations = Vec::with_capacity(request.artifact_keys().len());
         for (artifact_index, key) in request.artifact_keys().iter().enumerate() {
             let destination = request.destination().compose(key).map_err(|_| {
-                compilation_artifact_publication_error(
+                compilation_artifact_write_error(
                     request,
                     Some(artifact_index),
                     None,
-                    OpenDalPublicationPhase::DestinationValidation,
+                    OpenDalWritePhase::DestinationValidation,
                     progress,
                     CommitCertainty::NotCommitted,
-                    CompilationArtifactPublicationErrorCause::InvalidDestinationPath {
+                    CompilationArtifactWriteErrorCause::InvalidDestinationPath {
                         artifact_index,
                         key: key.clone(),
                     },
@@ -1019,8 +1013,8 @@ pub fn publish_compilation_artifacts<'a, R: OperatorResolver + ?Sized>(
             })
             .collect::<Vec<_>>();
         {
-            let mut operation = CompilationArtifactPublicationOperation { request, progress };
-            publish_exact_keys(
+            let mut operation = CompilationArtifactWriteOperation { request, progress };
+            write_exact_keys(
                 resolver,
                 request.destination().binding(),
                 request.policy(),
@@ -1030,38 +1024,38 @@ pub fn publish_compilation_artifacts<'a, R: OperatorResolver + ?Sized>(
             .await?;
         }
 
-        Ok(CompilationArtifactPublicationReceipt::new(
+        Ok(CompilationArtifactWriteReceipt::new(
             request.compilation_result_identity(),
             progress.clone(),
         ))
     }
 }
 
-/// A failure while publishing a Compilation Result's exact artifacts through OpenDAL.
+/// A failure while writing a Compilation Result's exact artifacts through OpenDAL.
 ///
 /// This error's own `Display` and `Debug` output omit native resolver and
 /// OpenDAL messages. Rendering its source chain may disclose backend context.
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "Compilation Output Artifact publication failed for binding {} beneath prefix operation path {:?} during {phase:?}: {cause}",
+    "Compilation Output Artifact write failed for binding {} beneath prefix operation path {:?} during {phase:?}: {cause}",
     .destination.binding(),
     .destination.operation_path(),
 )]
-pub struct CompilationArtifactPublicationError {
+pub struct CompilationArtifactWriteError {
     compilation_result_identity: CanonicalIdentity,
     destination: Location,
-    policy: PublicationPolicy,
+    policy: WritePolicy,
     failed_artifact_index: Option<usize>,
     failed_key: Option<String>,
     failed_destination_path: Option<String>,
-    phase: OpenDalPublicationPhase,
-    progress: CompilationArtifactPublicationProgress,
+    phase: OpenDalWritePhase,
+    progress: CompilationArtifactWriteProgress,
     commit_certainty: CommitCertainty,
     #[source]
-    cause: RedactedError<CompilationArtifactPublicationErrorCause>,
+    cause: RedactedError<CompilationArtifactWriteErrorCause>,
 }
 
-impl CompilationArtifactPublicationError {
+impl CompilationArtifactWriteError {
     pub const fn compilation_result_identity(&self) -> CanonicalIdentity {
         self.compilation_result_identity
     }
@@ -1070,7 +1064,7 @@ impl CompilationArtifactPublicationError {
         &self.destination
     }
 
-    pub const fn policy(&self) -> PublicationPolicy {
+    pub const fn policy(&self) -> WritePolicy {
         self.policy
     }
 
@@ -1086,11 +1080,11 @@ impl CompilationArtifactPublicationError {
         self.failed_destination_path.as_deref()
     }
 
-    pub const fn phase(&self) -> OpenDalPublicationPhase {
+    pub const fn phase(&self) -> OpenDalWritePhase {
         self.phase
     }
 
-    pub const fn progress(&self) -> &CompilationArtifactPublicationProgress {
+    pub const fn progress(&self) -> &CompilationArtifactWriteProgress {
         &self.progress
     }
 
@@ -1098,15 +1092,15 @@ impl CompilationArtifactPublicationError {
         self.commit_certainty
     }
 
-    pub const fn cause(&self) -> &CompilationArtifactPublicationErrorCause {
+    pub const fn cause(&self) -> &CompilationArtifactWriteErrorCause {
         self.cause.inner()
     }
 }
 
-/// The typed cause of an OpenDAL Compilation Output Artifact publication failure.
+/// The typed cause of an OpenDAL Compilation Output Artifact write failure.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum CompilationArtifactPublicationErrorCause {
+pub enum CompilationArtifactWriteErrorCause {
     #[error("the Compilation Result identity mismatched")]
     CompilationResultMismatch {
         expected: CanonicalIdentity,
@@ -1116,8 +1110,8 @@ pub enum CompilationArtifactPublicationErrorCause {
     InvalidDestinationPath { artifact_index: usize, key: String },
     #[error("operator resolution failed")]
     ResolveOperator(#[source] BoxError),
-    #[error("the publication policy is unsupported")]
-    UnsupportedPolicy { policy: PublicationPolicy },
+    #[error("the write policy is unsupported")]
+    UnsupportedPolicy { policy: WritePolicy },
     #[error("an artifact exceeds the advertised object size")]
     UnsupportedObjectSize {
         artifact_index: usize,
@@ -1138,17 +1132,17 @@ pub enum CompilationArtifactPublicationErrorCause {
     DirectWrite(#[source] ::opendal::Error),
 }
 
-fn compilation_artifact_publication_error(
-    request: &CompilationArtifactPublicationRequest,
+fn compilation_artifact_write_error(
+    request: &CompilationArtifactWriteRequest,
     failed_artifact_index: Option<usize>,
     failed_destination_path: Option<String>,
-    phase: OpenDalPublicationPhase,
-    progress: &CompilationArtifactPublicationProgress,
+    phase: OpenDalWritePhase,
+    progress: &CompilationArtifactWriteProgress,
     commit_certainty: CommitCertainty,
-    cause: CompilationArtifactPublicationErrorCause,
-) -> CompilationArtifactPublicationError {
+    cause: CompilationArtifactWriteErrorCause,
+) -> CompilationArtifactWriteError {
     let failed_key = failed_artifact_index.map(|index| request.artifact_keys()[index].clone());
-    CompilationArtifactPublicationError {
+    CompilationArtifactWriteError {
         compilation_result_identity: request.compilation_result_identity(),
         destination: request.destination().clone(),
         policy: request.policy(),
@@ -1174,13 +1168,13 @@ macro_rules! workflow_evidence {
         #[derive(Clone, Debug, Eq, PartialEq)]
         pub struct $entry {
             $($entry_field: $entry_type,)*
-            outcome: PublicationKeyOutcome,
+            outcome: WriteKeyOutcome,
         }
 
         impl $entry {
             $($entry_accessors)*
 
-            pub const fn outcome(&self) -> PublicationKeyOutcome {
+            pub const fn outcome(&self) -> WriteKeyOutcome {
                 self.outcome
             }
 
@@ -1224,27 +1218,27 @@ macro_rules! workflow_evidence {
 }
 
 workflow_evidence!(
-    PackArchivePublicationEntry,
-    PackArchivePublicationProgress,
-    PackArchivePublicationReceipt,
+    PackArchiveWriteEntry,
+    PackArchiveWriteProgress,
+    PackArchiveWriteReceipt,
     entry { destination_path: String },
     entry_accessors {
         pub fn destination_path(&self) -> &str { &self.destination_path }
     },
     progress_accessors {
-        pub fn completed(&self) -> Option<&PackArchivePublicationEntry> { self.completed.first() }
-        pub fn outcome(&self) -> Option<PublicationKeyOutcome> {
-            self.completed().map(PackArchivePublicationEntry::outcome)
+        pub fn completed(&self) -> Option<&PackArchiveWriteEntry> { self.completed.first() }
+        pub fn outcome(&self) -> Option<WriteKeyOutcome> {
+            self.completed().map(PackArchiveWriteEntry::outcome)
         }
     },
-    receipt { destination: Location, policy: PublicationPolicy },
+    receipt { destination: Location, policy: WritePolicy },
     receipt_accessors {
         pub fn destination(&self) -> &Location { &self.destination }
-        pub const fn policy(&self) -> PublicationPolicy { self.policy }
-        pub fn completed(&self) -> &PackArchivePublicationEntry {
+        pub const fn policy(&self) -> WritePolicy { self.policy }
+        pub fn completed(&self) -> &PackArchiveWriteEntry {
             self.progress.completed().expect("a Pack Archive receipt has one completed entry")
         }
-        pub const fn outcome(&self) -> PublicationKeyOutcome {
+        pub const fn outcome(&self) -> WriteKeyOutcome {
             match self.progress.completed.as_slice() {
                 [entry, ..] => entry.outcome,
                 [] => panic!("a Pack Archive receipt has one completed entry"),
@@ -1254,27 +1248,27 @@ workflow_evidence!(
 );
 
 workflow_evidence!(
-    PackageCacheArchivePublicationEntry,
-    PackageCacheArchivePublicationProgress,
-    PackageCacheArchivePublicationReceipt,
+    PackageCacheArchiveWriteEntry,
+    PackageCacheArchiveWriteProgress,
+    PackageCacheArchiveWriteReceipt,
     entry { destination_path: String },
     entry_accessors {
         pub fn destination_path(&self) -> &str { &self.destination_path }
     },
     progress_accessors {
-        pub fn completed(&self) -> Option<&PackageCacheArchivePublicationEntry> { self.completed.first() }
-        pub fn outcome(&self) -> Option<PublicationKeyOutcome> {
-            self.completed().map(PackageCacheArchivePublicationEntry::outcome)
+        pub fn completed(&self) -> Option<&PackageCacheArchiveWriteEntry> { self.completed.first() }
+        pub fn outcome(&self) -> Option<WriteKeyOutcome> {
+            self.completed().map(PackageCacheArchiveWriteEntry::outcome)
         }
     },
-    receipt { destination: Location, policy: PublicationPolicy },
+    receipt { destination: Location, policy: WritePolicy },
     receipt_accessors {
         pub fn destination(&self) -> &Location { &self.destination }
-        pub const fn policy(&self) -> PublicationPolicy { self.policy }
-        pub fn completed(&self) -> &PackageCacheArchivePublicationEntry {
+        pub const fn policy(&self) -> WritePolicy { self.policy }
+        pub fn completed(&self) -> &PackageCacheArchiveWriteEntry {
             self.progress.completed().expect("a package-cache archive receipt has one completed entry")
         }
-        pub const fn outcome(&self) -> PublicationKeyOutcome {
+        pub const fn outcome(&self) -> WriteKeyOutcome {
             match self.progress.completed.as_slice() {
                 [entry, ..] => entry.outcome,
                 [] => panic!("a package-cache archive receipt has one completed entry"),
@@ -1295,32 +1289,32 @@ impl<'a> ExactKey<'a> {
 }
 
 #[derive(Debug)]
-pub(crate) struct ExactKeyPublicationReceipt {
-    completed: Vec<ExactKeyPublicationEntry>,
+pub(crate) struct ExactKeyWriteReceipt {
+    completed: Vec<ExactKeyWriteEntry>,
 }
 
-impl ExactKeyPublicationReceipt {
+impl ExactKeyWriteReceipt {
     #[cfg(test)]
-    fn completed(&self) -> &[ExactKeyPublicationEntry] {
+    fn completed(&self) -> &[ExactKeyWriteEntry] {
         &self.completed
     }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct ExactKeyPublicationEntry {
+pub(crate) struct ExactKeyWriteEntry {
     pub(crate) index: usize,
-    pub(crate) outcome: PublicationKeyOutcome,
+    pub(crate) outcome: WriteKeyOutcome,
 }
 
-struct ExactKeyPublicationFailure {
-    phase: OpenDalPublicationPhase,
+struct ExactKeyWriteFailure {
+    phase: OpenDalWritePhase,
     failed_index: Option<usize>,
     failed_path: Option<String>,
     commit_certainty: CommitCertainty,
 }
 
-impl ExactKeyPublicationFailure {
-    fn operation(phase: OpenDalPublicationPhase) -> Self {
+impl ExactKeyWriteFailure {
+    fn operation(phase: OpenDalWritePhase) -> Self {
         Self {
             phase,
             failed_index: None,
@@ -1330,7 +1324,7 @@ impl ExactKeyPublicationFailure {
     }
 
     fn key(
-        phase: OpenDalPublicationPhase,
+        phase: OpenDalWritePhase,
         index: usize,
         key: &ExactKey<'_>,
         commit_certainty: CommitCertainty,
@@ -1344,9 +1338,9 @@ impl ExactKeyPublicationFailure {
     }
 }
 
-trait ExactKeyPublicationCause: Sized {
+trait ExactKeyWriteCause: Sized {
     fn resolve_operator(source: BoxError) -> Self;
-    fn unsupported_policy(policy: PublicationPolicy) -> Self;
+    fn unsupported_policy(policy: WritePolicy) -> Self;
     fn unsupported_object_size(index: usize, byte_length: u64) -> Self;
     fn preflight_read(source: opendal::Error) -> Self;
     fn byte_conflict(expected_byte_length: u64, observed_byte_length_at_least: u64) -> Self;
@@ -1354,36 +1348,36 @@ trait ExactKeyPublicationCause: Sized {
     fn race_verification(source: opendal::Error) -> Self;
 }
 
-trait ExactKeyOverwriteCause: ExactKeyPublicationCause {
+trait ExactKeyOverwriteCause: ExactKeyWriteCause {
     fn direct_write(source: opendal::Error) -> Self;
 }
 
-trait ExactKeyPublicationOperation {
+trait ExactKeyWriteOperation {
     type Error;
-    type Cause: ExactKeyPublicationCause;
+    type Cause: ExactKeyWriteCause;
 
-    fn completed_entry(&mut self, entry: ExactKeyPublicationEntry);
-    fn error(&self, failure: ExactKeyPublicationFailure, cause: Self::Cause) -> Self::Error;
+    fn completed_entry(&mut self, entry: ExactKeyWriteEntry);
+    fn error(&self, failure: ExactKeyWriteFailure, cause: Self::Cause) -> Self::Error;
 }
 
-struct PackArchivePublicationOperation<'a> {
-    request: &'a PackArchivePublicationRequest,
-    progress: &'a mut PackArchivePublicationProgress,
+struct PackArchiveWriteOperation<'a> {
+    request: &'a PackArchiveWriteRequest,
+    progress: &'a mut PackArchiveWriteProgress,
 }
 
-impl ExactKeyPublicationOperation for PackArchivePublicationOperation<'_> {
-    type Error = PackArchivePublicationError;
-    type Cause = PackArchivePublicationErrorCause;
+impl ExactKeyWriteOperation for PackArchiveWriteOperation<'_> {
+    type Error = PackArchiveWriteError;
+    type Cause = PackArchiveWriteErrorCause;
 
-    fn completed_entry(&mut self, entry: ExactKeyPublicationEntry) {
-        self.progress.push(PackArchivePublicationEntry {
+    fn completed_entry(&mut self, entry: ExactKeyWriteEntry) {
+        self.progress.push(PackArchiveWriteEntry {
             destination_path: self.request.destination().operation_path().to_owned(),
             outcome: entry.outcome,
         });
     }
 
-    fn error(&self, failure: ExactKeyPublicationFailure, cause: Self::Cause) -> Self::Error {
-        PackArchivePublicationError {
+    fn error(&self, failure: ExactKeyWriteFailure, cause: Self::Cause) -> Self::Error {
+        PackArchiveWriteError {
             destination: self.request.destination().clone(),
             policy: self.request.policy(),
             failed_path: failure.failed_path,
@@ -1395,12 +1389,12 @@ impl ExactKeyPublicationOperation for PackArchivePublicationOperation<'_> {
     }
 }
 
-impl ExactKeyPublicationCause for PackArchivePublicationErrorCause {
+impl ExactKeyWriteCause for PackArchiveWriteErrorCause {
     fn resolve_operator(source: BoxError) -> Self {
         Self::ResolveOperator(source)
     }
 
-    fn unsupported_policy(policy: PublicationPolicy) -> Self {
+    fn unsupported_policy(policy: WritePolicy) -> Self {
         Self::UnsupportedPolicy { policy }
     }
 
@@ -1428,30 +1422,30 @@ impl ExactKeyPublicationCause for PackArchivePublicationErrorCause {
     }
 }
 
-impl ExactKeyOverwriteCause for PackArchivePublicationErrorCause {
+impl ExactKeyOverwriteCause for PackArchiveWriteErrorCause {
     fn direct_write(source: opendal::Error) -> Self {
         Self::DirectWrite(source)
     }
 }
 
-struct PackageCacheArchivePublicationOperation<'a> {
-    request: &'a PackageCacheArchivePublicationRequest,
-    progress: &'a mut PackageCacheArchivePublicationProgress,
+struct PackageCacheArchiveWriteOperation<'a> {
+    request: &'a PackageCacheArchiveWriteRequest,
+    progress: &'a mut PackageCacheArchiveWriteProgress,
 }
 
-impl ExactKeyPublicationOperation for PackageCacheArchivePublicationOperation<'_> {
-    type Error = PackageCacheArchivePublicationError;
-    type Cause = PackageCacheArchivePublicationErrorCause;
+impl ExactKeyWriteOperation for PackageCacheArchiveWriteOperation<'_> {
+    type Error = PackageCacheArchiveWriteError;
+    type Cause = PackageCacheArchiveWriteErrorCause;
 
-    fn completed_entry(&mut self, entry: ExactKeyPublicationEntry) {
-        self.progress.push(PackageCacheArchivePublicationEntry {
+    fn completed_entry(&mut self, entry: ExactKeyWriteEntry) {
+        self.progress.push(PackageCacheArchiveWriteEntry {
             destination_path: self.request.destination().operation_path().to_owned(),
             outcome: entry.outcome,
         });
     }
 
-    fn error(&self, failure: ExactKeyPublicationFailure, cause: Self::Cause) -> Self::Error {
-        PackageCacheArchivePublicationError {
+    fn error(&self, failure: ExactKeyWriteFailure, cause: Self::Cause) -> Self::Error {
+        PackageCacheArchiveWriteError {
             destination: self.request.destination().clone(),
             policy: self.request.policy(),
             failed_path: failure.failed_path,
@@ -1463,12 +1457,12 @@ impl ExactKeyPublicationOperation for PackageCacheArchivePublicationOperation<'_
     }
 }
 
-impl ExactKeyPublicationCause for PackageCacheArchivePublicationErrorCause {
+impl ExactKeyWriteCause for PackageCacheArchiveWriteErrorCause {
     fn resolve_operator(source: BoxError) -> Self {
         Self::ResolveOperator(source)
     }
 
-    fn unsupported_policy(policy: PublicationPolicy) -> Self {
+    fn unsupported_policy(policy: WritePolicy) -> Self {
         Self::UnsupportedPolicy { policy }
     }
 
@@ -1496,29 +1490,29 @@ impl ExactKeyPublicationCause for PackageCacheArchivePublicationErrorCause {
     }
 }
 
-struct PackExtractionPublicationOperation<'a> {
-    request: &'a PackExtractionPublicationRequest,
+struct PackExtractionWriteOperation<'a> {
+    request: &'a PackExtractionWriteRequest,
     plan: &'a crate::PackExtractionPlan,
-    progress: &'a mut PackExtractionPublicationProgress,
+    progress: &'a mut PackExtractionWriteProgress,
 }
 
-impl ExactKeyPublicationOperation for PackExtractionPublicationOperation<'_> {
-    type Error = PackExtractionPublicationError;
-    type Cause = PackExtractionPublicationErrorCause;
+impl ExactKeyWriteOperation for PackExtractionWriteOperation<'_> {
+    type Error = PackExtractionWriteError;
+    type Cause = PackExtractionWriteErrorCause;
 
-    fn completed_entry(&mut self, entry: ExactKeyPublicationEntry) {
+    fn completed_entry(&mut self, entry: ExactKeyWriteEntry) {
         let index = entry.index;
-        self.progress.push(PackExtractionPublicationEntry::new(
+        self.progress.push(PackExtractionWriteEntry::new(
             self.plan.entries()[index].relative_path().to_owned(),
             entry.outcome,
         ));
     }
 
-    fn error(&self, failure: ExactKeyPublicationFailure, cause: Self::Cause) -> Self::Error {
+    fn error(&self, failure: ExactKeyWriteFailure, cause: Self::Cause) -> Self::Error {
         let failed_relative_path = failure
             .failed_index
             .map(|index| self.plan.entries()[index].relative_path().to_owned());
-        pack_extraction_publication_error(
+        pack_extraction_write_error(
             self.request,
             failed_relative_path,
             failure.failed_path,
@@ -1530,12 +1524,12 @@ impl ExactKeyPublicationOperation for PackExtractionPublicationOperation<'_> {
     }
 }
 
-impl ExactKeyPublicationCause for PackExtractionPublicationErrorCause {
+impl ExactKeyWriteCause for PackExtractionWriteErrorCause {
     fn resolve_operator(source: BoxError) -> Self {
         Self::ResolveOperator(source)
     }
 
-    fn unsupported_policy(policy: PublicationPolicy) -> Self {
+    fn unsupported_policy(policy: WritePolicy) -> Self {
         Self::UnsupportedPolicy { policy }
     }
 
@@ -1563,31 +1557,31 @@ impl ExactKeyPublicationCause for PackExtractionPublicationErrorCause {
     }
 }
 
-impl ExactKeyOverwriteCause for PackExtractionPublicationErrorCause {
+impl ExactKeyOverwriteCause for PackExtractionWriteErrorCause {
     fn direct_write(source: opendal::Error) -> Self {
         Self::DirectWrite(source)
     }
 }
 
-struct CompilationArtifactPublicationOperation<'a> {
-    request: &'a CompilationArtifactPublicationRequest,
-    progress: &'a mut CompilationArtifactPublicationProgress,
+struct CompilationArtifactWriteOperation<'a> {
+    request: &'a CompilationArtifactWriteRequest,
+    progress: &'a mut CompilationArtifactWriteProgress,
 }
 
-impl ExactKeyPublicationOperation for CompilationArtifactPublicationOperation<'_> {
-    type Error = CompilationArtifactPublicationError;
-    type Cause = CompilationArtifactPublicationErrorCause;
+impl ExactKeyWriteOperation for CompilationArtifactWriteOperation<'_> {
+    type Error = CompilationArtifactWriteError;
+    type Cause = CompilationArtifactWriteErrorCause;
 
-    fn completed_entry(&mut self, entry: ExactKeyPublicationEntry) {
+    fn completed_entry(&mut self, entry: ExactKeyWriteEntry) {
         let artifact_index = entry.index;
-        self.progress.push(CompilationArtifactPublicationEntry::new(
+        self.progress.push(CompilationArtifactWriteEntry::new(
             artifact_index,
             entry.outcome,
         ));
     }
 
-    fn error(&self, failure: ExactKeyPublicationFailure, cause: Self::Cause) -> Self::Error {
-        compilation_artifact_publication_error(
+    fn error(&self, failure: ExactKeyWriteFailure, cause: Self::Cause) -> Self::Error {
+        compilation_artifact_write_error(
             self.request,
             failure.failed_index,
             failure.failed_path,
@@ -1599,12 +1593,12 @@ impl ExactKeyPublicationOperation for CompilationArtifactPublicationOperation<'_
     }
 }
 
-impl ExactKeyPublicationCause for CompilationArtifactPublicationErrorCause {
+impl ExactKeyWriteCause for CompilationArtifactWriteErrorCause {
     fn resolve_operator(source: BoxError) -> Self {
         Self::ResolveOperator(source)
     }
 
-    fn unsupported_policy(policy: PublicationPolicy) -> Self {
+    fn unsupported_policy(policy: WritePolicy) -> Self {
         Self::UnsupportedPolicy { policy }
     }
 
@@ -1635,33 +1629,33 @@ impl ExactKeyPublicationCause for CompilationArtifactPublicationErrorCause {
     }
 }
 
-impl ExactKeyOverwriteCause for CompilationArtifactPublicationErrorCause {
+impl ExactKeyOverwriteCause for CompilationArtifactWriteErrorCause {
     fn direct_write(source: opendal::Error) -> Self {
         Self::DirectWrite(source)
     }
 }
 
-async fn publish_exact_keys<R, O>(
+async fn write_exact_keys<R, O>(
     resolver: &R,
     binding: &OperatorBinding,
-    policy: PublicationPolicy,
+    policy: WritePolicy,
     keys: &[ExactKey<'_>],
     operation: &mut O,
-) -> Result<ExactKeyPublicationReceipt, O::Error>
+) -> Result<ExactKeyWriteReceipt, O::Error>
 where
     R: OperatorResolver + ?Sized,
-    O: ExactKeyPublicationOperation,
+    O: ExactKeyWriteOperation,
     O::Cause: ExactKeyOverwriteCause,
 {
     if keys.is_empty() {
-        return Ok(ExactKeyPublicationReceipt {
+        return Ok(ExactKeyWriteReceipt {
             completed: Vec::new(),
         });
     }
 
     let operator = resolver.resolve(binding).map_err(|source| {
         operation.error(
-            ExactKeyPublicationFailure::operation(OpenDalPublicationPhase::ResolveOperator),
+            ExactKeyWriteFailure::operation(OpenDalWritePhase::ResolveOperator),
             O::Cause::resolve_operator(Box::new(source)),
         )
     })?;
@@ -1669,15 +1663,15 @@ where
 
     let mut completed = Vec::with_capacity(keys.len());
     match policy {
-        PublicationPolicy::OverwriteExactKeys => {
+        WritePolicy::OverwriteExactKeys => {
             for (index, key) in keys.iter().enumerate() {
                 operator
                     .write(key.path, key.bytes.to_vec())
                     .await
                     .map_err(|source| {
                         operation.error(
-                            ExactKeyPublicationFailure::key(
-                                OpenDalPublicationPhase::DirectWrite,
+                            ExactKeyWriteFailure::key(
+                                OpenDalWritePhase::DirectWrite,
                                 index,
                                 key,
                                 CommitCertainty::Indeterminate,
@@ -1685,70 +1679,65 @@ where
                             O::Cause::direct_write(source),
                         )
                     })?;
-                let entry = ExactKeyPublicationEntry {
+                let entry = ExactKeyWriteEntry {
                     index,
-                    outcome: PublicationKeyOutcome::Written,
+                    outcome: WriteKeyOutcome::Written,
                 };
                 operation.completed_entry(entry.clone());
                 completed.push(entry);
             }
         }
-        PublicationPolicy::CreateOrVerify => {
-            publish_create_or_verify(&operator, keys, &mut completed, operation).await?;
+        WritePolicy::CreateOrVerify => {
+            write_create_or_verify(&operator, keys, &mut completed, operation).await?;
         }
     }
 
-    Ok(ExactKeyPublicationReceipt { completed })
+    Ok(ExactKeyWriteReceipt { completed })
 }
 
-async fn publish_create_or_verify_exact_keys<R, O>(
+async fn write_create_or_verify_exact_keys<R, O>(
     resolver: &R,
     binding: &OperatorBinding,
     keys: &[ExactKey<'_>],
     operation: &mut O,
-) -> Result<ExactKeyPublicationReceipt, O::Error>
+) -> Result<ExactKeyWriteReceipt, O::Error>
 where
     R: OperatorResolver + ?Sized,
-    O: ExactKeyPublicationOperation,
+    O: ExactKeyWriteOperation,
 {
     if keys.is_empty() {
-        return Ok(ExactKeyPublicationReceipt {
+        return Ok(ExactKeyWriteReceipt {
             completed: Vec::new(),
         });
     }
 
     let operator = resolver.resolve(binding).map_err(|source| {
         operation.error(
-            ExactKeyPublicationFailure::operation(OpenDalPublicationPhase::ResolveOperator),
+            ExactKeyWriteFailure::operation(OpenDalWritePhase::ResolveOperator),
             O::Cause::resolve_operator(Box::new(source)),
         )
     })?;
-    appraise_capabilities(
-        &operator,
-        PublicationPolicy::CreateOrVerify,
-        keys,
-        operation,
-    )?;
+    appraise_capabilities(&operator, WritePolicy::CreateOrVerify, keys, operation)?;
 
     let mut completed = Vec::with_capacity(keys.len());
-    publish_create_or_verify(&operator, keys, &mut completed, operation).await?;
-    Ok(ExactKeyPublicationReceipt { completed })
+    write_create_or_verify(&operator, keys, &mut completed, operation).await?;
+    Ok(ExactKeyWriteReceipt { completed })
 }
 
-fn appraise_capabilities<O: ExactKeyPublicationOperation>(
+fn appraise_capabilities<O: ExactKeyWriteOperation>(
     operator: &opendal::Operator,
-    policy: PublicationPolicy,
+    policy: WritePolicy,
     keys: &[ExactKey<'_>],
     operation: &O,
 ) -> Result<(), O::Error> {
     let capability = operator.info().capability();
     let policy_supported = capability.write
         && (!keys.iter().any(|key| key.bytes.is_empty()) || capability.write_can_empty)
-        && (policy != PublicationPolicy::CreateOrVerify
+        && (policy != WritePolicy::CreateOrVerify
             || (capability.read && capability.write_with_if_not_exists));
     if !policy_supported {
         return Err(operation.error(
-            ExactKeyPublicationFailure::operation(OpenDalPublicationPhase::CapabilityAppraisal),
+            ExactKeyWriteFailure::operation(OpenDalWritePhase::CapabilityAppraisal),
             O::Cause::unsupported_policy(policy),
         ));
     }
@@ -1756,8 +1745,8 @@ fn appraise_capabilities<O: ExactKeyPublicationOperation>(
         for (index, key) in keys.iter().enumerate() {
             if key.bytes.len() > maximum {
                 return Err(operation.error(
-                    ExactKeyPublicationFailure::key(
-                        OpenDalPublicationPhase::CapabilityAppraisal,
+                    ExactKeyWriteFailure::key(
+                        OpenDalWritePhase::CapabilityAppraisal,
                         index,
                         key,
                         CommitCertainty::NotCommitted,
@@ -1770,10 +1759,10 @@ fn appraise_capabilities<O: ExactKeyPublicationOperation>(
     Ok(())
 }
 
-async fn publish_create_or_verify<O: ExactKeyPublicationOperation>(
+async fn write_create_or_verify<O: ExactKeyWriteOperation>(
     operator: &opendal::Operator,
     keys: &[ExactKey<'_>],
-    completed: &mut Vec<ExactKeyPublicationEntry>,
+    completed: &mut Vec<ExactKeyWriteEntry>,
     operation: &mut O,
 ) -> Result<(), O::Error> {
     let mut observations = Vec::with_capacity(keys.len());
@@ -1786,8 +1775,8 @@ async fn publish_create_or_verify<O: ExactKeyPublicationOperation>(
             }) if source.kind() == ErrorKind::NotFound => ExistingObject::Absent,
             Err(CompareError::Read { source, .. }) => {
                 return Err(operation.error(
-                    ExactKeyPublicationFailure::key(
-                        OpenDalPublicationPhase::PreflightRead,
+                    ExactKeyWriteFailure::key(
+                        OpenDalWritePhase::PreflightRead,
                         index,
                         key,
                         CommitCertainty::NotCommitted,
@@ -1800,7 +1789,7 @@ async fn publish_create_or_verify<O: ExactKeyPublicationOperation>(
             }) => {
                 return Err(byte_conflict_error(
                     operation,
-                    OpenDalPublicationPhase::PreflightRead,
+                    OpenDalWritePhase::PreflightRead,
                     index,
                     key,
                     observed_byte_length_at_least,
@@ -1808,9 +1797,9 @@ async fn publish_create_or_verify<O: ExactKeyPublicationOperation>(
             }
         };
         if observation == ExistingObject::Matching && completed.len() == index {
-            let entry = ExactKeyPublicationEntry {
+            let entry = ExactKeyWriteEntry {
                 index,
-                outcome: PublicationKeyOutcome::AlreadyMatching,
+                outcome: WriteKeyOutcome::AlreadyMatching,
             };
             operation.completed_entry(entry.clone());
             completed.push(entry);
@@ -1824,14 +1813,14 @@ async fn publish_create_or_verify<O: ExactKeyPublicationOperation>(
             continue;
         }
         let outcome = match observation {
-            ExistingObject::Matching => PublicationKeyOutcome::AlreadyMatching,
+            ExistingObject::Matching => WriteKeyOutcome::AlreadyMatching,
             ExistingObject::Absent => {
                 match operator
                     .write_with(key.path, key.bytes.to_vec())
                     .if_not_exists(true)
                     .await
                 {
-                    Ok(_) => PublicationKeyOutcome::Created,
+                    Ok(_) => WriteKeyOutcome::Created,
                     Err(source)
                         if matches!(
                             source.kind(),
@@ -1839,14 +1828,14 @@ async fn publish_create_or_verify<O: ExactKeyPublicationOperation>(
                         ) =>
                     {
                         match compare_object(operator, key.path, key.bytes).await {
-                            Ok(ExistingObject::Matching) => PublicationKeyOutcome::AlreadyMatching,
+                            Ok(ExistingObject::Matching) => WriteKeyOutcome::AlreadyMatching,
                             Ok(ExistingObject::Absent) => {
                                 unreachable!("a successful comparison never reports absence")
                             }
                             Err(CompareError::Read { source, .. }) => {
                                 return Err(operation.error(
-                                    ExactKeyPublicationFailure::key(
-                                        OpenDalPublicationPhase::RaceVerification,
+                                    ExactKeyWriteFailure::key(
+                                        OpenDalWritePhase::RaceVerification,
                                         index,
                                         key,
                                         CommitCertainty::NotCommitted,
@@ -1859,7 +1848,7 @@ async fn publish_create_or_verify<O: ExactKeyPublicationOperation>(
                             }) => {
                                 return Err(byte_conflict_error(
                                     operation,
-                                    OpenDalPublicationPhase::RaceVerification,
+                                    OpenDalWritePhase::RaceVerification,
                                     index,
                                     key,
                                     observed_byte_length_at_least,
@@ -1869,8 +1858,8 @@ async fn publish_create_or_verify<O: ExactKeyPublicationOperation>(
                     }
                     Err(source) => {
                         return Err(operation.error(
-                            ExactKeyPublicationFailure::key(
-                                OpenDalPublicationPhase::ConditionalCreate,
+                            ExactKeyWriteFailure::key(
+                                OpenDalWritePhase::ConditionalCreate,
                                 index,
                                 key,
                                 CommitCertainty::Indeterminate,
@@ -1881,22 +1870,22 @@ async fn publish_create_or_verify<O: ExactKeyPublicationOperation>(
                 }
             }
         };
-        let entry = ExactKeyPublicationEntry { index, outcome };
+        let entry = ExactKeyWriteEntry { index, outcome };
         operation.completed_entry(entry.clone());
         completed.push(entry);
     }
     Ok(())
 }
 
-fn byte_conflict_error<O: ExactKeyPublicationOperation>(
+fn byte_conflict_error<O: ExactKeyWriteOperation>(
     operation: &O,
-    phase: OpenDalPublicationPhase,
+    phase: OpenDalWritePhase,
     index: usize,
     key: &ExactKey<'_>,
     observed_byte_length_at_least: u64,
 ) -> O::Error {
     operation.error(
-        ExactKeyPublicationFailure::key(phase, index, key, CommitCertainty::NotCommitted),
+        ExactKeyWriteFailure::key(phase, index, key, CommitCertainty::NotCommitted),
         O::Cause::byte_conflict(byte_length(key.bytes), observed_byte_length_at_least),
     )
 }
@@ -1976,7 +1965,7 @@ async fn compare_object(
 }
 
 fn byte_length(bytes: &[u8]) -> u64 {
-    u64::try_from(bytes.len()).expect("OpenDAL publication supports no 128-bit target")
+    u64::try_from(bytes.len()).expect("OpenDAL write supports no 128-bit target")
 }
 
 #[cfg(test)]
@@ -1989,9 +1978,9 @@ mod tests {
     use opendal::ErrorKind;
 
     use crate::opendal::scripted_service::{
-        DestinationMutation, PendingPoint, PublicationCapabilities, PublicationDroppedOperation,
-        PublicationOperationLogEntry, PublicationReadScript, PublicationReadStep,
-        PublicationService, WriteCondition, WriteScript, WriteStep,
+        DestinationMutation, PendingPoint, WriteCapabilities, WriteCondition,
+        WriteDroppedOperation, WriteOperationLogEntry, WriteReadScript, WriteReadStep, WriteScript,
+        WriteService, WriteStep,
     };
     use crate::opendal::{OperatorBinding, OperatorResolver};
     use crate::pack_archive::CommitCertainty;
@@ -2001,29 +1990,28 @@ mod tests {
     };
 
     use super::{
-        CompilationArtifactPublicationErrorCause, CompilationArtifactPublicationProgress,
-        CompilationArtifactPublicationRequest, ExactKey, ExactKeyOverwriteCause,
-        ExactKeyPublicationCause, ExactKeyPublicationEntry, ExactKeyPublicationFailure,
-        ExactKeyPublicationOperation, OpenDalPublicationPhase, PackArchivePublicationEntry,
-        PackArchivePublicationProgress, PublicationKeyOutcome, PublicationPolicy,
-        publish_compilation_artifacts, publish_exact_keys,
+        CompilationArtifactWriteErrorCause, CompilationArtifactWriteProgress,
+        CompilationArtifactWriteRequest, ExactKey, ExactKeyOverwriteCause, ExactKeyWriteCause,
+        ExactKeyWriteEntry, ExactKeyWriteFailure, ExactKeyWriteOperation, OpenDalWritePhase,
+        PackArchiveWriteEntry, PackArchiveWriteProgress, WriteKeyOutcome, WritePolicy,
+        write_compilation_artifacts, write_exact_keys,
     };
 
     #[test]
-    fn empty_publication_succeeds_without_resolving_an_operator() {
+    fn empty_write_succeeds_without_resolving_an_operator() {
         let resolver = RejectingResolver;
         let binding = binding();
         let mut completed = Vec::new();
         let receipt = {
-            let mut operation = TestPublicationOperation::new(&mut completed);
-            let mut publication = pin!(publish_exact_keys(
+            let mut operation = TestWriteOperation::new(&mut completed);
+            let mut write = pin!(write_exact_keys(
                 &resolver,
                 &binding,
-                PublicationPolicy::OverwriteExactKeys,
+                WritePolicy::OverwriteExactKeys,
                 &[],
                 &mut operation,
             ));
-            expect_ready(publication.as_mut()).unwrap()
+            expect_ready(write.as_mut()).unwrap()
         };
 
         assert!(receipt.completed().is_empty());
@@ -2033,15 +2021,15 @@ mod tests {
     #[test]
     fn invalid_composed_artifact_destination_fails_before_resolution() {
         let result = two_artifact_result();
-        let request = CompilationArtifactPublicationRequest {
+        let request = CompilationArtifactWriteRequest {
             compilation_result_identity: result.result_identity(),
             destination: "destination:/prefix/".parse().unwrap(),
             artifact_keys: vec!["valid.svg".to_owned(), "../alias.svg".to_owned()],
-            policy: PublicationPolicy::OverwriteExactKeys,
+            policy: WritePolicy::OverwriteExactKeys,
         };
-        let mut progress = CompilationArtifactPublicationProgress::new();
+        let mut progress = CompilationArtifactWriteProgress::new();
 
-        let error = expect_ready(pin!(publish_compilation_artifacts(
+        let error = expect_ready(pin!(write_compilation_artifacts(
             &RejectingResolver,
             &request,
             &result,
@@ -2049,10 +2037,7 @@ mod tests {
         )))
         .unwrap_err();
 
-        assert_eq!(
-            error.phase(),
-            OpenDalPublicationPhase::DestinationValidation
-        );
+        assert_eq!(error.phase(), OpenDalWritePhase::DestinationValidation);
         assert_eq!(error.failed_artifact_index(), Some(1));
         assert_eq!(error.failed_key(), Some("../alias.svg"));
         assert_eq!(error.failed_destination_path(), None);
@@ -2060,7 +2045,7 @@ mod tests {
         assert!(error.progress().completed().is_empty());
         assert!(matches!(
             error.cause(),
-            CompilationArtifactPublicationErrorCause::InvalidDestinationPath {
+            CompilationArtifactWriteErrorCause::InvalidDestinationPath {
                 artifact_index: 1,
                 key,
             } if key == "../alias.svg"
@@ -2069,8 +2054,8 @@ mod tests {
 
     #[test]
     fn overwrite_writes_each_key_once_in_order_without_reading() {
-        let service = PublicationService::new(
-            PublicationCapabilities::all(),
+        let service = WriteService::new(
+            WriteCapabilities::all(),
             [],
             [],
             [
@@ -2086,12 +2071,12 @@ mod tests {
         ];
         let mut completed = Vec::new();
 
-        let receipt = expect_ready(pin!(publish_exact_keys(
+        let receipt = expect_ready(pin!(write_exact_keys(
             &resolver,
             &binding(),
-            PublicationPolicy::OverwriteExactKeys,
+            WritePolicy::OverwriteExactKeys,
             &keys,
-            &mut TestPublicationOperation::new(&mut completed),
+            &mut TestWriteOperation::new(&mut completed),
         )))
         .unwrap();
 
@@ -2109,34 +2094,30 @@ mod tests {
                 .iter()
                 .map(|entry| (entry.index, entry.outcome))
                 .collect::<Vec<_>>(),
-            [
-                (0, PublicationKeyOutcome::Written),
-                (1, PublicationKeyOutcome::Written),
-            ]
+            [(0, WriteKeyOutcome::Written), (1, WriteKeyOutcome::Written),]
         );
         assert!(
             service
                 .log()
                 .entries()
                 .iter()
-                .all(|entry| !matches!(entry, PublicationOperationLogEntry::ReadInvoked { .. }))
+                .all(|entry| !matches!(entry, WriteOperationLogEntry::ReadInvoked { .. }))
         );
     }
 
     #[test]
     fn create_or_verify_compares_every_key_before_mutation() {
-        let service = PublicationService::new(
-            PublicationCapabilities::all(),
+        let service = WriteService::new(
+            WriteCapabilities::all(),
             [("conflict.bin".to_owned(), b"wrong".to_vec())],
             [
-                PublicationReadScript::new(
+                WriteReadScript::new(
                     "absent.bin",
                     0,
-                    [PublicationReadStep::failure(ErrorKind::NotFound)],
+                    [WriteReadStep::failure(ErrorKind::NotFound)],
                 )
                 .unwrap(),
-                PublicationReadScript::new("conflict.bin", 1, [PublicationReadStep::chunk(0..5)])
-                    .unwrap(),
+                WriteReadScript::new("conflict.bin", 1, [WriteReadStep::chunk(0..5)]).unwrap(),
             ],
             [WriteScript::new(
                 "absent.bin",
@@ -2152,21 +2133,21 @@ mod tests {
         ];
         let mut completed = Vec::new();
 
-        let error = expect_ready(pin!(publish_exact_keys(
+        let error = expect_ready(pin!(write_exact_keys(
             &resolver,
             &binding(),
-            PublicationPolicy::CreateOrVerify,
+            WritePolicy::CreateOrVerify,
             &keys,
-            &mut TestPublicationOperation::new(&mut completed),
+            &mut TestWriteOperation::new(&mut completed),
         )))
         .unwrap_err();
 
-        assert_eq!(error.phase, OpenDalPublicationPhase::PreflightRead);
+        assert_eq!(error.phase, OpenDalWritePhase::PreflightRead);
         assert_eq!(error.failed_index, Some(1));
         assert_eq!(error.commit_certainty, CommitCertainty::NotCommitted);
         assert!(matches!(
             error.cause,
-            TestPublicationErrorCause::ByteConflict {
+            TestWriteErrorCause::ByteConflict {
                 expected_byte_length: 5,
                 observed_byte_length_at_least: 1,
             }
@@ -2178,23 +2159,21 @@ mod tests {
                 .log()
                 .entries()
                 .iter()
-                .all(|entry| !matches!(entry, PublicationOperationLogEntry::WriteInvoked { .. }))
+                .all(|entry| !matches!(entry, WriteOperationLogEntry::WriteInvoked { .. }))
         );
     }
 
     #[test]
     fn later_preflight_conflict_retains_the_leading_matching_prefix() {
-        let service = PublicationService::new(
-            PublicationCapabilities::all(),
+        let service = WriteService::new(
+            WriteCapabilities::all(),
             [
                 ("matching.bin".to_owned(), b"matching".to_vec()),
                 ("conflict.bin".to_owned(), b"wrong".to_vec()),
             ],
             [
-                PublicationReadScript::new("matching.bin", 1, [PublicationReadStep::chunk(0..8)])
-                    .unwrap(),
-                PublicationReadScript::new("conflict.bin", 1, [PublicationReadStep::chunk(0..5)])
-                    .unwrap(),
+                WriteReadScript::new("matching.bin", 1, [WriteReadStep::chunk(0..8)]).unwrap(),
+                WriteReadScript::new("conflict.bin", 1, [WriteReadStep::chunk(0..5)]).unwrap(),
             ],
             [],
             16,
@@ -2206,33 +2185,33 @@ mod tests {
         ];
         let mut completed = Vec::new();
 
-        let error = expect_ready(pin!(publish_exact_keys(
+        let error = expect_ready(pin!(write_exact_keys(
             &resolver,
             &binding(),
-            PublicationPolicy::CreateOrVerify,
+            WritePolicy::CreateOrVerify,
             &keys,
-            &mut TestPublicationOperation::new(&mut completed),
+            &mut TestWriteOperation::new(&mut completed),
         )))
         .unwrap_err();
 
-        assert_eq!(error.phase, OpenDalPublicationPhase::PreflightRead);
+        assert_eq!(error.phase, OpenDalWritePhase::PreflightRead);
         assert_eq!(completed.len(), 1);
         assert_eq!(completed[0].index, 0);
-        assert_eq!(completed[0].outcome, PublicationKeyOutcome::AlreadyMatching);
+        assert_eq!(completed[0].outcome, WriteKeyOutcome::AlreadyMatching);
     }
 
     #[test]
     fn mutable_matching_stream_is_read_only_evidence_without_commit_certainty() {
-        let service = PublicationService::new(
-            PublicationCapabilities::all(),
+        let service = WriteService::new(
+            WriteCapabilities::all(),
             [("mutable.bin".to_owned(), b"abcdef".to_vec())],
-            [PublicationReadScript::new(
+            [WriteReadScript::new(
                 "mutable.bin",
                 2,
                 [
-                    PublicationReadStep::chunk(0..3),
-                    PublicationReadStep::mutate(DestinationMutation::set("mutable.bin", b"abcXYZ")),
-                    PublicationReadStep::chunk(3..6),
+                    WriteReadStep::chunk(0..3),
+                    WriteReadStep::mutate(DestinationMutation::set("mutable.bin", b"abcXYZ")),
+                    WriteReadStep::chunk(3..6),
                 ],
             )
             .unwrap()],
@@ -2243,39 +2222,39 @@ mod tests {
         let keys = [ExactKey::new("mutable.bin", b"abcXYZ")];
         let mut completed = Vec::new();
 
-        let receipt = expect_ready(pin!(publish_exact_keys(
+        let receipt = expect_ready(pin!(write_exact_keys(
             &resolver,
             &binding(),
-            PublicationPolicy::CreateOrVerify,
+            WritePolicy::CreateOrVerify,
             &keys,
-            &mut TestPublicationOperation::new(&mut completed),
+            &mut TestWriteOperation::new(&mut completed),
         )))
         .unwrap();
 
         assert_eq!(
             receipt.completed()[0].outcome,
-            PublicationKeyOutcome::AlreadyMatching
+            WriteKeyOutcome::AlreadyMatching
         );
         assert!(
             service
                 .log()
                 .entries()
                 .iter()
-                .all(|entry| !matches!(entry, PublicationOperationLogEntry::WriteInvoked { .. }))
+                .all(|entry| !matches!(entry, WriteOperationLogEntry::WriteInvoked { .. }))
         );
     }
 
     #[test]
     fn disappearance_after_a_partial_stream_is_not_treated_as_absence() {
-        let service = PublicationService::new(
-            PublicationCapabilities::all(),
+        let service = WriteService::new(
+            WriteCapabilities::all(),
             [("unstable.bin".to_owned(), b"planned".to_vec())],
-            [PublicationReadScript::new(
+            [WriteReadScript::new(
                 "unstable.bin",
                 1,
                 [
-                    PublicationReadStep::chunk(0..3),
-                    PublicationReadStep::failure(ErrorKind::NotFound),
+                    WriteReadStep::chunk(0..3),
+                    WriteReadStep::failure(ErrorKind::NotFound),
                 ],
             )
             .unwrap()],
@@ -2290,19 +2269,19 @@ mod tests {
         let keys = [ExactKey::new("unstable.bin", b"planned")];
         let mut completed = Vec::new();
 
-        let error = expect_ready(pin!(publish_exact_keys(
+        let error = expect_ready(pin!(write_exact_keys(
             &resolver,
             &binding(),
-            PublicationPolicy::CreateOrVerify,
+            WritePolicy::CreateOrVerify,
             &keys,
-            &mut TestPublicationOperation::new(&mut completed),
+            &mut TestWriteOperation::new(&mut completed),
         )))
         .unwrap_err();
 
-        assert_eq!(error.phase, OpenDalPublicationPhase::PreflightRead);
+        assert_eq!(error.phase, OpenDalWritePhase::PreflightRead);
         assert!(matches!(
             error.cause,
-            TestPublicationErrorCause::PreflightRead(ref source)
+            TestWriteErrorCause::PreflightRead(ref source)
                 if source.kind() == ErrorKind::NotFound
         ));
         assert!(completed.is_empty());
@@ -2311,25 +2290,20 @@ mod tests {
                 .log()
                 .entries()
                 .iter()
-                .all(|entry| !matches!(entry, PublicationOperationLogEntry::WriteInvoked { .. }))
+                .all(|entry| !matches!(entry, WriteOperationLogEntry::WriteInvoked { .. }))
         );
     }
 
     #[test]
     fn conditional_conflict_performs_one_bounded_verification() {
         let pending = PendingPoint::new();
-        let service = PublicationService::new(
-            PublicationCapabilities::all(),
+        let service = WriteService::new(
+            WriteCapabilities::all(),
             [],
             [
-                PublicationReadScript::new(
-                    "race.bin",
-                    0,
-                    [PublicationReadStep::failure(ErrorKind::NotFound)],
-                )
-                .unwrap(),
-                PublicationReadScript::new("race.bin", 1, [PublicationReadStep::chunk(0..7)])
+                WriteReadScript::new("race.bin", 0, [WriteReadStep::failure(ErrorKind::NotFound)])
                     .unwrap(),
+                WriteReadScript::new("race.bin", 1, [WriteReadStep::chunk(0..7)]).unwrap(),
             ],
             [WriteScript::new(
                 "race.bin",
@@ -2343,31 +2317,31 @@ mod tests {
         let mut completed = Vec::new();
         let binding = binding();
         let receipt = {
-            let mut operation = TestPublicationOperation::new(&mut completed);
-            let mut publication = pin!(publish_exact_keys(
+            let mut operation = TestWriteOperation::new(&mut completed);
+            let mut write = pin!(write_exact_keys(
                 &resolver,
                 &binding,
-                PublicationPolicy::CreateOrVerify,
+                WritePolicy::CreateOrVerify,
                 &keys,
                 &mut operation,
             ));
 
-            assert!(matches!(poll_once(publication.as_mut()), Poll::Pending));
+            assert!(matches!(poll_once(write.as_mut()), Poll::Pending));
             service.mutate(DestinationMutation::set("race.bin", b"planned"));
             pending.release();
-            expect_ready(publication.as_mut()).unwrap()
+            expect_ready(write.as_mut()).unwrap()
         };
 
         assert_eq!(
             receipt.completed()[0].outcome,
-            PublicationKeyOutcome::AlreadyMatching
+            WriteKeyOutcome::AlreadyMatching
         );
         assert_eq!(
             service
                 .log()
                 .entries()
                 .iter()
-                .filter(|entry| matches!(entry, PublicationOperationLogEntry::ReadInvoked { .. }))
+                .filter(|entry| matches!(entry, WriteOperationLogEntry::ReadInvoked { .. }))
                 .count(),
             2
         );
@@ -2377,28 +2351,28 @@ mod tests {
     #[test]
     fn appraisal_rejects_capabilities_and_sizes_before_effects() {
         let cases = [
-            PublicationCapabilities {
+            WriteCapabilities {
                 write: false,
                 write_can_empty: true,
                 write_with_if_not_exists: true,
                 read: true,
                 write_total_max_size: None,
             },
-            PublicationCapabilities {
+            WriteCapabilities {
                 write: true,
                 write_can_empty: false,
                 write_with_if_not_exists: true,
                 read: true,
                 write_total_max_size: None,
             },
-            PublicationCapabilities {
+            WriteCapabilities {
                 write: true,
                 write_can_empty: true,
                 write_with_if_not_exists: false,
                 read: true,
                 write_total_max_size: None,
             },
-            PublicationCapabilities {
+            WriteCapabilities {
                 write: true,
                 write_can_empty: true,
                 write_with_if_not_exists: true,
@@ -2407,32 +2381,32 @@ mod tests {
             },
         ];
         for capabilities in cases {
-            let service = PublicationService::new(capabilities, [], [], [], 4);
+            let service = WriteService::new(capabilities, [], [], [], 4);
             let resolver = ServiceResolver(service.operator());
             let keys = [ExactKey::new("empty.bin", b"")];
             let mut completed = Vec::new();
 
-            let error = expect_ready(pin!(publish_exact_keys(
+            let error = expect_ready(pin!(write_exact_keys(
                 &resolver,
                 &binding(),
-                PublicationPolicy::CreateOrVerify,
+                WritePolicy::CreateOrVerify,
                 &keys,
-                &mut TestPublicationOperation::new(&mut completed),
+                &mut TestWriteOperation::new(&mut completed),
             )))
             .unwrap_err();
 
-            assert_eq!(error.phase, OpenDalPublicationPhase::CapabilityAppraisal);
+            assert_eq!(error.phase, OpenDalWritePhase::CapabilityAppraisal);
             assert!(matches!(
                 error.cause,
-                TestPublicationErrorCause::UnsupportedPolicy { .. }
+                TestWriteErrorCause::UnsupportedPolicy { .. }
             ));
             assert!(service.log().entries().is_empty());
         }
 
-        let service = PublicationService::new(
-            PublicationCapabilities {
+        let service = WriteService::new(
+            WriteCapabilities {
                 write_total_max_size: Some(3),
-                ..PublicationCapabilities::all()
+                ..WriteCapabilities::all()
             },
             [],
             [],
@@ -2442,26 +2416,26 @@ mod tests {
         let resolver = ServiceResolver(service.operator());
         let keys = [ExactKey::new("large.bin", b"four")];
         let mut completed = Vec::new();
-        let error = expect_ready(pin!(publish_exact_keys(
+        let error = expect_ready(pin!(write_exact_keys(
             &resolver,
             &binding(),
-            PublicationPolicy::OverwriteExactKeys,
+            WritePolicy::OverwriteExactKeys,
             &keys,
-            &mut TestPublicationOperation::new(&mut completed),
+            &mut TestWriteOperation::new(&mut completed),
         )))
         .unwrap_err();
 
         assert!(matches!(
             error.cause,
-            TestPublicationErrorCause::UnsupportedObjectSize { byte_length: 4 }
+            TestWriteErrorCause::UnsupportedObjectSize { byte_length: 4 }
         ));
         assert!(service.log().entries().is_empty());
     }
 
     #[test]
     fn issued_write_failure_is_indeterminate_and_retains_the_completed_prefix() {
-        let service = PublicationService::new(
-            PublicationCapabilities::all(),
+        let service = WriteService::new(
+            WriteCapabilities::all(),
             [],
             [],
             [
@@ -2481,16 +2455,16 @@ mod tests {
         ];
         let mut completed = Vec::new();
 
-        let error = expect_ready(pin!(publish_exact_keys(
+        let error = expect_ready(pin!(write_exact_keys(
             &resolver,
             &binding(),
-            PublicationPolicy::OverwriteExactKeys,
+            WritePolicy::OverwriteExactKeys,
             &keys,
-            &mut TestPublicationOperation::new(&mut completed),
+            &mut TestWriteOperation::new(&mut completed),
         )))
         .unwrap_err();
 
-        assert_eq!(error.phase, OpenDalPublicationPhase::DirectWrite);
+        assert_eq!(error.phase, OpenDalWritePhase::DirectWrite);
         assert_eq!(error.failed_index, Some(1));
         assert_eq!(error.failed_path.as_deref(), Some("second.bin"));
         assert_eq!(error.commit_certainty, CommitCertainty::Indeterminate);
@@ -2499,10 +2473,10 @@ mod tests {
     }
 
     #[test]
-    fn dropping_a_pending_publication_leaves_the_completed_prefix_with_the_caller() {
+    fn dropping_a_pending_write_leaves_the_completed_prefix_with_the_caller() {
         let pending = PendingPoint::new();
-        let service = PublicationService::new(
-            PublicationCapabilities::all(),
+        let service = WriteService::new(
+            WriteCapabilities::all(),
             [],
             [],
             [
@@ -2523,15 +2497,15 @@ mod tests {
         ];
         let mut completed = Vec::new();
         {
-            let mut operation = TestPublicationOperation::new(&mut completed);
-            let mut publication = pin!(publish_exact_keys(
+            let mut operation = TestWriteOperation::new(&mut completed);
+            let mut write = pin!(write_exact_keys(
                 &resolver,
                 &binding,
-                PublicationPolicy::OverwriteExactKeys,
+                WritePolicy::OverwriteExactKeys,
                 &keys,
                 &mut operation,
             ));
-            assert!(matches!(poll_once(publication.as_mut()), Poll::Pending));
+            assert!(matches!(poll_once(write.as_mut()), Poll::Pending));
             assert!(pending.was_observed());
         }
 
@@ -2539,7 +2513,7 @@ mod tests {
         assert_eq!(completed[0].index, 0);
         assert_eq!(
             service.cancellations(),
-            [PublicationDroppedOperation::Write {
+            [WriteDroppedOperation::Write {
                 id: 1,
                 path: "second.bin".to_owned(),
                 length: 6,
@@ -2552,18 +2526,13 @@ mod tests {
     #[test]
     fn dropping_a_later_preflight_read_retains_the_leading_matching_prefix() {
         let pending = PendingPoint::new();
-        let service = PublicationService::new(
-            PublicationCapabilities::all(),
+        let service = WriteService::new(
+            WriteCapabilities::all(),
             [("matching.bin".to_owned(), b"matching".to_vec())],
             [
-                PublicationReadScript::new("matching.bin", 1, [PublicationReadStep::chunk(0..8)])
+                WriteReadScript::new("matching.bin", 1, [WriteReadStep::chunk(0..8)]).unwrap(),
+                WriteReadScript::new("pending.bin", 0, [WriteReadStep::pending(pending.clone())])
                     .unwrap(),
-                PublicationReadScript::new(
-                    "pending.bin",
-                    0,
-                    [PublicationReadStep::pending(pending.clone())],
-                )
-                .unwrap(),
             ],
             [],
             16,
@@ -2576,58 +2545,55 @@ mod tests {
         ];
         let mut completed = Vec::new();
         {
-            let mut operation = TestPublicationOperation::new(&mut completed);
-            let mut publication = pin!(publish_exact_keys(
+            let mut operation = TestWriteOperation::new(&mut completed);
+            let mut write = pin!(write_exact_keys(
                 &resolver,
                 &binding,
-                PublicationPolicy::CreateOrVerify,
+                WritePolicy::CreateOrVerify,
                 &keys,
                 &mut operation,
             ));
-            assert!(matches!(poll_once(publication.as_mut()), Poll::Pending));
+            assert!(matches!(poll_once(write.as_mut()), Poll::Pending));
             assert!(pending.was_observed());
         }
 
         assert_eq!(completed.len(), 1);
         assert_eq!(completed[0].index, 0);
-        assert_eq!(completed[0].outcome, PublicationKeyOutcome::AlreadyMatching);
+        assert_eq!(completed[0].outcome, WriteKeyOutcome::AlreadyMatching);
     }
 
     #[test]
     fn workflow_evidence_retains_observed_outcomes() {
-        let mut progress = PackArchivePublicationProgress::new();
-        progress.push(PackArchivePublicationEntry {
+        let mut progress = PackArchiveWriteProgress::new();
+        progress.push(PackArchiveWriteEntry {
             destination_path: "archive.typk".to_owned(),
-            outcome: PublicationKeyOutcome::AlreadyMatching,
+            outcome: WriteKeyOutcome::AlreadyMatching,
         });
 
-        assert_eq!(
-            progress.outcome(),
-            Some(PublicationKeyOutcome::AlreadyMatching)
-        );
+        assert_eq!(progress.outcome(), Some(WriteKeyOutcome::AlreadyMatching));
 
         progress.clear();
-        progress.push(PackArchivePublicationEntry {
+        progress.push(PackArchiveWriteEntry {
             destination_path: "archive.typk".to_owned(),
-            outcome: PublicationKeyOutcome::Created,
+            outcome: WriteKeyOutcome::Created,
         });
-        assert_eq!(progress.outcome(), Some(PublicationKeyOutcome::Created));
+        assert_eq!(progress.outcome(), Some(WriteKeyOutcome::Created));
     }
 
     #[derive(Debug)]
-    struct TestPublicationError {
-        phase: OpenDalPublicationPhase,
+    struct TestWriteError {
+        phase: OpenDalWritePhase,
         failed_index: Option<usize>,
         failed_path: Option<String>,
         commit_certainty: CommitCertainty,
-        cause: TestPublicationErrorCause,
+        cause: TestWriteErrorCause,
     }
 
     #[derive(Debug)]
-    enum TestPublicationErrorCause {
+    enum TestWriteErrorCause {
         ResolveOperator(crate::opendal::BoxError),
         UnsupportedPolicy {
-            policy: PublicationPolicy,
+            policy: WritePolicy,
         },
         UnsupportedObjectSize {
             byte_length: u64,
@@ -2642,12 +2608,12 @@ mod tests {
         DirectWrite(opendal::Error),
     }
 
-    impl ExactKeyPublicationCause for TestPublicationErrorCause {
+    impl ExactKeyWriteCause for TestWriteErrorCause {
         fn resolve_operator(source: crate::opendal::BoxError) -> Self {
             Self::ResolveOperator(source)
         }
 
-        fn unsupported_policy(policy: PublicationPolicy) -> Self {
+        fn unsupported_policy(policy: WritePolicy) -> Self {
             Self::UnsupportedPolicy { policy }
         }
 
@@ -2675,32 +2641,32 @@ mod tests {
         }
     }
 
-    impl ExactKeyOverwriteCause for TestPublicationErrorCause {
+    impl ExactKeyOverwriteCause for TestWriteErrorCause {
         fn direct_write(source: opendal::Error) -> Self {
             Self::DirectWrite(source)
         }
     }
 
-    struct TestPublicationOperation<'a> {
-        completed: &'a mut Vec<ExactKeyPublicationEntry>,
+    struct TestWriteOperation<'a> {
+        completed: &'a mut Vec<ExactKeyWriteEntry>,
     }
 
-    impl<'a> TestPublicationOperation<'a> {
-        fn new(completed: &'a mut Vec<ExactKeyPublicationEntry>) -> Self {
+    impl<'a> TestWriteOperation<'a> {
+        fn new(completed: &'a mut Vec<ExactKeyWriteEntry>) -> Self {
             Self { completed }
         }
     }
 
-    impl ExactKeyPublicationOperation for TestPublicationOperation<'_> {
-        type Error = TestPublicationError;
-        type Cause = TestPublicationErrorCause;
+    impl ExactKeyWriteOperation for TestWriteOperation<'_> {
+        type Error = TestWriteError;
+        type Cause = TestWriteErrorCause;
 
-        fn completed_entry(&mut self, entry: ExactKeyPublicationEntry) {
+        fn completed_entry(&mut self, entry: ExactKeyWriteEntry) {
             self.completed.push(entry);
         }
 
-        fn error(&self, failure: ExactKeyPublicationFailure, cause: Self::Cause) -> Self::Error {
-            TestPublicationError {
+        fn error(&self, failure: ExactKeyWriteFailure, cause: Self::Cause) -> Self::Error {
+            TestWriteError {
                 phase: failure.phase,
                 failed_index: failure.failed_index,
                 failed_path: failure.failed_path,
@@ -2763,7 +2729,7 @@ mod tests {
         type Error = Infallible;
 
         fn resolve(&self, _: &OperatorBinding) -> Result<opendal::Operator, Self::Error> {
-            panic!("an empty publication must not resolve an operator")
+            panic!("an empty write must not resolve an operator")
         }
     }
 }

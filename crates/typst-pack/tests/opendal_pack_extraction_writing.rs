@@ -10,48 +10,42 @@ use std::task::{Context, Poll, Waker};
 use std::{error::Error, fmt};
 
 use scripted_opendal::{
-    DestinationMutation, PendingPoint, PublicationCapabilities, PublicationOperationLogEntry,
-    PublicationReadScript, PublicationReadStep, PublicationService, WriteCondition, WriteScript,
-    WriteStep,
+    DestinationMutation, PendingPoint, WriteCapabilities, WriteCondition, WriteOperationLogEntry,
+    WriteReadScript, WriteReadStep, WriteScript, WriteService, WriteStep,
 };
-use typst_pack::opendal::publication::{
-    OpenDalPublicationPhase, PackExtractionPublicationErrorCause, PackExtractionPublicationRequest,
-    PackExtractionPublicationRequestError, PublicationKeyOutcome, PublicationPolicy,
-    publish_pack_extraction_plan,
+use typst_pack::opendal::write::{
+    OpenDalWritePhase, PackExtractionWriteErrorCause, PackExtractionWriteRequest,
+    PackExtractionWriteRequestError, WriteKeyOutcome, WritePolicy, write_pack_extraction_plan,
 };
 use typst_pack::opendal::{
     Location, LocationRoleError, OperatorBinding, OperatorBindings, OperatorResolver,
 };
 use typst_pack::pack_archive::CommitCertainty;
 use typst_pack::{
-    Pack, PackExtractionPublicationProgress, PackExtractionPublicationReceipt,
-    PackExtractionSelection, plan_pack_extraction,
+    Pack, PackExtractionSelection, PackExtractionWriteProgress, PackExtractionWriteReceipt,
+    plan_pack_extraction,
 };
 
 #[test]
 fn request_accepts_normalized_prefixes_and_rejects_exact_objects() {
     for destination in ["project:/", "project:/extracted/"] {
         let destination: Location = destination.parse().unwrap();
-        let request = PackExtractionPublicationRequest::new(
-            destination.clone(),
-            PublicationPolicy::CreateOrVerify,
-        )
-        .unwrap();
+        let request =
+            PackExtractionWriteRequest::new(destination.clone(), WritePolicy::CreateOrVerify)
+                .unwrap();
 
         assert_eq!(request.destination(), &destination);
-        assert_eq!(request.policy(), PublicationPolicy::CreateOrVerify);
+        assert_eq!(request.policy(), WritePolicy::CreateOrVerify);
     }
 
     let destination: Location = "project:/extracted".parse().unwrap();
-    let error = PackExtractionPublicationRequest::new(
-        destination.clone(),
-        PublicationPolicy::OverwriteExactKeys,
-    )
-    .unwrap_err();
+    let error =
+        PackExtractionWriteRequest::new(destination.clone(), WritePolicy::OverwriteExactKeys)
+            .unwrap_err();
 
     assert_eq!(
         error,
-        PackExtractionPublicationRequestError::InvalidDestinationRole {
+        PackExtractionWriteRequestError::InvalidDestinationRole {
             location: destination,
             source: LocationRoleError::PrefixMissingTrailingSlash,
         }
@@ -59,10 +53,10 @@ fn request_accepts_normalized_prefixes_and_rejects_exact_objects() {
 }
 
 #[test]
-fn overwrite_publishes_exact_plan_bytes_and_complete_evidence_in_plan_order() {
+fn overwrite_writes_exact_plan_bytes_and_complete_evidence_in_plan_order() {
     let plan = sample_plan();
-    let service = PublicationService::new(
-        PublicationCapabilities::all(),
+    let service = WriteService::new(
+        WriteCapabilities::all(),
         [("stale.bin".to_owned(), b"untouched".to_vec())],
         [],
         [
@@ -72,12 +66,15 @@ fn overwrite_publishes_exact_plan_bytes_and_complete_evidence_in_plan_order() {
         16,
     );
     let bindings = bindings(&service);
-    let request = request(PublicationPolicy::OverwriteExactKeys);
-    let mut progress = PackExtractionPublicationProgress::new();
+    let request = request(WritePolicy::OverwriteExactKeys);
+    let mut progress = PackExtractionWriteProgress::new();
 
-    let receipt: PackExtractionPublicationReceipt = expect_ready(pin!(
-        publish_pack_extraction_plan(&bindings, &request, &plan, &mut progress,)
-    ))
+    let receipt: PackExtractionWriteReceipt = expect_ready(pin!(write_pack_extraction_plan(
+        &bindings,
+        &request,
+        &plan,
+        &mut progress,
+    )))
     .unwrap();
 
     assert_eq!(receipt.pack_identity(), *plan.pack_identity());
@@ -89,8 +86,8 @@ fn overwrite_publishes_exact_plan_bytes_and_complete_evidence_in_plan_order() {
             .map(|entry| (entry.relative_path(), entry.outcome()))
             .collect::<Vec<_>>(),
         [
-            ("assets/logo.bin", PublicationKeyOutcome::Written),
-            ("main.typ", PublicationKeyOutcome::Written),
+            ("assets/logo.bin", WriteKeyOutcome::Written),
+            ("main.typ", WriteKeyOutcome::Written),
         ]
     );
     assert_eq!(
@@ -117,10 +114,10 @@ fn every_composed_path_is_validated_before_operator_resolution() {
         .build()
         .unwrap();
     let plan = plan_pack_extraction(&pack, PackExtractionSelection::default()).unwrap();
-    let request = request(PublicationPolicy::CreateOrVerify);
-    let mut progress = PackExtractionPublicationProgress::new();
+    let request = request(WritePolicy::CreateOrVerify);
+    let mut progress = PackExtractionWriteProgress::new();
 
-    let error = expect_ready(pin!(publish_pack_extraction_plan(
+    let error = expect_ready(pin!(write_pack_extraction_plan(
         &RejectingResolver,
         &request,
         &plan,
@@ -129,19 +126,16 @@ fn every_composed_path_is_validated_before_operator_resolution() {
     .unwrap_err();
 
     assert_eq!(error.destination(), request.destination());
-    assert_eq!(error.policy(), PublicationPolicy::CreateOrVerify);
+    assert_eq!(error.policy(), WritePolicy::CreateOrVerify);
     assert_eq!(error.failed_relative_path(), Some("z "));
     assert_eq!(error.failed_destination_path(), None);
-    assert_eq!(
-        error.phase(),
-        OpenDalPublicationPhase::DestinationValidation
-    );
+    assert_eq!(error.phase(), OpenDalWritePhase::DestinationValidation);
     assert_eq!(error.commit_certainty(), CommitCertainty::NotCommitted);
     assert!(error.progress().completed().is_empty());
     assert!(progress.completed().is_empty());
     assert!(matches!(
         error.cause(),
-        PackExtractionPublicationErrorCause::InvalidDestinationPath { relative_path }
+        PackExtractionWriteErrorCause::InvalidDestinationPath { relative_path }
             if relative_path == "z "
     ));
 }
@@ -149,23 +143,20 @@ fn every_composed_path_is_validated_before_operator_resolution() {
 #[test]
 fn create_or_verify_preflights_every_entry_then_reports_matching_and_created_entries() {
     let plan = sample_plan();
-    let service = PublicationService::new(
-        PublicationCapabilities::all(),
+    let service = WriteService::new(
+        WriteCapabilities::all(),
         [("extracted/assets/logo.bin".to_owned(), b"logo".to_vec())],
         [
-            PublicationReadScript::new(
+            WriteReadScript::new(
                 "extracted/assets/logo.bin",
                 2,
-                [
-                    PublicationReadStep::chunk(0..2),
-                    PublicationReadStep::chunk(2..4),
-                ],
+                [WriteReadStep::chunk(0..2), WriteReadStep::chunk(2..4)],
             )
             .unwrap(),
-            PublicationReadScript::new(
+            WriteReadScript::new(
                 "extracted/main.typ",
                 0,
-                [PublicationReadStep::failure(opendal::ErrorKind::NotFound)],
+                [WriteReadStep::failure(opendal::ErrorKind::NotFound)],
             )
             .unwrap(),
         ],
@@ -177,10 +168,10 @@ fn create_or_verify_preflights_every_entry_then_reports_matching_and_created_ent
         32,
     );
     let bindings = bindings(&service);
-    let request = request(PublicationPolicy::CreateOrVerify);
-    let mut progress = PackExtractionPublicationProgress::new();
+    let request = request(WritePolicy::CreateOrVerify);
+    let mut progress = PackExtractionWriteProgress::new();
 
-    let receipt = expect_ready(pin!(publish_pack_extraction_plan(
+    let receipt = expect_ready(pin!(write_pack_extraction_plan(
         &bindings,
         &request,
         &plan,
@@ -194,21 +185,18 @@ fn create_or_verify_preflights_every_entry_then_reports_matching_and_created_ent
             .iter()
             .map(|entry| entry.outcome())
             .collect::<Vec<_>>(),
-        [
-            PublicationKeyOutcome::AlreadyMatching,
-            PublicationKeyOutcome::Created,
-        ]
+        [WriteKeyOutcome::AlreadyMatching, WriteKeyOutcome::Created,]
     );
     let log = service.log();
     let second_read = log
         .entries()
         .iter()
-        .position(|entry| matches!(entry, PublicationOperationLogEntry::ReadInvoked { path, .. } if path == "extracted/main.typ"))
+        .position(|entry| matches!(entry, WriteOperationLogEntry::ReadInvoked { path, .. } if path == "extracted/main.typ"))
         .unwrap();
     let first_write = log
         .entries()
         .iter()
-        .position(|entry| matches!(entry, PublicationOperationLogEntry::WriteInvoked { .. }))
+        .position(|entry| matches!(entry, WriteOperationLogEntry::WriteInvoked { .. }))
         .unwrap();
     assert!(second_read < first_write);
 }
@@ -216,23 +204,21 @@ fn create_or_verify_preflights_every_entry_then_reports_matching_and_created_ent
 #[test]
 fn conflicts_and_write_failures_retain_entry_context_and_contiguous_progress() {
     let plan = sample_plan();
-    let create_request = request(PublicationPolicy::CreateOrVerify);
-    let conflict_service = PublicationService::new(
-        PublicationCapabilities::all(),
+    let create_request = request(WritePolicy::CreateOrVerify);
+    let conflict_service = WriteService::new(
+        WriteCapabilities::all(),
         [("extracted/assets/logo.bin".to_owned(), b"wrong".to_vec())],
-        [PublicationReadScript::new(
-            "extracted/assets/logo.bin",
-            1,
-            [PublicationReadStep::chunk(0..1)],
-        )
-        .unwrap()],
+        [
+            WriteReadScript::new("extracted/assets/logo.bin", 1, [WriteReadStep::chunk(0..1)])
+                .unwrap(),
+        ],
         [],
         16,
     );
     let conflict_bindings = bindings(&conflict_service);
-    let mut conflict_progress = PackExtractionPublicationProgress::new();
+    let mut conflict_progress = PackExtractionWriteProgress::new();
 
-    let conflict = expect_ready(pin!(publish_pack_extraction_plan(
+    let conflict = expect_ready(pin!(write_pack_extraction_plan(
         &conflict_bindings,
         &create_request,
         &plan,
@@ -245,19 +231,19 @@ fn conflicts_and_write_failures_retain_entry_context_and_contiguous_progress() {
         conflict.failed_destination_path(),
         Some("extracted/assets/logo.bin")
     );
-    assert_eq!(conflict.phase(), OpenDalPublicationPhase::PreflightRead);
+    assert_eq!(conflict.phase(), OpenDalWritePhase::PreflightRead);
     assert_eq!(conflict.commit_certainty(), CommitCertainty::NotCommitted);
     assert!(conflict.progress().completed().is_empty());
     assert!(matches!(
         conflict.cause(),
-        PackExtractionPublicationErrorCause::ByteConflict {
+        PackExtractionWriteErrorCause::ByteConflict {
             expected_byte_length: 4,
             observed_byte_length_at_least: 1,
         }
     ));
 
-    let failure_service = PublicationService::new(
-        PublicationCapabilities::all(),
+    let failure_service = WriteService::new(
+        WriteCapabilities::all(),
         [],
         [],
         [
@@ -271,10 +257,10 @@ fn conflicts_and_write_failures_retain_entry_context_and_contiguous_progress() {
         24,
     );
     let failure_bindings = bindings(&failure_service);
-    let overwrite_request = request(PublicationPolicy::OverwriteExactKeys);
-    let mut failure_progress = PackExtractionPublicationProgress::new();
+    let overwrite_request = request(WritePolicy::OverwriteExactKeys);
+    let mut failure_progress = PackExtractionWriteProgress::new();
 
-    let failure = expect_ready(pin!(publish_pack_extraction_plan(
+    let failure = expect_ready(pin!(write_pack_extraction_plan(
         &failure_bindings,
         &overwrite_request,
         &plan,
@@ -287,13 +273,13 @@ fn conflicts_and_write_failures_retain_entry_context_and_contiguous_progress() {
         failure.failed_destination_path(),
         Some("extracted/main.typ")
     );
-    assert_eq!(failure.phase(), OpenDalPublicationPhase::DirectWrite);
+    assert_eq!(failure.phase(), OpenDalWritePhase::DirectWrite);
     assert_eq!(failure.commit_certainty(), CommitCertainty::Indeterminate);
     assert_eq!(failure.progress().completed().len(), 1);
     assert_eq!(failure.progress(), &failure_progress);
     assert!(matches!(
         failure.cause(),
-        PackExtractionPublicationErrorCause::DirectWrite(source)
+        PackExtractionWriteErrorCause::DirectWrite(source)
             if source.kind() == opendal::ErrorKind::PermissionDenied
     ));
 }
@@ -301,62 +287,60 @@ fn conflicts_and_write_failures_retain_entry_context_and_contiguous_progress() {
 #[test]
 fn resolver_read_create_and_race_failures_retain_typed_public_causes() {
     let plan = main_only_plan();
-    let request = request(PublicationPolicy::CreateOrVerify);
-    let mut progress = PackExtractionPublicationProgress::new();
+    let request = request(WritePolicy::CreateOrVerify);
+    let mut progress = PackExtractionWriteProgress::new();
 
-    let resolve = expect_ready(pin!(publish_pack_extraction_plan(
+    let resolve = expect_ready(pin!(write_pack_extraction_plan(
         &FailingResolver,
         &request,
         &plan,
         &mut progress,
     )))
     .unwrap_err();
-    assert_eq!(resolve.phase(), OpenDalPublicationPhase::ResolveOperator);
-    let PackExtractionPublicationErrorCause::ResolveOperator(source) = resolve.cause() else {
+    assert_eq!(resolve.phase(), OpenDalWritePhase::ResolveOperator);
+    let PackExtractionWriteErrorCause::ResolveOperator(source) = resolve.cause() else {
         panic!("unexpected cause: {:?}", resolve.cause());
     };
     assert!(source.downcast_ref::<ResolveError>().is_some());
     assert!(!format!("{resolve:?}").contains("resolver rejected"));
     let cause = resolve.source().unwrap().source().unwrap();
-    assert!(cause.is::<PackExtractionPublicationErrorCause>());
+    assert!(cause.is::<PackExtractionWriteErrorCause>());
     assert!(cause.source().unwrap().is::<ResolveError>());
 
-    let read_service = PublicationService::new(
-        PublicationCapabilities::all(),
+    let read_service = WriteService::new(
+        WriteCapabilities::all(),
         [("extracted/main.typ".to_owned(), b"main".to_vec())],
-        [PublicationReadScript::new(
+        [WriteReadScript::new(
             "extracted/main.typ",
             0,
-            [PublicationReadStep::failure(
-                opendal::ErrorKind::PermissionDenied,
-            )],
+            [WriteReadStep::failure(opendal::ErrorKind::PermissionDenied)],
         )
         .unwrap()],
         [],
         8,
     );
     let read_bindings = bindings(&read_service);
-    let read = expect_ready(pin!(publish_pack_extraction_plan(
+    let read = expect_ready(pin!(write_pack_extraction_plan(
         &read_bindings,
         &request,
         &plan,
         &mut progress,
     )))
     .unwrap_err();
-    assert_eq!(read.phase(), OpenDalPublicationPhase::PreflightRead);
+    assert_eq!(read.phase(), OpenDalWritePhase::PreflightRead);
     assert!(matches!(
         read.cause(),
-        PackExtractionPublicationErrorCause::PreflightRead(source)
+        PackExtractionWriteErrorCause::PreflightRead(source)
             if source.kind() == opendal::ErrorKind::PermissionDenied
     ));
 
-    let create_service = PublicationService::new(
-        PublicationCapabilities::all(),
+    let create_service = WriteService::new(
+        WriteCapabilities::all(),
         [],
-        [PublicationReadScript::new(
+        [WriteReadScript::new(
             "extracted/main.typ",
             0,
-            [PublicationReadStep::failure(opendal::ErrorKind::NotFound)],
+            [WriteReadStep::failure(opendal::ErrorKind::NotFound)],
         )
         .unwrap()],
         [WriteScript::write_failure(
@@ -367,38 +351,36 @@ fn resolver_read_create_and_race_failures_retain_typed_public_causes() {
         8,
     );
     let create_bindings = bindings(&create_service);
-    let create = expect_ready(pin!(publish_pack_extraction_plan(
+    let create = expect_ready(pin!(write_pack_extraction_plan(
         &create_bindings,
         &request,
         &plan,
         &mut progress,
     )))
     .unwrap_err();
-    assert_eq!(create.phase(), OpenDalPublicationPhase::ConditionalCreate);
+    assert_eq!(create.phase(), OpenDalWritePhase::ConditionalCreate);
     assert_eq!(create.commit_certainty(), CommitCertainty::Indeterminate);
     assert!(matches!(
         create.cause(),
-        PackExtractionPublicationErrorCause::ConditionalCreate(source)
+        PackExtractionWriteErrorCause::ConditionalCreate(source)
             if source.kind() == opendal::ErrorKind::PermissionDenied
     ));
 
     let pending = PendingPoint::new();
-    let race_service = PublicationService::new(
-        PublicationCapabilities::all(),
+    let race_service = WriteService::new(
+        WriteCapabilities::all(),
         [],
         [
-            PublicationReadScript::new(
+            WriteReadScript::new(
                 "extracted/main.typ",
                 0,
-                [PublicationReadStep::failure(opendal::ErrorKind::NotFound)],
+                [WriteReadStep::failure(opendal::ErrorKind::NotFound)],
             )
             .unwrap(),
-            PublicationReadScript::new(
+            WriteReadScript::new(
                 "extracted/main.typ",
                 0,
-                [PublicationReadStep::failure(
-                    opendal::ErrorKind::PermissionDenied,
-                )],
+                [WriteReadStep::failure(opendal::ErrorKind::PermissionDenied)],
             )
             .unwrap(),
         ],
@@ -411,22 +393,22 @@ fn resolver_read_create_and_race_failures_retain_typed_public_causes() {
     );
     let race_bindings = bindings(&race_service);
     let race = {
-        let mut publication = pin!(publish_pack_extraction_plan(
+        let mut write = pin!(write_pack_extraction_plan(
             &race_bindings,
             &request,
             &plan,
             &mut progress,
         ));
-        assert!(matches!(poll_once(publication.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(write.as_mut()), Poll::Pending));
         race_service.mutate(DestinationMutation::set("extracted/main.typ", b"racing"));
         pending.release();
-        expect_ready(publication.as_mut()).unwrap_err()
+        expect_ready(write.as_mut()).unwrap_err()
     };
-    assert_eq!(race.phase(), OpenDalPublicationPhase::RaceVerification);
+    assert_eq!(race.phase(), OpenDalWritePhase::RaceVerification);
     assert_eq!(race.commit_certainty(), CommitCertainty::NotCommitted);
     assert!(matches!(
         race.cause(),
-        PackExtractionPublicationErrorCause::RaceVerification(source)
+        PackExtractionWriteErrorCause::RaceVerification(source)
             if source.kind() == opendal::ErrorKind::PermissionDenied
     ));
 }
@@ -434,11 +416,11 @@ fn resolver_read_create_and_race_failures_retain_typed_public_causes() {
 #[test]
 fn capability_and_size_failures_happen_before_destination_effects() {
     let plan = sample_plan();
-    let create_request = request(PublicationPolicy::CreateOrVerify);
-    let unsupported_service = PublicationService::new(
-        PublicationCapabilities {
+    let create_request = request(WritePolicy::CreateOrVerify);
+    let unsupported_service = WriteService::new(
+        WriteCapabilities {
             read: false,
-            ..PublicationCapabilities::all()
+            ..WriteCapabilities::all()
         },
         [],
         [],
@@ -446,9 +428,9 @@ fn capability_and_size_failures_happen_before_destination_effects() {
         8,
     );
     let unsupported_bindings = bindings(&unsupported_service);
-    let mut progress = PackExtractionPublicationProgress::new();
+    let mut progress = PackExtractionWriteProgress::new();
 
-    let unsupported = expect_ready(pin!(publish_pack_extraction_plan(
+    let unsupported = expect_ready(pin!(write_pack_extraction_plan(
         &unsupported_bindings,
         &create_request,
         &plan,
@@ -456,22 +438,19 @@ fn capability_and_size_failures_happen_before_destination_effects() {
     )))
     .unwrap_err();
 
-    assert_eq!(
-        unsupported.phase(),
-        OpenDalPublicationPhase::CapabilityAppraisal
-    );
+    assert_eq!(unsupported.phase(), OpenDalWritePhase::CapabilityAppraisal);
     assert!(matches!(
         unsupported.cause(),
-        PackExtractionPublicationErrorCause::UnsupportedPolicy {
-            policy: PublicationPolicy::CreateOrVerify,
+        PackExtractionWriteErrorCause::UnsupportedPolicy {
+            policy: WritePolicy::CreateOrVerify,
         }
     ));
     assert!(unsupported_service.log().entries().is_empty());
 
-    let size_service = PublicationService::new(
-        PublicationCapabilities {
+    let size_service = WriteService::new(
+        WriteCapabilities {
             write_total_max_size: Some(3),
-            ..PublicationCapabilities::all()
+            ..WriteCapabilities::all()
         },
         [],
         [],
@@ -479,9 +458,9 @@ fn capability_and_size_failures_happen_before_destination_effects() {
         8,
     );
     let size_bindings = bindings(&size_service);
-    let overwrite_request = request(PublicationPolicy::OverwriteExactKeys);
-    let mut progress = PackExtractionPublicationProgress::new();
-    let size = expect_ready(pin!(publish_pack_extraction_plan(
+    let overwrite_request = request(WritePolicy::OverwriteExactKeys);
+    let mut progress = PackExtractionWriteProgress::new();
+    let size = expect_ready(pin!(write_pack_extraction_plan(
         &size_bindings,
         &overwrite_request,
         &plan,
@@ -492,7 +471,7 @@ fn capability_and_size_failures_happen_before_destination_effects() {
     assert_eq!(size.failed_relative_path(), Some("assets/logo.bin"));
     assert!(matches!(
         size.cause(),
-        PackExtractionPublicationErrorCause::UnsupportedObjectSize { byte_length: 4 }
+        PackExtractionWriteErrorCause::UnsupportedObjectSize { byte_length: 4 }
     ));
     assert!(size_service.log().entries().is_empty());
 }
@@ -500,19 +479,16 @@ fn capability_and_size_failures_happen_before_destination_effects() {
 #[test]
 fn mutable_streams_and_matching_conditional_races_are_read_only_successes() {
     let plan = main_only_plan();
-    let mutable_service = PublicationService::new(
-        PublicationCapabilities::all(),
+    let mutable_service = WriteService::new(
+        WriteCapabilities::all(),
         [("extracted/main.typ".to_owned(), b"maXX".to_vec())],
-        [PublicationReadScript::new(
+        [WriteReadScript::new(
             "extracted/main.typ",
             2,
             [
-                PublicationReadStep::chunk(0..2),
-                PublicationReadStep::mutate(DestinationMutation::set(
-                    "extracted/main.typ",
-                    b"YYin",
-                )),
-                PublicationReadStep::chunk(2..4),
+                WriteReadStep::chunk(0..2),
+                WriteReadStep::mutate(DestinationMutation::set("extracted/main.typ", b"YYin")),
+                WriteReadStep::chunk(2..4),
             ],
         )
         .unwrap()],
@@ -520,9 +496,9 @@ fn mutable_streams_and_matching_conditional_races_are_read_only_successes() {
         24,
     );
     let mutable_bindings = bindings(&mutable_service);
-    let request = request(PublicationPolicy::CreateOrVerify);
-    let mut mutable_progress = PackExtractionPublicationProgress::new();
-    let mutable_receipt = expect_ready(pin!(publish_pack_extraction_plan(
+    let request = request(WritePolicy::CreateOrVerify);
+    let mut mutable_progress = PackExtractionWriteProgress::new();
+    let mutable_receipt = expect_ready(pin!(write_pack_extraction_plan(
         &mutable_bindings,
         &request,
         &plan,
@@ -531,22 +507,21 @@ fn mutable_streams_and_matching_conditional_races_are_read_only_successes() {
     .unwrap();
     assert_eq!(
         mutable_receipt.completed()[0].outcome(),
-        PublicationKeyOutcome::AlreadyMatching
+        WriteKeyOutcome::AlreadyMatching
     );
 
     let pending = PendingPoint::new();
-    let race_service = PublicationService::new(
-        PublicationCapabilities::all(),
+    let race_service = WriteService::new(
+        WriteCapabilities::all(),
         [],
         [
-            PublicationReadScript::new(
+            WriteReadScript::new(
                 "extracted/main.typ",
                 0,
-                [PublicationReadStep::failure(opendal::ErrorKind::NotFound)],
+                [WriteReadStep::failure(opendal::ErrorKind::NotFound)],
             )
             .unwrap(),
-            PublicationReadScript::new("extracted/main.typ", 1, [PublicationReadStep::chunk(0..4)])
-                .unwrap(),
+            WriteReadScript::new("extracted/main.typ", 1, [WriteReadStep::chunk(0..4)]).unwrap(),
         ],
         [WriteScript::new(
             "extracted/main.typ",
@@ -556,22 +531,22 @@ fn mutable_streams_and_matching_conditional_races_are_read_only_successes() {
         32,
     );
     let race_bindings = bindings(&race_service);
-    let mut race_progress = PackExtractionPublicationProgress::new();
+    let mut race_progress = PackExtractionWriteProgress::new();
     let race_receipt = {
-        let mut publication = pin!(publish_pack_extraction_plan(
+        let mut write = pin!(write_pack_extraction_plan(
             &race_bindings,
             &request,
             &plan,
             &mut race_progress,
         ));
-        assert!(matches!(poll_once(publication.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(write.as_mut()), Poll::Pending));
         race_service.mutate(DestinationMutation::set("extracted/main.typ", b"main"));
         pending.release();
-        expect_ready(publication.as_mut()).unwrap()
+        expect_ready(write.as_mut()).unwrap()
     };
     assert_eq!(
         race_receipt.completed()[0].outcome(),
-        PublicationKeyOutcome::AlreadyMatching
+        WriteKeyOutcome::AlreadyMatching
     );
 }
 
@@ -579,8 +554,8 @@ fn mutable_streams_and_matching_conditional_races_are_read_only_successes() {
 fn dropping_mid_plan_leaves_the_contiguous_completed_prefix_with_the_caller() {
     let plan = sample_plan();
     let pending = PendingPoint::new();
-    let service = PublicationService::new(
-        PublicationCapabilities::all(),
+    let service = WriteService::new(
+        WriteCapabilities::all(),
         [],
         [],
         [
@@ -594,25 +569,22 @@ fn dropping_mid_plan_leaves_the_contiguous_completed_prefix_with_the_caller() {
         24,
     );
     let bindings = bindings(&service);
-    let request = request(PublicationPolicy::OverwriteExactKeys);
-    let mut progress = PackExtractionPublicationProgress::new();
+    let request = request(WritePolicy::OverwriteExactKeys);
+    let mut progress = PackExtractionWriteProgress::new();
     {
-        let mut publication = pin!(publish_pack_extraction_plan(
+        let mut write = pin!(write_pack_extraction_plan(
             &bindings,
             &request,
             &plan,
             &mut progress,
         ));
-        assert!(matches!(poll_once(publication.as_mut()), Poll::Pending));
+        assert!(matches!(poll_once(write.as_mut()), Poll::Pending));
         assert!(pending.was_observed());
     }
 
     assert_eq!(progress.completed().len(), 1);
     assert_eq!(progress.completed()[0].relative_path(), "assets/logo.bin");
-    assert_eq!(
-        progress.completed()[0].outcome(),
-        PublicationKeyOutcome::Written
-    );
+    assert_eq!(progress.completed()[0].outcome(), WriteKeyOutcome::Written);
 }
 
 #[test]
@@ -623,14 +595,14 @@ fn memory_proves_exact_root_state_and_create_or_verify_replay() {
     let bindings =
         OperatorBindings::new([(OperatorBinding::new("memory").unwrap(), operator.clone())])
             .unwrap();
-    let overwrite = PackExtractionPublicationRequest::new(
+    let overwrite = PackExtractionWriteRequest::new(
         "memory:/".parse().unwrap(),
-        PublicationPolicy::OverwriteExactKeys,
+        WritePolicy::OverwriteExactKeys,
     )
     .unwrap();
-    let mut progress = PackExtractionPublicationProgress::new();
+    let mut progress = PackExtractionWriteProgress::new();
 
-    expect_ready(pin!(publish_pack_extraction_plan(
+    expect_ready(pin!(write_pack_extraction_plan(
         &bindings,
         &overwrite,
         &plan,
@@ -648,12 +620,10 @@ fn memory_proves_exact_root_state_and_create_or_verify_replay() {
         b"untouched"
     );
 
-    let replay = PackExtractionPublicationRequest::new(
-        "memory:/".parse().unwrap(),
-        PublicationPolicy::CreateOrVerify,
-    )
-    .unwrap();
-    let receipt = expect_ready(pin!(publish_pack_extraction_plan(
+    let replay =
+        PackExtractionWriteRequest::new("memory:/".parse().unwrap(), WritePolicy::CreateOrVerify)
+            .unwrap();
+    let receipt = expect_ready(pin!(write_pack_extraction_plan(
         &bindings,
         &replay,
         &plan,
@@ -664,15 +634,15 @@ fn memory_proves_exact_root_state_and_create_or_verify_replay() {
         receipt
             .completed()
             .iter()
-            .all(|entry| entry.outcome() == PublicationKeyOutcome::AlreadyMatching)
+            .all(|entry| entry.outcome() == WriteKeyOutcome::AlreadyMatching)
     );
 }
 
 #[test]
 fn unpolled_futures_clear_stale_progress_and_operator_bindings_make_send_futures() {
     let plan = main_only_plan();
-    let service = PublicationService::new(
-        PublicationCapabilities::all(),
+    let service = WriteService::new(
+        WriteCapabilities::all(),
         [],
         [],
         [WriteScript::new(
@@ -683,9 +653,9 @@ fn unpolled_futures_clear_stale_progress_and_operator_bindings_make_send_futures
         8,
     );
     let bindings = bindings(&service);
-    let request = request(PublicationPolicy::OverwriteExactKeys);
-    let mut progress = PackExtractionPublicationProgress::new();
-    expect_ready(pin!(publish_pack_extraction_plan(
+    let request = request(WritePolicy::OverwriteExactKeys);
+    let mut progress = PackExtractionWriteProgress::new();
+    expect_ready(pin!(write_pack_extraction_plan(
         &bindings,
         &request,
         &plan,
@@ -694,14 +664,14 @@ fn unpolled_futures_clear_stale_progress_and_operator_bindings_make_send_futures
     .unwrap();
     assert_eq!(progress.completed().len(), 1);
 
-    drop(publish_pack_extraction_plan(
+    drop(write_pack_extraction_plan(
         &RejectingResolver,
         &request,
         &plan,
         &mut progress,
     ));
     assert!(progress.completed().is_empty());
-    assert_send(publish_pack_extraction_plan(
+    assert_send(write_pack_extraction_plan(
         &bindings,
         &request,
         &plan,
@@ -729,12 +699,12 @@ fn main_only_plan() -> typst_pack::PackExtractionPlan {
     plan_pack_extraction(&pack, PackExtractionSelection::default()).unwrap()
 }
 
-fn bindings(service: &PublicationService) -> OperatorBindings {
+fn bindings(service: &WriteService) -> OperatorBindings {
     OperatorBindings::new([(OperatorBinding::new("project").unwrap(), service.operator())]).unwrap()
 }
 
-fn request(policy: PublicationPolicy) -> PackExtractionPublicationRequest {
-    PackExtractionPublicationRequest::new("project:/extracted/".parse().unwrap(), policy).unwrap()
+fn request(policy: WritePolicy) -> PackExtractionWriteRequest {
+    PackExtractionWriteRequest::new("project:/extracted/".parse().unwrap(), policy).unwrap()
 }
 
 fn expect_ready<F: Future>(future: std::pin::Pin<&mut F>) -> F::Output {

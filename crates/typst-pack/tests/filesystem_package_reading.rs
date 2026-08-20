@@ -1,4 +1,4 @@
-//! Package Tree gathering from the reference filesystem source.
+//! Package Tree reading from the reference filesystem source.
 
 #![cfg(feature = "fs")]
 
@@ -6,9 +6,9 @@ use std::fs;
 
 use typst::syntax::package::PackageSpec;
 use typst_pack::{
-    FilesystemPackageAcquisitionError, FilesystemPackageAuthority, FilesystemPackageGatherError,
-    FilesystemPackageLimitError, FilesystemPackageLimits, FilesystemPackageLimitsError,
-    FilesystemPackageResource, PackageAcquisitionFailureReason, gather_filesystem_package,
+    FilesystemPackageAuthority, FilesystemPackageAuthorityReadError, FilesystemPackageLimitError,
+    FilesystemPackageLimits, FilesystemPackageLimitsError, FilesystemPackageReadError,
+    FilesystemPackageResource, PackageReadFailureReason, read_filesystem_package,
 };
 
 fn limits(values: [u64; 4]) -> FilesystemPackageLimits {
@@ -55,7 +55,7 @@ fn every_package_source_ceiling_must_leave_room_for_a_plus_one_probe() {
 }
 
 #[test]
-fn gathering_returns_one_validated_complete_package_tree_in_canonical_order() {
+fn reading_returns_one_validated_complete_package_tree_in_canonical_order() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("assets")).unwrap();
     fs::write(dir.path().join("typst.toml"), b"declaration").unwrap();
@@ -63,7 +63,7 @@ fn gathering_returns_one_validated_complete_package_tree_in_canonical_order() {
     fs::write(dir.path().join("assets/unused.txt"), b"unused").unwrap();
 
     let tree =
-        gather_filesystem_package(dir.path(), FilesystemPackageLimits::reference_v1()).unwrap();
+        read_filesystem_package(dir.path(), FilesystemPackageLimits::reference_v1()).unwrap();
 
     assert_eq!(
         tree.files().collect::<Vec<_>>(),
@@ -84,11 +84,11 @@ fn assert_limit(
     ceiling: u64,
     observed: u64,
 ) {
-    let error = gather_filesystem_package(root, limits(values)).unwrap_err();
+    let error = read_filesystem_package(root, limits(values)).unwrap_err();
     assert!(
         matches!(
             error,
-            FilesystemPackageGatherError::Limit {
+            FilesystemPackageReadError::Limit {
                 source: FilesystemPackageLimitError::Exceeded {
                     resource: reported,
                     ceiling: reported_ceiling,
@@ -121,7 +121,7 @@ fn generated_boundaries_cover_every_package_source_resource() {
         for ceiling in [observed + 1, observed] {
             let mut values = exact;
             values[index] = ceiling;
-            gather_filesystem_package(root, limits(values)).unwrap();
+            read_filesystem_package(root, limits(values)).unwrap();
         }
         let mut values = exact;
         values[index] -= 1;
@@ -139,9 +139,9 @@ fn filesystem_aliases_do_not_masquerade_as_package_files() {
     symlink(dir.path().join("lib.typ"), dir.path().join("alias.typ")).unwrap();
 
     let error =
-        gather_filesystem_package(dir.path(), FilesystemPackageLimits::reference_v1()).unwrap_err();
+        read_filesystem_package(dir.path(), FilesystemPackageLimits::reference_v1()).unwrap_err();
 
-    assert!(matches!(error, FilesystemPackageGatherError::Survey(_)));
+    assert!(matches!(error, FilesystemPackageReadError::Survey(_)));
 }
 
 #[cfg(unix)]
@@ -153,9 +153,9 @@ fn survey_issues_take_precedence_over_deferred_selected_file_limits() {
     fs::write(dir.path().join("lib.typ"), b"library").unwrap();
     symlink(dir.path().join("lib.typ"), dir.path().join("alias.typ")).unwrap();
 
-    let error = gather_filesystem_package(dir.path(), limits([10, 0, 100, 100])).unwrap_err();
+    let error = read_filesystem_package(dir.path(), limits([10, 0, 100, 100])).unwrap_err();
 
-    assert!(matches!(error, FilesystemPackageGatherError::Survey(_)));
+    assert!(matches!(error, FilesystemPackageReadError::Survey(_)));
 }
 
 #[test]
@@ -167,18 +167,18 @@ fn concrete_authority_makes_local_cache_and_offline_precedence_explicit() {
     write_package(&cache, b"cache");
     let spec: PackageSpec = "@local/example:1.0.0".parse().unwrap();
 
-    let acquired = FilesystemPackageAuthority::new(Some(&data), Some(&cache), true)
-        .acquire(&spec)
+    let read = FilesystemPackageAuthority::new(Some(&data), Some(&cache), true)
+        .read(&spec)
         .unwrap();
 
-    assert_eq!(acquired.tree().file("marker.txt"), Some(&b"local"[..]));
-    assert_eq!(acquired.root(), Some(data_root.as_path()));
+    assert_eq!(read.tree().file("marker.txt"), Some(&b"local"[..]));
+    assert_eq!(read.root(), Some(data_root.as_path()));
 
     fs::remove_dir_all(&data_root).unwrap();
-    let acquired = FilesystemPackageAuthority::new(Some(&data), Some(&cache), true)
-        .acquire(&spec)
+    let read = FilesystemPackageAuthority::new(Some(&data), Some(&cache), true)
+        .read(&spec)
         .unwrap();
-    assert_eq!(acquired.tree().file("marker.txt"), Some(&b"cache"[..]));
+    assert_eq!(read.tree().file("marker.txt"), Some(&b"cache"[..]));
 }
 
 #[test]
@@ -201,16 +201,16 @@ fn concrete_authority_finds_a_tree_under_its_namespace_name_and_version() {
     for (text, key) in layouts {
         let spec: PackageSpec = text.parse().unwrap();
 
-        let acquired = FilesystemPackageAuthority::new(Some(&data), Some(&data), true)
-            .acquire(&spec)
+        let read = FilesystemPackageAuthority::new(Some(&data), Some(&data), true)
+            .read(&spec)
             .unwrap();
 
         assert_eq!(
-            acquired.tree().file("marker.txt"),
+            read.tree().file("marker.txt"),
             Some(key.as_bytes()),
             "{text}"
         );
-        assert_eq!(acquired.root(), Some(data.join(key).as_path()), "{text}");
+        assert_eq!(read.root(), Some(data.join(key).as_path()), "{text}");
     }
 }
 
@@ -220,12 +220,12 @@ fn concrete_authority_failure_retains_the_exact_specification() {
     let spec: PackageSpec = "@local/missing:1.0.0".parse().unwrap();
 
     let error = FilesystemPackageAuthority::new(Some(dir.path()), Some(dir.path()), true)
-        .acquire(&spec)
+        .read(&spec)
         .unwrap_err();
     let failure = error.failure();
 
     assert_eq!(failure.spec(), &spec);
-    assert_eq!(failure.reason(), &PackageAcquisitionFailureReason::NotFound);
+    assert_eq!(failure.reason(), &PackageReadFailureReason::NotFound);
 }
 
 #[cfg(unix)]
@@ -239,15 +239,15 @@ fn concrete_authority_preserves_the_typed_filesystem_cause() {
     let spec: PackageSpec = "@local/example:1.0.0".parse().unwrap();
 
     let error = FilesystemPackageAuthority::new(Some(dir.path()), None, true)
-        .acquire(&spec)
+        .read(&spec)
         .unwrap_err();
 
-    let FilesystemPackageAcquisitionError::Filesystem { failure, source } = error else {
-        panic!("expected a typed filesystem acquisition cause");
+    let FilesystemPackageAuthorityReadError::Filesystem { failure, source } = error else {
+        panic!("expected a typed filesystem read cause");
     };
     assert_eq!(failure.spec(), &spec);
     assert!(matches!(
         source.as_ref(),
-        FilesystemPackageGatherError::Survey(_)
+        FilesystemPackageReadError::Survey(_)
     ));
 }

@@ -1,7 +1,7 @@
 //! Pack Creation over supplied inputs.
 //!
 //! Every test here runs on a build with no crate feature enabled: the inputs
-//! are bytes the caller already holds, and creation acquires nothing itself.
+//! are bytes the caller already holds, and creation reads nothing itself.
 //! The font section needs real font bytes, which Typst only ships with the
 //! `embedded-fonts` feature.
 
@@ -10,10 +10,9 @@ use std::str::FromStr;
 use typst::syntax::package::PackageSpec;
 use typst_pack::{
     DiscoverySpecification, DocumentTime, FontCatalog, Pack, PackCreationError, PackCreationInput,
-    PackCreationOutcome, PackMetadata, PackageAcquisitionFailure, PackageAcquisitionFailureReason,
-    PackageAcquisitionFailures, PackageCatalog, PackageCatalogError, PackageCatalogIssue,
-    PackageDisposition, PackageTree, PackageTreeIssue, ProjectSnapshot, ProjectSnapshotAssembly,
-    TypstTarget, create,
+    PackCreationOutcome, PackMetadata, PackageCatalog, PackageCatalogError, PackageCatalogIssue,
+    PackageDisposition, PackageReadFailure, PackageReadFailureReason, PackageReadFailures,
+    PackageTree, PackageTreeIssue, ProjectSnapshot, ProjectSnapshotAssembly, TypstTarget, create,
 };
 
 /// 2023-11-14T22:13:20Z, the Document Time every representative request here
@@ -35,7 +34,7 @@ struct TestCreation {
     project: ProjectSnapshot,
     packages: PackageCatalog,
     fonts: FontCatalog,
-    package_failures: PackageAcquisitionFailures,
+    package_failures: PackageReadFailures,
     discovery: DiscoverySpecification,
     metadata: Option<PackMetadata>,
 }
@@ -46,7 +45,7 @@ impl TestCreation {
             project,
             packages: PackageCatalog::new(),
             fonts: FontCatalog::new(),
-            package_failures: PackageAcquisitionFailures::new(),
+            package_failures: PackageReadFailures::new(),
             discovery: DiscoverySpecification::new(
                 TypstTarget::Paged,
                 typst::foundations::Dict::new(),
@@ -69,7 +68,7 @@ impl TestCreation {
         self
     }
 
-    fn package_failure(mut self, failure: PackageAcquisitionFailure) -> Self {
+    fn package_failure(mut self, failure: PackageReadFailure) -> Self {
         self.package_failures.insert(failure);
         self
     }
@@ -429,7 +428,7 @@ const CHAINED_PACKAGES: &str = "#import \"@local/first:1.0.0\": first\n\
                                 #rect(width: (first + second) * 1pt, height: 1pt)";
 
 /// The tree a resume round can resolve for one reported specification,
-/// standing in for whatever acquisition the caller's host allows.
+/// standing in for whatever read the caller's host allows.
 fn resolvable(spec: &PackageSpec) -> CatalogEntry {
     let body = match spec.name.as_str() {
         "first" => "#import \"@local/third:1.0.0\": third\n#let first = 1 + third",
@@ -504,9 +503,9 @@ fn a_resumed_creation_issues_the_pack_one_invocation_would_have() {
 #[test]
 fn a_specification_declared_unresolvable_fails_the_request_that_needed_it() {
     let source = "#import \"@local/first:1.0.0\": first\n#first";
-    let failure = PackageAcquisitionFailure::new(
+    let failure = PackageReadFailure::new(
         spec("first"),
-        PackageAcquisitionFailureReason::NetworkFailed {
+        PackageReadFailureReason::NetworkFailed {
             detail: Some("connection refused".to_owned()),
         },
     );
@@ -533,7 +532,7 @@ fn a_specification_declared_unresolvable_fails_the_request_that_needed_it() {
 fn a_declared_specification_is_no_longer_reported_as_missing() {
     let source = "#import \"@local/first:1.0.0\": first\n#first";
     let request = TestCreation::new(document(source), CREATION_TIMESTAMP).package_failure(
-        PackageAcquisitionFailure::new(spec("first"), PackageAcquisitionFailureReason::NotFound),
+        PackageReadFailure::new(spec("first"), PackageReadFailureReason::NotFound),
     );
 
     // Reporting it again would ask the caller for what it said it cannot
@@ -549,9 +548,9 @@ fn a_tree_supplied_for_a_declared_specification_takes_precedence() {
     let source = "#import \"@local/first:1.0.0\": first\n#rect(width: first * 1pt, height: 1pt)";
     let issued = issue(
         &TestCreation::new(document(source), CREATION_TIMESTAMP)
-            .package_failure(PackageAcquisitionFailure::new(
+            .package_failure(PackageReadFailure::new(
                 spec("first"),
-                PackageAcquisitionFailureReason::NotFound,
+                PackageReadFailureReason::NotFound,
             ))
             .package_catalog(package_catalog([embedded_package(
                 spec("first"),

@@ -2,7 +2,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-#[cfg(feature = "package-acquisition")]
+#[cfg(feature = "package-reading")]
 use typst::foundations::Bytes;
 use typst::syntax::package::{PackageSpec, PackageVersion};
 
@@ -27,7 +27,7 @@ impl PackageDisposition {
     }
 }
 
-/// Every addressable regular file beneath one acquired package root.
+/// Every addressable regular file beneath one read package root.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PackageTree {
     files: BTreeMap<String, SharedBytes>,
@@ -49,7 +49,7 @@ impl PackageTree {
         )
     }
 
-    #[cfg(feature = "package-acquisition")]
+    #[cfg(feature = "package-reading")]
     pub(crate) fn from_typst_entries(
         entries: Vec<(String, Bytes)>,
     ) -> Result<Self, PackageTreeError> {
@@ -227,7 +227,7 @@ impl PackageTreePathPreflightError {
     }
 }
 
-/// Validates Package Tree paths before payloads are acquired.
+/// Validates Package Tree paths before payloads are read.
 ///
 /// `retain` is called with the byte lengths of every path copy that would be
 /// kept by the plan or its error evidence. Returning `false` stops before those

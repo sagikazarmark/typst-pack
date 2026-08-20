@@ -3,13 +3,13 @@
 //! Backend services, credentials, transports, TLS, executors, runtimes, layers,
 //! retry policy, and polling remain the caller's responsibility.
 
-#[allow(dead_code)]
-mod acquisition;
 pub mod location;
 pub mod pack_archive;
 pub mod pack_assembly;
 #[allow(dead_code)]
-pub mod publication;
+mod read;
+#[allow(dead_code)]
+pub mod write;
 
 #[cfg(test)]
 #[allow(dead_code)]

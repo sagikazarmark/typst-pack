@@ -277,7 +277,7 @@ impl PackOverrideSet {
         }
     }
 
-    /// Validates Pack Override paths before their replacement bytes are acquired.
+    /// Validates Pack Override paths before their replacement bytes are read.
     pub fn validate_paths<I, S>(pack: &Pack, paths: I) -> Result<(), PackOverrideSetError>
     where
         I: IntoIterator<Item = S>,

@@ -2,8 +2,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use typst_pack::{
-    FilesystemMergePolicy, FilesystemPublicationFaultProbe, Pack, PackExtractionSelection,
-    plan_pack_extraction, publish_pack_extraction_plan_to_filesystem_with_fault_probe,
+    FilesystemMergePolicy, FilesystemWriteFaultProbe, Pack, PackExtractionSelection,
+    plan_pack_extraction, write_pack_extraction_plan_to_filesystem_with_fault_probe,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -25,7 +25,7 @@ fuzz_target!(|data: &[u8]| {
     let directory = tempfile::tempdir().unwrap();
     let destination = std::fs::canonicalize(directory.path())
         .unwrap()
-        .join("published");
+        .join("written");
     std::fs::create_dir(&destination).unwrap();
     std::fs::write(destination.join("unrelated.txt"), b"unrelated").unwrap();
     if flags & 1 != 0 {
@@ -38,11 +38,11 @@ fuzz_target!(|data: &[u8]| {
         .collect::<Vec<_>>();
     for (step, byte) in data.iter().copied().skip(1).take(16).enumerate() {
         let policy = match byte % 3 {
-            0 => FilesystemMergePolicy::PublishNewTree,
+            0 => FilesystemMergePolicy::WriteNewTree,
             1 => FilesystemMergePolicy::MergeCreateOnly,
             _ => FilesystemMergePolicy::MergeReplaceExactFiles,
         };
-        let publish_destination = if policy == FilesystemMergePolicy::PublishNewTree {
+        let write_destination = if policy == FilesystemMergePolicy::WriteNewTree {
             destination.with_file_name(format!("new-tree-{step}"))
         } else {
             destination.clone()
@@ -50,12 +50,12 @@ fuzz_target!(|data: &[u8]| {
         let fault_file =
             usize::from(data.get(step + 2).copied().unwrap_or_default()) % plan.entries().len();
         let fault_after = usize::from(data.get(step + 3).copied().unwrap_or_default());
-        let fault_kind = if policy == FilesystemMergePolicy::PublishNewTree {
+        let fault_kind = if policy == FilesystemMergePolicy::WriteNewTree {
             byte / 3 % 8
         } else {
             byte / 3 % 6
         };
-        let probe = FilesystemPublicationFaultProbe {
+        let probe = FilesystemWriteFaultProbe {
             maximum_write: if fault_kind == 1 {
                 fault_after % 4 + 1
             } else {
@@ -64,24 +64,24 @@ fuzz_target!(|data: &[u8]| {
             write_fault_file: (fault_kind == 2).then_some(fault_file),
             write_fault_after: fault_after,
             flush_fault_file: (fault_kind == 3).then_some(fault_file),
-            commit_fault_file: (policy != FilesystemMergePolicy::PublishNewTree && fault_kind == 4)
+            commit_fault_file: (policy != FilesystemMergePolicy::WriteNewTree && fault_kind == 4)
                 .then_some(fault_file),
-            ancestor_symlink_race_file: (policy != FilesystemMergePolicy::PublishNewTree
+            ancestor_symlink_race_file: (policy != FilesystemMergePolicy::WriteNewTree
                 && fault_kind == 5)
                 .then_some(fault_file),
-            new_tree_commit_unsupported: policy == FilesystemMergePolicy::PublishNewTree
+            new_tree_commit_unsupported: policy == FilesystemMergePolicy::WriteNewTree
                 && fault_kind == 4,
-            new_tree_policy_unsupported: policy == FilesystemMergePolicy::PublishNewTree
+            new_tree_policy_unsupported: policy == FilesystemMergePolicy::WriteNewTree
                 && fault_kind == 7,
-            tree_staging_open_fault: policy == FilesystemMergePolicy::PublishNewTree
+            tree_staging_open_fault: policy == FilesystemMergePolicy::WriteNewTree
                 && matches!(fault_kind, 5 | 6),
-            tree_staging_cleanup_fault: policy == FilesystemMergePolicy::PublishNewTree
+            tree_staging_cleanup_fault: policy == FilesystemMergePolicy::WriteNewTree
                 && fault_kind == 6,
         };
 
-        let result = publish_pack_extraction_plan_to_filesystem_with_fault_probe(
+        let result = write_pack_extraction_plan_to_filesystem_with_fault_probe(
             &plan,
-            &publish_destination,
+            &write_destination,
             policy,
             probe,
         );
@@ -99,7 +99,7 @@ fuzz_target!(|data: &[u8]| {
                 .iter()
                 .find(|entry| std::path::Path::new(entry.relative_path()) == relative_path)
                 .unwrap();
-            match std::fs::read(publish_destination.join(relative_path)) {
+            match std::fs::read(write_destination.join(relative_path)) {
                 Ok(bytes) => assert_eq!(bytes, entry.bytes()),
                 Err(error) if fault_kind == 5 && error.kind() == std::io::ErrorKind::NotFound => {}
                 Err(error) => panic!("committed file cannot be observed: {error}"),

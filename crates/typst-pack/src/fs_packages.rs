@@ -1,7 +1,7 @@
-//! The package acquisition half of Pack Assembly for the reference filesystem
+//! The package-reading half of Pack Assembly for the reference filesystem
 //! Pack Assembler.
 //!
-//! Acquisition is resume-driven: the core reports the exact specifications its
+//! Reading is resume-driven: the core reports the exact specifications its
 //! representative request read and was not given, and the adapter obtains each
 //! of them through the configured Package Authority — local package
 //! directories, then the package cache, then a download unless creation is
@@ -29,11 +29,11 @@ use typst_kit::packages::FsPackages;
 use crate::error_display::format_error_list;
 use crate::limits::{LimitError, Limits, LimitsError, ResourceKind};
 use crate::package_catalog::{PackageTree, PackageTreeError};
-use crate::package_failure::{PackageAcquisitionFailure, PackageAcquisitionFailureReason};
+use crate::package_failure::{PackageReadFailure, PackageReadFailureReason};
 #[cfg(feature = "egress")]
 use crate::{
-    PackageAcquisitionError, PackageArchiveAcquisitionError, PackageExpansionLimits,
-    acquire_package_archive, expand_package_archive, package_archive_url,
+    PackageArchiveReadError, PackageExpansionLimits, PackageReadError, expand_package_archive,
+    package_archive_url, read_package_archive,
 };
 
 #[cfg(feature = "egress")]
@@ -42,7 +42,7 @@ const USER_AGENT: &str = concat!("typst-pack/", env!("CARGO_PKG_VERSION"));
 #[cfg(all(feature = "_test-package-download-probe", debug_assertions))]
 const PACKAGE_DOWNLOAD_PROBE_ENV: &str = "TYPST_PACK_TEST_PACKAGE_DOWNLOAD_PROBE";
 
-/// A resource bounded during filesystem Package Tree gathering.
+/// A resource bounded during filesystem Package Tree reading.
 pub type FilesystemPackageResource = ResourceKind<1>;
 
 #[allow(non_upper_case_globals)]
@@ -55,10 +55,10 @@ impl ResourceKind<1> {
 
 pub type FilesystemPackageLimitsError = LimitsError<FilesystemPackageResource>;
 
-/// A filesystem package exceeded a mandatory gathering ceiling.
+/// A filesystem package exceeded a mandatory reading ceiling.
 pub type FilesystemPackageLimitError = LimitError<FilesystemPackageResource>;
 
-/// Mandatory finite resource ceilings for filesystem Package Tree gathering.
+/// Mandatory finite resource ceilings for filesystem Package Tree reading.
 pub type FilesystemPackageLimits = Limits<FilesystemPackageResource>;
 
 impl Limits<FilesystemPackageResource> {
@@ -85,7 +85,7 @@ impl Limits<FilesystemPackageResource> {
         ])
     }
 
-    /// The first-party limits for package trees acquired from filesystems.
+    /// The first-party limits for package trees read from filesystems.
     pub const fn reference_v1() -> Self {
         Self::from_ceilings([
             100_000,
@@ -126,7 +126,7 @@ pub enum FilesystemPackageEntryKind {
     Unknown,
 }
 
-/// The filesystem operation that failed while gathering a Package Tree.
+/// The filesystem operation that failed while reading a Package Tree.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum FilesystemPackageOperation {
@@ -201,10 +201,10 @@ impl FilesystemPackageSurveyError {
     }
 }
 
-/// A failure while gathering a Package Tree from the filesystem.
+/// A failure while reading a Package Tree from the filesystem.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum FilesystemPackageGatherError {
+pub enum FilesystemPackageReadError {
     #[error("failed to {operation} {path:?}: {source}")]
     Io {
         operation: FilesystemPackageOperation,
@@ -223,7 +223,7 @@ pub enum FilesystemPackageGatherError {
     PackageTree(#[source] PackageTreeError),
 }
 
-impl FilesystemPackageGatherError {
+impl FilesystemPackageReadError {
     fn io(
         operation: FilesystemPackageOperation,
         path: impl Into<PathBuf>,
@@ -244,17 +244,17 @@ impl FilesystemPackageGatherError {
     }
 }
 
-/// Gathers every addressable regular file beneath one filesystem package root.
-pub fn gather_filesystem_package(
+/// Reads every addressable regular file beneath one filesystem package root.
+pub fn read_filesystem_package(
     root: impl AsRef<Path>,
     limits: FilesystemPackageLimits,
-) -> Result<PackageTree, FilesystemPackageGatherError> {
+) -> Result<PackageTree, FilesystemPackageReadError> {
     let root = root.as_ref();
     let root_metadata = std::fs::symlink_metadata(root).map_err(|source| {
-        FilesystemPackageGatherError::io(FilesystemPackageOperation::InspectRoot, root, source)
+        FilesystemPackageReadError::io(FilesystemPackageOperation::InspectRoot, root, source)
     })?;
     if root_metadata.file_type().is_symlink() {
-        return Err(FilesystemPackageGatherError::Survey(
+        return Err(FilesystemPackageReadError::Survey(
             FilesystemPackageSurveyError {
                 issues: vec![FilesystemPackageIssue::Alias {
                     path: root.to_owned(),
@@ -263,7 +263,7 @@ pub fn gather_filesystem_package(
         ));
     }
     if !root_metadata.is_dir() {
-        return Err(FilesystemPackageGatherError::Survey(
+        return Err(FilesystemPackageReadError::Survey(
             FilesystemPackageSurveyError {
                 issues: vec![FilesystemPackageIssue::RootNotDirectory {
                     path: root.to_owned(),
@@ -284,7 +284,7 @@ pub fn gather_filesystem_package(
             let source = error
                 .into_io_error()
                 .unwrap_or_else(|| std::io::Error::other("filesystem traversal failed"));
-            FilesystemPackageGatherError::io(FilesystemPackageOperation::SurveyEntry, path, source)
+            FilesystemPackageReadError::io(FilesystemPackageOperation::SurveyEntry, path, source)
         })?;
         if entry.depth() == 0 {
             continue;
@@ -295,13 +295,13 @@ pub fn gather_filesystem_package(
             1,
             FilesystemPackageResource::VisitedEntries,
         )
-        .map_err(|source| FilesystemPackageGatherError::limit(entry.path(), source))?;
+        .map_err(|source| FilesystemPackageReadError::limit(entry.path(), source))?;
         check_limit(
             FilesystemPackageResource::VisitedEntries,
             limits.visited_entries(),
             visited_entries,
         )
-        .map_err(|source| FilesystemPackageGatherError::limit(entry.path(), source))?;
+        .map_err(|source| FilesystemPackageReadError::limit(entry.path(), source))?;
 
         let relative = entry
             .path()
@@ -333,14 +333,14 @@ pub fn gather_filesystem_package(
 
         selected_files =
             checked_add(selected_files, 1, FilesystemPackageResource::SelectedFiles)
-                .map_err(|source| FilesystemPackageGatherError::limit(entry.path(), source))?;
+                .map_err(|source| FilesystemPackageReadError::limit(entry.path(), source))?;
         if let Err(source) = check_limit(
             FilesystemPackageResource::SelectedFiles,
             limits.selected_files(),
             selected_files,
         ) {
             deferred_limit
-                .get_or_insert_with(|| FilesystemPackageGatherError::limit(entry.path(), source));
+                .get_or_insert_with(|| FilesystemPackageReadError::limit(entry.path(), source));
             continue;
         }
         let metadata = entry.metadata().map_err(|error| {
@@ -348,7 +348,7 @@ pub fn gather_filesystem_package(
             let source = error.into_io_error().unwrap_or_else(|| {
                 std::io::Error::other("failed to inspect selected package file")
             });
-            FilesystemPackageGatherError::io(
+            FilesystemPackageReadError::io(
                 FilesystemPackageOperation::InspectSelectedFile,
                 path,
                 source,
@@ -360,7 +360,7 @@ pub fn gather_filesystem_package(
             metadata.len(),
         ) {
             deferred_limit
-                .get_or_insert_with(|| FilesystemPackageGatherError::limit(entry.path(), source));
+                .get_or_insert_with(|| FilesystemPackageReadError::limit(entry.path(), source));
             continue;
         }
         declared_total = checked_add(
@@ -368,14 +368,14 @@ pub fn gather_filesystem_package(
             metadata.len(),
             FilesystemPackageResource::PackageTreeBytes,
         )
-        .map_err(|source| FilesystemPackageGatherError::limit(entry.path(), source))?;
+        .map_err(|source| FilesystemPackageReadError::limit(entry.path(), source))?;
         if let Err(source) = check_limit(
             FilesystemPackageResource::PackageTreeBytes,
             limits.package_tree_bytes(),
             declared_total,
         ) {
             deferred_limit
-                .get_or_insert_with(|| FilesystemPackageGatherError::limit(entry.path(), source));
+                .get_or_insert_with(|| FilesystemPackageReadError::limit(entry.path(), source));
             continue;
         }
         selected.push((path, entry.path().to_owned()));
@@ -387,7 +387,7 @@ pub fn gather_filesystem_package(
                 .cmp(right.path())
                 .then_with(|| left.rank().cmp(&right.rank()))
         });
-        return Err(FilesystemPackageGatherError::Survey(
+        return Err(FilesystemPackageReadError::Survey(
             FilesystemPackageSurveyError { issues },
         ));
     }
@@ -408,7 +408,7 @@ pub fn gather_filesystem_package(
             limits.package_tree_bytes(),
         )?;
         let observed = u64::try_from(bytes.len()).map_err(|_| {
-            FilesystemPackageGatherError::limit(
+            FilesystemPackageReadError::limit(
                 &source,
                 FilesystemPackageLimitError::AccountingOverflow {
                     resource: FilesystemPackageResource::PackageTreeBytes,
@@ -420,11 +420,11 @@ pub fn gather_filesystem_package(
             observed,
             FilesystemPackageResource::PackageTreeBytes,
         )
-        .map_err(|source_error| FilesystemPackageGatherError::limit(&source, source_error))?;
+        .map_err(|source_error| FilesystemPackageReadError::limit(&source, source_error))?;
         entries.push((path, bytes));
     }
 
-    PackageTree::from_owned_entries(entries).map_err(FilesystemPackageGatherError::PackageTree)
+    PackageTree::from_owned_entries(entries).map_err(FilesystemPackageReadError::PackageTree)
 }
 
 fn read_bounded_package_file(
@@ -433,7 +433,7 @@ fn read_bounded_package_file(
     selected_file_ceiling: u64,
     total_before: u64,
     package_tree_ceiling: u64,
-) -> Result<Vec<u8>, FilesystemPackageGatherError> {
+) -> Result<Vec<u8>, FilesystemPackageReadError> {
     let total_allowance = package_tree_ceiling.saturating_sub(total_before);
     let allowance = selected_file_ceiling.min(total_allowance);
     let mut bytes = Vec::new();
@@ -442,14 +442,14 @@ fn read_bounded_package_file(
         .take(allowance + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| {
-            FilesystemPackageGatherError::io(
+            FilesystemPackageReadError::io(
                 FilesystemPackageOperation::ReadSelectedFile,
                 path,
                 error,
             )
         })?;
     let observed = u64::try_from(bytes.len()).map_err(|_| {
-        FilesystemPackageGatherError::limit(
+        FilesystemPackageReadError::limit(
             path,
             FilesystemPackageLimitError::AccountingOverflow {
                 resource: FilesystemPackageResource::SelectedFileBytes,
@@ -461,24 +461,24 @@ fn read_bounded_package_file(
         selected_file_ceiling,
         observed,
     )
-    .map_err(|source| FilesystemPackageGatherError::limit(path, source))?;
+    .map_err(|source| FilesystemPackageReadError::limit(path, source))?;
     let total = checked_add(
         total_before,
         observed,
         FilesystemPackageResource::PackageTreeBytes,
     )
-    .map_err(|source| FilesystemPackageGatherError::limit(path, source))?;
+    .map_err(|source| FilesystemPackageReadError::limit(path, source))?;
     check_limit(
         FilesystemPackageResource::PackageTreeBytes,
         package_tree_ceiling,
         total,
     )
-    .map_err(|source| FilesystemPackageGatherError::limit(path, source))?;
+    .map_err(|source| FilesystemPackageReadError::limit(path, source))?;
     Ok(bytes)
 }
 
 #[cfg(unix)]
-fn open_without_following(root: &Path, path: &Path) -> Result<File, FilesystemPackageGatherError> {
+fn open_without_following(root: &Path, path: &Path) -> Result<File, FilesystemPackageReadError> {
     use std::ffi::CString;
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
@@ -489,7 +489,7 @@ fn open_without_following(root: &Path, path: &Path) -> Result<File, FilesystemPa
     let mut components = relative.components().peekable();
     let mut current = root.to_owned();
     let mut directory = File::open(root).map_err(|error| {
-        FilesystemPackageGatherError::io(FilesystemPackageOperation::ReadSelectedFile, root, error)
+        FilesystemPackageReadError::io(FilesystemPackageOperation::ReadSelectedFile, root, error)
     })?;
     while let Some(component) = components.next() {
         current.push(component.as_os_str());
@@ -514,7 +514,7 @@ fn open_without_following(root: &Path, path: &Path) -> Result<File, FilesystemPa
             {
                 return Err(alias_error(&current));
             }
-            return Err(FilesystemPackageGatherError::io(
+            return Err(FilesystemPackageReadError::io(
                 FilesystemPackageOperation::ReadSelectedFile,
                 &current,
                 std::io::Error::last_os_error(),
@@ -531,7 +531,7 @@ fn open_without_following(root: &Path, path: &Path) -> Result<File, FilesystemPa
 }
 
 #[cfg(not(unix))]
-fn open_without_following(root: &Path, path: &Path) -> Result<File, FilesystemPackageGatherError> {
+fn open_without_following(root: &Path, path: &Path) -> Result<File, FilesystemPackageReadError> {
     if let Some(alias) = first_alias(root, path) {
         return Err(alias_error(&alias));
     }
@@ -551,7 +551,7 @@ fn open_without_following(root: &Path, path: &Path) -> Result<File, FilesystemPa
             if let Some(alias) = first_alias(root, path) {
                 return Err(alias_error(&alias));
             }
-            return Err(FilesystemPackageGatherError::io(
+            return Err(FilesystemPackageReadError::io(
                 FilesystemPackageOperation::ReadSelectedFile,
                 path,
                 error,
@@ -564,15 +564,15 @@ fn open_without_following(root: &Path, path: &Path) -> Result<File, FilesystemPa
     validate_opened_file(file, path)
 }
 
-fn validate_opened_file(file: File, path: &Path) -> Result<File, FilesystemPackageGatherError> {
+fn validate_opened_file(file: File, path: &Path) -> Result<File, FilesystemPackageReadError> {
     let metadata = file.metadata().map_err(|error| {
-        FilesystemPackageGatherError::io(FilesystemPackageOperation::ReadSelectedFile, path, error)
+        FilesystemPackageReadError::io(FilesystemPackageOperation::ReadSelectedFile, path, error)
     })?;
     if metadata.file_type().is_symlink() {
         return Err(alias_error(path));
     }
     if !metadata.file_type().is_file() {
-        return Err(FilesystemPackageGatherError::Survey(
+        return Err(FilesystemPackageReadError::Survey(
             FilesystemPackageSurveyError {
                 issues: vec![FilesystemPackageIssue::UnsupportedEntry {
                     path: path.to_owned(),
@@ -601,8 +601,8 @@ fn first_alias(root: &Path, path: &Path) -> Option<PathBuf> {
     None
 }
 
-fn alias_error(path: &Path) -> FilesystemPackageGatherError {
-    FilesystemPackageGatherError::Survey(FilesystemPackageSurveyError {
+fn alias_error(path: &Path) -> FilesystemPackageReadError {
+    FilesystemPackageReadError::Survey(FilesystemPackageSurveyError {
         issues: vec![FilesystemPackageIssue::Alias {
             path: path.to_owned(),
         }],
@@ -660,74 +660,74 @@ fn check_limit(
 
 /// A typed failure from the concrete filesystem Package Authority.
 ///
-/// The stable Package Acquisition Failure remains available through
+/// The stable Package Read Failure remains available through
 /// [`Self::failure`], while adapter and transformation failures retain their
 /// authoritative lower-module source.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum FilesystemPackageAcquisitionError {
+pub enum FilesystemPackageAuthorityReadError {
     #[error(transparent)]
-    Unavailable(PackageAcquisitionFailure),
+    Unavailable(PackageReadFailure),
     #[error("{failure}: {source}")]
     Filesystem {
-        failure: PackageAcquisitionFailure,
+        failure: PackageReadFailure,
         #[source]
-        source: Box<FilesystemPackageGatherError>,
+        source: Box<FilesystemPackageReadError>,
     },
     #[cfg(feature = "egress")]
     #[error("{failure}: {source}")]
     RegistryUrl {
-        failure: PackageAcquisitionFailure,
+        failure: PackageReadFailure,
         #[source]
-        source: Box<PackageAcquisitionError>,
+        source: Box<PackageReadError>,
     },
     #[cfg(feature = "egress")]
     #[error("{failure}: {source}")]
     Download {
-        failure: PackageAcquisitionFailure,
+        failure: PackageReadFailure,
         #[source]
         source: std::io::Error,
     },
     #[cfg(feature = "egress")]
     #[error("{failure}: {source}")]
     DownloadSize {
-        failure: PackageAcquisitionFailure,
+        failure: PackageReadFailure,
         #[source]
         source: std::num::TryFromIntError,
     },
     #[cfg(feature = "egress")]
     #[error("{failure}: {source}")]
-    ArchiveAcquisition {
-        failure: PackageAcquisitionFailure,
+    ArchiveRead {
+        failure: PackageReadFailure,
         #[source]
-        source: Box<PackageArchiveAcquisitionError>,
+        source: Box<PackageArchiveReadError>,
     },
     #[cfg(feature = "egress")]
     #[error("{failure}: {source}")]
     ArchiveExpansion {
-        failure: PackageAcquisitionFailure,
+        failure: PackageReadFailure,
         #[source]
-        source: Box<PackageAcquisitionError>,
+        source: Box<PackageReadError>,
     },
     #[cfg(feature = "egress")]
     #[error("{failure}: {source}")]
     Cache {
-        failure: PackageAcquisitionFailure,
+        failure: PackageReadFailure,
         #[source]
         source: Box<PackageError>,
     },
 }
 
-impl FilesystemPackageAcquisitionError {
+impl FilesystemPackageAuthorityReadError {
     /// The stable exact-specification failure represented by this adapter error.
-    pub fn failure(&self) -> &PackageAcquisitionFailure {
+    pub fn failure(&self) -> &PackageReadFailure {
         match self {
             Self::Unavailable(failure) | Self::Filesystem { failure, .. } => failure,
             #[cfg(feature = "egress")]
             Self::RegistryUrl { failure, .. }
             | Self::Download { failure, .. }
             | Self::DownloadSize { failure, .. }
-            | Self::ArchiveAcquisition { failure, .. }
+            | Self::ArchiveRead { failure, .. }
             | Self::ArchiveExpansion { failure, .. }
             | Self::Cache { failure, .. } => failure,
         }
@@ -736,7 +736,7 @@ impl FilesystemPackageAcquisitionError {
 
 /// The concrete Package Authority used by the reference filesystem workflows.
 ///
-/// Local package data, package cache, offline policy, and registry acquisition
+/// Local package data, package cache, offline policy, and registry read
 /// remain explicit here rather than being fallback behavior in Pack Creation.
 #[derive(Debug)]
 pub struct FilesystemPackageAuthority {
@@ -801,65 +801,64 @@ impl FilesystemPackageAuthority {
         self
     }
 
-    /// Acquires one exact validated tree and identifies its filesystem root
-    /// when the bytes came from or were published to one.
-    pub fn acquire(
+    /// Reads one exact validated tree and identifies its filesystem root
+    /// when the bytes came from or were written to one.
+    pub fn read(
         &self,
         spec: &PackageSpec,
-    ) -> Result<AcquiredPackage, FilesystemPackageAcquisitionError> {
-        if let Some(acquired) = self.acquire_from(&self.data, spec)? {
-            return Ok(acquired);
+    ) -> Result<ReadPackage, FilesystemPackageAuthorityReadError> {
+        if let Some(read) = self.read_from(&self.data, spec)? {
+            return Ok(read);
         }
-        if let Some(acquired) = self.acquire_from(&self.cache, spec)? {
-            return Ok(acquired);
+        if let Some(read) = self.read_from(&self.cache, spec)? {
+            return Ok(read);
         }
         if self.offline {
-            return Err(FilesystemPackageAcquisitionError::Unavailable(not_found(
+            return Err(FilesystemPackageAuthorityReadError::Unavailable(not_found(
                 spec,
             )));
         }
 
         #[cfg(feature = "egress")]
         {
-            self.acquire_from_registry(spec)
+            self.read_from_registry(spec)
         }
         #[cfg(not(feature = "egress"))]
         {
-            Err(FilesystemPackageAcquisitionError::Unavailable(not_found(
+            Err(FilesystemPackageAuthorityReadError::Unavailable(not_found(
                 spec,
             )))
         }
     }
 
-    fn acquire_from(
+    fn read_from(
         &self,
         packages: &Option<FsPackages>,
         spec: &PackageSpec,
-    ) -> Result<Option<AcquiredPackage>, FilesystemPackageAcquisitionError> {
+    ) -> Result<Option<ReadPackage>, FilesystemPackageAuthorityReadError> {
         let Some(root) = packages.as_ref().and_then(|packages| packages.obtain(spec)) else {
             return Ok(None);
         };
-        let tree =
-            gather_filesystem_package(root.path(), self.source_limits).map_err(|source| {
-                let failure = other_failure(spec, source.to_string());
-                FilesystemPackageAcquisitionError::Filesystem {
-                    failure,
-                    source: Box::new(source),
-                }
-            })?;
-        Ok(Some(AcquiredPackage {
+        let tree = read_filesystem_package(root.path(), self.source_limits).map_err(|source| {
+            let failure = other_failure(spec, source.to_string());
+            FilesystemPackageAuthorityReadError::Filesystem {
+                failure,
+                source: Box::new(source),
+            }
+        })?;
+        Ok(Some(ReadPackage {
             tree,
             root: Some(root.path().to_owned()),
         }))
     }
 
     #[cfg(feature = "egress")]
-    fn acquire_from_registry(
+    fn read_from_registry(
         &self,
         spec: &PackageSpec,
-    ) -> Result<AcquiredPackage, FilesystemPackageAcquisitionError> {
+    ) -> Result<ReadPackage, FilesystemPackageAuthorityReadError> {
         let url = package_archive_url(spec).map_err(|source| {
-            FilesystemPackageAcquisitionError::RegistryUrl {
+            FilesystemPackageAuthorityReadError::RegistryUrl {
                 failure: not_found(spec),
                 source: Box::new(source),
             }
@@ -872,28 +871,28 @@ impl FilesystemPackageAuthority {
             let failure = if source.kind() == std::io::ErrorKind::NotFound {
                 not_found(spec)
             } else {
-                PackageAcquisitionFailure::new(
+                PackageReadFailure::new(
                     spec.clone(),
-                    PackageAcquisitionFailureReason::NetworkFailed {
+                    PackageReadFailureReason::NetworkFailed {
                         detail: Some(source.to_string()),
                     },
                 )
             };
-            FilesystemPackageAcquisitionError::Download { failure, source }
+            FilesystemPackageAuthorityReadError::Download { failure, source }
         })?;
         let known_size = known_size
             .map(u64::try_from)
             .transpose()
-            .map_err(|source| FilesystemPackageAcquisitionError::DownloadSize {
+            .map_err(|source| FilesystemPackageAuthorityReadError::DownloadSize {
                 failure: other_failure(spec, "download size is not representable"),
                 source,
             })?;
-        let tree = acquire_registry_tree(spec, reader, known_size, self.expansion_limits)?;
+        let tree = read_registry_tree(spec, reader, known_size, self.expansion_limits)?;
 
         let root = if let Some(cache) = &self.cache {
             cache
                 .store(spec, |directory| write_tree(directory, &tree))
-                .map_err(|source| FilesystemPackageAcquisitionError::Cache {
+                .map_err(|source| FilesystemPackageAuthorityReadError::Cache {
                     failure: other_failure(spec, source.to_string()),
                     source: Box::new(source),
                 })?;
@@ -901,19 +900,19 @@ impl FilesystemPackageAuthority {
         } else {
             None
         };
-        Ok(AcquiredPackage { tree, root })
+        Ok(ReadPackage { tree, root })
     }
 }
 
-/// One successful acquisition from the concrete filesystem Package Authority.
+/// One successful read from the concrete filesystem Package Authority.
 #[derive(Debug)]
-pub struct AcquiredPackage {
+pub struct ReadPackage {
     tree: PackageTree,
     root: Option<PathBuf>,
 }
 
-impl AcquiredPackage {
-    /// The validated Package Tree produced by this acquisition.
+impl ReadPackage {
+    /// The validated Package Tree produced by this read.
     pub fn tree(&self) -> &PackageTree {
         &self.tree
     }
@@ -929,56 +928,54 @@ impl AcquiredPackage {
     }
 }
 
-fn not_found(spec: &PackageSpec) -> PackageAcquisitionFailure {
-    PackageAcquisitionFailure::new(spec.clone(), PackageAcquisitionFailureReason::NotFound)
+fn not_found(spec: &PackageSpec) -> PackageReadFailure {
+    PackageReadFailure::new(spec.clone(), PackageReadFailureReason::NotFound)
 }
 
-fn other_failure(spec: &PackageSpec, detail: impl Into<String>) -> PackageAcquisitionFailure {
-    PackageAcquisitionFailure::new(
+fn other_failure(spec: &PackageSpec, detail: impl Into<String>) -> PackageReadFailure {
+    PackageReadFailure::new(
         spec.clone(),
-        PackageAcquisitionFailureReason::Other {
+        PackageReadFailureReason::Other {
             detail: Some(detail.into()),
         },
     )
 }
 
 #[cfg(feature = "egress")]
-fn acquire_registry_tree(
+fn read_registry_tree(
     spec: &PackageSpec,
     reader: impl Read,
     known_size: Option<u64>,
     limits: PackageExpansionLimits,
-) -> Result<PackageTree, FilesystemPackageAcquisitionError> {
-    let archive = acquire_package_archive(reader, known_size, limits).map_err(|source| {
+) -> Result<PackageTree, FilesystemPackageAuthorityReadError> {
+    let archive = read_package_archive(reader, known_size, limits).map_err(|source| {
         let failure = match &source {
-            PackageArchiveAcquisitionError::Read(error) => PackageAcquisitionFailure::new(
+            PackageArchiveReadError::Read(error) => PackageReadFailure::new(
                 spec.clone(),
-                PackageAcquisitionFailureReason::NetworkFailed {
+                PackageReadFailureReason::NetworkFailed {
                     detail: Some(error.to_string()),
                 },
             ),
-            PackageArchiveAcquisitionError::Limit(error) => other_failure(spec, error.to_string()),
+            PackageArchiveReadError::Limit(error) => other_failure(spec, error.to_string()),
         };
-        FilesystemPackageAcquisitionError::ArchiveAcquisition {
+        FilesystemPackageAuthorityReadError::ArchiveRead {
             failure,
             source: Box::new(source),
         }
     })?;
     expand_package_archive(spec.clone(), &archive, limits).map_err(|source| {
         let failure = match &source {
-            PackageAcquisitionError::UnservedNamespace { .. } => not_found(spec),
-            PackageAcquisitionError::ExpansionLimit { .. } => {
-                other_failure(spec, source.to_string())
-            }
-            PackageAcquisitionError::MalformedArchive { .. }
-            | PackageAcquisitionError::InvalidPackageTree { .. } => PackageAcquisitionFailure::new(
+            PackageReadError::UnservedNamespace { .. } => not_found(spec),
+            PackageReadError::ExpansionLimit { .. } => other_failure(spec, source.to_string()),
+            PackageReadError::MalformedArchive { .. }
+            | PackageReadError::InvalidPackageTree { .. } => PackageReadFailure::new(
                 spec.clone(),
-                PackageAcquisitionFailureReason::MalformedArchive {
+                PackageReadFailureReason::MalformedArchive {
                     detail: Some(source.to_string()),
                 },
             ),
         };
-        FilesystemPackageAcquisitionError::ArchiveExpansion {
+        FilesystemPackageAuthorityReadError::ArchiveExpansion {
             failure,
             source: Box::new(source),
         }
@@ -987,7 +984,7 @@ fn acquire_registry_tree(
 
 #[cfg(feature = "egress")]
 fn package_root(base: &Path, spec: &PackageSpec) -> PathBuf {
-    base.join(crate::acquisition_layout::package_tree_key(spec))
+    base.join(crate::read_layout::package_tree_key(spec))
 }
 
 #[cfg(feature = "egress")]
@@ -1010,11 +1007,11 @@ fn package_cache_error(error: std::io::Error) -> PackageError {
 }
 
 /// Exact Package Trees retained for representative-compile diagnostics.
-pub(crate) struct AcquiredPackages {
+pub(crate) struct ReadPackages {
     trees: Mutex<Vec<(PackageSpec, PackageTree)>>,
 }
 
-impl AcquiredPackages {
+impl ReadPackages {
     pub(crate) fn new() -> Self {
         Self {
             trees: Mutex::new(Vec::new()),
@@ -1024,16 +1021,16 @@ impl AcquiredPackages {
     pub(crate) fn record(&self, spec: PackageSpec, tree: PackageTree) {
         self.trees
             .lock()
-            .expect("acquired package lock poisoned")
+            .expect("read package lock poisoned")
             .push((spec, tree));
     }
 
-    /// The exact bytes acquired for one package file, which is all creation
+    /// The exact bytes read for one package file, which is all creation
     /// diagnostics and timing spans may still resolve a package source from.
     pub(crate) fn file(&self, spec: &PackageSpec, path: &str) -> Option<Bytes> {
         self.trees
             .lock()
-            .expect("acquired package lock poisoned")
+            .expect("read package lock poisoned")
             .iter()
             .find(|(candidate, _)| candidate == spec)?
             .1
@@ -1168,7 +1165,7 @@ mod tests {
                 .unwrap_err();
         assert!(matches!(
             error,
-            FilesystemPackageGatherError::Limit {
+            FilesystemPackageReadError::Limit {
                 source,
                 ..
             } if source == FilesystemPackageLimitError::exceeded(
@@ -1185,7 +1182,7 @@ mod tests {
                 .unwrap_err();
         assert!(matches!(
             error,
-            FilesystemPackageGatherError::Limit {
+            FilesystemPackageReadError::Limit {
                 source: FilesystemPackageLimitError::AccountingOverflow {
                     resource: FilesystemPackageResource::PackageTreeBytes,
                 },
@@ -1200,7 +1197,7 @@ mod tests {
         let spec = "@preview/example:1.0.0".parse().unwrap();
         let archive = package_archive(&[("lib.typ", b"exact registry bytes")]);
 
-        let tree = acquire_registry_tree(
+        let tree = read_registry_tree(
             &spec,
             std::io::Cursor::new(&archive),
             Some(archive.len() as u64),
@@ -1218,7 +1215,7 @@ mod tests {
         let archive = package_archive(&[("lib.typ", b"12345")]);
         let limits = PackageExpansionLimits::new(1024 * 1024, 10, 100, 4, 100).unwrap();
 
-        let error = acquire_registry_tree(
+        let error = read_registry_tree(
             &spec,
             std::io::Cursor::new(&archive),
             Some(archive.len() as u64),
@@ -1226,16 +1223,17 @@ mod tests {
         )
         .unwrap_err();
 
-        let FilesystemPackageAcquisitionError::ArchiveExpansion { failure, source } = error else {
+        let FilesystemPackageAuthorityReadError::ArchiveExpansion { failure, source } = error
+        else {
             panic!("expected a typed archive expansion cause");
         };
         assert!(matches!(
             failure.reason(),
-            PackageAcquisitionFailureReason::Other { .. }
+            PackageReadFailureReason::Other { .. }
         ));
         assert!(matches!(
             source.as_ref(),
-            PackageAcquisitionError::ExpansionLimit { .. }
+            PackageReadError::ExpansionLimit { .. }
         ));
     }
 }

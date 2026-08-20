@@ -1,12 +1,12 @@
-//! The transport-free package acquisition helpers.
+//! The transport-free package reading helpers.
 //!
 //! Every test here drives the public library surface of a build that has the
-//! `package-acquisition` feature and no HTTP client: a caller obtains the
+//! `package-reading` feature and no HTTP client: a caller obtains the
 //! registry URL for a reported package specification, fetches it with whatever
 //! primitive its host provides, and expands the resulting archive bytes into a
 //! Package Tree the core accepts as a resolved tree.
 
-#![cfg(feature = "package-acquisition")]
+#![cfg(feature = "package-reading")]
 
 use std::cell::Cell;
 use std::io::{self, Read};
@@ -16,11 +16,10 @@ use std::str::FromStr;
 use typst::syntax::package::PackageSpec;
 use typst_pack::{
     DiscoverySpecification, DocumentTime, FontCatalog, PackCreationInput, PackCreationOutcome,
-    PackageAcquisitionError, PackageAcquisitionFailures, PackageArchiveAcquisitionError,
-    PackageCatalog, PackageDisposition, PackageExpansionLimitError, PackageExpansionLimits,
-    PackageExpansionLimitsError, PackageExpansionResource, PackageTree, PackageTreeIssue,
-    ProjectSnapshotAssembly, TypstTarget, acquire_package_archive, create, expand_package_archive,
-    package_archive_url,
+    PackageArchiveReadError, PackageCatalog, PackageDisposition, PackageExpansionLimitError,
+    PackageExpansionLimits, PackageExpansionLimitsError, PackageExpansionResource,
+    PackageReadError, PackageReadFailures, PackageTree, PackageTreeIssue, ProjectSnapshotAssembly,
+    TypstTarget, create, expand_package_archive, package_archive_url, read_package_archive,
 };
 
 fn spec(text: &str) -> PackageSpec {
@@ -161,12 +160,12 @@ fn known_oversized_package_archive_is_rejected_before_reading() {
         reads: Rc::clone(&reads),
     };
 
-    let error = acquire_package_archive(reader, Some(5), limits(4, 10, 100, 100, 100)).unwrap_err();
+    let error = read_package_archive(reader, Some(5), limits(4, 10, 100, 100, 100)).unwrap_err();
 
     assert_eq!(reads.get(), 0);
     assert!(matches!(
         error,
-        PackageArchiveAcquisitionError::Limit(PackageExpansionLimitError::Exceeded {
+        PackageArchiveReadError::Limit(PackageExpansionLimitError::Exceeded {
             resource: PackageExpansionResource::CompressedArchiveBytes,
             ceiling: 4,
             observed_at_least: 5,
@@ -177,11 +176,10 @@ fn known_oversized_package_archive_is_rejected_before_reading() {
 #[test]
 fn unknown_package_archive_size_is_incrementally_metered_with_a_plus_one_probe() {
     let exact =
-        acquire_package_archive(io::Cursor::new(b"1234"), None, limits(4, 10, 100, 100, 100))
-            .unwrap();
+        read_package_archive(io::Cursor::new(b"1234"), None, limits(4, 10, 100, 100, 100)).unwrap();
     assert_eq!(exact, b"1234");
 
-    let error = acquire_package_archive(
+    let error = read_package_archive(
         io::Cursor::new(b"12345-extra"),
         None,
         limits(4, 10, 100, 100, 100),
@@ -189,7 +187,7 @@ fn unknown_package_archive_size_is_incrementally_metered_with_a_plus_one_probe()
     .unwrap_err();
     assert!(matches!(
         error,
-        PackageArchiveAcquisitionError::Limit(PackageExpansionLimitError::Exceeded {
+        PackageArchiveReadError::Limit(PackageExpansionLimitError::Exceeded {
             resource: PackageExpansionResource::CompressedArchiveBytes,
             ceiling: 4,
             observed_at_least: 5,
@@ -199,7 +197,7 @@ fn unknown_package_archive_size_is_incrementally_metered_with_a_plus_one_probe()
 
 #[test]
 fn dishonest_known_package_archive_sizes_cannot_bypass_or_force_reads() {
-    let error = acquire_package_archive(
+    let error = read_package_archive(
         io::Cursor::new(b"12345-extra"),
         Some(4),
         limits(4, 10, 100, 100, 100),
@@ -207,7 +205,7 @@ fn dishonest_known_package_archive_sizes_cannot_bypass_or_force_reads() {
     .unwrap_err();
     assert!(matches!(
         error,
-        PackageArchiveAcquisitionError::Limit(PackageExpansionLimitError::Exceeded {
+        PackageArchiveReadError::Limit(PackageExpansionLimitError::Exceeded {
             resource: PackageExpansionResource::CompressedArchiveBytes,
             ceiling: 4,
             observed_at_least: 5,
@@ -219,11 +217,11 @@ fn dishonest_known_package_archive_sizes_cannot_bypass_or_force_reads() {
         bytes: io::Cursor::new(b"1234".to_vec()),
         reads: Rc::clone(&reads),
     };
-    let error = acquire_package_archive(reader, Some(5), limits(4, 10, 100, 100, 100)).unwrap_err();
+    let error = read_package_archive(reader, Some(5), limits(4, 10, 100, 100, 100)).unwrap_err();
     assert_eq!(reads.get(), 0);
     assert!(matches!(
         error,
-        PackageArchiveAcquisitionError::Limit(PackageExpansionLimitError::Exceeded {
+        PackageArchiveReadError::Limit(PackageExpansionLimitError::Exceeded {
             resource: PackageExpansionResource::CompressedArchiveBytes,
             ceiling: 4,
             observed_at_least: 5,
@@ -285,7 +283,7 @@ fn generated_boundaries_cover_every_package_expansion_resource() {
         assert!(
             matches!(
                 error,
-                PackageAcquisitionError::ExpansionLimit {
+                PackageReadError::ExpansionLimit {
                     source: PackageExpansionLimitError::Exceeded {
                         resource: reported,
                         ceiling: reported_ceiling,
@@ -337,7 +335,7 @@ fn a_specification_the_registry_does_not_serve_has_no_url() {
         let error = package_archive_url(&unserved).unwrap_err();
 
         assert!(
-            matches!(&error, PackageAcquisitionError::UnservedNamespace { spec } if spec == &unserved),
+            matches!(&error, PackageReadError::UnservedNamespace { spec } if spec == &unserved),
             "{text}: {error}"
         );
     }
@@ -376,7 +374,7 @@ fn archive_expansion_preserves_duplicate_entries_for_package_tree_rejection() {
     let error = expand_package_archive(spec("@preview/example:1.0.0"), &bytes, GENEROUS_LIMITS)
         .unwrap_err();
 
-    let PackageAcquisitionError::InvalidPackageTree { source, .. } = &error else {
+    let PackageReadError::InvalidPackageTree { source, .. } = &error else {
         panic!("{error}");
     };
     assert!(source.issues().iter().any(
@@ -391,7 +389,7 @@ fn archive_expansion_preserves_ancestor_conflicts_for_package_tree_rejection() {
     let error = expand_package_archive(spec("@preview/example:1.0.0"), &bytes, GENEROUS_LIMITS)
         .unwrap_err();
 
-    let PackageAcquisitionError::InvalidPackageTree { source, .. } = &error else {
+    let PackageReadError::InvalidPackageTree { source, .. } = &error else {
         panic!("{error}");
     };
     assert!(source.issues().iter().any(|issue| matches!(
@@ -457,7 +455,7 @@ fn a_pax_path_is_bounded_before_its_name_allocation() {
 
     assert!(matches!(
         error,
-        PackageAcquisitionError::ExpansionLimit {
+        PackageReadError::ExpansionLimit {
             source: PackageExpansionLimitError::Exceeded {
                 resource: PackageExpansionResource::MemberNameBytes,
                 ..
@@ -511,7 +509,7 @@ fn an_oversized_pax_size_is_rejected_before_the_described_member_is_read() {
 
     assert!(matches!(
         error,
-        PackageAcquisitionError::ExpansionLimit {
+        PackageReadError::ExpansionLimit {
             source: PackageExpansionLimitError::Exceeded {
                 resource: PackageExpansionResource::MemberBytes,
                 ceiling: 1024,
@@ -540,7 +538,7 @@ fn nonzero_bytes_past_a_member_declaration_are_rejected() {
         .unwrap_err();
 
     assert!(
-        matches!(error, PackageAcquisitionError::MalformedArchive { .. }),
+        matches!(error, PackageReadError::MalformedArchive { .. }),
         "{error}"
     );
 }
@@ -569,7 +567,7 @@ fn competing_gnu_and_pax_names_are_rejected_as_ambiguous() {
         .unwrap_err();
 
     assert!(
-        matches!(error, PackageAcquisitionError::MalformedArchive { .. }),
+        matches!(error, PackageReadError::MalformedArchive { .. }),
         "{error}"
     );
 }
@@ -588,7 +586,7 @@ fn long_name_payloads_are_charged_before_they_are_materialized_as_names() {
 
     assert!(matches!(
         error,
-        PackageAcquisitionError::ExpansionLimit {
+        PackageReadError::ExpansionLimit {
             source: PackageExpansionLimitError::Exceeded {
                 resource: PackageExpansionResource::MemberNameBytes,
                 ..
@@ -625,7 +623,7 @@ fn package_expansion_ceiling_does_not_contribute_to_pack_identity() {
         )])
         .unwrap();
     let fonts = FontCatalog::new();
-    let package_failures = PackageAcquisitionFailures::new();
+    let package_failures = PackageReadFailures::new();
     let discovery = discovery();
     let issue = |tree| {
         let catalog =
@@ -684,7 +682,7 @@ fn an_archive_expanding_past_the_ceiling_is_not_expanded_at_all() {
     assert!(
         matches!(
             &error,
-            PackageAcquisitionError::ExpansionLimit {
+            PackageReadError::ExpansionLimit {
                 spec: reported,
                 source: PackageExpansionLimitError::Exceeded {
                     resource: PackageExpansionResource::MemberBytes,
@@ -724,7 +722,7 @@ fn a_member_that_becomes_no_package_file_is_charged_against_the_ceiling_too() {
     assert!(
         matches!(
             &error,
-            PackageAcquisitionError::ExpansionLimit {
+            PackageReadError::ExpansionLimit {
                 source: PackageExpansionLimitError::Exceeded {
                     resource: PackageExpansionResource::TotalExpandedBytes,
                     ..
@@ -759,7 +757,7 @@ fn omitted_member_payloads_are_charged_cumulatively() {
 
     assert!(matches!(
         error,
-        PackageAcquisitionError::ExpansionLimit {
+        PackageReadError::ExpansionLimit {
             source: PackageExpansionLimitError::Exceeded {
                 resource: PackageExpansionResource::TotalExpandedBytes,
                 ceiling: 5,
@@ -780,7 +778,7 @@ fn bytes_that_are_not_the_archive_a_registry_serves_are_rejected() {
     .unwrap_err();
 
     assert!(
-        matches!(&error, PackageAcquisitionError::MalformedArchive { .. }),
+        matches!(&error, PackageReadError::MalformedArchive { .. }),
         "{error}"
     );
 }
@@ -805,7 +803,7 @@ fn an_archive_entry_that_cannot_name_a_package_file_is_rejected() {
     let error = expand_package_archive(spec("@preview/example:1.0.0"), &bytes, GENEROUS_LIMITS)
         .unwrap_err();
 
-    let PackageAcquisitionError::InvalidPackageTree { source, .. } = &error else {
+    let PackageReadError::InvalidPackageTree { source, .. } = &error else {
         panic!("{error}");
     };
     assert!(source.issues().iter().any(
@@ -830,7 +828,7 @@ fn an_omitted_archive_entry_must_still_have_a_safe_package_path() {
         .unwrap_err();
 
     assert!(
-        matches!(error, PackageAcquisitionError::MalformedArchive { .. }),
+        matches!(error, PackageReadError::MalformedArchive { .. }),
         "{error}"
     );
 }
@@ -850,7 +848,7 @@ fn a_non_utf8_archive_member_name_is_not_addressable() {
         .unwrap_err();
 
     assert!(
-        matches!(error, PackageAcquisitionError::MalformedArchive { .. }),
+        matches!(error, PackageReadError::MalformedArchive { .. }),
         "{error}"
     );
 }
@@ -927,7 +925,7 @@ fn a_resume_loop_fetches_and_expands_what_creation_reported() {
 
     let mut resolved: Vec<(PackageSpec, PackageTree, PackageDisposition)> = Vec::new();
     let fonts = FontCatalog::new();
-    let package_failures = PackageAcquisitionFailures::new();
+    let package_failures = PackageReadFailures::new();
     let discovery = discovery();
     // Bounded so that a loop making no progress fails instead of hanging; the
     // number of rounds it actually takes is not asserted.

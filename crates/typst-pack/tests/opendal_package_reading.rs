@@ -15,25 +15,24 @@ use scripted_opendal::{
     Capabilities, ListEntry, ListScript, ListStep, OperationLogEntry, ReadScript, ReadStep,
     ScriptedService,
 };
-use typst_pack::PackageAcquisitionFailureReason;
-#[cfg(feature = "package-acquisition")]
+use typst_pack::PackageReadFailureReason;
 use typst_pack::opendal::pack_assembly::{
-    AcquiredPackageInsertionErrorCause, AcquiredPackageInsertionTarget, insert_acquired_package,
+    PackageArchiveReadCeilings, PackageArchiveReadLimitError, PackageArchiveReadResource,
+    PackageRead, PackageReadCeilings, PackageReadErrorCause, PackageReadLimits,
+    PackageReadLimitsError, PackageReadRequest, PackageReadRequestIssue, PackageReadResource,
+    PackageTreeReadCeilings, PackageTreeSource, read_package,
 };
+#[cfg(feature = "package-reading")]
 use typst_pack::opendal::pack_assembly::{
-    PackageAcquisition, PackageAcquisitionCeilings, PackageAcquisitionErrorCause,
-    PackageAcquisitionLimits, PackageAcquisitionLimitsError, PackageAcquisitionRequest,
-    PackageAcquisitionRequestIssue, PackageAcquisitionResource, PackageArchiveAcquisitionCeilings,
-    PackageArchiveAcquisitionLimitError, PackageArchiveAcquisitionResource,
-    PackageTreeAcquisitionCeilings, PackageTreeSource, acquire_package,
+    ReadPackageInsertionErrorCause, ReadPackageInsertionTarget, insert_read_package,
 };
 use typst_pack::opendal::{
     Location, LocationRoleError, OperatorBinding, OperatorBindings, OperatorResolver,
 };
-#[cfg(feature = "package-acquisition")]
+#[cfg(feature = "package-reading")]
 use typst_pack::{
-    PackageAcquisitionFailure, PackageAcquisitionFailures, PackageCatalog, PackageDisposition,
-    PackageExpansionLimits, PackageTree,
+    PackageCatalog, PackageDisposition, PackageExpansionLimits, PackageReadFailure,
+    PackageReadFailures, PackageTree,
 };
 
 #[test]
@@ -57,12 +56,12 @@ fn absent_tree_falls_through_to_exact_cached_archive() {
     let tree_source =
         PackageTreeSource::new(Location::from_operation_path(binding.clone(), "trees/").unwrap());
     let cache = Location::from_operation_path(binding, "cache/").unwrap();
-    let request = PackageAcquisitionRequest::new(
+    let request = PackageReadRequest::new(
         "@preview/example:1.2.3".parse().unwrap(),
         [tree_source.clone()],
         Some(cache.clone()),
         Some("registry:/packages/".parse().unwrap()),
-        PackageAcquisitionLimits::reference_v1(),
+        PackageReadLimits::reference_v1(),
     )
     .unwrap();
     assert_eq!(request.spec().to_string(), "@preview/example:1.2.3");
@@ -72,10 +71,10 @@ fn absent_tree_falls_through_to_exact_cached_archive() {
         request.registry().unwrap().to_string(),
         "registry:/packages/"
     );
-    assert_eq!(request.limits(), PackageAcquisitionLimits::reference_v1());
+    assert_eq!(request.limits(), PackageReadLimits::reference_v1());
 
-    let acquisition = expect_ready(pin!(acquire_package(&resolver, &request))).unwrap();
-    let PackageAcquisition::CachedArchive(archive) = acquisition else {
+    let read = expect_ready(pin!(read_package(&resolver, &request))).unwrap();
+    let PackageRead::CachedArchive(archive) = read else {
         panic!("expected cached archive");
     };
 
@@ -105,9 +104,9 @@ fn absent_tree_falls_through_to_exact_cached_archive() {
     );
 }
 
-#[cfg(feature = "package-acquisition")]
+#[cfg(feature = "package-reading")]
 #[test]
-fn acquired_tree_is_inserted_and_clears_an_older_failure() {
+fn read_tree_is_inserted_and_clears_an_older_failure() {
     let candidate = "trees/preview/example/1.2.3/";
     let service = ScriptedService::new(
         Capabilities::all(),
@@ -143,16 +142,16 @@ fn acquired_tree_is_inserted_and_clears_an_older_failure() {
         operator: service.operator(),
     };
     let spec: typst::syntax::package::PackageSpec = "@preview/example:1.2.3".parse().unwrap();
-    let request = PackageAcquisitionRequest::new(
+    let request = PackageReadRequest::new(
         spec.clone(),
         [PackageTreeSource::new("packages:/trees/".parse().unwrap())],
         None,
         None,
-        PackageAcquisitionLimits::reference_v1(),
+        PackageReadLimits::reference_v1(),
     )
     .unwrap();
-    let acquisition = expect_ready(pin!(acquire_package(&resolver, &request))).unwrap();
-    let PackageAcquisition::Tree(tree) = &acquisition else {
+    let read = expect_ready(pin!(read_package(&resolver, &request))).unwrap();
+    let PackageRead::Tree(tree) = &read else {
         panic!("expected Package Tree");
     };
     assert_eq!(tree.spec(), &spec);
@@ -166,16 +165,16 @@ fn acquired_tree_is_inserted_and_clears_an_older_failure() {
         ["lib.typ", "typst.toml"]
     );
     let mut catalog = PackageCatalog::new();
-    let mut failures = PackageAcquisitionFailures::new();
-    failures.insert(PackageAcquisitionFailure::new(
+    let mut failures = PackageReadFailures::new();
+    failures.insert(PackageReadFailure::new(
         spec.clone(),
-        PackageAcquisitionFailureReason::NotFound,
+        PackageReadFailureReason::NotFound,
     ));
 
-    let residue = insert_acquired_package(
+    let residue = insert_read_package(
         &mut catalog,
         &mut failures,
-        acquisition,
+        read,
         PackageDisposition::Embedded,
         PackageExpansionLimits::reference_v1(),
     )
@@ -192,19 +191,19 @@ fn acquired_tree_is_inserted_and_clears_an_older_failure() {
 #[test]
 fn request_aggregates_invalid_roles_and_limits_keep_the_reference_profile() {
     let spec = "@preview/example:1.2.3".parse().unwrap();
-    let rejection = PackageAcquisitionRequest::new(
+    let rejection = PackageReadRequest::new(
         spec,
         [PackageTreeSource::new("tree:/exact".parse().unwrap())],
         Some("cache:/exact".parse().unwrap()),
         Some("registry:/exact".parse().unwrap()),
-        PackageAcquisitionLimits::reference_v1(),
+        PackageReadLimits::reference_v1(),
     )
     .unwrap_err();
 
     assert_eq!(rejection.issues().len(), 3);
     assert!(matches!(
         &rejection.issues()[0],
-        PackageAcquisitionRequestIssue::InvalidTreeSourceRole {
+        PackageReadRequestIssue::InvalidTreeSourceRole {
             source_index: 0,
             source: LocationRoleError::PrefixMissingTrailingSlash,
             ..
@@ -212,32 +211,32 @@ fn request_aggregates_invalid_roles_and_limits_keep_the_reference_profile() {
     ));
     assert!(matches!(
         &rejection.issues()[1],
-        PackageAcquisitionRequestIssue::InvalidArchiveCacheRole {
+        PackageReadRequestIssue::InvalidArchiveCacheRole {
             source: LocationRoleError::PrefixMissingTrailingSlash,
             ..
         }
     ));
     assert!(matches!(
         &rejection.issues()[2],
-        PackageAcquisitionRequestIssue::InvalidRegistryRole {
+        PackageReadRequestIssue::InvalidRegistryRole {
             source: LocationRoleError::PrefixMissingTrailingSlash,
             ..
         }
     ));
 
-    let reference = PackageAcquisitionCeilings::reference_v1();
+    let reference = PackageReadCeilings::reference_v1();
     assert_eq!(reference.trees.selected_files, 50_000);
     assert_eq!(reference.trees.total_bytes, 512 * 1024 * 1024);
     assert_eq!(reference.archives.archive_bytes, 128 * 1024 * 1024);
     assert!(matches!(
-        PackageAcquisitionLimits::new(PackageAcquisitionCeilings {
-            archives: PackageArchiveAcquisitionCeilings {
+        PackageReadLimits::new(PackageReadCeilings {
+            archives: PackageArchiveReadCeilings {
                 archive_bytes: u64::MAX,
             },
             ..reference
         }),
-        Err(PackageAcquisitionLimitsError::CannotProbe {
-            resource: PackageAcquisitionResource::ArchiveBytes,
+        Err(PackageReadLimitsError::CannotProbe {
+            resource: PackageReadResource::ArchiveBytes,
             ceiling: u64::MAX,
         })
     ));
@@ -265,21 +264,21 @@ fn registry_success_preserves_raw_bytes_and_derives_the_cache_destination() {
         ),
     ])
     .unwrap();
-    let request = PackageAcquisitionRequest::new(
+    let request = PackageReadRequest::new(
         "@preview/example:1.2.3".parse().unwrap(),
         [],
         Some("cache:/archives/".parse().unwrap()),
         Some("registry:/registry/".parse().unwrap()),
-        PackageAcquisitionLimits::reference_v1(),
+        PackageReadLimits::reference_v1(),
     )
     .unwrap();
 
-    let acquisition = expect_ready(pin!(acquire_package(&bindings, &request))).unwrap();
+    let read = expect_ready(pin!(read_package(&bindings, &request))).unwrap();
     assert_eq!(
-        acquisition.configured_source().unwrap().to_string(),
+        read.configured_source().unwrap().to_string(),
         "registry:/registry/"
     );
-    let PackageAcquisition::RegistryArchive(archive) = acquisition else {
+    let PackageRead::RegistryArchive(archive) = read else {
         panic!("expected registry archive");
     };
     assert_eq!(archive.bytes(), raw);
@@ -298,27 +297,24 @@ fn unserved_registry_namespace_is_skipped_and_exhaustion_is_not_found() {
         calls: AtomicUsize::new(0),
     };
     let spec: typst::syntax::package::PackageSpec = "@local/example:1.2.3".parse().unwrap();
-    let request = PackageAcquisitionRequest::new(
+    let request = PackageReadRequest::new(
         spec.clone(),
         [],
         None,
         Some("registry:/registry/".parse().unwrap()),
-        PackageAcquisitionLimits::reference_v1(),
+        PackageReadLimits::reference_v1(),
     )
     .unwrap();
 
-    let acquisition = expect_ready(pin!(acquire_package(&resolver, &request))).unwrap();
+    let read = expect_ready(pin!(read_package(&resolver, &request))).unwrap();
 
     assert_eq!(resolver.calls.load(Ordering::Relaxed), 0);
-    assert!(acquisition.configured_source().is_none());
-    let PackageAcquisition::Unavailable(unavailable) = acquisition else {
-        panic!("expected unavailable acquisition");
+    assert!(read.configured_source().is_none());
+    let PackageRead::Unavailable(unavailable) = read else {
+        panic!("expected unavailable read");
     };
     assert_eq!(unavailable.spec(), &spec);
-    assert_eq!(
-        unavailable.reason(),
-        &PackageAcquisitionFailureReason::NotFound
-    );
+    assert_eq!(unavailable.reason(), &PackageReadFailureReason::NotFound);
 }
 
 #[test]
@@ -339,25 +335,25 @@ fn non_not_found_registry_errors_are_terminal_other_failures() {
         service.operator(),
     )])
     .unwrap();
-    let request = PackageAcquisitionRequest::new(
+    let request = PackageReadRequest::new(
         "@preview/example:1.2.3".parse().unwrap(),
         [],
         None,
         Some("registry:/registry/".parse().unwrap()),
-        PackageAcquisitionLimits::reference_v1(),
+        PackageReadLimits::reference_v1(),
     )
     .unwrap();
 
-    let error = expect_ready(pin!(acquire_package(&bindings, &request))).unwrap_err();
+    let error = expect_ready(pin!(read_package(&bindings, &request))).unwrap_err();
 
     assert!(matches!(
         error.cause(),
-        PackageAcquisitionErrorCause::RegistryRead(source)
+        PackageReadErrorCause::RegistryRead(source)
             if source.kind() == opendal::ErrorKind::PermissionDenied
     ));
     assert_eq!(
         error.reason(),
-        &PackageAcquisitionFailureReason::Other { detail: None }
+        &PackageReadFailureReason::Other { detail: None }
     );
     assert_eq!(error.spec(), request.spec());
     assert_eq!(error.source_index(), None);
@@ -376,7 +372,7 @@ fn non_not_found_registry_errors_are_terminal_other_failures() {
         .unwrap()
         .source()
         .unwrap()
-        .downcast_ref::<PackageAcquisitionErrorCause>()
+        .downcast_ref::<PackageReadErrorCause>()
         .unwrap();
     assert_eq!(
         cause
@@ -391,21 +387,21 @@ fn non_not_found_registry_errors_are_terminal_other_failures() {
 
 #[test]
 fn resolver_and_archive_capability_failures_remain_typed() {
-    let request = PackageAcquisitionRequest::new(
+    let request = PackageReadRequest::new(
         "@preview/example:1.2.3".parse().unwrap(),
         [],
         Some("packages:/cache/".parse().unwrap()),
         None,
-        PackageAcquisitionLimits::reference_v1(),
+        PackageReadLimits::reference_v1(),
     )
     .unwrap();
     let resolver = RejectingResolver {
         calls: AtomicUsize::new(0),
     };
-    let resolve_error = expect_ready(pin!(acquire_package(&resolver, &request))).unwrap_err();
+    let resolve_error = expect_ready(pin!(read_package(&resolver, &request))).unwrap_err();
     assert!(matches!(
         resolve_error.cause(),
-        PackageAcquisitionErrorCause::ResolveOperator(source)
+        PackageReadErrorCause::ResolveOperator(source)
             if source.downcast_ref::<ResolverFailure>().is_some()
     ));
     let cause = resolve_error
@@ -413,7 +409,7 @@ fn resolver_and_archive_capability_failures_remain_typed() {
         .unwrap()
         .source()
         .unwrap()
-        .downcast_ref::<PackageAcquisitionErrorCause>()
+        .downcast_ref::<PackageReadErrorCause>()
         .unwrap();
     assert!(cause.source().unwrap().is::<ResolverFailure>());
 
@@ -432,17 +428,17 @@ fn resolver_and_archive_capability_failures_remain_typed() {
         service.operator(),
     )])
     .unwrap();
-    let capability_error = expect_ready(pin!(acquire_package(&bindings, &request))).unwrap_err();
+    let capability_error = expect_ready(pin!(read_package(&bindings, &request))).unwrap_err();
     assert!(matches!(
         capability_error.cause(),
-        PackageAcquisitionErrorCause::UnsupportedArchiveRead
+        PackageReadErrorCause::UnsupportedArchiveRead
     ));
     let cause = capability_error
         .source()
         .unwrap()
         .source()
         .unwrap()
-        .downcast_ref::<PackageAcquisitionErrorCause>()
+        .downcast_ref::<PackageReadErrorCause>()
         .unwrap();
     assert!(cause.source().is_none());
 }
@@ -460,8 +456,8 @@ fn public_tree_errors_preserve_every_typed_cause_family() {
         2,
     );
     assert!(matches!(
-        tree_error(&unsupported, PackageAcquisitionLimits::reference_v1()).cause(),
-        PackageAcquisitionErrorCause::UnsupportedTreeCapabilities { list: false, .. }
+        tree_error(&unsupported, PackageReadLimits::reference_v1()).cause(),
+        PackageReadErrorCause::UnsupportedTreeCapabilities { list: false, .. }
     ));
 
     let list_failure = ScriptedService::new(
@@ -476,8 +472,8 @@ fn public_tree_errors_preserve_every_typed_cause_family() {
         2,
     );
     assert!(matches!(
-        tree_error(&list_failure, PackageAcquisitionLimits::reference_v1()).cause(),
-        PackageAcquisitionErrorCause::TreeList(source)
+        tree_error(&list_failure, PackageReadLimits::reference_v1()).cause(),
+        PackageReadErrorCause::TreeList(source)
             if source.kind() == opendal::ErrorKind::PermissionDenied
     ));
 
@@ -495,8 +491,8 @@ fn public_tree_errors_preserve_every_typed_cause_family() {
         4,
     );
     assert!(matches!(
-        tree_error(&read_failure, PackageAcquisitionLimits::reference_v1()).cause(),
-        PackageAcquisitionErrorCause::TreeRead(source)
+        tree_error(&read_failure, PackageReadLimits::reference_v1()).cause(),
+        PackageReadErrorCause::TreeRead(source)
             if source.kind() == opendal::ErrorKind::PermissionDenied
     ));
 
@@ -506,11 +502,11 @@ fn public_tree_errors_preserve_every_typed_cause_family() {
         [],
         4,
     );
-    let disappeared = tree_error(&disappeared, PackageAcquisitionLimits::reference_v1());
+    let disappeared = tree_error(&disappeared, PackageReadLimits::reference_v1());
     assert_eq!(disappeared.failed_path(), Some(object.as_str()));
     assert!(matches!(
         disappeared.cause(),
-        PackageAcquisitionErrorCause::ListedTreeObjectAbsent(source)
+        PackageReadErrorCause::ListedTreeObjectAbsent(source)
             if source.kind() == opendal::ErrorKind::NotFound
     ));
 
@@ -526,8 +522,8 @@ fn public_tree_errors_preserve_every_typed_cause_family() {
         4,
     );
     assert!(matches!(
-        tree_error(&structural, PackageAcquisitionLimits::reference_v1()).cause(),
-        PackageAcquisitionErrorCause::TreeStructural(_)
+        tree_error(&structural, PackageReadLimits::reference_v1()).cause(),
+        PackageReadErrorCause::TreeStructural(_)
     ));
 
     let conflict = ScriptedService::new(
@@ -545,8 +541,8 @@ fn public_tree_errors_preserve_every_typed_cause_family() {
         4,
     );
     assert!(matches!(
-        tree_error(&conflict, PackageAcquisitionLimits::reference_v1()).cause(),
-        PackageAcquisitionErrorCause::InvalidPackageTree(_)
+        tree_error(&conflict, PackageReadLimits::reference_v1()).cause(),
+        PackageReadErrorCause::InvalidPackageTree(_)
     ));
 
     let limited = ScriptedService::new(
@@ -555,17 +551,17 @@ fn public_tree_errors_preserve_every_typed_cause_family() {
         [],
         4,
     );
-    let limits = PackageAcquisitionLimits::new(PackageAcquisitionCeilings {
-        trees: PackageTreeAcquisitionCeilings {
+    let limits = PackageReadLimits::new(PackageReadCeilings {
+        trees: PackageTreeReadCeilings {
             listed_entries: 0,
-            ..PackageTreeAcquisitionCeilings::reference_v1()
+            ..PackageTreeReadCeilings::reference_v1()
         },
-        ..PackageAcquisitionCeilings::reference_v1()
+        ..PackageReadCeilings::reference_v1()
     })
     .unwrap();
     assert!(matches!(
         tree_error(&limited, limits).cause(),
-        PackageAcquisitionErrorCause::TreeLimit(_)
+        PackageReadErrorCause::TreeLimit(_)
     ));
 }
 
@@ -587,12 +583,12 @@ fn present_oversized_cache_is_terminal_before_registry() {
         service.operator(),
     )])
     .unwrap();
-    let limits = PackageAcquisitionLimits::new(PackageAcquisitionCeilings {
-        archives: PackageArchiveAcquisitionCeilings { archive_bytes: 4 },
-        ..PackageAcquisitionCeilings::reference_v1()
+    let limits = PackageReadLimits::new(PackageReadCeilings {
+        archives: PackageArchiveReadCeilings { archive_bytes: 4 },
+        ..PackageReadCeilings::reference_v1()
     })
     .unwrap();
-    let request = PackageAcquisitionRequest::new(
+    let request = PackageReadRequest::new(
         "@preview/example:1.2.3".parse().unwrap(),
         [],
         Some("packages:/cache/".parse().unwrap()),
@@ -601,12 +597,12 @@ fn present_oversized_cache_is_terminal_before_registry() {
     )
     .unwrap();
 
-    let error = expect_ready(pin!(acquire_package(&bindings, &request))).unwrap_err();
+    let error = expect_ready(pin!(read_package(&bindings, &request))).unwrap_err();
 
     assert!(matches!(
         error.cause(),
-        PackageAcquisitionErrorCause::ArchiveLimit(PackageArchiveAcquisitionLimitError::Exceeded {
-            resource: PackageArchiveAcquisitionResource::ArchiveBytes,
+        PackageReadErrorCause::ArchiveLimit(PackageArchiveReadLimitError::Exceeded {
+            resource: PackageArchiveReadResource::ArchiveBytes,
             ceiling: 4,
             observed_at_least: 5,
         })
@@ -634,20 +630,20 @@ fn cache_disappearance_after_yielding_bytes_is_terminal() {
         service.operator(),
     )])
     .unwrap();
-    let request = PackageAcquisitionRequest::new(
+    let request = PackageReadRequest::new(
         "@preview/example:1.2.3".parse().unwrap(),
         [],
         Some("packages:/cache/".parse().unwrap()),
         Some("packages:/registry/".parse().unwrap()),
-        PackageAcquisitionLimits::reference_v1(),
+        PackageReadLimits::reference_v1(),
     )
     .unwrap();
 
-    let error = expect_ready(pin!(acquire_package(&bindings, &request))).unwrap_err();
+    let error = expect_ready(pin!(read_package(&bindings, &request))).unwrap_err();
 
     assert!(matches!(
         error.cause(),
-        PackageAcquisitionErrorCause::CacheRead(source)
+        PackageReadErrorCause::CacheRead(source)
             if source.kind() == opendal::ErrorKind::NotFound
     ));
 }
@@ -669,18 +665,18 @@ fn empty_tree_survey_does_not_require_payload_read_capability() {
         service.operator(),
     )])
     .unwrap();
-    let request = PackageAcquisitionRequest::new(
+    let request = PackageReadRequest::new(
         "@preview/example:1.2.3".parse().unwrap(),
         [PackageTreeSource::new("packages:/trees/".parse().unwrap())],
         None,
         None,
-        PackageAcquisitionLimits::reference_v1(),
+        PackageReadLimits::reference_v1(),
     )
     .unwrap();
 
-    let acquisition = expect_ready(pin!(acquire_package(&bindings, &request))).unwrap();
+    let read = expect_ready(pin!(read_package(&bindings, &request))).unwrap();
 
-    assert!(matches!(acquisition, PackageAcquisition::Unavailable(_)));
+    assert!(matches!(read, PackageRead::Unavailable(_)));
     assert!(matches!(
         service.log().entries(),
         [
@@ -691,25 +687,25 @@ fn empty_tree_survey_does_not_require_payload_read_capability() {
 }
 
 #[test]
-fn operator_bindings_produce_a_send_package_acquisition_future() {
+fn operator_bindings_produce_a_send_package_reading_future() {
     let operator = opendal::Operator::new(opendal::services::Memory::default()).unwrap();
     let bindings =
         OperatorBindings::new([(OperatorBinding::new("packages").unwrap(), operator)]).unwrap();
-    let request = PackageAcquisitionRequest::new(
+    let request = PackageReadRequest::new(
         "@preview/example:1.2.3".parse().unwrap(),
         [],
         Some("packages:/cache/".parse().unwrap()),
         None,
-        PackageAcquisitionLimits::reference_v1(),
+        PackageReadLimits::reference_v1(),
     )
     .unwrap();
 
-    assert_send(acquire_package(&bindings, &request));
+    assert_send(read_package(&bindings, &request));
 }
 
-#[cfg(feature = "package-acquisition")]
+#[cfg(feature = "package-reading")]
 #[test]
-fn registry_archive_is_validated_before_exact_bytes_are_returned_for_publication() {
+fn registry_archive_is_validated_before_exact_bytes_are_returned_for_write() {
     let archive = package_archive();
     let service = ScriptedService::new(
         Capabilities::all(),
@@ -731,22 +727,22 @@ fn registry_archive_is_validated_before_exact_bytes_are_returned_for_publication
     ])
     .unwrap();
     let spec: typst::syntax::package::PackageSpec = "@preview/example:1.2.3".parse().unwrap();
-    let request = PackageAcquisitionRequest::new(
+    let request = PackageReadRequest::new(
         spec.clone(),
         [],
         Some("cache:/archives/".parse().unwrap()),
         Some("registry:/registry/".parse().unwrap()),
-        PackageAcquisitionLimits::reference_v1(),
+        PackageReadLimits::reference_v1(),
     )
     .unwrap();
-    let acquisition = expect_ready(pin!(acquire_package(&bindings, &request))).unwrap();
+    let read = expect_ready(pin!(read_package(&bindings, &request))).unwrap();
     let mut catalog = PackageCatalog::new();
-    let mut failures = PackageAcquisitionFailures::new();
+    let mut failures = PackageReadFailures::new();
 
-    let residue = insert_acquired_package(
+    let residue = insert_read_package(
         &mut catalog,
         &mut failures,
-        acquisition,
+        read,
         PackageDisposition::External,
         PackageExpansionLimits::reference_v1(),
     )
@@ -765,19 +761,19 @@ fn registry_archive_is_validated_before_exact_bytes_are_returned_for_publication
     );
 }
 
-#[cfg(feature = "package-acquisition")]
+#[cfg(feature = "package-reading")]
 #[test]
 fn malformed_cache_and_registry_archives_map_to_the_same_stable_failure() {
     for (cache, registry, expected_target) in [
         (
             Some("packages:/cache/"),
             None,
-            AcquiredPackageInsertionTarget::CachedArchive,
+            ReadPackageInsertionTarget::CachedArchive,
         ),
         (
             None,
             Some("packages:/registry/"),
-            AcquiredPackageInsertionTarget::RegistryArchive,
+            ReadPackageInsertionTarget::RegistryArchive,
         ),
     ] {
         let path = if cache.is_some() {
@@ -797,22 +793,22 @@ fn malformed_cache_and_registry_archives_map_to_the_same_stable_failure() {
         )])
         .unwrap();
         let spec: typst::syntax::package::PackageSpec = "@preview/example:1.2.3".parse().unwrap();
-        let request = PackageAcquisitionRequest::new(
+        let request = PackageReadRequest::new(
             spec.clone(),
             [],
             cache.map(|value| value.parse().unwrap()),
             registry.map(|value| value.parse().unwrap()),
-            PackageAcquisitionLimits::reference_v1(),
+            PackageReadLimits::reference_v1(),
         )
         .unwrap();
-        let acquisition = expect_ready(pin!(acquire_package(&bindings, &request))).unwrap();
+        let read = expect_ready(pin!(read_package(&bindings, &request))).unwrap();
         let mut catalog = PackageCatalog::new();
-        let mut failures = PackageAcquisitionFailures::new();
+        let mut failures = PackageReadFailures::new();
 
-        let error = insert_acquired_package(
+        let error = insert_read_package(
             &mut catalog,
             &mut failures,
-            acquisition,
+            read,
             PackageDisposition::Embedded,
             PackageExpansionLimits::reference_v1(),
         )
@@ -821,29 +817,29 @@ fn malformed_cache_and_registry_archives_map_to_the_same_stable_failure() {
         assert_eq!(error.target(), &expected_target);
         assert_eq!(
             error.reason(),
-            &PackageAcquisitionFailureReason::MalformedArchive { detail: None }
+            &PackageReadFailureReason::MalformedArchive { detail: None }
         );
         assert!(matches!(
             error.cause(),
-            AcquiredPackageInsertionErrorCause::ArchiveExpansion(_)
+            ReadPackageInsertionErrorCause::ArchiveExpansion(_)
         ));
         let cause = error
             .source()
             .unwrap()
-            .downcast_ref::<Box<AcquiredPackageInsertionErrorCause>>()
+            .downcast_ref::<Box<ReadPackageInsertionErrorCause>>()
             .unwrap();
         assert!(
             cause
                 .source()
                 .unwrap()
-                .is::<Box<typst_pack::PackageAcquisitionError>>()
+                .is::<Box<typst_pack::PackageReadError>>()
         );
         assert_eq!(failures.get(&spec), Some(error.failure()));
         assert!(catalog.get(&spec).is_none());
     }
 }
 
-#[cfg(feature = "package-acquisition")]
+#[cfg(feature = "package-reading")]
 #[test]
 fn unavailable_expansion_limit_and_catalog_failures_update_the_failure_map() {
     let spec: typst::syntax::package::PackageSpec = "@preview/example:1.2.3".parse().unwrap();
@@ -851,19 +847,19 @@ fn unavailable_expansion_limit_and_catalog_failures_update_the_failure_map() {
     let resolver = RejectingResolver {
         calls: AtomicUsize::new(0),
     };
-    let unavailable_request = PackageAcquisitionRequest::new(
+    let unavailable_request = PackageReadRequest::new(
         spec.clone(),
         [],
         None,
         None,
-        PackageAcquisitionLimits::reference_v1(),
+        PackageReadLimits::reference_v1(),
     )
     .unwrap();
-    let unavailable = expect_ready(pin!(acquire_package(&resolver, &unavailable_request))).unwrap();
+    let unavailable = expect_ready(pin!(read_package(&resolver, &unavailable_request))).unwrap();
     let mut catalog = PackageCatalog::new();
-    let mut failures = PackageAcquisitionFailures::new();
+    let mut failures = PackageReadFailures::new();
     assert!(
-        insert_acquired_package(
+        insert_read_package(
             &mut catalog,
             &mut failures,
             unavailable,
@@ -875,10 +871,10 @@ fn unavailable_expansion_limit_and_catalog_failures_update_the_failure_map() {
     );
     assert_eq!(
         failures.get(&spec).unwrap().reason(),
-        &PackageAcquisitionFailureReason::NotFound
+        &PackageReadFailureReason::NotFound
     );
 
-    let expansion_acquisition = acquire_raw_archive(&package_archive(), false);
+    let expansion_read = read_raw_archive(&package_archive(), false);
     let reference = PackageExpansionLimits::reference_v1();
     let expansion_limits = PackageExpansionLimits::new(
         0,
@@ -888,24 +884,24 @@ fn unavailable_expansion_limit_and_catalog_failures_update_the_failure_map() {
         reference.total_expanded_bytes(),
     )
     .unwrap();
-    let expansion_error = insert_acquired_package(
+    let expansion_error = insert_read_package(
         &mut PackageCatalog::new(),
-        &mut PackageAcquisitionFailures::new(),
-        expansion_acquisition,
+        &mut PackageReadFailures::new(),
+        expansion_read,
         PackageDisposition::Embedded,
         expansion_limits,
     )
     .unwrap_err();
     assert_eq!(
         expansion_error.target(),
-        &AcquiredPackageInsertionTarget::CachedArchive
+        &ReadPackageInsertionTarget::CachedArchive
     );
     assert_eq!(
         expansion_error.reason(),
-        &PackageAcquisitionFailureReason::Other { detail: None }
+        &PackageReadFailureReason::Other { detail: None }
     );
 
-    let catalog_acquisition = acquire_raw_archive(&package_archive(), true);
+    let catalog_read = read_raw_archive(&package_archive(), true);
     let mut catalog = PackageCatalog::new();
     catalog
         .insert(
@@ -921,26 +917,26 @@ fn unavailable_expansion_limit_and_catalog_failures_update_the_failure_map() {
             PackageDisposition::Embedded,
         )
         .unwrap();
-    let mut failures = PackageAcquisitionFailures::new();
-    let catalog_error = insert_acquired_package(
+    let mut failures = PackageReadFailures::new();
+    let catalog_error = insert_read_package(
         &mut catalog,
         &mut failures,
-        catalog_acquisition,
+        catalog_read,
         PackageDisposition::External,
         PackageExpansionLimits::reference_v1(),
     )
     .unwrap_err();
     assert_eq!(
         catalog_error.target(),
-        &AcquiredPackageInsertionTarget::PackageCatalog
+        &ReadPackageInsertionTarget::PackageCatalog
     );
     assert_eq!(
         catalog_error.reason(),
-        &PackageAcquisitionFailureReason::Other { detail: None }
+        &PackageReadFailureReason::Other { detail: None }
     );
     assert!(matches!(
         catalog_error.cause(),
-        AcquiredPackageInsertionErrorCause::PackageCatalog(_)
+        ReadPackageInsertionErrorCause::PackageCatalog(_)
     ));
     assert_eq!(failures.get(&spec), Some(catalog_error.failure()));
 }
@@ -976,7 +972,7 @@ impl OperatorResolver for RejectingResolver {
 #[error("resolver failed")]
 struct ResolverFailure;
 
-#[cfg(feature = "package-acquisition")]
+#[cfg(feature = "package-reading")]
 fn package_archive() -> Vec<u8> {
     use std::io::Write as _;
 
@@ -1001,8 +997,8 @@ fn package_archive() -> Vec<u8> {
     encoder.finish().unwrap()
 }
 
-#[cfg(feature = "package-acquisition")]
-fn acquire_raw_archive(bytes: &[u8], registry: bool) -> PackageAcquisition {
+#[cfg(feature = "package-reading")]
+fn read_raw_archive(bytes: &[u8], registry: bool) -> PackageRead {
     let path = if registry {
         "registry/preview/example-1.2.3.tar.gz"
     } else {
@@ -1024,29 +1020,29 @@ fn acquire_raw_archive(bytes: &[u8], registry: bool) -> PackageAcquisition {
     } else {
         (Some("packages:/cache/".parse().unwrap()), None)
     };
-    let request = PackageAcquisitionRequest::new(
+    let request = PackageReadRequest::new(
         "@preview/example:1.2.3".parse().unwrap(),
         [],
         cache,
         registry_source,
-        PackageAcquisitionLimits::reference_v1(),
+        PackageReadLimits::reference_v1(),
     )
     .unwrap();
-    expect_ready(pin!(acquire_package(&bindings, &request))).unwrap()
+    expect_ready(pin!(read_package(&bindings, &request))).unwrap()
 }
 
 fn assert_send<T: Send>(_: T) {}
 
 fn tree_error(
     service: &ScriptedService,
-    limits: PackageAcquisitionLimits,
-) -> typst_pack::opendal::pack_assembly::PackageAcquisitionError {
+    limits: PackageReadLimits,
+) -> typst_pack::opendal::pack_assembly::PackageReadError {
     let bindings = OperatorBindings::new([(
         OperatorBinding::new("packages").unwrap(),
         service.operator(),
     )])
     .unwrap();
-    let request = PackageAcquisitionRequest::new(
+    let request = PackageReadRequest::new(
         "@preview/example:1.2.3".parse().unwrap(),
         [PackageTreeSource::new("packages:/trees/".parse().unwrap())],
         None,
@@ -1054,7 +1050,7 @@ fn tree_error(
         limits,
     )
     .unwrap();
-    expect_ready(pin!(acquire_package(&bindings, &request))).unwrap_err()
+    expect_ready(pin!(read_package(&bindings, &request))).unwrap_err()
 }
 
 fn expect_ready<F: Future>(mut future: std::pin::Pin<&mut F>) -> F::Output {

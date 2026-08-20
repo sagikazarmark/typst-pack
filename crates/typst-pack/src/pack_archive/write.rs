@@ -8,41 +8,41 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use super::{EncodeError, EncodeLimits, encode_with_limits};
 use crate::{CommitCertainty, Pack, PackArchiveBytes};
 
-/// The stream publication phase reached by an attempt.
+/// The stream write phase reached by an attempt.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum StreamPublicationPhase {
+pub enum StreamWritePhase {
     Write,
     Flush,
     Complete,
 }
 
-/// Evidence from successful exact stream publication.
+/// Evidence from successful exact stream write.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct StreamPublicationReceipt {
+pub struct StreamWriteReceipt {
     visible_prefix: u64,
 }
 
-impl StreamPublicationReceipt {
+impl StreamWriteReceipt {
     pub const fn visible_prefix(&self) -> u64 {
         self.visible_prefix
     }
 }
 
-/// Evidence and the concrete cause from failed exact stream publication.
+/// Evidence and the concrete cause from failed exact stream write.
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "Pack Archive stream publication failed during {phase:?} after a {visible_prefix}-byte visible prefix: {source}"
+    "Pack Archive stream write failed during {phase:?} after a {visible_prefix}-byte visible prefix: {source}"
 )]
-pub struct StreamPublicationError {
-    phase: StreamPublicationPhase,
+pub struct StreamWriteError {
+    phase: StreamWritePhase,
     visible_prefix: u64,
     commit_certainty: CommitCertainty,
     #[source]
     source: io::Error,
 }
 
-impl StreamPublicationError {
-    pub const fn phase(&self) -> StreamPublicationPhase {
+impl StreamWriteError {
+    pub const fn phase(&self) -> StreamWritePhase {
         self.phase
     }
 
@@ -59,30 +59,30 @@ impl StreamPublicationError {
     }
 }
 
-/// Publishes exact Pack Archive bytes to a stream and flushes the writer.
-pub fn publish(
+/// Writes exact Pack Archive bytes to a stream and flushes the writer.
+pub fn write(
     mut writer: impl Write,
     archive: &PackArchiveBytes,
-) -> Result<StreamPublicationReceipt, StreamPublicationError> {
+) -> Result<StreamWriteReceipt, StreamWriteError> {
     let mut visible_prefix = 0usize;
     while visible_prefix < archive.as_slice().len() {
         match writer.write(&archive.as_slice()[visible_prefix..]) {
             Ok(0) => {
-                return Err(StreamPublicationError {
-                    phase: StreamPublicationPhase::Write,
+                return Err(StreamWriteError {
+                    phase: StreamWritePhase::Write,
                     visible_prefix: visible_prefix as u64,
                     commit_certainty: CommitCertainty::NotCommitted,
                     source: io::Error::new(
                         io::ErrorKind::WriteZero,
-                        "failed to publish the complete Pack Archive",
+                        "failed to write the complete Pack Archive",
                     ),
                 });
             }
             Ok(written) => visible_prefix += written,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
             Err(source) => {
-                return Err(StreamPublicationError {
-                    phase: StreamPublicationPhase::Write,
+                return Err(StreamWriteError {
+                    phase: StreamWritePhase::Write,
                     visible_prefix: visible_prefix as u64,
                     commit_certainty: CommitCertainty::NotCommitted,
                     source,
@@ -91,65 +91,62 @@ pub fn publish(
         }
     }
     if let Err(source) = writer.flush() {
-        return Err(StreamPublicationError {
-            phase: StreamPublicationPhase::Flush,
+        return Err(StreamWriteError {
+            phase: StreamWritePhase::Flush,
             visible_prefix: visible_prefix as u64,
             commit_certainty: CommitCertainty::Indeterminate,
             source,
         });
     }
-    Ok(StreamPublicationReceipt {
+    Ok(StreamWriteReceipt {
         visible_prefix: visible_prefix as u64,
     })
 }
 
-/// A failure in Pack Archive Encoding followed by stream publication.
+/// A failure in Pack Archive Encoding followed by stream write.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum WritePackError {
     #[error(transparent)]
     Encode(#[from] EncodeError),
-    #[error("encoded Pack Archive could not be published: {source}")]
-    Publish {
+    #[error("encoded Pack Archive could not be written: {source}")]
+    Write {
         archive: PackArchiveBytes,
         #[source]
-        source: StreamPublicationError,
+        source: StreamWriteError,
     },
 }
 
-/// Encodes and publishes one Pack while preserving exact bytes on publication failure.
-pub fn write_pack(
-    writer: impl Write,
-    pack: &Pack,
-) -> Result<StreamPublicationReceipt, WritePackError> {
+/// Encodes and writes one Pack while preserving exact bytes on write failure.
+pub fn write_pack(writer: impl Write, pack: &Pack) -> Result<StreamWriteReceipt, WritePackError> {
     write_pack_with_limits(writer, pack, EncodeLimits::reference_v1())
 }
 
-/// Encodes under explicit resource ceilings and publishes one Pack.
+/// Encodes under explicit resource ceilings and writes one Pack.
 pub fn write_pack_with_limits(
     writer: impl Write,
     pack: &Pack,
     encode_limits: EncodeLimits,
-) -> Result<StreamPublicationReceipt, WritePackError> {
+) -> Result<StreamWriteReceipt, WritePackError> {
     let archive = encode_with_limits(pack, encode_limits)?;
-    match publish(writer, &archive) {
+    match write(writer, &archive) {
         Ok(receipt) => Ok(receipt),
-        Err(source) => Err(WritePackError::Publish { archive, source }),
+        Err(source) => Err(WritePackError::Write { archive, source }),
     }
 }
 
-/// The strict atomic policy requested for filesystem publication.
+/// The strict atomic policy requested for filesystem write.
 #[cfg(feature = "fs")]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum FilePublicationPolicy {
+pub enum FileWritePolicy {
     CreateNew,
     ReplaceExisting,
 }
 
-/// The filesystem publication phase reached by an attempt.
+/// The filesystem write phase reached by an attempt.
 #[cfg(feature = "fs")]
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub enum FilePublicationPhase {
+pub enum FileWritePhase {
     Policy,
     StagingCreate,
     StagingWrite,
@@ -168,33 +165,33 @@ pub enum StagingResidueStatus {
     Indeterminate,
 }
 
-/// The concrete cause of a filesystem publication failure.
+/// The concrete cause of a filesystem write failure.
 #[cfg(feature = "fs")]
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum FilePublicationErrorCause {
-    #[error("the platform cannot guarantee the requested {0:?} publication policy")]
-    UnsupportedPolicy(FilePublicationPolicy),
+pub enum FileWriteErrorCause {
+    #[error("the platform cannot guarantee the requested {0:?} write policy")]
+    UnsupportedPolicy(FileWritePolicy),
     #[error(transparent)]
     Io(#[from] io::Error),
 }
 
-/// Evidence from successful atomic filesystem publication.
+/// Evidence from successful atomic filesystem write.
 #[cfg(feature = "fs")]
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct FilePublicationReceipt {
+pub struct FileWriteReceipt {
     destination: PathBuf,
-    policy: FilePublicationPolicy,
+    policy: FileWritePolicy,
     byte_length: u64,
 }
 
 #[cfg(feature = "fs")]
-impl FilePublicationReceipt {
+impl FileWriteReceipt {
     pub fn destination(&self) -> &Path {
         &self.destination
     }
 
-    pub const fn policy(&self) -> FilePublicationPolicy {
+    pub const fn policy(&self) -> FileWritePolicy {
         self.policy
     }
 
@@ -203,31 +200,31 @@ impl FilePublicationReceipt {
     }
 }
 
-/// Evidence and the concrete cause from failed atomic filesystem publication.
+/// Evidence and the concrete cause from failed atomic filesystem write.
 #[cfg(feature = "fs")]
 #[derive(Debug, thiserror::Error)]
 #[error(
-    "Pack Archive publication to {destination:?} failed during {phase:?} with {commit_certainty:?} certainty: {source}"
+    "Pack Archive write to {destination:?} failed during {phase:?} with {commit_certainty:?} certainty: {source}"
 )]
-pub struct FilePublicationError {
+pub struct FileWriteError {
     destination: PathBuf,
-    policy: FilePublicationPolicy,
+    policy: FileWritePolicy,
     byte_length: u64,
-    phase: FilePublicationPhase,
+    phase: FileWritePhase,
     staging_residue: Option<PathBuf>,
     staging_residue_status: StagingResidueStatus,
     commit_certainty: CommitCertainty,
     #[source]
-    source: FilePublicationErrorCause,
+    source: FileWriteErrorCause,
 }
 
 #[cfg(feature = "fs")]
-impl FilePublicationError {
+impl FileWriteError {
     pub fn destination(&self) -> &Path {
         &self.destination
     }
 
-    pub const fn policy(&self) -> FilePublicationPolicy {
+    pub const fn policy(&self) -> FileWritePolicy {
         self.policy
     }
 
@@ -235,7 +232,7 @@ impl FilePublicationError {
         self.byte_length
     }
 
-    pub const fn phase(&self) -> FilePublicationPhase {
+    pub const fn phase(&self) -> FileWritePhase {
         self.phase
     }
 
@@ -251,21 +248,21 @@ impl FilePublicationError {
         self.commit_certainty
     }
 
-    pub const fn cause(&self) -> &FilePublicationErrorCause {
+    pub const fn cause(&self) -> &FileWriteErrorCause {
         &self.source
     }
 }
 
 #[cfg(feature = "fs")]
-fn publication_error(
+fn write_error(
     destination: &Path,
-    policy: FilePublicationPolicy,
+    policy: FileWritePolicy,
     byte_length: u64,
-    phase: FilePublicationPhase,
+    phase: FileWritePhase,
     staging_residue: Option<PathBuf>,
     commit_certainty: CommitCertainty,
-    source: impl Into<FilePublicationErrorCause>,
-) -> FilePublicationError {
+    source: impl Into<FileWriteErrorCause>,
+) -> FileWriteError {
     let staging_residue_status = staging_residue
         .as_deref()
         .map(observe_staging_residue)
@@ -275,7 +272,7 @@ fn publication_error(
     } else {
         staging_residue
     };
-    FilePublicationError {
+    FileWriteError {
         destination: destination.to_owned(),
         policy,
         byte_length,
@@ -287,42 +284,42 @@ fn publication_error(
     }
 }
 
-/// Atomically publishes exact Pack Archive bytes from same-directory staging.
+/// Atomically writes exact Pack Archive bytes from same-directory staging.
 #[cfg(feature = "fs")]
-pub fn publish_file(
+pub fn write_file(
     destination: impl AsRef<Path>,
     archive: &PackArchiveBytes,
-    policy: FilePublicationPolicy,
-) -> Result<FilePublicationReceipt, FilePublicationError> {
-    publish_file_before_commit(destination.as_ref(), archive, policy, |_| {})
+    policy: FileWritePolicy,
+) -> Result<FileWriteReceipt, FileWriteError> {
+    write_file_before_commit(destination.as_ref(), archive, policy, |_| {})
 }
 
 #[cfg(feature = "fs")]
-fn publish_file_before_commit(
+fn write_file_before_commit(
     destination: &Path,
     archive: &PackArchiveBytes,
-    policy: FilePublicationPolicy,
+    policy: FileWritePolicy,
     before_commit: impl FnOnce(&Path),
-) -> Result<FilePublicationReceipt, FilePublicationError> {
+) -> Result<FileWriteReceipt, FileWriteError> {
     let byte_length = archive.len();
-    if policy == FilePublicationPolicy::ReplaceExisting && !replace_existing_supported() {
-        return Err(publication_error(
+    if policy == FileWritePolicy::ReplaceExisting && !replace_existing_supported() {
+        return Err(write_error(
             destination,
             policy,
             byte_length,
-            FilePublicationPhase::Policy,
+            FileWritePhase::Policy,
             None,
             CommitCertainty::NotCommitted,
-            FilePublicationErrorCause::UnsupportedPolicy(policy),
+            FileWriteErrorCause::UnsupportedPolicy(policy),
         ));
     }
 
     let (staging, mut file) = create_staging(destination).map_err(|source| {
-        publication_error(
+        write_error(
             destination,
             policy,
             byte_length,
-            FilePublicationPhase::StagingCreate,
+            FileWritePhase::StagingCreate,
             None,
             CommitCertainty::NotCommitted,
             source,
@@ -330,7 +327,7 @@ fn publish_file_before_commit(
     })?;
     if let Err((phase, source)) = write_staging(&mut file, archive.as_slice()) {
         drop(file);
-        return Err(publication_error(
+        return Err(write_error(
             destination,
             policy,
             byte_length,
@@ -344,11 +341,11 @@ fn publish_file_before_commit(
     before_commit(&staging);
 
     if let Err(source) = commit_staging(&staging, destination, policy) {
-        return Err(publication_error(
+        return Err(write_error(
             destination,
             policy,
             byte_length,
-            FilePublicationPhase::Commit,
+            FileWritePhase::Commit,
             Some(staging),
             CommitCertainty::NotCommitted,
             source,
@@ -357,18 +354,18 @@ fn publish_file_before_commit(
     if let Err(source) = std::fs::remove_file(&staging)
         && source.kind() != io::ErrorKind::NotFound
     {
-        return Err(publication_error(
+        return Err(write_error(
             destination,
             policy,
             byte_length,
-            FilePublicationPhase::StagingCleanup,
+            FileWritePhase::StagingCleanup,
             Some(staging),
             CommitCertainty::Committed,
             source,
         ));
     }
 
-    Ok(FilePublicationReceipt {
+    Ok(FileWriteReceipt {
         destination: destination.to_owned(),
         policy,
         byte_length,
@@ -418,16 +415,13 @@ fn observe_staging_residue(staging: &Path) -> StagingResidueStatus {
 }
 
 #[cfg(feature = "fs")]
-fn write_staging(
-    writer: &mut impl Write,
-    bytes: &[u8],
-) -> Result<(), (FilePublicationPhase, io::Error)> {
+fn write_staging(writer: &mut impl Write, bytes: &[u8]) -> Result<(), (FileWritePhase, io::Error)> {
     let mut written = 0;
     while written < bytes.len() {
         match writer.write(&bytes[written..]) {
             Ok(0) => {
                 return Err((
-                    FilePublicationPhase::StagingWrite,
+                    FileWritePhase::StagingWrite,
                     io::Error::new(
                         io::ErrorKind::WriteZero,
                         "failed to write complete staging file",
@@ -436,23 +430,19 @@ fn write_staging(
             }
             Ok(count) => written += count,
             Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
-            Err(error) => return Err((FilePublicationPhase::StagingWrite, error)),
+            Err(error) => return Err((FileWritePhase::StagingWrite, error)),
         }
     }
     writer
         .flush()
-        .map_err(|error| (FilePublicationPhase::StagingFlush, error))
+        .map_err(|error| (FileWritePhase::StagingFlush, error))
 }
 
 #[cfg(feature = "fs")]
-fn commit_staging(
-    staging: &Path,
-    destination: &Path,
-    policy: FilePublicationPolicy,
-) -> io::Result<()> {
+fn commit_staging(staging: &Path, destination: &Path, policy: FileWritePolicy) -> io::Result<()> {
     match policy {
-        FilePublicationPolicy::CreateNew => std::fs::hard_link(staging, destination),
-        FilePublicationPolicy::ReplaceExisting => replace_existing(staging, destination),
+        FileWritePolicy::CreateNew => std::fs::hard_link(staging, destination),
+        FileWritePolicy::ReplaceExisting => replace_existing(staging, destination),
     }
 }
 
@@ -520,47 +510,47 @@ fn replace_existing(staging: &Path, destination: &Path) -> io::Result<()> {
 fn replace_existing(_staging: &Path, _destination: &Path) -> io::Result<()> {
     Err(io::Error::new(
         io::ErrorKind::Unsupported,
-        "strict replace-existing publication is unsupported",
+        "strict replace-existing write is unsupported",
     ))
 }
 
-/// A failure in Pack Archive Encoding followed by atomic file publication.
+/// A failure in Pack Archive Encoding followed by atomic file write.
 #[cfg(feature = "fs")]
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum SavePackError {
     #[error(transparent)]
     Encode(#[from] EncodeError),
-    #[error("encoded Pack Archive could not be published: {source}")]
-    Publish {
+    #[error("encoded Pack Archive could not be written: {source}")]
+    Write {
         archive: PackArchiveBytes,
         #[source]
-        source: FilePublicationError,
+        source: FileWriteError,
     },
 }
 
-/// Encodes and atomically publishes one Pack while preserving bytes on failure.
+/// Encodes and atomically writes one Pack while preserving bytes on failure.
 #[cfg(feature = "fs")]
 pub fn save_pack(
     destination: impl AsRef<Path>,
     pack: &Pack,
-    policy: FilePublicationPolicy,
-) -> Result<FilePublicationReceipt, SavePackError> {
+    policy: FileWritePolicy,
+) -> Result<FileWriteReceipt, SavePackError> {
     save_pack_with_limits(destination, pack, EncodeLimits::reference_v1(), policy)
 }
 
-/// Encodes under explicit resource ceilings and atomically publishes one Pack.
+/// Encodes under explicit resource ceilings and atomically writes one Pack.
 #[cfg(feature = "fs")]
 pub fn save_pack_with_limits(
     destination: impl AsRef<Path>,
     pack: &Pack,
     encode_limits: EncodeLimits,
-    policy: FilePublicationPolicy,
-) -> Result<FilePublicationReceipt, SavePackError> {
+    policy: FileWritePolicy,
+) -> Result<FileWriteReceipt, SavePackError> {
     let archive = encode_with_limits(pack, encode_limits)?;
-    match publish_file(destination, &archive, policy) {
+    match write_file(destination, &archive, policy) {
         Ok(receipt) => Ok(receipt),
-        Err(source) => Err(SavePackError::Publish { archive, source }),
+        Err(source) => Err(SavePackError::Write { archive, source }),
     }
 }
 
@@ -574,15 +564,13 @@ mod tests {
         let destination = directory.path().join("archive.typk");
         let archive = PackArchiveBytes::from_vec(b"new archive".to_vec());
 
-        let error = publish_file_before_commit(
-            &destination,
-            &archive,
-            FilePublicationPolicy::CreateNew,
-            |_| std::fs::write(&destination, b"racing archive").unwrap(),
-        )
-        .unwrap_err();
+        let error =
+            write_file_before_commit(&destination, &archive, FileWritePolicy::CreateNew, |_| {
+                std::fs::write(&destination, b"racing archive").unwrap()
+            })
+            .unwrap_err();
 
-        assert_eq!(error.phase(), FilePublicationPhase::Commit);
+        assert_eq!(error.phase(), FileWritePhase::Commit);
         assert_eq!(error.commit_certainty(), CommitCertainty::NotCommitted);
         assert_eq!(std::fs::read(&destination).unwrap(), b"racing archive");
         assert_eq!(
@@ -601,15 +589,15 @@ mod tests {
         std::fs::write(&destination, b"old archive").unwrap();
         let archive = PackArchiveBytes::from_vec(b"new archive".to_vec());
 
-        let error = publish_file_before_commit(
+        let error = write_file_before_commit(
             &destination,
             &archive,
-            FilePublicationPolicy::ReplaceExisting,
+            FileWritePolicy::ReplaceExisting,
             |_| std::fs::remove_file(&destination).unwrap(),
         )
         .unwrap_err();
 
-        assert_eq!(error.phase(), FilePublicationPhase::Commit);
+        assert_eq!(error.phase(), FileWritePhase::Commit);
         assert_eq!(error.commit_certainty(), CommitCertainty::NotCommitted);
         assert!(!destination.exists());
         assert_eq!(
@@ -624,15 +612,15 @@ mod tests {
         let destination = directory.path().join("archive.typk");
         let archive = PackArchiveBytes::from_vec(b"new archive".to_vec());
 
-        let error = publish_file_before_commit(
+        let error = write_file_before_commit(
             &destination,
             &archive,
-            FilePublicationPolicy::CreateNew,
+            FileWritePolicy::CreateNew,
             |staging| std::fs::remove_file(staging).unwrap(),
         )
         .unwrap_err();
 
-        assert_eq!(error.phase(), FilePublicationPhase::Commit);
+        assert_eq!(error.phase(), FileWritePhase::Commit);
         assert_eq!(error.staging_residue_status(), StagingResidueStatus::Absent);
         assert_eq!(error.staging_residue(), None);
         assert!(!destination.exists());
@@ -652,12 +640,12 @@ mod tests {
     fn staging_write_and_flush_faults_keep_their_phase() {
         let mut write_failure = FaultWriter::new(3, Some(6), false);
         let (phase, _) = write_staging(&mut write_failure, b"complete staging bytes").unwrap_err();
-        assert_eq!(phase, FilePublicationPhase::StagingWrite);
+        assert_eq!(phase, FileWritePhase::StagingWrite);
         assert_eq!(write_failure.bytes, b"comple");
 
         let mut flush_failure = FaultWriter::new(usize::MAX, None, true);
         let (phase, _) = write_staging(&mut flush_failure, b"complete staging bytes").unwrap_err();
-        assert_eq!(phase, FilePublicationPhase::StagingFlush);
+        assert_eq!(phase, FileWritePhase::StagingFlush);
         assert_eq!(flush_failure.bytes, b"complete staging bytes");
     }
 

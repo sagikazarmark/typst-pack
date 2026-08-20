@@ -334,8 +334,8 @@
       <h1>Can one Pack travel the whole lifecycle without crossing the wrong seam?</h1>
       <p class="question">
         This prototype tests whether the selected domain values, deep modules, phase ordering,
-        ownership rules, failures, and destination effects compose from source acquisition to
-        publication. It also tests whether the migration can preserve version-1 <code>.typk</code>,
+        ownership rules, failures, and destination effects compose from source reading to
+        writing. It also tests whether the migration can preserve version-1 <code>.typk</code>,
         filesystem, and CLI behavior while replacing one seam at a time.
       </p>
     </header>
@@ -436,7 +436,7 @@ impl FilesystemPackAssembler {
 pub fn apply_pack_extraction_to_filesystem(
     plan: &amp;PackExtractionPlan,
     destination: &amp;Path,
-    policy: FilesystemTreePublicationPolicy,
+    policy: FilesystemTreeWritingPolicy,
 ) -&gt; Result&lt;PackExtractionFilesystemReceipt,
              PackExtractionFilesystemError&gt;;</pre>
           </details>
@@ -469,7 +469,7 @@ pub fn apply_pack_extraction_to_filesystem(
           </div>
           <ul class="provisional">
             <li>Exact accessors used to inspect a <code>CompilationReport</code>.</li>
-            <li>Exact stream and file publication operation names and recovery methods.</li>
+            <li>Exact stream and file writing operation names and recovery methods.</li>
           </ul>
         </section>
       </aside>
@@ -495,7 +495,7 @@ pub fn apply_pack_extraction_to_filesystem(
   <script>
     const Architecture = (() => {
       const initialState = () => ({
-        project: "not acquired",
+        project: "not read",
         packages: "empty catalog",
         pack: "none",
         packIdentity: "not established",
@@ -507,7 +507,7 @@ pub fn apply_pack_extraction_to_filesystem(
         evidence: [],
         payloads: "no retained payloads",
         migration: 0,
-        last: "Reset. Source acquisition may begin.",
+        last: "Reset. Source reading may begin.",
         rejected: false,
       });
 
@@ -530,12 +530,12 @@ pub fn apply_pack_extraction_to_filesystem(
         switch (action.type) {
           case "RESET":
             return initialState();
-          case "GATHER_PROJECT":
+          case "READ_PROJECT":
             return accept(state, {
               project: "validated Project Snapshot",
               payloads: "Project Snapshot owns shared immutable payloads",
-              evidence: ["Filesystem gatherer selected membership before assembly"],
-            }, "The source-specific gatherer applied the Project Ignore Policy, bounded its reads, and submitted exact selected bytes to Project Snapshot assembly.");
+              evidence: ["Filesystem reader selected membership before assembly"],
+            }, "The source-specific reader applied the Project Ignore Policy, bounded its reads, and submitted exact selected bytes to Project Snapshot assembly.");
           case "DISCOVER_MISSING":
             if (state.project !== "validated Project Snapshot") {
               return reject(state, "Pack Creation requires a Project Snapshot.");
@@ -546,19 +546,19 @@ pub fn apply_pack_extraction_to_filesystem(
             }, "Pack Creation accepted its borrowed inputs, ran one Dependency Discovery, and returned a resumable Missing Package Specifications outcome. No Pack exists yet.");
           case "RECORD_PACKAGE_FAILURE":
             if (!state.packages.startsWith("missing")) {
-              return reject(state, "An acquisition failure must correspond to a reported missing specification.");
+              return reject(state, "An reading failure must correspond to a reported missing specification.");
             }
             return accept(state, {
-              packages: "one Package Tree plus one acquisition failure",
+              packages: "one Package Tree plus one reading failure",
               evidence: [...state.evidence, "Failure data remains outside the Package Catalog"],
-            }, "Pack Assembly retained the failed acquisition separately so Dependency Discovery can attach it to the importing source request.");
+            }, "Pack Assembly retained the failed reading separately so Dependency Discovery can attach it to the importing source request.");
           case "SUPPLY_PACKAGES":
             if (state.project !== "validated Project Snapshot") {
-              return reject(state, "Package Catalog preparation does not replace Project Snapshot acquisition.");
+              return reject(state, "Package Catalog preparation does not replace Project Snapshot reading.");
             }
             return accept(state, {
               packages: "validated complete Package Catalog",
-              evidence: [...state.evidence, "Supplied Package Trees supersede older acquisition failures"],
+              evidence: [...state.evidence, "Supplied Package Trees supersede older reading failures"],
               payloads: "Project and package payloads use shared immutable allocations",
             }, "Every Package Tree was validated before catalog insertion, including declarations that Dependency Discovery may not use.");
           case "CREATE_PACK":
@@ -571,15 +571,15 @@ pub fn apply_pack_extraction_to_filesystem(
               payloads: "Pack shares selected immutable payloads; creation copied no payload bytes",
               evidence: [...state.evidence, "Private Pack construction owns whole-Pack invariants"],
             }, "Pack Creation returned Created with one validated Pack and discovery warnings. The Pack is independent of archive representation and host destinations.");
-          case "ACQUIRE_ARCHIVE":
+          case "READ_ARCHIVE":
             return accept(state, {
               archive: "bounded exact Pack Archive bytes",
               payloads: "PackArchiveBytes uniquely owns its allocation and is not Clone",
-              evidence: [...state.evidence, "Acquisition applied mandatory finite limits"],
-            }, "A concrete source adapter acquired exact Pack Archive bytes without decoding them.");
+              evidence: [...state.evidence, "Read applied mandatory finite limits"],
+            }, "A concrete source adapter read exact Pack Archive bytes without decoding them.");
           case "DECODE_AMBIGUOUS":
             if (!state.archive.includes("Pack Archive bytes")) {
-              return reject(state, "Pack Archive Decoding requires acquired exact bytes.");
+              return reject(state, "Pack Archive Decoding requires read exact bytes.");
             }
             return accept(state, {
               pack: "none",
@@ -588,7 +588,7 @@ pub fn apply_pack_extraction_to_filesystem(
             }, "Decoding rejected ambiguous raw archive members before domain interpretation. This is a Pack Archive error, not a Pack invariant error.");
           case "DECODE_PACK":
             if (!state.archive.includes("Pack Archive bytes")) {
-              return reject(state, "Pack Archive Decoding requires acquired exact bytes.");
+              return reject(state, "Pack Archive Decoding requires read exact bytes.");
             }
             return accept(state, {
               pack: "validated Pack",
@@ -608,23 +608,23 @@ pub fn apply_pack_extraction_to_filesystem(
               archive: "complete exact Pack Archive bytes",
               payloads: "PackArchiveBytes uniquely owns the complete encoded allocation",
               evidence: [...state.evidence, "Encoding performed no whole-Pack revalidation"],
-            }, "The format module produced complete version-1 Pack Archive bytes before destination publication began.");
-          case "PUBLISH_ARCHIVE_FAILURE":
+            }, "The format module produced complete version-1 Pack Archive bytes before destination writing began.");
+          case "WRITE_ARCHIVE_FAILURE":
             if (state.archive !== "complete exact Pack Archive bytes") {
-              return reject(state, "Archive publication requires complete encoded bytes.");
+              return reject(state, "Archive writing requires complete encoded bytes.");
             }
             return accept(state, {
               destinationEffects: [...state.destinationEffects, "archive destination: Not Committed"],
               evidence: [...state.evidence, "Exact encoded bytes retained for retry"],
-            }, "Atomic filesystem publication failed before commit. The error returned the exact PackArchiveBytes, so retry needs no re-encoding.");
-          case "PUBLISH_ARCHIVE":
+            }, "Atomic filesystem writing failed before commit. The error returned the exact PackArchiveBytes, so retry needs no re-encoding.");
+          case "WRITE_ARCHIVE":
             if (state.archive !== "complete exact Pack Archive bytes") {
-              return reject(state, "Archive publication requires complete encoded bytes.");
+              return reject(state, "Archive writing requires complete encoded bytes.");
             }
             return accept(state, {
               destinationEffects: [...state.destinationEffects, "archive destination: Committed"],
-              evidence: [...state.evidence, "Pack Archive Publication Receipt"],
-            }, "A concrete filesystem adapter atomically committed the complete archive and issued a Publication Receipt.");
+              evidence: [...state.evidence, "Pack Archive Writing Receipt"],
+            }, "A concrete filesystem adapter atomically committed the complete archive and issued a Writing Receipt.");
           case "PLAN_COLLIDING_EXTRACTION":
             if (!hasPack(state)) return reject(state, "Pack Extraction planning requires a Pack.");
             return accept(state, {
@@ -644,8 +644,8 @@ pub fn apply_pack_extraction_to_filesystem(
             }
             return accept(state, {
               destinationEffects: [...state.destinationEffects, "a.typ: Committed", "b.typ: Not Committed"],
-              evidence: [...state.evidence, "Ordered Publication Progress retained the failed path and staging residue"],
-            }, "Merge publication atomically committed one exact file, then failed on the next. The adapter reported truthful partial progress without exposing a truncated target.");
+              evidence: [...state.evidence, "Ordered Writing Progress retained the failed path and staging residue"],
+            }, "Merge writing atomically committed one exact file, then failed on the next. The adapter reported truthful partial progress without exposing a truncated target.");
           case "INVALID_COMPILE_REQUEST":
             if (!hasPack(state)) return reject(state, "Pack Compilation requires a Pack.");
             return accept(state, {
@@ -704,21 +704,21 @@ pub fn apply_pack_extraction_to_filesystem(
             }, "Compilation and export succeeded under invocation-scoped limits. Artifacts, diagnostics, trace, and identities are canonical.");
           case "PLAN_ARTIFACTS":
             if (state.compilation !== "succeeded Compilation Result with canonical artifacts") {
-              return reject(state, "Artifact publication planning accepts only a succeeded Compilation Result.");
+              return reject(state, "Artifact writing planning accepts only a succeeded Compilation Result.");
             }
             return accept(state, {
-              compilation: "owned Compilation Artifact Publication Plan",
+              compilation: "owned Compilation Artifact Writing Plan",
               payloads: "The plan shares artifact payload handles",
               evidence: [...state.evidence, "Artifact destinations remain outside Compilation Result"],
             }, "A semantic plan assigned canonical relative paths to result artifacts without touching a destination.");
-          case "PUBLISH_ARTIFACTS":
-            if (state.compilation !== "owned Compilation Artifact Publication Plan") {
-              return reject(state, "Artifact destination effects require a publication plan.");
+          case "WRITE_ARTIFACTS":
+            if (state.compilation !== "owned Compilation Artifact Writing Plan") {
+              return reject(state, "Artifact destination effects require a writing plan.");
             }
             return accept(state, {
               destinationEffects: [...state.destinationEffects, "compilation artifacts: Committed"],
               evidence: [...state.evidence, "Artifact Filesystem Receipt"],
-            }, "A concrete destination adapter atomically published the planned artifacts and returned workflow-specific evidence.");
+            }, "A concrete destination adapter atomically written the planned artifacts and returned workflow-specific evidence.");
           case "MIGRATE": {
             if (action.index !== state.migration) {
               return reject(state, `Migration slice ${action.index + 1} is not next. Complete slice ${state.migration + 1} first.`);
@@ -739,8 +739,8 @@ pub fn apply_pack_extraction_to_filesystem(
         { name: "Validate input values", gate: "Package Trees, Font Containers, and catalogs reject ambiguity before use." },
         { name: "Deepen Pack construction", gate: "One private sequence-shaped seam owns whole-Pack invariants and identity." },
         { name: "Split Pack Archive format", gate: "Old and independent fixtures interoperate; representation failures leave valid Packs valid." },
-        { name: "Add acquisition and publication", gate: "Exact bytes are bounded, atomic file publication is old-or-complete, and retry material survives." },
-        { name: "Move membership to gatherers", gate: "Filesystem membership remains equal while core assembly loses source policy and budgets." },
+        { name: "Add reading and writing", gate: "Exact bytes are bounded, atomic file writing is old-or-complete, and retry material survives." },
+        { name: "Move membership to readers", gate: "Filesystem membership remains equal while core assembly loses source policy and budgets." },
         { name: "Migrate Pack Creation and Assembly", gate: "Resumption, source order, offline policy, warnings, and CLI defaults remain stable." },
         { name: "Complete amplification limits", gate: "Every dimension passes below, exactly-at, and one-over tests without changing identities." },
         { name: "Complete compilation contracts", gate: "Request precedence, exact fulfillments, confinement, and canonical output remain stable." },
@@ -753,18 +753,18 @@ pub fn apply_pack_extraction_to_filesystem(
 
     const actions = [
       ["RESET", "Reset lifecycle"],
-      ["GATHER_PROJECT", "Gather Project Snapshot"],
+      ["READ_PROJECT", "Read Project Snapshot"],
       ["DISCOVER_MISSING", "Discover missing packages"],
-      ["RECORD_PACKAGE_FAILURE", "Record acquisition failure"],
+      ["RECORD_PACKAGE_FAILURE", "Record reading failure"],
       ["SUPPLY_PACKAGES", "Supply validated Package Trees"],
       ["CREATE_PACK", "Create validated Pack"],
-      ["ACQUIRE_ARCHIVE", "Acquire Pack Archive bytes"],
+      ["READ_ARCHIVE", "Read Pack Archive bytes"],
       ["DECODE_AMBIGUOUS", "Decode ambiguous archive"],
       ["DECODE_PACK", "Decode valid archive"],
       ["ENCODE_TOO_SMALL", "Encode under a tiny limit"],
       ["ENCODE_PACK", "Encode Pack Archive"],
-      ["PUBLISH_ARCHIVE_FAILURE", "Fail archive publication"],
-      ["PUBLISH_ARCHIVE", "Publish archive atomically"],
+      ["WRITE_ARCHIVE_FAILURE", "Fail archive writing"],
+      ["WRITE_ARCHIVE", "Write archive atomically"],
       ["PLAN_COLLIDING_EXTRACTION", "Plan colliding extraction"],
       ["PLAN_EXTRACTION", "Plan Pack Extraction"],
       ["APPLY_EXTRACTION_PARTIAL", "Partially apply extraction"],
@@ -775,35 +775,35 @@ pub fn apply_pack_extraction_to_filesystem(
       ["MATERIALIZE_WORLD", "Materialize private World"],
       ["COMPILER_REJECTS", "Compiler rejects document"],
       ["COMPILER_SUCCEEDS", "Compile and export"],
-      ["PLAN_ARTIFACTS", "Plan artifact publication"],
-      ["PUBLISH_ARTIFACTS", "Publish artifacts"],
+      ["PLAN_ARTIFACTS", "Plan artifact writing"],
+      ["WRITE_ARTIFACTS", "Write artifacts"],
     ];
 
     const scenarios = [
       {
         name: "Resumable creation",
         description: "Watch Pack Assembly retain source-specific failures outside the semantic catalog, then let a later Package Tree supersede the failure. No Pack exists until authoritative construction succeeds.",
-        steps: ["GATHER_PROJECT", "DISCOVER_MISSING", "RECORD_PACKAGE_FAILURE", "SUPPLY_PACKAGES", "CREATE_PACK"],
+        steps: ["READ_PROJECT", "DISCOVER_MISSING", "RECORD_PACKAGE_FAILURE", "SUPPLY_PACKAGES", "CREATE_PACK"],
       },
       {
         name: "Representation split",
-        description: "A valid Pack first fails an encoding-only limit, then encodes successfully. Publication can fail without losing exact retry bytes. Pack validity never absorbs ZIP limits or destination effects.",
-        steps: ["GATHER_PROJECT", "SUPPLY_PACKAGES", "CREATE_PACK", "ENCODE_TOO_SMALL", "ENCODE_PACK", "PUBLISH_ARCHIVE_FAILURE", "PUBLISH_ARCHIVE"],
+        description: "A valid Pack first fails an encoding-only limit, then encodes successfully. Writing can fail without losing exact retry bytes. Pack validity never absorbs ZIP limits or destination effects.",
+        steps: ["READ_PROJECT", "SUPPLY_PACKAGES", "CREATE_PACK", "ENCODE_TOO_SMALL", "ENCODE_PACK", "WRITE_ARCHIVE_FAILURE", "WRITE_ARCHIVE"],
       },
       {
         name: "Decode boundary",
-        description: "Raw archive ambiguity is rejected before domain interpretation. A separate valid acquisition reaches whole-Pack validation and establishes Pack Identity only after decoding submits canonical content.",
-        steps: ["ACQUIRE_ARCHIVE", "DECODE_AMBIGUOUS", "ACQUIRE_ARCHIVE", "DECODE_PACK"],
+        description: "Raw archive ambiguity is rejected before domain interpretation. A separate valid reading reaches whole-Pack validation and establishes Pack Identity only after decoding submits canonical content.",
+        steps: ["READ_ARCHIVE", "DECODE_AMBIGUOUS", "READ_ARCHIVE", "DECODE_PACK"],
       },
       {
         name: "Compilation precedence",
         description: "First prove semantic request rejection wins before fulfillment inspection. Then accept a request, observe an exact-set operational outcome without a World, and finally follow the successful confined path.",
-        steps: ["GATHER_PROJECT", "SUPPLY_PACKAGES", "CREATE_PACK", "INVALID_COMPILE_REQUEST", "ACCEPT_COMPILE_REQUEST", "VERIFY_BAD_FULFILLMENTS", "ACCEPT_COMPILE_REQUEST", "VERIFY_FULFILLMENTS", "MATERIALIZE_WORLD", "COMPILER_SUCCEEDS", "PLAN_ARTIFACTS", "PUBLISH_ARTIFACTS"],
+        steps: ["READ_PROJECT", "SUPPLY_PACKAGES", "CREATE_PACK", "INVALID_COMPILE_REQUEST", "ACCEPT_COMPILE_REQUEST", "VERIFY_BAD_FULFILLMENTS", "ACCEPT_COMPILE_REQUEST", "VERIFY_FULFILLMENTS", "MATERIALIZE_WORLD", "COMPILER_SUCCEEDS", "PLAN_ARTIFACTS", "WRITE_ARTIFACTS"],
       },
       {
         name: "Extraction effects",
         description: "A semantic collision fails before destination access. A valid owned plan then survives independently and a concrete merge adapter reports truthful partial progress after atomic per-file commits.",
-        steps: ["GATHER_PROJECT", "SUPPLY_PACKAGES", "CREATE_PACK", "PLAN_COLLIDING_EXTRACTION", "PLAN_EXTRACTION", "APPLY_EXTRACTION_PARTIAL"],
+        steps: ["READ_PROJECT", "SUPPLY_PACKAGES", "CREATE_PACK", "PLAN_COLLIDING_EXTRACTION", "PLAN_EXTRACTION", "APPLY_EXTRACTION_PARTIAL"],
       },
       {
         name: "Migration order",
@@ -813,7 +813,7 @@ pub fn apply_pack_extraction_to_filesystem(
     ];
 
     const routeSteps = [
-      ["Acquire", "Concrete gatherers and authorities"],
+      ["Read", "Concrete readers and authorities"],
       ["Validate", "Canonical semantic values"],
       ["Transform", "Creation, codec, plans, compilation"],
       ["Apply", "Concrete destination adapters"],
@@ -837,7 +837,7 @@ pub fn apply_pack_extraction_to_filesystem(
       if (state.destinationEffects.length) return 4;
       if (state.extraction.includes("Plan") || state.compilation.includes("Plan") || state.archive.includes("bytes")) return 3;
       if (state.pack === "validated Pack" || state.compilation !== "none" || state.extraction !== "none") return 2;
-      if (state.project !== "not acquired" || state.packages !== "empty catalog") return 1;
+      if (state.project !== "not read" || state.packages !== "empty catalog") return 1;
       return 0;
     }
 

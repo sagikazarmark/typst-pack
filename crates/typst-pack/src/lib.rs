@@ -8,7 +8,6 @@ pub const VERSION: &str = concat!(
     ")"
 );
 
-mod acquisition_layout;
 mod compile;
 mod creation;
 mod domain;
@@ -16,7 +15,7 @@ mod embedded;
 #[cfg(feature = "fs")]
 mod error_display;
 #[cfg(feature = "fs")]
-mod filesystem_publication;
+mod filesystem_write;
 mod font_catalog;
 #[cfg(feature = "fs")]
 mod fs_assembly;
@@ -34,18 +33,19 @@ pub mod opendal;
 mod pack;
 pub mod pack_archive;
 mod pack_extraction;
-#[cfg(feature = "package-acquisition")]
-mod package_acquisition;
 mod package_catalog;
 mod package_failure;
+#[cfg(feature = "package-reading")]
+mod package_reading;
 mod paths;
 mod payload;
 mod project_snapshot;
-mod publication;
+mod read_layout;
 #[cfg(feature = "opendal")]
 mod redacted_error;
 mod world;
 mod world_trace;
+mod write;
 
 #[cfg(all(feature = "diagnostics", feature = "fs"))]
 #[doc(hidden)]
@@ -74,18 +74,17 @@ pub use creation::{
 };
 pub use domain::{DocumentTime, TypstTarget};
 #[cfg(feature = "fs")]
-pub use filesystem_publication::{
-    CompilationArtifactPathPublicationError, CompilationArtifactPublicationError,
-    CompilationArtifactPublicationIssue, FilesystemDestinationEntryKind, FilesystemMergePolicy,
-    FilesystemPublicationErrorCause, FilesystemPublicationPathError, FilesystemPublicationPhase,
-    FilesystemPublicationPreflightIssue, PackExtractionPublicationError,
-    publish_compilation_artifacts_to_filesystem_paths, publish_pack_extraction_plan_to_filesystem,
-    resolve_filesystem_publication_paths,
+pub use filesystem_write::{
+    CompilationArtifactPathWriteError, CompilationArtifactWriteError,
+    CompilationArtifactWriteIssue, FilesystemDestinationEntryKind, FilesystemMergePolicy,
+    FilesystemWriteErrorCause, FilesystemWritePathError, FilesystemWritePhase,
+    FilesystemWritePreflightIssue, PackExtractionWriteError, resolve_filesystem_write_paths,
+    write_compilation_artifacts_to_filesystem_paths, write_pack_extraction_plan_to_filesystem,
 };
 #[cfg(all(feature = "fs", fuzzing))]
 #[doc(hidden)]
-pub use filesystem_publication::{
-    FilesystemPublicationFaultProbe, publish_pack_extraction_plan_to_filesystem_with_fault_probe,
+pub use filesystem_write::{
+    FilesystemWriteFaultProbe, write_pack_extraction_plan_to_filesystem_with_fault_probe,
 };
 #[cfg(feature = "embedded-fonts")]
 pub use font_catalog::typst_embedded_font_containers;
@@ -102,25 +101,24 @@ pub use fs_assembly::{
 };
 #[cfg(feature = "fs")]
 pub use fs_fonts::{
-    FilesystemFontContainerIssue, FilesystemFontEntryKind, FilesystemFontGatherError,
-    FilesystemFontIssue, FilesystemFontLimitError, FilesystemFontLimits, FilesystemFontLimitsError,
-    FilesystemFontOperation, FilesystemFontResource, FilesystemFontSource,
-    FilesystemFontSurveyError, FilesystemFontValidationError, gather_filesystem_font_catalog,
+    FilesystemFontContainerIssue, FilesystemFontEntryKind, FilesystemFontIssue,
+    FilesystemFontLimitError, FilesystemFontLimits, FilesystemFontLimitsError,
+    FilesystemFontOperation, FilesystemFontReadError, FilesystemFontResource, FilesystemFontSource,
+    FilesystemFontSurveyError, FilesystemFontValidationError, read_filesystem_fonts,
 };
 #[cfg(feature = "fs")]
 pub use fs_packages::{
-    AcquiredPackage, FilesystemPackageAcquisitionError, FilesystemPackageAuthority,
-    FilesystemPackageEntryKind, FilesystemPackageGatherError, FilesystemPackageIssue,
-    FilesystemPackageLimitError, FilesystemPackageLimits, FilesystemPackageLimitsError,
-    FilesystemPackageOperation, FilesystemPackageResource, FilesystemPackageSurveyError,
-    gather_filesystem_package,
+    FilesystemPackageAuthority, FilesystemPackageAuthorityReadError, FilesystemPackageEntryKind,
+    FilesystemPackageIssue, FilesystemPackageLimitError, FilesystemPackageLimits,
+    FilesystemPackageLimitsError, FilesystemPackageOperation, FilesystemPackageReadError,
+    FilesystemPackageResource, FilesystemPackageSurveyError, ReadPackage, read_filesystem_package,
 };
 #[cfg(feature = "fs")]
 pub use fs_project::{
-    FilesystemProjectEntryKind, FilesystemProjectGatherError, FilesystemProjectIssue,
-    FilesystemProjectLimitError, FilesystemProjectLimits, FilesystemProjectLimitsError,
-    FilesystemProjectOperation, FilesystemProjectPolicyError, FilesystemProjectResource,
-    FilesystemProjectSurveyError, IGNORE_FILE, gather_filesystem_project,
+    FilesystemProjectEntryKind, FilesystemProjectIssue, FilesystemProjectLimitError,
+    FilesystemProjectLimits, FilesystemProjectLimitsError, FilesystemProjectOperation,
+    FilesystemProjectPolicyError, FilesystemProjectReadError, FilesystemProjectResource,
+    FilesystemProjectSurveyError, IGNORE_FILE, read_filesystem_project,
 };
 pub use identity::{CanonicalIdentity, CanonicalIdentityRole};
 pub use limits::{LimitError, Limits, LimitsError, Resource, ResourceKind};
@@ -133,28 +131,26 @@ pub use pack_extraction::{
     PackExtractionEntry, PackExtractionEntryRole, PackExtractionPlan, PackExtractionPlanError,
     PackExtractionPlanIssue, PackExtractionSelection, plan_pack_extraction,
 };
-#[cfg(feature = "package-acquisition")]
-pub use package_acquisition::{
-    PACKAGE_REGISTRY_NAMESPACE, PACKAGE_REGISTRY_URL, PackageAcquisitionError,
-    PackageArchiveAcquisitionError, PackageExpansionLimitError, PackageExpansionLimits,
-    PackageExpansionLimitsError, PackageExpansionResource, acquire_package_archive,
-    expand_package_archive, package_archive_url,
-};
 pub use package_catalog::{
     PackageCatalog, PackageCatalogEntry, PackageCatalogError, PackageCatalogIssue,
     PackageDisposition, PackageTree, PackageTreeError, PackageTreeIssue,
 };
-pub use package_failure::{
-    PackageAcquisitionFailure, PackageAcquisitionFailureReason, PackageAcquisitionFailures,
+pub use package_failure::{PackageReadFailure, PackageReadFailureReason, PackageReadFailures};
+#[cfg(feature = "package-reading")]
+pub use package_reading::{
+    PACKAGE_REGISTRY_NAMESPACE, PACKAGE_REGISTRY_URL, PackageArchiveReadError,
+    PackageExpansionLimitError, PackageExpansionLimits, PackageExpansionLimitsError,
+    PackageExpansionResource, PackageReadError, expand_package_archive, package_archive_url,
+    read_package_archive,
 };
 pub use payload::PackArchiveBytes;
 pub use project_snapshot::{
     ProjectSnapshot, ProjectSnapshotAssembly, ProjectSnapshotError, ProjectSnapshotIssue,
 };
-pub use publication::{
-    CommitCertainty, CompilationArtifactPublicationEntry, CompilationArtifactPublicationProgress,
-    CompilationArtifactPublicationReceipt, PackExtractionPublicationEntry,
-    PackExtractionPublicationProgress, PackExtractionPublicationReceipt, PublicationKeyOutcome,
+pub use write::{
+    CommitCertainty, CompilationArtifactWriteEntry, CompilationArtifactWriteProgress,
+    CompilationArtifactWriteReceipt, PackExtractionWriteEntry, PackExtractionWriteProgress,
+    PackExtractionWriteReceipt, WriteKeyOutcome,
 };
 
 #[cfg(test)]

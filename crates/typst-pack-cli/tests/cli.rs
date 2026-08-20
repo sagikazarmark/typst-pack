@@ -747,7 +747,7 @@ fn compile_preserves_pack_override_preflight_error_output() {
 }
 
 #[test]
-fn compile_preserves_publication_path_resolution_error_output() {
+fn compile_preserves_write_path_resolution_error_output() {
     let directory = tempfile::tempdir().unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"#rect(width: 1pt, height: 1pt)".to_vec())

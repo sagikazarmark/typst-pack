@@ -1,4 +1,4 @@
-//! Package acquisition for a Pack Assembler that supplies its own transport.
+//! Package reading for a Pack Assembler that supplies its own transport.
 //!
 //! Creation reports the exact specifications its representative request needs
 //! and was not given. These helpers cover the two transformations between that
@@ -17,14 +17,14 @@ use typst::foundations::Bytes;
 use typst::syntax::package::PackageSpec;
 
 use crate::Pack;
-use crate::acquisition_layout;
 use crate::limits::{LimitError, Limits, LimitsError, ResourceKind};
 use crate::package_catalog::{PackageTree, PackageTreeError};
+use crate::read_layout;
 
-/// A failure while acquiring exact Package Archive bytes from a stream.
+/// A failure while reading exact Package Archive bytes from a stream.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum PackageArchiveAcquisitionError {
+pub enum PackageArchiveReadError {
     #[error(transparent)]
     Limit(#[from] PackageExpansionLimitError),
     #[error("failed to read Package Archive bytes: {0}")]
@@ -34,12 +34,12 @@ pub enum PackageArchiveAcquisitionError {
 /// The URL of the package registry these helpers describe the layout of, the
 /// official Typst Universe registry. There is no standardized registry
 /// protocol, so the layout is this registry's own.
-pub const PACKAGE_REGISTRY_URL: &str = acquisition_layout::PACKAGE_REGISTRY_URL;
+pub const PACKAGE_REGISTRY_URL: &str = read_layout::PACKAGE_REGISTRY_URL;
 
 /// The one package namespace the registry serves. A specification in any other
 /// namespace is resolved from wherever its namespace lives, which the registry
 /// layout says nothing about.
-pub const PACKAGE_REGISTRY_NAMESPACE: &str = acquisition_layout::PACKAGE_REGISTRY_NAMESPACE;
+pub const PACKAGE_REGISTRY_NAMESPACE: &str = read_layout::PACKAGE_REGISTRY_NAMESPACE;
 
 /// A resource bounded during Package Archive Expansion.
 pub type PackageExpansionResource = ResourceKind<6>;
@@ -123,17 +123,17 @@ impl Limits<PackageExpansionResource> {
     }
 }
 
-/// Acquires exact Package Archive bytes under the expansion profile's
+/// Reads exact Package Archive bytes under the expansion profile's
 /// compressed-byte ceiling.
 ///
 /// A known size is checked before the reader is touched. The stream is still
 /// incrementally metered with a plus-one probe because a size declaration is
 /// only a hint.
-pub fn acquire_package_archive(
+pub fn read_package_archive(
     mut reader: impl Read,
     known_size: Option<u64>,
     limits: PackageExpansionLimits,
-) -> Result<Vec<u8>, PackageArchiveAcquisitionError> {
+) -> Result<Vec<u8>, PackageArchiveReadError> {
     let resource = PackageExpansionResource::CompressedArchiveBytes;
     if let Some(size) = known_size {
         check_expansion_limit(resource, limits.compressed_archive_bytes(), size)?;
@@ -144,7 +144,7 @@ pub fn acquire_package_archive(
         .by_ref()
         .take(limits.compressed_archive_bytes() + 1)
         .read_to_end(&mut bytes)
-        .map_err(PackageArchiveAcquisitionError::Read)?;
+        .map_err(PackageArchiveReadError::Read)?;
     let observed = u64::try_from(bytes.len())
         .map_err(|_| PackageExpansionLimitError::AccountingOverflow { resource })?;
     check_expansion_limit(resource, limits.compressed_archive_bytes(), observed)?;
@@ -157,9 +157,9 @@ pub fn acquire_package_archive(
 /// No index lookup is involved: creation only ever reports fully versioned
 /// specifications, because a Typst import specification always carries an exact
 /// version.
-pub fn package_archive_url(spec: &PackageSpec) -> Result<String, PackageAcquisitionError> {
-    acquisition_layout::official_registry_archive_url(spec)
-        .ok_or_else(|| PackageAcquisitionError::UnservedNamespace { spec: spec.clone() })
+pub fn package_archive_url(spec: &PackageSpec) -> Result<String, PackageReadError> {
+    read_layout::official_registry_archive_url(spec)
+        .ok_or_else(|| PackageReadError::UnservedNamespace { spec: spec.clone() })
 }
 
 /// Expands the archive bytes served for one exact package specification into
@@ -173,7 +173,7 @@ pub fn package_archive_url(spec: &PackageSpec) -> Result<String, PackageAcquisit
 /// expansion is where a hostile archive is met.
 ///
 /// Expansion stops at `limits` and fails with
-/// [`PackageAcquisitionError::ExpansionLimit`] rather than materializing what
+/// [`PackageReadError::ExpansionLimit`] rather than materializing what
 /// lies past it. Every raw member and its payload is charged before semantic
 /// interpretation, whether or not that member becomes a package file.
 ///
@@ -181,12 +181,12 @@ pub fn expand_package_archive(
     spec: PackageSpec,
     archive: &[u8],
     limits: PackageExpansionLimits,
-) -> Result<PackageTree, PackageAcquisitionError> {
-    let malformed = |message: String| PackageAcquisitionError::MalformedArchive {
+) -> Result<PackageTree, PackageReadError> {
+    let malformed = |message: String| PackageReadError::MalformedArchive {
         spec: spec.clone(),
         message,
     };
-    let limited = |source| PackageAcquisitionError::ExpansionLimit {
+    let limited = |source| PackageReadError::ExpansionLimit {
         spec: spec.clone(),
         source,
     };
@@ -480,7 +480,7 @@ pub fn expand_package_archive(
     }
 
     PackageTree::from_typst_entries(files)
-        .map_err(|source| PackageAcquisitionError::InvalidPackageTree { spec, source })
+        .map_err(|source| PackageReadError::InvalidPackageTree { spec, source })
 }
 
 #[derive(Default)]
@@ -719,10 +719,10 @@ fn check_expansion_limit(
     Ok(())
 }
 
-/// A failure while acquiring one Package Tree.
+/// A failure while reading one Package Tree.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
-pub enum PackageAcquisitionError {
+pub enum PackageReadError {
     /// The registry does not serve the specification's namespace, so it has no
     /// URL there.
     #[error(

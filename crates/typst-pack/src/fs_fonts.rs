@@ -1,4 +1,4 @@
-//! Font Catalog gathering for the reference filesystem Font Authority.
+//! Font Catalog reading for the reference filesystem Font Authority.
 
 use std::fs::File;
 #[cfg(not(unix))]
@@ -14,7 +14,7 @@ use crate::font_catalog::{
 };
 use crate::limits::{LimitError, Limits, LimitsError, ResourceKind};
 
-/// A resource bounded during filesystem Font Catalog gathering.
+/// A resource bounded during filesystem Font Catalog reading.
 pub type FilesystemFontResource = ResourceKind<2>;
 
 #[allow(non_upper_case_globals)]
@@ -27,14 +27,14 @@ impl ResourceKind<2> {
 
 pub type FilesystemFontLimitsError = LimitsError<FilesystemFontResource>;
 
-/// A filesystem font source exceeded a mandatory gathering ceiling.
+/// A filesystem font source exceeded a mandatory reading ceiling.
 pub type FilesystemFontLimitError = LimitError<FilesystemFontResource>;
 
-/// Mandatory finite resource ceilings for filesystem Font Catalog gathering.
+/// Mandatory finite resource ceilings for filesystem Font Catalog reading.
 pub type FilesystemFontLimits = Limits<FilesystemFontResource>;
 
 impl Limits<FilesystemFontResource> {
-    /// Constructs validated mandatory finite gathering ceilings.
+    /// Constructs validated mandatory finite reading ceilings.
     pub fn new(
         visited_entries: u64,
         accepted_containers: u64,
@@ -146,7 +146,7 @@ pub enum FilesystemFontEntryKind {
     Unknown,
 }
 
-/// The filesystem operation that failed while gathering a Font Catalog.
+/// The filesystem operation that failed while reading a Font Catalog.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum FilesystemFontOperation {
@@ -254,10 +254,10 @@ impl FilesystemFontValidationError {
     }
 }
 
-/// A failure while gathering a Font Catalog from configured filesystem sources.
+/// A failure while reading a Font Catalog from configured filesystem sources.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum FilesystemFontGatherError {
+pub enum FilesystemFontReadError {
     #[error("failed to {operation} {path:?}: {source}")]
     Io {
         operation: FilesystemFontOperation,
@@ -276,7 +276,7 @@ pub enum FilesystemFontGatherError {
     InvalidContainers(FilesystemFontValidationError),
 }
 
-impl FilesystemFontGatherError {
+impl FilesystemFontReadError {
     fn io(
         operation: FilesystemFontOperation,
         path: impl Into<PathBuf>,
@@ -321,17 +321,17 @@ struct SurveyState {
     accepted_containers: u64,
     declared_total: u64,
     issues: Vec<FilesystemFontIssue>,
-    deferred_limit: Option<FilesystemFontGatherError>,
+    deferred_limit: Option<FilesystemFontReadError>,
 }
 
-/// Gathers one ordered Font Catalog from explicitly configured sources.
+/// Reads one ordered Font Catalog from explicitly configured sources.
 ///
 /// Sources compose in iterator order. Paths within one scanned root compose in
 /// lexical order, and no system or embedded source is added implicitly.
-pub fn gather_filesystem_font_catalog(
+pub fn read_filesystem_fonts(
     sources: impl IntoIterator<Item = FilesystemFontSource>,
     limits: FilesystemFontLimits,
-) -> Result<FontCatalog, FilesystemFontGatherError> {
+) -> Result<FontCatalog, FilesystemFontReadError> {
     let mut state = SurveyState::default();
     let mut plans = Vec::new();
 
@@ -371,11 +371,9 @@ pub fn gather_filesystem_font_catalog(
                 .cmp(right.path())
                 .then_with(|| left.rank().cmp(&right.rank()))
         });
-        return Err(FilesystemFontGatherError::Survey(
-            FilesystemFontSurveyError {
-                issues: state.issues,
-            },
-        ));
+        return Err(FilesystemFontReadError::Survey(FilesystemFontSurveyError {
+            issues: state.issues,
+        }));
     }
     if let Some(error) = state.deferred_limit {
         return Err(error);
@@ -403,7 +401,7 @@ pub fn gather_filesystem_font_catalog(
                         bytes.len() as u64,
                         FilesystemFontResource::TotalAcceptedBytes,
                     )
-                    .map_err(|source| FilesystemFontGatherError::limit(&selected.path, source))?;
+                    .map_err(|source| FilesystemFontReadError::limit(&selected.path, source))?;
                     match FontContainer::new(bytes) {
                         Ok(container) => {
                             catalog.push(FontCatalogEntry::new(container, disposition));
@@ -428,7 +426,7 @@ pub fn gather_filesystem_font_catalog(
     }
     if !invalid_containers.is_empty() {
         invalid_containers.sort_by(|left, right| left.path.cmp(&right.path));
-        return Err(FilesystemFontGatherError::InvalidContainers(
+        return Err(FilesystemFontReadError::InvalidContainers(
             FilesystemFontValidationError {
                 issues: invalid_containers,
             },
@@ -440,7 +438,7 @@ pub fn gather_filesystem_font_catalog(
 fn survey_system_fonts(
     limits: FilesystemFontLimits,
     state: &mut SurveyState,
-) -> Result<Vec<SelectedFont>, FilesystemFontGatherError> {
+) -> Result<Vec<SelectedFont>, FilesystemFontReadError> {
     let mut selected = Vec::new();
     for root in system_font_roots() {
         selected.extend(survey_root(&root, false, limits, state)?);
@@ -461,13 +459,13 @@ fn survey_system_fonts(
 fn survey_macos_downloadable_fonts(
     limits: FilesystemFontLimits,
     state: &mut SurveyState,
-) -> Result<Vec<SelectedFont>, FilesystemFontGatherError> {
+) -> Result<Vec<SelectedFont>, FilesystemFontReadError> {
     let root = Path::new("/System/Library/AssetsV2");
     let entries = match std::fs::read_dir(root) {
         Ok(entries) => entries,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
         Err(error) => {
-            return Err(FilesystemFontGatherError::io(
+            return Err(FilesystemFontReadError::io(
                 FilesystemFontOperation::SurveyEntry,
                 root,
                 error,
@@ -477,20 +475,20 @@ fn survey_macos_downloadable_fonts(
     let mut roots = Vec::new();
     for entry in entries {
         let entry = entry.map_err(|error| {
-            FilesystemFontGatherError::io(FilesystemFontOperation::SurveyEntry, root, error)
+            FilesystemFontReadError::io(FilesystemFontOperation::SurveyEntry, root, error)
         })?;
         state.visited_entries = checked_add(
             state.visited_entries,
             1,
             FilesystemFontResource::VisitedEntries,
         )
-        .map_err(|source| FilesystemFontGatherError::limit(&entry.path(), source))?;
+        .map_err(|source| FilesystemFontReadError::limit(&entry.path(), source))?;
         check_limit(
             FilesystemFontResource::VisitedEntries,
             limits.visited_entries(),
             state.visited_entries,
         )
-        .map_err(|source| FilesystemFontGatherError::limit(&entry.path(), source))?;
+        .map_err(|source| FilesystemFontReadError::limit(&entry.path(), source))?;
         if entry
             .file_name()
             .to_string_lossy()
@@ -513,14 +511,14 @@ fn survey_root(
     required: bool,
     limits: FilesystemFontLimits,
     state: &mut SurveyState,
-) -> Result<Vec<SelectedFont>, FilesystemFontGatherError> {
+) -> Result<Vec<SelectedFont>, FilesystemFontReadError> {
     let metadata = match std::fs::symlink_metadata(root) {
         Ok(metadata) => metadata,
         Err(error) if !required && error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(Vec::new());
         }
         Err(error) => {
-            return Err(FilesystemFontGatherError::io(
+            return Err(FilesystemFontReadError::io(
                 FilesystemFontOperation::InspectRoot,
                 root,
                 error,
@@ -540,7 +538,7 @@ fn survey_root(
         return Ok(Vec::new());
     }
     let boundary = std::fs::canonicalize(root).map_err(|source| {
-        FilesystemFontGatherError::io(FilesystemFontOperation::InspectRoot, root, source)
+        FilesystemFontReadError::io(FilesystemFontOperation::InspectRoot, root, source)
     })?;
 
     let mut selected = Vec::new();
@@ -550,7 +548,7 @@ fn survey_root(
             let source = error
                 .into_io_error()
                 .unwrap_or_else(|| std::io::Error::other("filesystem traversal failed"));
-            FilesystemFontGatherError::io(FilesystemFontOperation::SurveyEntry, path, source)
+            FilesystemFontReadError::io(FilesystemFontOperation::SurveyEntry, path, source)
         })?;
         if entry.depth() == 0 {
             continue;
@@ -561,13 +559,13 @@ fn survey_root(
             1,
             FilesystemFontResource::VisitedEntries,
         )
-        .map_err(|source| FilesystemFontGatherError::limit(entry.path(), source))?;
+        .map_err(|source| FilesystemFontReadError::limit(entry.path(), source))?;
         check_limit(
             FilesystemFontResource::VisitedEntries,
             limits.visited_entries(),
             state.visited_entries,
         )
-        .map_err(|source| FilesystemFontGatherError::limit(entry.path(), source))?;
+        .map_err(|source| FilesystemFontReadError::limit(entry.path(), source))?;
 
         let file_type = entry.file_type();
         if file_type.is_dir() {
@@ -595,7 +593,7 @@ fn survey_root(
             let source = error
                 .into_io_error()
                 .unwrap_or_else(|| std::io::Error::other("failed to inspect Font Container"));
-            FilesystemFontGatherError::io(FilesystemFontOperation::InspectContainer, path, source)
+            FilesystemFontReadError::io(FilesystemFontOperation::InspectContainer, path, source)
         })?;
         let accepted = account_container(entry.path(), metadata.len(), limits, state)?;
         if accepted {
@@ -615,20 +613,20 @@ fn account_container(
     declared: u64,
     limits: FilesystemFontLimits,
     state: &mut SurveyState,
-) -> Result<bool, FilesystemFontGatherError> {
+) -> Result<bool, FilesystemFontReadError> {
     state.accepted_containers = checked_add(
         state.accepted_containers,
         1,
         FilesystemFontResource::AcceptedContainers,
     )
-    .map_err(|source| FilesystemFontGatherError::limit(path, source))?;
+    .map_err(|source| FilesystemFontReadError::limit(path, source))?;
     if let Err(source) = check_limit(
         FilesystemFontResource::AcceptedContainers,
         limits.accepted_containers(),
         state.accepted_containers,
     ) {
         if state.deferred_limit.is_none() {
-            state.deferred_limit = Some(FilesystemFontGatherError::limit(path, source));
+            state.deferred_limit = Some(FilesystemFontReadError::limit(path, source));
         }
         return Ok(false);
     }
@@ -638,7 +636,7 @@ fn account_container(
         declared,
     ) {
         if state.deferred_limit.is_none() {
-            state.deferred_limit = Some(FilesystemFontGatherError::limit(path, source));
+            state.deferred_limit = Some(FilesystemFontReadError::limit(path, source));
         }
         return Ok(false);
     }
@@ -647,14 +645,14 @@ fn account_container(
         declared,
         FilesystemFontResource::TotalAcceptedBytes,
     )
-    .map_err(|source| FilesystemFontGatherError::limit(path, source))?;
+    .map_err(|source| FilesystemFontReadError::limit(path, source))?;
     if let Err(source) = check_limit(
         FilesystemFontResource::TotalAcceptedBytes,
         limits.total_accepted_bytes(),
         state.declared_total,
     ) {
         if state.deferred_limit.is_none() {
-            state.deferred_limit = Some(FilesystemFontGatherError::limit(path, source));
+            state.deferred_limit = Some(FilesystemFontReadError::limit(path, source));
         }
         return Ok(false);
     }
@@ -667,7 +665,7 @@ fn read_bounded(
     path: &Path,
     total_before: u64,
     limits: FilesystemFontLimits,
-) -> Result<Vec<u8>, FilesystemFontGatherError> {
+) -> Result<Vec<u8>, FilesystemFontReadError> {
     let total_allowance = limits.total_accepted_bytes().saturating_sub(total_before);
     let allowance = limits.container_bytes().min(total_allowance);
     let mut file = open_without_following(root, boundary, path)?;
@@ -676,10 +674,10 @@ fn read_bounded(
         .take(allowance + 1)
         .read_to_end(&mut bytes)
         .map_err(|error| {
-            FilesystemFontGatherError::io(FilesystemFontOperation::ReadContainer, path, error)
+            FilesystemFontReadError::io(FilesystemFontOperation::ReadContainer, path, error)
         })?;
     let observed = u64::try_from(bytes.len()).map_err(|_| {
-        FilesystemFontGatherError::limit(
+        FilesystemFontReadError::limit(
             path,
             FilesystemFontLimitError::AccountingOverflow {
                 resource: FilesystemFontResource::ContainerBytes,
@@ -691,19 +689,19 @@ fn read_bounded(
         limits.container_bytes(),
         observed,
     )
-    .map_err(|source| FilesystemFontGatherError::limit(path, source))?;
+    .map_err(|source| FilesystemFontReadError::limit(path, source))?;
     let total = checked_add(
         total_before,
         observed,
         FilesystemFontResource::TotalAcceptedBytes,
     )
-    .map_err(|source| FilesystemFontGatherError::limit(path, source))?;
+    .map_err(|source| FilesystemFontReadError::limit(path, source))?;
     check_limit(
         FilesystemFontResource::TotalAcceptedBytes,
         limits.total_accepted_bytes(),
         total,
     )
-    .map_err(|source| FilesystemFontGatherError::limit(path, source))?;
+    .map_err(|source| FilesystemFontReadError::limit(path, source))?;
     Ok(bytes)
 }
 
@@ -712,7 +710,7 @@ fn open_without_following(
     root: &Path,
     _boundary: &Path,
     path: &Path,
-) -> Result<File, FilesystemFontGatherError> {
+) -> Result<File, FilesystemFontReadError> {
     use std::ffi::CString;
     use std::os::fd::{AsRawFd, FromRawFd};
     use std::os::unix::ffi::OsStrExt;
@@ -740,7 +738,7 @@ fn open_without_following(
         if std::fs::symlink_metadata(root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
             return Err(alias_error(root));
         }
-        return Err(FilesystemFontGatherError::io(
+        return Err(FilesystemFontReadError::io(
             FilesystemFontOperation::ReadContainer,
             root,
             std::io::Error::last_os_error(),
@@ -771,7 +769,7 @@ fn open_without_following(
             {
                 return Err(alias_error(&current));
             }
-            return Err(FilesystemFontGatherError::io(
+            return Err(FilesystemFontReadError::io(
                 FilesystemFontOperation::ReadContainer,
                 &current,
                 std::io::Error::last_os_error(),
@@ -792,7 +790,7 @@ fn open_without_following(
     root: &Path,
     boundary: &Path,
     path: &Path,
-) -> Result<File, FilesystemFontGatherError> {
+) -> Result<File, FilesystemFontReadError> {
     #[cfg(not(windows))]
     let _ = boundary;
     if let Some(alias) = first_alias(root, path) {
@@ -813,7 +811,7 @@ fn open_without_following(
             if let Some(alias) = first_alias(root, path) {
                 return Err(alias_error(&alias));
             }
-            return Err(FilesystemFontGatherError::io(
+            return Err(FilesystemFontReadError::io(
                 FilesystemFontOperation::ReadContainer,
                 path,
                 error,
@@ -834,7 +832,7 @@ fn validate_windows_boundary(
     file: &File,
     boundary: &Path,
     path: &Path,
-) -> Result<(), FilesystemFontGatherError> {
+) -> Result<(), FilesystemFontReadError> {
     use std::os::windows::ffi::OsStringExt;
     use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::GetFinalPathNameByHandleW;
@@ -844,7 +842,7 @@ fn validate_windows_boundary(
     // the required UTF-16 length and writes no bytes.
     let required = unsafe { GetFinalPathNameByHandleW(handle, std::ptr::null_mut(), 0, 0) };
     if required == 0 {
-        return Err(FilesystemFontGatherError::io(
+        return Err(FilesystemFontReadError::io(
             FilesystemFontOperation::ReadContainer,
             path,
             std::io::Error::last_os_error(),
@@ -856,7 +854,7 @@ fn validate_windows_boundary(
     let written =
         unsafe { GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, 0) };
     if written == 0 || written as usize >= buffer.len() {
-        return Err(FilesystemFontGatherError::io(
+        return Err(FilesystemFontReadError::io(
             FilesystemFontOperation::ReadContainer,
             path,
             std::io::Error::last_os_error(),
@@ -869,22 +867,20 @@ fn validate_windows_boundary(
     Ok(())
 }
 
-fn validate_opened_file(file: File, path: &Path) -> Result<File, FilesystemFontGatherError> {
+fn validate_opened_file(file: File, path: &Path) -> Result<File, FilesystemFontReadError> {
     let metadata = file.metadata().map_err(|error| {
-        FilesystemFontGatherError::io(FilesystemFontOperation::ReadContainer, path, error)
+        FilesystemFontReadError::io(FilesystemFontOperation::ReadContainer, path, error)
     })?;
     if metadata.file_type().is_symlink() {
         return Err(alias_error(path));
     }
     if !metadata.file_type().is_file() {
-        return Err(FilesystemFontGatherError::Survey(
-            FilesystemFontSurveyError {
-                issues: vec![FilesystemFontIssue::UnsupportedEntry {
-                    path: path.to_owned(),
-                    kind: unsupported_kind(&metadata.file_type()),
-                }],
-            },
-        ));
+        return Err(FilesystemFontReadError::Survey(FilesystemFontSurveyError {
+            issues: vec![FilesystemFontIssue::UnsupportedEntry {
+                path: path.to_owned(),
+                kind: unsupported_kind(&metadata.file_type()),
+            }],
+        }));
     }
     Ok(file)
 }
@@ -909,8 +905,8 @@ fn first_alias(root: &Path, path: &Path) -> Option<PathBuf> {
     None
 }
 
-fn alias_error(path: &Path) -> FilesystemFontGatherError {
-    FilesystemFontGatherError::Survey(FilesystemFontSurveyError {
+fn alias_error(path: &Path) -> FilesystemFontReadError {
+    FilesystemFontReadError::Survey(FilesystemFontSurveyError {
         issues: vec![FilesystemFontIssue::Alias {
             path: path.to_owned(),
         }],
@@ -920,7 +916,7 @@ fn alias_error(path: &Path) -> FilesystemFontGatherError {
 fn font_eligible(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
-        .is_some_and(crate::acquisition_layout::is_font_container_extension)
+        .is_some_and(crate::read_layout::is_font_container_extension)
 }
 
 fn unsupported_kind(file_type: &std::fs::FileType) -> FilesystemFontEntryKind {
@@ -1096,7 +1092,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            FilesystemFontGatherError::Survey(ref survey)
+            FilesystemFontReadError::Survey(ref survey)
                 if matches!(survey.issues(), [FilesystemFontIssue::Alias { path }] if path == &selected)
         ));
     }
@@ -1129,7 +1125,7 @@ mod tests {
 
         assert!(matches!(
             error,
-            FilesystemFontGatherError::Survey(ref survey)
+            FilesystemFontReadError::Survey(ref survey)
                 if matches!(survey.issues(), [FilesystemFontIssue::Alias { path }] if path == &root)
         ));
     }

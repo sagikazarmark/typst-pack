@@ -1,13 +1,13 @@
-//! Project gathering from the reference filesystem source.
+//! Project reading from the reference filesystem source.
 
 #![cfg(feature = "fs")]
 
 use std::fs;
 
 use typst_pack::{
-    FilesystemProjectGatherError, FilesystemProjectIssue, FilesystemProjectLimitError,
-    FilesystemProjectLimits, FilesystemProjectLimitsError, FilesystemProjectResource,
-    gather_filesystem_project,
+    FilesystemProjectIssue, FilesystemProjectLimitError, FilesystemProjectLimits,
+    FilesystemProjectLimitsError, FilesystemProjectReadError, FilesystemProjectResource,
+    read_filesystem_project,
 };
 
 fn limits(values: [u64; 5]) -> FilesystemProjectLimits {
@@ -51,7 +51,7 @@ fn every_project_source_ceiling_must_leave_room_for_a_plus_one_probe() {
 }
 
 #[test]
-fn gathering_applies_the_root_policy_once_and_preserves_its_exact_bytes() {
+fn reading_applies_the_root_policy_once_and_preserves_its_exact_bytes() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path();
     let policy = b"drop/**\n!drop/keep/\n!drop/keep/kept.txt\n*.secret\n";
@@ -65,7 +65,7 @@ fn gathering_applies_the_root_policy_once_and_preserves_its_exact_bytes() {
     fs::write(root.join("nested/ordinary.txt"), b"ordinary").unwrap();
     fs::write(root.join("private.secret"), b"private").unwrap();
 
-    let snapshot = gather_filesystem_project(root, "main.typ", GENEROUS_LIMITS).unwrap();
+    let snapshot = read_filesystem_project(root, "main.typ", GENEROUS_LIMITS).unwrap();
 
     assert_eq!(snapshot.file(".typkignore"), Some(policy.as_slice()));
     assert_eq!(snapshot.file("drop/keep/kept.txt"), Some(&b"kept"[..]));
@@ -76,16 +76,16 @@ fn gathering_applies_the_root_policy_once_and_preserves_its_exact_bytes() {
 }
 
 #[test]
-fn malformed_root_policy_bytes_are_a_typed_gathering_error() {
+fn malformed_root_policy_bytes_are_a_typed_reading_error() {
     let dir = tempfile::tempdir().unwrap();
     fs::write(dir.path().join("main.typ"), b"main").unwrap();
     fs::write(dir.path().join(".typkignore"), [0xff]).unwrap();
 
-    let error = gather_filesystem_project(dir.path(), "main.typ", GENEROUS_LIMITS).unwrap_err();
+    let error = read_filesystem_project(dir.path(), "main.typ", GENEROUS_LIMITS).unwrap_err();
 
     assert!(matches!(
         error,
-        FilesystemProjectGatherError::InvalidPolicy { .. }
+        FilesystemProjectReadError::InvalidPolicy { .. }
     ));
 }
 
@@ -101,7 +101,7 @@ fn excluded_directories_are_pruned_before_aliases_beneath_them_are_surveyed() {
     fs::write(root.join(".typkignore"), b"ignored/\n").unwrap();
     symlink(dir.path(), root.join("ignored/outside")).unwrap();
 
-    let snapshot = gather_filesystem_project(&root, "main.typ", GENEROUS_LIMITS).unwrap();
+    let snapshot = read_filesystem_project(&root, "main.typ", GENEROUS_LIMITS).unwrap();
 
     assert_eq!(
         snapshot.files().map(|(path, _)| path).collect::<Vec<_>>(),
@@ -121,8 +121,8 @@ fn aliases_and_unsupported_entries_are_aggregated_after_the_structural_survey() 
     symlink(root.join("main.typ"), root.join("alias.typ")).unwrap();
     let _socket = UnixListener::bind(root.join("project.sock")).unwrap();
 
-    let error = gather_filesystem_project(root, "main.typ", GENEROUS_LIMITS).unwrap_err();
-    let FilesystemProjectGatherError::Survey(survey) = error else {
+    let error = read_filesystem_project(root, "main.typ", GENEROUS_LIMITS).unwrap_err();
+    let FilesystemProjectReadError::Survey(survey) = error else {
         panic!("expected a structural survey error");
     };
 
@@ -143,8 +143,8 @@ fn unrepresentable_paths_are_reported_by_the_filesystem_survey() {
     fs::write(dir.path().join("main.typ"), b"main").unwrap();
     fs::write(dir.path().join(OsString::from_vec(vec![0xff])), b"bytes").unwrap();
 
-    let error = gather_filesystem_project(dir.path(), "main.typ", GENEROUS_LIMITS).unwrap_err();
-    let FilesystemProjectGatherError::Survey(survey) = error else {
+    let error = read_filesystem_project(dir.path(), "main.typ", GENEROUS_LIMITS).unwrap_err();
+    let FilesystemProjectReadError::Survey(survey) = error else {
         panic!("expected a structural survey error");
     };
     assert!(matches!(
@@ -160,11 +160,11 @@ fn assert_limit(
     ceiling: u64,
     observed: u64,
 ) {
-    let error = gather_filesystem_project(root, "main.typ", limits(values)).unwrap_err();
+    let error = read_filesystem_project(root, "main.typ", limits(values)).unwrap_err();
     assert!(
         matches!(
             error,
-            FilesystemProjectGatherError::Limit {
+            FilesystemProjectReadError::Limit {
                 source: FilesystemProjectLimitError::Exceeded {
                     resource: reported,
                     ceiling: reported_ceiling,
@@ -198,7 +198,7 @@ fn generated_boundaries_cover_every_project_source_resource() {
         for ceiling in [observed + 1, observed] {
             let mut values = exact;
             values[index] = ceiling;
-            gather_filesystem_project(root, "main.typ", limits(values)).unwrap();
+            read_filesystem_project(root, "main.typ", limits(values)).unwrap();
         }
         let mut values = exact;
         values[index] -= 1;

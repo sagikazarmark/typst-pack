@@ -1,10 +1,10 @@
 //! Pack Creation through the reference filesystem Pack Assembler.
 //!
 //! Every test here drives the public filesystem creation interface over a real
-//! project directory: what the adapter acquires — project files under the
+//! project directory: what the adapter reads — project files under the
 //! Project Ignore Policy, package trees from the configured Package Authority,
 //! and font containers from the host's font sources — is what the Pack it
-//! returns describes. Post-acquisition mutation behavior is covered in-crate
+//! returns describes. Post-read mutation behavior is covered in-crate
 //! because mutating the tree mid-creation needs a test hook this interface does
 //! not offer.
 
@@ -19,11 +19,11 @@ use std::path::{Path, PathBuf};
 use archive_support::{decode_reference, encode_reference};
 use typst_pack::{
     DocumentTime, FilesystemPackAssembler, FilesystemPackAssemblerConfig,
-    FilesystemPackAssemblyError, FilesystemPackAssemblyRequest, FilesystemProjectGatherError,
-    FilesystemProjectIssue, Pack, PackCreationError, TypstTarget,
+    FilesystemPackAssemblyError, FilesystemPackAssemblyRequest, FilesystemProjectIssue,
+    FilesystemProjectReadError, Pack, PackCreationError, TypstTarget,
 };
 #[cfg(feature = "egress")]
-use typst_pack::{FilesystemPackageAcquisitionError, PackageAcquisitionFailureReason};
+use typst_pack::{FilesystemPackageAuthorityReadError, PackageReadFailureReason};
 
 /// A project directory with an image, a data file, an included chapter, and an
 /// import from a local package, plus the package itself in a separate
@@ -262,7 +262,7 @@ fn structural_creation_rejects_a_symlinked_root_ignore_policy() {
 
     assert!(matches!(
         result,
-        Err(FilesystemPackAssemblyError::ProjectGather(FilesystemProjectGatherError::Survey(ref survey)))
+        Err(FilesystemPackAssemblyError::ProjectRead(FilesystemProjectReadError::Survey(ref survey)))
             if matches!(survey.issues(), [FilesystemProjectIssue::Alias { path }] if path == &policy)
     ));
 }
@@ -527,10 +527,10 @@ fn offline_creation_fails_on_an_uncached_universe_package() {
         Err(FilesystemPackAssemblyError::Creation(error))
             if matches!(
                 error.package_failures(),
-                [FilesystemPackageAcquisitionError::Unavailable(failure)]
+                [FilesystemPackageAuthorityReadError::Unavailable(failure)]
                     if failure.spec().to_string()
                         == "@preview/typst-pack-no-such-package:0.0.1"
-                        && failure.reason() == &PackageAcquisitionFailureReason::NotFound
+                        && failure.reason() == &PackageReadFailureReason::NotFound
             )
     ));
 
@@ -546,7 +546,7 @@ fn offline_creation_fails_on_an_uncached_universe_package() {
 }
 
 /// A build without egress has no download capability under any runtime
-/// configuration: a Universe package no local source holds fails acquisition
+/// configuration: a Universe package no local source holds fails read
 /// even though nothing asked for offline creation.
 #[cfg(not(feature = "egress"))]
 #[test]

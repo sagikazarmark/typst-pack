@@ -2,11 +2,11 @@
 
 use typst_pack::pack_archive::{CommitCertainty, StagingResidueStatus};
 use typst_pack::{
-    CompilationArtifactPublicationIssue, CompilationLimits, CompilationOutputSpecification,
-    FilesystemMergePolicy, FilesystemPublicationPreflightIssue, Pack, PackCompilationRequest,
-    PackExtractionSelection, PdfOutputSpecification, PublicationKeyOutcome, SvgOutputSpecification,
-    compile_with_limits, plan_pack_extraction, publish_compilation_artifacts_to_filesystem_paths,
-    publish_pack_extraction_plan_to_filesystem, resolve_filesystem_publication_paths,
+    CompilationArtifactWriteIssue, CompilationLimits, CompilationOutputSpecification,
+    FilesystemMergePolicy, FilesystemWritePreflightIssue, Pack, PackCompilationRequest,
+    PackExtractionSelection, PdfOutputSpecification, SvgOutputSpecification, WriteKeyOutcome,
+    compile_with_limits, plan_pack_extraction, resolve_filesystem_write_paths,
+    write_compilation_artifacts_to_filesystem_paths, write_pack_extraction_plan_to_filesystem,
 };
 
 fn extraction_plan() -> typst_pack::PackExtractionPlan {
@@ -42,7 +42,7 @@ fn two_page_compilation_result() -> typst_pack::CompilationResult {
 }
 
 #[test]
-fn publication_paths_resolve_a_common_destination_and_relative_targets() {
+fn write_paths_resolve_a_common_destination_and_relative_targets() {
     let directory = tempfile::tempdir().unwrap();
     let root = temp_path(&directory);
     std::fs::create_dir_all(root.join("first")).unwrap();
@@ -52,7 +52,7 @@ fn publication_paths_resolve_a_common_destination_and_relative_targets() {
         root.join("second/output-2.svg"),
     ];
 
-    let (destination, relative_paths) = resolve_filesystem_publication_paths(&targets).unwrap();
+    let (destination, relative_paths) = resolve_filesystem_write_paths(&targets).unwrap();
 
     assert_eq!(destination, root);
     assert_eq!(
@@ -65,44 +65,44 @@ fn publication_paths_resolve_a_common_destination_and_relative_targets() {
 }
 
 #[test]
-fn publication_path_resolution_retains_the_unresolved_output_directory() {
+fn write_path_resolution_retains_the_unresolved_output_directory() {
     let directory = tempfile::tempdir().unwrap();
     let unresolved = directory.path().join("missing");
     let target = unresolved.join("output.svg");
 
-    let error = resolve_filesystem_publication_paths(&[target]).unwrap_err();
+    let error = resolve_filesystem_write_paths(&[target]).unwrap_err();
 
     assert!(matches!(
         error,
-        typst_pack::FilesystemPublicationPathError::OutputDirectory { path, .. }
+        typst_pack::FilesystemWritePathError::OutputDirectory { path, .. }
             if path == unresolved
     ));
 }
 
 #[cfg(unix)]
 #[test]
-fn publication_path_resolution_rejects_a_target_without_a_file_name() {
+fn write_path_resolution_rejects_a_target_without_a_file_name() {
     let target = std::path::PathBuf::from("/");
 
-    let error = resolve_filesystem_publication_paths(std::slice::from_ref(&target)).unwrap_err();
+    let error = resolve_filesystem_write_paths(std::slice::from_ref(&target)).unwrap_err();
 
     assert!(matches!(
         error,
-        typst_pack::FilesystemPublicationPathError::OutputPathDoesNotNameFile { path }
+        typst_pack::FilesystemWritePathError::OutputPathDoesNotNameFile { path }
             if path == target
     ));
 }
 
 #[test]
-fn publish_new_tree_exposes_the_complete_plan_through_one_root_commit() {
+fn write_new_tree_exposes_the_complete_plan_through_one_root_commit() {
     let directory = tempfile::tempdir().unwrap();
-    let destination = temp_path(&directory).join("published");
+    let destination = temp_path(&directory).join("written");
     let plan = extraction_plan();
 
-    let receipt = publish_pack_extraction_plan_to_filesystem(
+    let receipt = write_pack_extraction_plan_to_filesystem(
         &plan,
         &destination,
-        FilesystemMergePolicy::PublishNewTree,
+        FilesystemMergePolicy::WriteNewTree,
     )
     .unwrap();
 
@@ -114,8 +114,8 @@ fn publish_new_tree_exposes_the_complete_plan_through_one_root_commit() {
             .map(|entry| (entry.relative_path(), entry.outcome()))
             .collect::<Vec<_>>(),
         [
-            ("assets/data.txt", PublicationKeyOutcome::Created),
-            ("main.typ", PublicationKeyOutcome::Created),
+            ("assets/data.txt", WriteKeyOutcome::Created),
+            ("main.typ", WriteKeyOutcome::Created),
         ]
     );
     assert_eq!(
@@ -134,17 +134,17 @@ fn publish_new_tree_exposes_the_complete_plan_through_one_root_commit() {
 }
 
 #[test]
-fn publish_new_tree_preflight_aggregates_an_existing_root_with_other_issues() {
+fn write_new_tree_preflight_aggregates_an_existing_root_with_other_issues() {
     let directory = tempfile::tempdir().unwrap();
-    let destination = temp_path(&directory).join("published");
+    let destination = temp_path(&directory).join("written");
     std::fs::create_dir(&destination).unwrap();
     std::fs::write(destination.join("main.typ"), b"existing").unwrap();
     let plan = extraction_plan();
 
-    let error = publish_pack_extraction_plan_to_filesystem(
+    let error = write_pack_extraction_plan_to_filesystem(
         &plan,
         &destination,
-        FilesystemMergePolicy::PublishNewTree,
+        FilesystemMergePolicy::WriteNewTree,
     )
     .unwrap_err();
     let issues = error.preflight_issues().unwrap();
@@ -152,18 +152,15 @@ fn publish_new_tree_preflight_aggregates_an_existing_root_with_other_issues() {
     assert_eq!(issues.len(), 2);
     assert!(matches!(
         &issues[0],
-        FilesystemPublicationPreflightIssue::ExistingDestinationRoot { path }
+        FilesystemWritePreflightIssue::ExistingDestinationRoot { path }
             if path == &destination
     ));
     assert!(matches!(
         &issues[1],
-        FilesystemPublicationPreflightIssue::ExistingTarget { relative_path }
+        FilesystemWritePreflightIssue::ExistingTarget { relative_path }
             if relative_path == "main.typ"
     ));
-    assert_eq!(
-        error.phase(),
-        typst_pack::FilesystemPublicationPhase::Preflight
-    );
+    assert_eq!(error.phase(), typst_pack::FilesystemWritePhase::Preflight);
     assert_eq!(error.failed_target(), None);
     assert_eq!(error.commit_certainty(), CommitCertainty::NotCommitted);
     assert_eq!(error.staging_residue_status(), StagingResidueStatus::Absent);
@@ -179,29 +176,26 @@ fn publish_new_tree_preflight_aggregates_an_existing_root_with_other_issues() {
 }
 
 #[test]
-fn publish_new_tree_preflight_validates_destination_components_before_staging() {
+fn write_new_tree_preflight_validates_destination_components_before_staging() {
     let directory = tempfile::tempdir().unwrap();
     let destination = temp_path(&directory).join("x".repeat(256));
     let plan = extraction_plan();
 
-    let error = publish_pack_extraction_plan_to_filesystem(
+    let error = write_pack_extraction_plan_to_filesystem(
         &plan,
         &destination,
-        FilesystemMergePolicy::PublishNewTree,
+        FilesystemMergePolicy::WriteNewTree,
     )
     .unwrap_err();
 
     assert!(error.preflight_issues().unwrap().iter().any(|issue| {
         matches!(
             issue,
-            FilesystemPublicationPreflightIssue::DestinationComponentTooLong { path, .. }
+            FilesystemWritePreflightIssue::DestinationComponentTooLong { path, .. }
                 if path == &destination
         )
     }));
-    assert_eq!(
-        error.phase(),
-        typst_pack::FilesystemPublicationPhase::Preflight
-    );
+    assert_eq!(error.phase(), typst_pack::FilesystemWritePhase::Preflight);
     assert_eq!(error.staging_residue_status(), StagingResidueStatus::Absent);
     assert!(
         std::fs::read_dir(directory.path())
@@ -214,14 +208,14 @@ fn publish_new_tree_preflight_validates_destination_components_before_staging() 
 #[test]
 fn merge_policies_remain_distinct_and_preserve_unrelated_content() {
     let directory = tempfile::tempdir().unwrap();
-    let destination = temp_path(&directory).join("published");
+    let destination = temp_path(&directory).join("written");
     std::fs::create_dir_all(destination.join("assets")).unwrap();
     std::fs::write(destination.join("main.typ"), b"old main").unwrap();
     std::fs::write(destination.join("assets/data.txt"), b"old data").unwrap();
     std::fs::write(destination.join("unrelated.txt"), b"keep me").unwrap();
     let plan = extraction_plan();
 
-    let error = publish_pack_extraction_plan_to_filesystem(
+    let error = write_pack_extraction_plan_to_filesystem(
         &plan,
         &destination,
         FilesystemMergePolicy::MergeCreateOnly,
@@ -233,7 +227,7 @@ fn merge_policies_remain_distinct_and_preserve_unrelated_content() {
         .unwrap()
         .iter()
         .filter_map(|issue| match issue {
-            FilesystemPublicationPreflightIssue::ExistingTarget { relative_path } => {
+            FilesystemWritePreflightIssue::ExistingTarget { relative_path } => {
                 Some(relative_path.as_path())
             }
             _ => None,
@@ -246,10 +240,7 @@ fn merge_policies_remain_distinct_and_preserve_unrelated_content() {
             std::path::Path::new("main.typ"),
         ]
     );
-    assert_eq!(
-        error.phase(),
-        typst_pack::FilesystemPublicationPhase::Preflight
-    );
+    assert_eq!(error.phase(), typst_pack::FilesystemWritePhase::Preflight);
     assert_eq!(error.failed_target(), None);
     assert_eq!(error.commit_certainty(), CommitCertainty::NotCommitted);
     assert_eq!(error.staging_residue_status(), StagingResidueStatus::Absent);
@@ -265,7 +256,7 @@ fn merge_policies_remain_distinct_and_preserve_unrelated_content() {
     );
     std::fs::remove_file(destination.join("assets/data.txt")).unwrap();
 
-    let receipt = publish_pack_extraction_plan_to_filesystem(
+    let receipt = write_pack_extraction_plan_to_filesystem(
         &plan,
         &destination,
         FilesystemMergePolicy::MergeReplaceExactFiles,
@@ -279,8 +270,8 @@ fn merge_policies_remain_distinct_and_preserve_unrelated_content() {
             .map(|entry| (entry.relative_path(), entry.outcome()))
             .collect::<Vec<_>>(),
         [
-            ("assets/data.txt", PublicationKeyOutcome::Written),
-            ("main.typ", PublicationKeyOutcome::Written),
+            ("assets/data.txt", WriteKeyOutcome::Written),
+            ("main.typ", WriteKeyOutcome::Written),
         ]
     );
     assert_eq!(
@@ -300,7 +291,7 @@ fn merge_policies_remain_distinct_and_preserve_unrelated_content() {
 #[test]
 fn preflight_aggregates_detectable_issues_before_writing() {
     let directory = tempfile::tempdir().unwrap();
-    let destination = temp_path(&directory).join("published");
+    let destination = temp_path(&directory).join("written");
     std::fs::create_dir(&destination).unwrap();
     std::fs::write(destination.join("existing.txt"), b"old").unwrap();
     std::fs::write(destination.join("blocked"), b"not a directory").unwrap();
@@ -321,7 +312,7 @@ fn preflight_aggregates_detectable_issues_before_writing() {
         .unwrap();
     let plan = plan_pack_extraction(&pack, PackExtractionSelection::default()).unwrap();
 
-    let error = publish_pack_extraction_plan_to_filesystem(
+    let error = write_pack_extraction_plan_to_filesystem(
         &plan,
         &destination,
         FilesystemMergePolicy::MergeCreateOnly,
@@ -331,17 +322,17 @@ fn preflight_aggregates_detectable_issues_before_writing() {
 
     assert!(issues.iter().any(|issue| matches!(
         issue,
-        FilesystemPublicationPreflightIssue::ExistingTarget { relative_path }
+        FilesystemWritePreflightIssue::ExistingTarget { relative_path }
             if relative_path == "existing.txt"
     )));
     assert!(issues.iter().any(|issue| matches!(
         issue,
-        FilesystemPublicationPreflightIssue::ConflictingAncestor { relative_path, .. }
+        FilesystemWritePreflightIssue::ConflictingAncestor { relative_path, .. }
             if relative_path == "blocked/child.txt"
     )));
     assert!(issues.iter().any(|issue| matches!(
         issue,
-        FilesystemPublicationPreflightIssue::ComponentTooLong { relative_path, .. }
+        FilesystemWritePreflightIssue::ComponentTooLong { relative_path, .. }
             if relative_path.ends_with("child.txt")
     )));
     assert!(error.progress().completed().is_empty());
@@ -353,9 +344,9 @@ fn preflight_aggregates_detectable_issues_before_writing() {
 }
 
 #[test]
-fn compilation_artifacts_publish_as_a_new_tree_through_caller_selected_platform_paths() {
+fn compilation_artifacts_write_as_a_new_tree_through_caller_selected_platform_paths() {
     let pack = Pack::builder("main.typ")
-        .file("main.typ", b"= Published".to_vec())
+        .file("main.typ", b"= Written".to_vec())
         .unwrap()
         .build()
         .unwrap();
@@ -372,11 +363,11 @@ fn compilation_artifacts_publish_as_a_new_tree_through_caller_selected_platform_
     let destination = temp_path(&directory).join("artifacts");
     let paths = vec![std::path::PathBuf::from("reports/custom-name.pdf")];
 
-    let receipt = publish_compilation_artifacts_to_filesystem_paths(
+    let receipt = write_compilation_artifacts_to_filesystem_paths(
         result,
         &destination,
         &paths,
-        FilesystemMergePolicy::PublishNewTree,
+        FilesystemMergePolicy::WriteNewTree,
     )
     .unwrap();
 
@@ -390,7 +381,7 @@ fn compilation_artifacts_publish_as_a_new_tree_through_caller_selected_platform_
             .iter()
             .map(|entry| (entry.artifact_index(), entry.outcome()))
             .collect::<Vec<_>>(),
-        [(0, PublicationKeyOutcome::Created)]
+        [(0, WriteKeyOutcome::Created)]
     );
     assert_eq!(
         std::fs::read(destination.join(&paths[0])).unwrap(),
@@ -404,7 +395,7 @@ fn caller_selected_artifact_paths_reject_count_and_tree_conflicts_before_writes(
     let directory = tempfile::tempdir().unwrap();
     let destination = temp_path(&directory).join("artifacts");
 
-    let mismatch = publish_compilation_artifacts_to_filesystem_paths(
+    let mismatch = write_compilation_artifacts_to_filesystem_paths(
         &result,
         &destination,
         &[std::path::PathBuf::from("one.svg")],
@@ -414,7 +405,7 @@ fn caller_selected_artifact_paths_reject_count_and_tree_conflicts_before_writes(
     assert_eq!(
         mismatch.issues(),
         Some(
-            [CompilationArtifactPublicationIssue::PathCountMismatch {
+            [CompilationArtifactWriteIssue::PathCountMismatch {
                 artifact_count: 2,
                 path_count: 1,
             }]
@@ -422,7 +413,7 @@ fn caller_selected_artifact_paths_reject_count_and_tree_conflicts_before_writes(
         )
     );
 
-    let count_and_conflict = publish_compilation_artifacts_to_filesystem_paths(
+    let count_and_conflict = write_compilation_artifacts_to_filesystem_paths(
         &result,
         &destination,
         &[
@@ -437,11 +428,11 @@ fn caller_selected_artifact_paths_reject_count_and_tree_conflicts_before_writes(
         count_and_conflict.issues(),
         Some(
             [
-                CompilationArtifactPublicationIssue::PathCountMismatch {
+                CompilationArtifactWriteIssue::PathCountMismatch {
                     artifact_count: 2,
                     path_count: 3,
                 },
-                CompilationArtifactPublicationIssue::PathConflict {
+                CompilationArtifactWriteIssue::PathConflict {
                     first_path: std::path::PathBuf::from("same.svg"),
                     second_path: std::path::PathBuf::from("same.svg"),
                 },
@@ -460,7 +451,7 @@ fn caller_selected_artifact_paths_reject_count_and_tree_conflicts_before_writes(
             std::path::PathBuf::from("tree/page.svg"),
         ],
     ] {
-        let error = publish_compilation_artifacts_to_filesystem_paths(
+        let error = write_compilation_artifacts_to_filesystem_paths(
             &result,
             &destination,
             &paths,
@@ -469,7 +460,7 @@ fn caller_selected_artifact_paths_reject_count_and_tree_conflicts_before_writes(
         .unwrap_err();
         assert!(matches!(
             error.issues(),
-            Some([CompilationArtifactPublicationIssue::PathConflict { .. }])
+            Some([CompilationArtifactWriteIssue::PathConflict { .. }])
         ));
         assert!(!destination.exists());
     }
@@ -478,7 +469,7 @@ fn caller_selected_artifact_paths_reject_count_and_tree_conflicts_before_writes(
         std::path::PathBuf::from("/absolute.svg"),
         std::path::PathBuf::from("../parent.svg"),
     ] {
-        let error = publish_compilation_artifacts_to_filesystem_paths(
+        let error = write_compilation_artifacts_to_filesystem_paths(
             &result,
             &destination,
             &[invalid.clone(), std::path::PathBuf::from("valid.svg")],
@@ -486,12 +477,12 @@ fn caller_selected_artifact_paths_reject_count_and_tree_conflicts_before_writes(
         )
         .unwrap_err();
         let error = error
-            .publication_error()
+            .write_error()
             .expect("path count matches and selected paths do not conflict");
         assert!(error.preflight_issues().unwrap().iter().any(|issue| {
             matches!(
                 issue,
-                FilesystemPublicationPreflightIssue::InvalidRelativePath { relative_path }
+                FilesystemWritePreflightIssue::InvalidRelativePath { relative_path }
                     if relative_path.as_path() == invalid.as_path()
             )
         }));
@@ -501,7 +492,7 @@ fn caller_selected_artifact_paths_reject_count_and_tree_conflicts_before_writes(
 }
 
 #[test]
-fn rejected_compilation_results_are_not_published() {
+fn rejected_compilation_results_are_not_written() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"#unknown-function()".to_vec())
         .unwrap()
@@ -518,7 +509,7 @@ fn rejected_compilation_results_are_not_published() {
     let directory = tempfile::tempdir().unwrap();
     let destination = temp_path(&directory).join("artifacts");
 
-    let error = publish_compilation_artifacts_to_filesystem_paths(
+    let error = write_compilation_artifacts_to_filesystem_paths(
         report.result().unwrap(),
         &destination,
         &[std::path::PathBuf::from("output.pdf")],
@@ -530,8 +521,8 @@ fn rejected_compilation_results_are_not_published() {
         error.issues(),
         Some(
             [
-                CompilationArtifactPublicationIssue::RejectedCompilationResult,
-                CompilationArtifactPublicationIssue::PathCountMismatch {
+                CompilationArtifactWriteIssue::RejectedCompilationResult,
+                CompilationArtifactWriteIssue::PathCountMismatch {
                     artifact_count: 0,
                     path_count: 1,
                 },
@@ -544,11 +535,11 @@ fn rejected_compilation_results_are_not_published() {
 
 #[cfg(unix)]
 #[test]
-fn caller_selected_artifact_publication_supports_non_unicode_platform_paths() {
+fn caller_selected_artifact_write_supports_non_unicode_platform_paths() {
     use std::os::unix::ffi::OsStringExt as _;
 
     let pack = Pack::builder("main.typ")
-        .file("main.typ", b"= Published".to_vec())
+        .file("main.typ", b"= Written".to_vec())
         .unwrap()
         .build()
         .unwrap();
@@ -566,7 +557,7 @@ fn caller_selected_artifact_publication_supports_non_unicode_platform_paths() {
     let relative =
         std::path::PathBuf::from(std::ffi::OsString::from_vec(b"report-\xff.pdf".to_vec()));
 
-    let receipt = publish_compilation_artifacts_to_filesystem_paths(
+    let receipt = write_compilation_artifacts_to_filesystem_paths(
         result,
         &destination,
         std::slice::from_ref(&relative),
@@ -588,7 +579,7 @@ fn preflight_rejects_symlinked_targets_and_ancestors_without_writes() {
 
     let directory = tempfile::tempdir().unwrap();
     let root = temp_path(&directory);
-    let destination = root.join("published");
+    let destination = root.join("written");
     let outside = root.join("outside");
     std::fs::create_dir(&destination).unwrap();
     std::fs::create_dir(&outside).unwrap();
@@ -605,7 +596,7 @@ fn preflight_rejects_symlinked_targets_and_ancestors_without_writes() {
         .unwrap();
     let plan = plan_pack_extraction(&pack, PackExtractionSelection::default()).unwrap();
 
-    let error = publish_pack_extraction_plan_to_filesystem(
+    let error = write_pack_extraction_plan_to_filesystem(
         &plan,
         &destination,
         FilesystemMergePolicy::MergeReplaceExactFiles,
@@ -615,12 +606,12 @@ fn preflight_rejects_symlinked_targets_and_ancestors_without_writes() {
 
     assert!(issues.iter().any(|issue| matches!(
         issue,
-        FilesystemPublicationPreflightIssue::ConflictingAncestor { relative_path, .. }
+        FilesystemWritePreflightIssue::ConflictingAncestor { relative_path, .. }
             if relative_path == "linked/child.txt"
     )));
     assert!(issues.iter().any(|issue| matches!(
         issue,
-        FilesystemPublicationPreflightIssue::ConflictingTarget { relative_path, .. }
+        FilesystemWritePreflightIssue::ConflictingTarget { relative_path, .. }
             if relative_path == "target.txt"
     )));
     assert!(error.progress().completed().is_empty());
@@ -644,13 +635,13 @@ fn native_case_aliases_are_aggregated_before_writes() {
     let plan = plan_pack_extraction(&pack, PackExtractionSelection::default()).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let root = temp_path(&directory);
-    let destination = root.join("published");
+    let destination = root.join("written");
     let probe = root.join("case-probe");
     std::fs::write(&probe, b"probe").unwrap();
     let case_insensitive = root.join("CASE-PROBE").exists();
     std::fs::remove_file(probe).unwrap();
 
-    let result = publish_pack_extraction_plan_to_filesystem(
+    let result = write_pack_extraction_plan_to_filesystem(
         &plan,
         &destination,
         FilesystemMergePolicy::MergeReplaceExactFiles,
@@ -658,9 +649,13 @@ fn native_case_aliases_are_aggregated_before_writes() {
 
     if case_insensitive {
         let error = result.unwrap_err();
-        assert!(error.preflight_issues().unwrap().iter().any(|issue| {
-            matches!(issue, FilesystemPublicationPreflightIssue::PathAlias { .. })
-        }));
+        assert!(
+            error
+                .preflight_issues()
+                .unwrap()
+                .iter()
+                .any(|issue| { matches!(issue, FilesystemWritePreflightIssue::PathAlias { .. }) })
+        );
         assert!(!destination.exists());
     } else {
         let receipt = result.unwrap();
@@ -691,9 +686,9 @@ fn windows_reserved_names_are_aggregated_before_writes() {
         .unwrap();
     let plan = plan_pack_extraction(&pack, PackExtractionSelection::default()).unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let destination = temp_path(&directory).join("published");
+    let destination = temp_path(&directory).join("written");
 
-    let error = publish_pack_extraction_plan_to_filesystem(
+    let error = write_pack_extraction_plan_to_filesystem(
         &plan,
         &destination,
         FilesystemMergePolicy::MergeCreateOnly,
@@ -703,12 +698,7 @@ fn windows_reserved_names_are_aggregated_before_writes() {
         .preflight_issues()
         .unwrap()
         .iter()
-        .filter(|issue| {
-            matches!(
-                issue,
-                FilesystemPublicationPreflightIssue::ReservedName { .. }
-            )
-        })
+        .filter(|issue| matches!(issue, FilesystemWritePreflightIssue::ReservedName { .. }))
         .count();
 
     assert_eq!(reserved_count, 3);
@@ -721,17 +711,17 @@ fn windows_reserved_destination_root_is_rejected_before_staging() {
     let directory = tempfile::tempdir().unwrap();
     let destination = temp_path(&directory).join("CON");
 
-    let error = publish_pack_extraction_plan_to_filesystem(
+    let error = write_pack_extraction_plan_to_filesystem(
         &extraction_plan(),
         &destination,
-        FilesystemMergePolicy::PublishNewTree,
+        FilesystemMergePolicy::WriteNewTree,
     )
     .unwrap_err();
 
     assert!(error.preflight_issues().unwrap().iter().any(|issue| {
         matches!(
             issue,
-            FilesystemPublicationPreflightIssue::DestinationReservedName { path, component }
+            FilesystemWritePreflightIssue::DestinationReservedName { path, component }
                 if path == &destination && component == "CON"
         )
     }));
@@ -757,9 +747,9 @@ fn macos_normalization_aliases_are_aggregated_before_writes() {
         .unwrap();
     let plan = plan_pack_extraction(&pack, PackExtractionSelection::default()).unwrap();
     let directory = tempfile::tempdir().unwrap();
-    let destination = temp_path(&directory).join("published");
+    let destination = temp_path(&directory).join("written");
 
-    let error = publish_pack_extraction_plan_to_filesystem(
+    let error = write_pack_extraction_plan_to_filesystem(
         &plan,
         &destination,
         FilesystemMergePolicy::MergeCreateOnly,
@@ -767,9 +757,11 @@ fn macos_normalization_aliases_are_aggregated_before_writes() {
     .unwrap_err();
 
     assert!(
-        error.preflight_issues().unwrap().iter().any(|issue| {
-            matches!(issue, FilesystemPublicationPreflightIssue::PathAlias { .. })
-        })
+        error
+            .preflight_issues()
+            .unwrap()
+            .iter()
+            .any(|issue| { matches!(issue, FilesystemWritePreflightIssue::PathAlias { .. }) })
     );
     assert!(!destination.exists());
 }

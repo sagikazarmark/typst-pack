@@ -93,7 +93,7 @@ fn frozen_pack_identity_vector() {
     feature = "egress",
     feature = "fs",
     feature = "opendal",
-    feature = "package-acquisition",
+    feature = "package-reading",
     feature = "parallel"
 )))]
 #[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
@@ -137,7 +137,7 @@ fn frozen_featureless_compilation_and_result_identity_vectors() {
         feature = "embedded-fonts",
         feature = "egress",
         feature = "fs",
-        feature = "package-acquisition",
+        feature = "package-reading",
         feature = "parallel"
     ))
 ))]
@@ -165,21 +165,21 @@ fn frozen_opendal_compilation_and_result_identity_vectors() {
     feature = "egress",
     feature = "fs",
     feature = "opendal",
-    feature = "package-acquisition",
+    feature = "package-reading",
     feature = "parallel"
 ))]
 #[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
 #[test]
 fn frozen_all_feature_compilation_and_result_identity_vectors() {
     assert_implementation_attestation_vectors(
-        "_test-package-download-probe,default,diagnostics,egress,embedded-fonts,fs,opendal,package-acquisition,parallel",
+        "_test-package-download-probe,default,diagnostics,egress,embedded-fonts,fs,opendal,package-reading,parallel",
         [
-            0x32, 0x7f, 0x07, 0xa5, 0x97, 0xbb, 0x11, 0x65, 0xd7, 0xfc, 0x94, 0x88, 0x44, 0xb1,
-            0x32, 0x89,
+            0x3f, 0xe4, 0xce, 0xdf, 0xd9, 0x5b, 0x8b, 0xf2, 0x35, 0x5d, 0x56, 0x67, 0x72, 0x8d,
+            0x6a, 0x37,
         ],
         [
-            0xb6, 0x4b, 0x2c, 0xeb, 0xd2, 0xc2, 0xfc, 0x36, 0x2d, 0xb0, 0x44, 0x72, 0xbb, 0xb7,
-            0x51, 0xe8,
+            0x70, 0xe9, 0xcf, 0xb0, 0x86, 0x67, 0x08, 0x21, 0xc7, 0xaf, 0xb4, 0xe0, 0xdf, 0xbd,
+            0x53, 0x85,
         ],
     );
 }

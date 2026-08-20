@@ -21,13 +21,13 @@ use typst::syntax::package::PackageSpec;
 /// The URL of the package registry this crate describes the layout of, the
 /// official Typst Universe registry. There is no standardized registry
 /// protocol, so the layout is this registry's own.
-#[cfg_attr(not(feature = "package-acquisition"), allow(dead_code))]
+#[cfg_attr(not(feature = "package-reading"), allow(dead_code))]
 pub(crate) const PACKAGE_REGISTRY_URL: &str = "https://packages.typst.org";
 
 /// The one package namespace the official registry serves. A specification in
 /// any other namespace is resolved from wherever its namespace lives, which the
 /// registry layout says nothing about.
-#[cfg_attr(not(feature = "package-acquisition"), allow(dead_code))]
+#[cfg_attr(not(feature = "package-reading"), allow(dead_code))]
 pub(crate) const PACKAGE_REGISTRY_NAMESPACE: &str = "preview";
 
 /// The suffixes a supported Font Container file is named with, without their
@@ -60,7 +60,7 @@ pub(crate) fn package_archive_cache_key(spec: &PackageSpec) -> String {
 
 /// Whether the official registry serves the specification's namespace, and so
 /// whether it can have a candidate there at all.
-#[cfg_attr(not(feature = "package-acquisition"), allow(dead_code))]
+#[cfg_attr(not(feature = "package-reading"), allow(dead_code))]
 pub(crate) fn official_registry_serves(spec: &PackageSpec) -> bool {
     spec.namespace == PACKAGE_REGISTRY_NAMESPACE
 }
@@ -70,7 +70,7 @@ pub(crate) fn official_registry_serves(spec: &PackageSpec) -> bool {
 ///
 /// No index lookup is involved: a Typst import specification always carries an
 /// exact version, so an archive is addressed directly.
-#[cfg_attr(not(feature = "package-acquisition"), allow(dead_code))]
+#[cfg_attr(not(feature = "package-reading"), allow(dead_code))]
 pub(crate) fn official_registry_archive_key(spec: &PackageSpec) -> Option<String> {
     official_registry_serves(spec)
         .then(|| format!("{}/{}-{}.tar.gz", spec.namespace, spec.name, spec.version))
@@ -78,7 +78,7 @@ pub(crate) fn official_registry_archive_key(spec: &PackageSpec) -> Option<String
 
 /// The URL of the archive the official registry serves for one exact
 /// specification, or `None` when it does not serve that namespace.
-#[cfg_attr(not(feature = "package-acquisition"), allow(dead_code))]
+#[cfg_attr(not(feature = "package-reading"), allow(dead_code))]
 pub(crate) fn official_registry_archive_url(spec: &PackageSpec) -> Option<String> {
     let key = official_registry_archive_key(spec)?;
     Some(format!("{PACKAGE_REGISTRY_URL}/{key}"))

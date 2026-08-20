@@ -1,13 +1,13 @@
 //! The reference filesystem Pack Assembler.
 //!
-//! The adapter acquires and the core transforms. It lists and reads the
+//! The adapter reads and the core transforms. It lists and reads the
 //! project, composes the Font Catalog out of the font sources the
 //! host offers, obtains the Package Trees the core reports as
 //! missing, and resolves Document Time; Pack Creation itself runs in
 //! the core over those bytes.
 //!
-//! Each acquired value records the exact bytes observed by its source adapter;
-//! the project gatherer does not reread the source solely to establish that all
+//! Each read value records the exact bytes observed by its source adapter;
+//! the project reader does not reread the source solely to establish that all
 //! values coexisted at one instant.
 
 #![cfg(feature = "fs")]
@@ -34,16 +34,16 @@ use crate::creation::{
 };
 use crate::domain::{DocumentTime, TypstTarget};
 use crate::font_catalog::FontDisposition;
-use crate::fs_fonts::{FilesystemFontLimits, FilesystemFontSource, gather_filesystem_font_catalog};
+use crate::fs_fonts::{FilesystemFontLimits, FilesystemFontSource, read_filesystem_fonts};
 use crate::fs_packages::{
-    AcquiredPackages, FilesystemPackageAcquisitionError, FilesystemPackageAuthority,
-    FilesystemPackageLimits,
+    FilesystemPackageAuthority, FilesystemPackageAuthorityReadError, FilesystemPackageLimits,
+    ReadPackages,
 };
 use crate::fs_project;
 use crate::manifest::PackMetadata;
 use crate::pack::Pack;
 use crate::package_catalog::{PackageCatalog, PackageCatalogError, PackageDisposition};
-use crate::package_failure::PackageAcquisitionFailures;
+use crate::package_failure::PackageReadFailures;
 use crate::project_snapshot::ProjectSnapshot;
 
 /// Named finite resource policy for one filesystem Pack Assembly run.
@@ -339,7 +339,7 @@ impl FilesystemPackAssembler {
         self
     }
 
-    /// Gathers one Project Snapshot and Font Catalog, then resolves exactly the
+    /// Reads one Project Snapshot and Font Catalog, then resolves exactly the
     /// packages reported between stateless Pack Creation invocations.
     pub fn assemble(
         &self,
@@ -380,13 +380,13 @@ impl FilesystemPackAssembler {
             .map_err(|err| FilesystemPackAssemblyError::io("failed to resolve entrypoint", err))?;
         let entrypoint = VirtualPath::virtualize(&root, &entrypoint_abs)
             .map_err(|_| FilesystemPackAssemblyError::OutsideRoot(entrypoint_abs.clone()))?;
-        let snapshot = Arc::new(fs_project::gather_filesystem_project(
+        let snapshot = Arc::new(fs_project::read_filesystem_project(
             &root,
             entrypoint.get_without_slash(),
             self.profile.project,
         )?);
 
-        let packages = Arc::new(AcquiredPackages::new());
+        let packages = Arc::new(ReadPackages::new());
 
         let scanned_disposition = FontDisposition::embedded_if(request.embed_fonts);
         let mut font_sources = Vec::new();
@@ -411,7 +411,7 @@ impl FilesystemPackAssembler {
                 .iter()
                 .map(|path| FilesystemFontSource::directory(path, scanned_disposition)),
         );
-        let font_catalog = gather_filesystem_font_catalog(font_sources, self.profile.fonts)?;
+        let font_catalog = read_filesystem_fonts(font_sources, self.profile.fonts)?;
 
         // The core consults no wall clock, so the adapter resolves the
         // representative request's Document Time from the host's.
@@ -431,7 +431,7 @@ impl FilesystemPackAssembler {
             )
         })?;
 
-        let mut world = AcquiredWorld {
+        let mut world = ReadWorld {
             root: root.clone(),
             #[cfg(feature = "diagnostics")]
             workdir: std::env::current_dir()
@@ -439,7 +439,7 @@ impl FilesystemPackAssembler {
                 .map(|path| path.canonicalize().unwrap_or(path)),
             library: LazyHash::new(Library::builder().build()),
             main: RootedPath::new(VirtualRoot::Project, entrypoint).intern(),
-            files: FileStore::new(AcquiredLoader {
+            files: FileStore::new(ReadLoader {
                 project: Arc::clone(&snapshot),
                 packages: Arc::clone(&packages),
             }),
@@ -507,7 +507,7 @@ impl FilesystemPackAssemblyClock {
     }
 }
 
-/// Runs creation over the acquired inputs, resolving what it reports as
+/// Runs creation over the read inputs, resolving what it reports as
 /// missing, until it issues a Pack.
 ///
 /// Package requirements can only be discovered by compiling, so each round
@@ -528,19 +528,19 @@ fn resolve_and_create(
     discovery: &DiscoverySpecification,
     metadata: Option<&PackMetadata>,
     authority: &FilesystemPackageAuthority,
-    packages: &AcquiredPackages,
+    packages: &ReadPackages,
     disposition: PackageDisposition,
 ) -> Result<(Pack, EcoVec<SourceDiagnostic>), CreationFailure> {
     let mut attempted_specs: HashSet<String> = HashSet::new();
     let mut package_failures = Vec::new();
-    let mut acquisition_failures = PackageAcquisitionFailures::new();
+    let mut read_failures = PackageReadFailures::new();
     let mut catalog = PackageCatalog::new();
     loop {
         let outcome = create(PackCreationInput {
             project,
             packages: &catalog,
             fonts,
-            package_failures: &acquisition_failures,
+            package_failures: &read_failures,
             discovery,
             metadata,
         })
@@ -566,17 +566,17 @@ fn resolve_and_create(
                             },
                         ));
                     }
-                    match authority.acquire(&spec) {
-                        Ok(acquired) => {
-                            let (tree, _) = acquired.into_parts();
+                    match authority.read(&spec) {
+                        Ok(read) => {
+                            let (tree, _) = read.into_parts();
                             packages.record(spec.clone(), tree.clone());
-                            acquisition_failures.remove(&spec);
+                            read_failures.remove(&spec);
                             catalog
                                 .insert(spec.clone(), tree, disposition)
                                 .map_err(FilesystemPackAssemblyError::InvalidPackageCatalog)?;
                         }
                         Err(error) => {
-                            acquisition_failures.insert(error.failure().clone());
+                            read_failures.insert(error.failure().clone());
                             package_failures.push(error);
                         }
                     }
@@ -592,16 +592,16 @@ enum CreationFailure {
     /// The core issued no Pack.
     Core {
         error: PackCreationError,
-        package_failures: Vec<FilesystemPackageAcquisitionError>,
+        package_failures: Vec<FilesystemPackageAuthorityReadError>,
     },
-    /// The adapter failed to acquire what the core reported as missing.
+    /// The adapter failed to read what the core reported as missing.
     Adapter(FilesystemPackAssemblyError),
 }
 
 impl CreationFailure {
     /// Reports the failure in the filesystem adapter's vocabulary, handing a
     /// failed representative compile the sources that render its diagnostics.
-    fn into_assembly_error(self, world: AcquiredWorld) -> FilesystemPackAssemblyError {
+    fn into_assembly_error(self, world: ReadWorld) -> FilesystemPackAssemblyError {
         match self {
             Self::Adapter(error) => error,
             Self::Core {
@@ -627,7 +627,7 @@ pub struct PackAssemblyReport {
     pack: Pack,
     warnings: EcoVec<SourceDiagnostic>,
     #[cfg(feature = "diagnostics")]
-    pub(crate) world: AcquiredWorld,
+    pub(crate) world: ReadWorld,
 }
 
 impl PackAssemblyReport {
@@ -653,7 +653,7 @@ impl PackAssemblyReport {
 #[derive(Debug)]
 pub struct PackAssemblyDiagnosticContext {
     #[cfg_attr(not(feature = "diagnostics"), allow(dead_code))]
-    pub(crate) world: AcquiredWorld,
+    pub(crate) world: ReadWorld,
 }
 
 /// A Pack Creation failure retained by the filesystem Pack Assembler.
@@ -663,7 +663,7 @@ pub struct FilesystemPackAssemblyCreationError {
     context: Box<PackAssemblyDiagnosticContext>,
     #[source]
     error: PackCreationError,
-    package_failures: Vec<FilesystemPackageAcquisitionError>,
+    package_failures: Vec<FilesystemPackageAuthorityReadError>,
 }
 
 impl FilesystemPackAssemblyCreationError {
@@ -678,7 +678,7 @@ impl FilesystemPackAssemblyCreationError {
     }
 
     /// Package Authority failures from the same assembly attempt.
-    pub fn package_failures(&self) -> &[FilesystemPackageAcquisitionError] {
+    pub fn package_failures(&self) -> &[FilesystemPackageAuthorityReadError] {
         &self.package_failures
     }
 
@@ -688,7 +688,7 @@ impl FilesystemPackAssemblyCreationError {
     ) -> (
         Box<PackAssemblyDiagnosticContext>,
         PackCreationError,
-        Vec<FilesystemPackageAcquisitionError>,
+        Vec<FilesystemPackageAuthorityReadError>,
     ) {
         (self.context, self.error, self.package_failures)
     }
@@ -734,13 +734,13 @@ pub enum FilesystemPackAssemblyError {
     Timings(String),
     #[error("failed to load package {spec}: {message}")]
     Package { spec: PackageSpec, message: String },
-    /// The acquired Package Trees do not form a valid Package Catalog.
+    /// The read Package Trees do not form a valid Package Catalog.
     #[error(transparent)]
     InvalidPackageCatalog(PackageCatalogError),
     #[error(transparent)]
-    ProjectGather(#[from] fs_project::FilesystemProjectGatherError),
+    ProjectRead(#[from] fs_project::FilesystemProjectReadError),
     #[error(transparent)]
-    FontGather(#[from] crate::fs_fonts::FilesystemFontGatherError),
+    FontRead(#[from] crate::fs_fonts::FilesystemFontReadError),
 }
 
 impl FilesystemPackAssemblyError {
@@ -752,24 +752,24 @@ impl FilesystemPackAssemblyError {
     }
 }
 
-/// The bytes one creation acquired, as a world.
+/// The bytes one creation read, as a world.
 ///
 /// It compiles nothing: the representative request runs in the core, over the
-/// same bytes. This world exists so that what the adapter acquired can still be
+/// same bytes. This world exists so that what the adapter read can still be
 /// presented afterwards — creation diagnostics render their source context and
 /// timing spans resolve their file and line from here, without reading the
 /// project or a package tree a second time.
-pub(crate) struct AcquiredWorld {
+pub(crate) struct ReadWorld {
     root: PathBuf,
     #[cfg(feature = "diagnostics")]
     workdir: Option<PathBuf>,
     library: LazyHash<Library>,
     main: FileId,
-    files: FileStore<AcquiredLoader>,
+    files: FileStore<ReadLoader>,
     fonts: FontStore,
 }
 
-impl AcquiredWorld {
+impl ReadWorld {
     /// The canonicalized project root.
     #[cfg(feature = "diagnostics")]
     fn root(&self) -> &Path {
@@ -782,15 +782,15 @@ impl AcquiredWorld {
     }
 }
 
-impl fmt::Debug for AcquiredWorld {
+impl fmt::Debug for ReadWorld {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("AcquiredWorld")
+        f.debug_struct("ReadWorld")
             .field("root", &self.root)
             .finish_non_exhaustive()
     }
 }
 
-impl World for AcquiredWorld {
+impl World for ReadWorld {
     fn library(&self) -> &LazyHash<Library> {
         &self.library
     }
@@ -824,7 +824,7 @@ impl World for AcquiredWorld {
 }
 
 #[cfg(feature = "diagnostics")]
-impl typst_kit::diagnostics::DiagnosticWorld for AcquiredWorld {
+impl typst_kit::diagnostics::DiagnosticWorld for ReadWorld {
     fn name(&self, id: FileId) -> String {
         match id.root() {
             VirtualRoot::Project => id
@@ -885,14 +885,14 @@ fn relative_path(path: &Path, base: &Path) -> Option<PathBuf> {
     Some(relative.iter().map(|part| part.as_os_str()).collect())
 }
 
-/// Serves file requests from the bytes the adapter acquired, and from nothing
+/// Serves file requests from the bytes the adapter read, and from nothing
 /// else: no request reaches the filesystem a second time.
-struct AcquiredLoader {
+struct ReadLoader {
     project: Arc<ProjectSnapshot>,
-    packages: Arc<AcquiredPackages>,
+    packages: Arc<ReadPackages>,
 }
 
-impl FileLoader for AcquiredLoader {
+impl FileLoader for ReadLoader {
     fn load(&self, id: FileId) -> FileResult<Bytes> {
         let path = id.vpath().get_without_slash();
         match id.root() {

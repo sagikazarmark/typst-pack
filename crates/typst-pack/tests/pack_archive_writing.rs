@@ -2,16 +2,15 @@ use std::io::{self, Write};
 
 use typst_pack::PackArchiveBytes;
 use typst_pack::pack_archive::{
-    CommitCertainty, EncodeLimits, StreamPublicationPhase, WritePackError, publish,
-    write_pack_with_limits,
+    CommitCertainty, EncodeLimits, StreamWritePhase, WritePackError, write, write_pack_with_limits,
 };
 
 #[test]
-fn stream_publication_handles_short_writes_and_reports_complete_evidence() {
+fn stream_write_handles_short_writes_and_reports_complete_evidence() {
     let archive = PackArchiveBytes::from_vec(b"complete archive".to_vec());
     let mut writer = ScriptedWriter::new(2, None, false);
 
-    let receipt = publish(&mut writer, &archive).unwrap();
+    let receipt = write(&mut writer, &archive).unwrap();
 
     assert_eq!(writer.bytes, archive.as_slice());
     assert_eq!(receipt.visible_prefix(), archive.len());
@@ -23,10 +22,10 @@ fn stream_write_failure_reports_the_exact_visible_prefix() {
     let archive = PackArchiveBytes::from_vec(b"complete archive".to_vec());
     let mut writer = ScriptedWriter::new(3, Some(6), false);
 
-    let error = publish(&mut writer, &archive).unwrap_err();
+    let error = write(&mut writer, &archive).unwrap_err();
 
     assert_eq!(writer.bytes, b"comple");
-    assert_eq!(error.phase(), StreamPublicationPhase::Write);
+    assert_eq!(error.phase(), StreamWritePhase::Write);
     assert_eq!(error.visible_prefix(), 6);
     assert_eq!(error.commit_certainty(), CommitCertainty::NotCommitted);
     assert!(!writer.flush_called);
@@ -37,10 +36,10 @@ fn stream_flush_failure_reports_the_complete_visible_prefix_as_indeterminate() {
     let archive = PackArchiveBytes::from_vec(b"complete archive".to_vec());
     let mut writer = ScriptedWriter::new(usize::MAX, None, true);
 
-    let error = publish(&mut writer, &archive).unwrap_err();
+    let error = write(&mut writer, &archive).unwrap_err();
 
     assert_eq!(writer.bytes, archive.as_slice());
-    assert_eq!(error.phase(), StreamPublicationPhase::Flush);
+    assert_eq!(error.phase(), StreamWritePhase::Flush);
     assert_eq!(error.visible_prefix(), archive.len());
     assert_eq!(error.commit_certainty(), CommitCertainty::Indeterminate);
 }
@@ -52,13 +51,13 @@ fn write_pack_returns_exact_encoded_bytes_for_retry_without_reencoding() {
     let error =
         write_pack_with_limits(&mut failing, &pack, EncodeLimits::reference_v1()).unwrap_err();
 
-    let WritePackError::Publish { archive, source } = error else {
-        panic!("expected a publication failure");
+    let WritePackError::Write { archive, source } = error else {
+        panic!("expected a write failure");
     };
     assert_eq!(source.visible_prefix(), 8);
 
     let mut retry = Vec::new();
-    publish(&mut retry, &archive).unwrap();
+    write(&mut retry, &archive).unwrap();
     let decoded = typst_pack::pack_archive::decode(
         &archive,
         typst_pack::pack_archive::DecodeLimits::reference_v1(),
@@ -70,22 +69,21 @@ fn write_pack_returns_exact_encoded_bytes_for_retry_without_reencoding() {
 
 #[cfg(feature = "fs")]
 #[test]
-fn file_create_new_publishes_complete_bytes_and_never_replaces() {
+fn file_create_new_writes_complete_bytes_and_never_replaces() {
     use typst_pack::pack_archive::StagingResidueStatus;
-    use typst_pack::pack_archive::{FilePublicationPhase, FilePublicationPolicy, publish_file};
+    use typst_pack::pack_archive::{FileWritePhase, FileWritePolicy, write_file};
 
     let directory = tempfile::tempdir().unwrap();
     let destination = directory.path().join("archive.typk");
     let archive = PackArchiveBytes::from_vec(b"new archive".to_vec());
 
-    let receipt = publish_file(&destination, &archive, FilePublicationPolicy::CreateNew).unwrap();
+    let receipt = write_file(&destination, &archive, FileWritePolicy::CreateNew).unwrap();
     assert_eq!(std::fs::read(&destination).unwrap(), archive.as_slice());
     assert_eq!(receipt.destination(), destination);
 
     let replacement = PackArchiveBytes::from_vec(b"replacement".to_vec());
-    let error =
-        publish_file(&destination, &replacement, FilePublicationPolicy::CreateNew).unwrap_err();
-    assert_eq!(error.phase(), FilePublicationPhase::Commit);
+    let error = write_file(&destination, &replacement, FileWritePolicy::CreateNew).unwrap_err();
+    assert_eq!(error.phase(), FileWritePhase::Commit);
     assert_eq!(error.commit_certainty(), CommitCertainty::NotCommitted);
     assert_eq!(std::fs::read(&destination).unwrap(), archive.as_slice());
     let staging = error.staging_residue().expect("retry material on disk");
@@ -101,8 +99,8 @@ fn file_create_new_publishes_complete_bytes_and_never_replaces() {
 #[test]
 fn file_replace_requires_an_existing_destination_and_commits_atomically() {
     use typst_pack::pack_archive::{
-        FilePublicationPhase, FilePublicationPolicy, SavePackError, StagingResidueStatus,
-        publish_file, save_pack_with_limits,
+        FileWritePhase, FileWritePolicy, SavePackError, StagingResidueStatus,
+        save_pack_with_limits, write_file,
     };
 
     let directory = tempfile::tempdir().unwrap();
@@ -115,26 +113,17 @@ fn file_replace_requires_an_existing_destination_and_commits_atomically() {
         target_os = "macos",
         target_os = "ios"
     ))) {
-        let error = publish_file(
-            &destination,
-            &archive,
-            FilePublicationPolicy::ReplaceExisting,
-        )
-        .unwrap_err();
-        assert_eq!(error.phase(), FilePublicationPhase::Policy);
+        let error =
+            write_file(&destination, &archive, FileWritePolicy::ReplaceExisting).unwrap_err();
+        assert_eq!(error.phase(), FileWritePhase::Policy);
         assert_eq!(error.commit_certainty(), CommitCertainty::NotCommitted);
         assert_eq!(error.staging_residue_status(), StagingResidueStatus::Absent);
         assert_eq!(error.staging_residue(), None);
         return;
     }
 
-    let missing = publish_file(
-        &destination,
-        &archive,
-        FilePublicationPolicy::ReplaceExisting,
-    )
-    .unwrap_err();
-    assert_eq!(missing.phase(), FilePublicationPhase::Commit);
+    let missing = write_file(&destination, &archive, FileWritePolicy::ReplaceExisting).unwrap_err();
+    assert_eq!(missing.phase(), FileWritePhase::Commit);
     assert_eq!(missing.commit_certainty(), CommitCertainty::NotCommitted);
     assert_eq!(
         missing.staging_residue_status(),
@@ -147,12 +136,7 @@ fn file_replace_requires_an_existing_destination_and_commits_atomically() {
     );
 
     std::fs::write(&destination, b"old archive").unwrap();
-    publish_file(
-        &destination,
-        &archive,
-        FilePublicationPolicy::ReplaceExisting,
-    )
-    .unwrap();
+    write_file(&destination, &archive, FileWritePolicy::ReplaceExisting).unwrap();
     assert_eq!(std::fs::read(&destination).unwrap(), archive.as_slice());
 
     let pack = simple_pack();
@@ -160,13 +144,13 @@ fn file_replace_requires_an_existing_destination_and_commits_atomically() {
         &destination,
         &pack,
         EncodeLimits::reference_v1(),
-        FilePublicationPolicy::CreateNew,
+        FileWritePolicy::CreateNew,
     )
     .unwrap_err();
-    let SavePackError::Publish { archive, source } = error else {
-        panic!("expected a publication failure");
+    let SavePackError::Write { archive, source } = error else {
+        panic!("expected a write failure");
     };
-    assert_eq!(source.phase(), FilePublicationPhase::Commit);
+    assert_eq!(source.phase(), FileWritePhase::Commit);
     let decoded = typst_pack::pack_archive::decode(
         &archive,
         typst_pack::pack_archive::DecodeLimits::reference_v1(),

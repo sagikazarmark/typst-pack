@@ -177,7 +177,7 @@ classification = "unavoidable-mirror"
 coverage = ["crates/typst-pack-cli/tests/official_typst_cli.rs", "crates/typst-pack-cli/tests/cli.rs"]
 
 [[semantic]]
-name = "artifact-publication"
+name = "artifact-writing"
 classification = "adapter-concern"
 coverage = ["crates/typst-pack-cli/tests/cli.rs", ".dagger/modules/tests/main.dang"]
 

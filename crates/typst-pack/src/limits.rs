@@ -21,20 +21,20 @@ impl<const PROFILE: u8> fmt::Debug for ResourceKind<PROFILE> {
 
 const fn operation_name(profile: u8) -> &'static str {
     match profile {
-        0 => "filesystem project gathering",
-        1 => "filesystem Package Tree gathering",
-        2 => "filesystem Font Catalog gathering",
+        0 => "filesystem project reading",
+        1 => "filesystem Package Tree reading",
+        2 => "filesystem Font Catalog reading",
         3 => "compilation",
         4 => "Pack Archive Encode",
         5 => "Pack Archive Decode",
         6 => "Package Archive Expansion",
-        7 => "Pack Archive Acquisition",
-        8 => "OpenDAL recursive acquisition",
-        9 => "OpenDAL Project Acquisition",
-        10 => "OpenDAL Font Acquisition",
-        11 => "OpenDAL Package Tree Acquisition",
-        12 => "OpenDAL Package Archive Acquisition",
-        13 => "OpenDAL Package Acquisition",
+        7 => "Pack Archive Read",
+        8 => "OpenDAL recursive read",
+        9 => "OpenDAL Project Read",
+        10 => "OpenDAL Font Read",
+        11 => "OpenDAL Package Tree Read",
+        12 => "OpenDAL Package Archive Read",
+        13 => "OpenDAL Package Read",
         _ => "resource-limited operation",
     }
 }

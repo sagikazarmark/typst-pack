@@ -1,44 +1,44 @@
 use std::io::{self, Cursor, Read};
 
 use typst_pack::pack_archive::{
-    AcquisitionError, AcquisitionLimitError, AcquisitionLimits, AcquisitionLimitsError,
-    AcquisitionResource, ReadPackError, acquire, read_pack,
+    ReadError, ReadLimitError, ReadLimits, ReadLimitsError, ReadPackError, ReadResource, read,
+    read_pack,
 };
 
 #[test]
 fn reference_v1_profile_bounds_exact_archive_bytes() {
     assert_eq!(
-        AcquisitionLimits::reference_v1().archive_bytes(),
+        ReadLimits::reference_v1().archive_bytes(),
         512 * 1024 * 1024
     );
 }
 
 #[test]
-fn acquisition_limits_reject_an_unprobeable_ceiling() {
+fn read_limits_reject_an_unprobeable_ceiling() {
     assert!(matches!(
-        AcquisitionLimits::new(u64::MAX),
-        Err(AcquisitionLimitsError::CannotProbe {
-            resource: AcquisitionResource::ArchiveBytes,
+        ReadLimits::new(u64::MAX),
+        Err(ReadLimitsError::CannotProbe {
+            resource: ReadResource::ArchiveBytes,
             ceiling: u64::MAX,
         })
     ));
 }
 
 #[test]
-fn stream_acquisition_handles_short_reads_and_preserves_exact_bytes() {
+fn stream_read_handles_short_reads_and_preserves_exact_bytes() {
     let mut reader = ChunkedReader::new(b"exact archive bytes", 2);
 
-    let archive = acquire(&mut reader, AcquisitionLimits::new(19).unwrap()).unwrap();
+    let archive = read(&mut reader, ReadLimits::new(19).unwrap()).unwrap();
 
     assert_eq!(archive.as_slice(), b"exact archive bytes");
     assert!(reader.reads > 1);
 }
 
 #[test]
-fn acquired_archive_debug_excludes_payload_bytes() {
-    let archive = acquire(
+fn read_archive_debug_excludes_payload_bytes() {
+    let archive = read(
         Cursor::new(b"secret archive bytes"),
-        AcquisitionLimits::reference_v1(),
+        ReadLimits::reference_v1(),
     )
     .unwrap();
 
@@ -46,21 +46,20 @@ fn acquired_archive_debug_excludes_payload_bytes() {
 }
 
 #[test]
-fn stream_acquisition_accepts_the_boundary_and_probes_only_one_byte_past_it() {
+fn stream_read_accepts_the_boundary_and_probes_only_one_byte_past_it() {
     let bytes = b"12345";
     for ceiling in [bytes.len() as u64 + 1, bytes.len() as u64] {
-        let archive =
-            acquire(Cursor::new(bytes), AcquisitionLimits::new(ceiling).unwrap()).unwrap();
+        let archive = read(Cursor::new(bytes), ReadLimits::new(ceiling).unwrap()).unwrap();
         assert_eq!(archive.as_slice(), bytes);
     }
 
     let mut one_over = ChunkedReader::new(b"123456789", 9);
-    let error = acquire(&mut one_over, AcquisitionLimits::new(5).unwrap()).unwrap_err();
+    let error = read(&mut one_over, ReadLimits::new(5).unwrap()).unwrap_err();
 
     assert!(matches!(
         error,
-        AcquisitionError::Limit(AcquisitionLimitError::Exceeded {
-            resource: AcquisitionResource::ArchiveBytes,
+        ReadError::Limit(ReadLimitError::Exceeded {
+            resource: ReadResource::ArchiveBytes,
             ceiling: 5,
             observed_at_least: 6,
         })
@@ -69,18 +68,18 @@ fn stream_acquisition_accepts_the_boundary_and_probes_only_one_byte_past_it() {
 }
 
 #[test]
-fn stream_acquisition_returns_a_typed_read_error_without_partial_bytes() {
-    let error = acquire(FailingReader, AcquisitionLimits::new(10).unwrap()).unwrap_err();
+fn stream_read_returns_a_typed_read_error_without_partial_bytes() {
+    let error = read(FailinReader, ReadLimits::new(10).unwrap()).unwrap_err();
 
-    assert!(matches!(error, AcquisitionError::Read(_)));
+    assert!(matches!(error, ReadError::Read(_)));
 }
 
 #[test]
-fn read_pack_returns_exact_acquired_bytes_when_decoding_fails() {
+fn read_pack_returns_exact_read_bytes_when_decoding_fails() {
     let expected = b"not a Pack Archive";
     let error = read_pack(
         Cursor::new(expected),
-        AcquisitionLimits::new(expected.len() as u64).unwrap(),
+        ReadLimits::new(expected.len() as u64).unwrap(),
         typst_pack::pack_archive::DecodeLimits::reference_v1(),
     )
     .unwrap_err();
@@ -93,25 +92,25 @@ fn read_pack_returns_exact_acquired_bytes_when_decoding_fails() {
 
 #[cfg(feature = "fs")]
 #[test]
-fn file_acquisition_uses_known_size_preflight_and_exact_reads() {
+fn file_read_uses_known_size_preflight_and_exact_reads() {
     use typst_pack::pack_archive::{
-        FileAcquisitionError, FileAcquisitionPhase, OpenPackError, acquire_file, open_pack,
+        FileReadError, FileReadPhase, OpenPackError, open_pack, read_file,
     };
 
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("archive.typk");
     std::fs::write(&path, b"12345").unwrap();
 
-    let archive = acquire_file(&path, AcquisitionLimits::new(5).unwrap()).unwrap();
+    let archive = read_file(&path, ReadLimits::new(5).unwrap()).unwrap();
     assert_eq!(archive.as_slice(), b"12345");
 
-    let error = acquire_file(&path, AcquisitionLimits::new(4).unwrap()).unwrap_err();
-    assert_eq!(error.phase(), FileAcquisitionPhase::Metadata);
+    let error = read_file(&path, ReadLimits::new(4).unwrap()).unwrap_err();
+    assert_eq!(error.phase(), FileReadPhase::Metadata);
     assert!(matches!(
         error,
-        FileAcquisitionError::Limit {
-            source: AcquisitionLimitError::Exceeded {
-                resource: AcquisitionResource::ArchiveBytes,
+        FileReadError::Limit {
+            source: ReadLimitError::Exceeded {
+                resource: ReadResource::ArchiveBytes,
                 ceiling: 4,
                 observed_at_least: 5,
             },
@@ -123,7 +122,7 @@ fn file_acquisition_uses_known_size_preflight_and_exact_reads() {
     std::fs::write(&path, invalid).unwrap();
     let error = open_pack(
         &path,
-        AcquisitionLimits::new(invalid.len() as u64).unwrap(),
+        ReadLimits::new(invalid.len() as u64).unwrap(),
         typst_pack::pack_archive::DecodeLimits::reference_v1(),
     )
     .unwrap_err();
@@ -164,9 +163,9 @@ impl Read for ChunkedReader<'_> {
     }
 }
 
-struct FailingReader;
+struct FailinReader;
 
-impl Read for FailingReader {
+impl Read for FailinReader {
     fn read(&mut self, _buffer: &mut [u8]) -> io::Result<usize> {
         Err(io::Error::other("scripted read failure"))
     }

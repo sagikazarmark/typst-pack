@@ -43,7 +43,7 @@ impl ProjectSnapshot {
 
 /// Assembles a [`ProjectSnapshot`] from already selected path-and-bytes entries.
 ///
-/// Source gatherers decide membership before this operation. Assembly owns only
+/// Source readers decide membership before this operation. Assembly owns only
 /// universal snapshot invariants: canonical paths, duplicate and `.typk` path
 /// rejection, exact bytes, canonical order, and entrypoint presence.
 #[derive(Debug)]

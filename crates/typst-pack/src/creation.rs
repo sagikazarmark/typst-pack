@@ -1,6 +1,6 @@
 //! Pack Creation: one representative Typst request over supplied inputs.
 //!
-//! Creation acquires nothing. The caller supplies a [`ProjectSnapshot`], a
+//! Creation reads nothing. The caller supplies a [`ProjectSnapshot`], a
 //! [`FontCatalog`], and the Package Trees resolved for the
 //! document, all as bytes it already holds, so the operation runs wherever the
 //! core runs — including a host with no filesystem and no clock. Obtaining
@@ -26,9 +26,7 @@ use crate::font_catalog::{CatalogFonts, FontCatalog, FontDisposition};
 use crate::manifest::PackMetadata;
 use crate::pack::{Pack, PackBuildError, PackInvariantError};
 use crate::package_catalog::PackageCatalog;
-use crate::package_failure::{
-    PackageAcquisitionFailure, PackageAcquisitionFailureReason, PackageAcquisitionFailures,
-};
+use crate::package_failure::{PackageReadFailure, PackageReadFailureReason, PackageReadFailures};
 use crate::payload::SharedBytes;
 use crate::project_snapshot::ProjectSnapshot;
 
@@ -103,8 +101,8 @@ pub struct PackCreationInput<'a> {
     pub packages: &'a PackageCatalog,
     /// Ordered Font Containers available to Dependency Discovery.
     pub fonts: &'a FontCatalog,
-    /// Failed package acquisitions to attach at importing source spans.
-    pub package_failures: &'a PackageAcquisitionFailures,
+    /// Failed package reads to attach at importing source spans.
+    pub package_failures: &'a PackageReadFailures,
     /// Semantic controls used only for this Dependency Discovery run.
     pub discovery: &'a DiscoverySpecification,
     /// Optional descriptive Pack metadata, excluded from Pack Identity.
@@ -181,11 +179,11 @@ pub enum PackCreationError {
 /// failed import ends module evaluation, one round reports what that round
 /// reached, and a project needing several packages completes over repeated
 /// invocation. A specification the caller cannot resolve is added to
-/// [`PackageAcquisitionFailures`], which fails the next round's
+/// [`PackageReadFailures`], which fails the next round's
 /// Dependency Discovery at the import that needed it.
 ///
 /// Creation borrows validated bytes and has nothing to re-read. A Pack represents the
-/// exact values its source adapters acquired, without guaranteeing that values
+/// exact values its source adapters read, without guaranteeing that values
 /// from mutable sources all coexisted at one instant.
 pub fn create(input: PackCreationInput<'_>) -> Result<PackCreationOutcome, PackCreationError> {
     let entrypoint = VirtualPath::new(input.project.entrypoint())
@@ -419,7 +417,7 @@ impl DiscoveryClock {
 struct SuppliedLoader<'a> {
     project: &'a ProjectSnapshot,
     packages: &'a PackageCatalog,
-    package_failures: &'a PackageAcquisitionFailures,
+    package_failures: &'a PackageReadFailures,
 }
 
 impl FileLoader for SuppliedLoader<'_> {
@@ -452,20 +450,20 @@ impl FileLoader for SuppliedLoader<'_> {
     }
 }
 
-fn package_failure_for_discovery(failure: &PackageAcquisitionFailure) -> PackageError {
+fn package_failure_for_discovery(failure: &PackageReadFailure) -> PackageError {
     let spec = failure.spec().clone();
     match failure.reason() {
-        PackageAcquisitionFailureReason::NotFound => PackageError::NotFound(spec),
-        PackageAcquisitionFailureReason::VersionNotFound { latest } => {
+        PackageReadFailureReason::NotFound => PackageError::NotFound(spec),
+        PackageReadFailureReason::VersionNotFound { latest } => {
             PackageError::VersionNotFound(spec, *latest)
         }
-        PackageAcquisitionFailureReason::NetworkFailed { detail } => {
+        PackageReadFailureReason::NetworkFailed { detail } => {
             PackageError::NetworkFailed(detail.clone().map(Into::into))
         }
-        PackageAcquisitionFailureReason::MalformedArchive { detail } => {
+        PackageReadFailureReason::MalformedArchive { detail } => {
             PackageError::MalformedArchive(detail.clone().map(Into::into))
         }
-        PackageAcquisitionFailureReason::Other { detail } => {
+        PackageReadFailureReason::Other { detail } => {
             PackageError::Other(detail.clone().map(Into::into))
         }
     }

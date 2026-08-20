@@ -1,11 +1,11 @@
-//! Versioned Pack Archive encoding, decoding, acquisition, and publication.
+//! Versioned Pack Archive encoding, decoding, read, and write.
 
-mod acquisition;
-mod publication;
+mod read;
+mod write;
 
 pub use crate::CommitCertainty;
-pub use acquisition::*;
-pub use publication::*;
+pub use read::*;
+pub use write::*;
 
 use std::collections::{BTreeMap, BTreeSet, btree_map::Entry};
 use std::io::{Cursor, Read, Seek, SeekFrom, Write};

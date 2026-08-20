@@ -15,16 +15,16 @@ use scripted_opendal::{
     ScriptedService,
 };
 use typst_pack::opendal::pack_archive::{
-    PackArchiveAcquisitionErrorCause, PackArchiveAcquisitionRequest,
-    PackArchiveAcquisitionRequestError, acquire_pack_archive,
+    PackArchiveReadErrorCause, PackArchiveReadRequest, PackArchiveReadRequestError,
+    read_pack_archive,
 };
 use typst_pack::opendal::{
     Location, LocationRoleError, OperatorBinding, OperatorBindings, OperatorResolver,
 };
-use typst_pack::pack_archive::{AcquisitionLimitError, AcquisitionLimits, AcquisitionResource};
+use typst_pack::pack_archive::{ReadLimitError, ReadLimits, ReadResource};
 
 #[test]
-fn acquires_exact_pack_archive_bytes_without_decoding() {
+fn reads_exact_pack_archive_bytes_without_decoding() {
     let script = ReadScript::new(
         "packs/document.typk",
         2,
@@ -35,14 +35,14 @@ fn acquires_exact_pack_archive_bytes_without_decoding() {
     let binding = OperatorBinding::new("archive").unwrap();
     let bindings = OperatorBindings::new([(binding, service.operator())]).unwrap();
     let source = "archive:/packs/document.typk".parse().unwrap();
-    let limits = AcquisitionLimits::new(10).unwrap();
-    let request = PackArchiveAcquisitionRequest::new(source, limits).unwrap();
+    let limits = ReadLimits::new(10).unwrap();
+    let request = PackArchiveReadRequest::new(source, limits).unwrap();
 
     assert_eq!(request.source().to_string(), "archive:/packs/document.typk");
     assert_eq!(request.limits(), limits);
 
-    let mut acquisition = pin!(acquire_pack_archive(&bindings, &request));
-    let archive = expect_ready(acquisition.as_mut()).unwrap();
+    let mut read = pin!(read_pack_archive(&bindings, &request));
+    let archive = expect_ready(read.as_mut()).unwrap();
 
     assert_eq!(archive.as_slice(), b"not a pack");
     assert_eq!(
@@ -66,7 +66,7 @@ fn acquires_exact_pack_archive_bytes_without_decoding() {
 }
 
 #[test]
-fn memory_acquires_empty_short_exact_and_chunked_archives() {
+fn memory_reads_empty_short_exact_and_chunked_archives() {
     for (path, bytes, ceiling) in [
         ("empty.typk", b"".as_slice(), 0),
         ("short.typk", b"abc".as_slice(), 4),
@@ -83,14 +83,10 @@ fn memory_acquires_empty_short_exact_and_chunked_archives() {
         let source =
             Location::from_operation_path(OperatorBinding::new("memory").unwrap(), path).unwrap();
         let request =
-            PackArchiveAcquisitionRequest::new(source, AcquisitionLimits::new(ceiling).unwrap())
-                .unwrap();
-        let mut acquisition = pin!(acquire_pack_archive(&bindings, &request));
+            PackArchiveReadRequest::new(source, ReadLimits::new(ceiling).unwrap()).unwrap();
+        let mut read = pin!(read_pack_archive(&bindings, &request));
 
-        assert_eq!(
-            expect_ready(acquisition.as_mut()).unwrap().as_slice(),
-            bytes
-        );
+        assert_eq!(expect_ready(read.as_mut()).unwrap().as_slice(), bytes);
     }
 }
 
@@ -104,16 +100,15 @@ fn memory_reports_one_byte_over_the_archive_ceiling() {
     let bindings =
         OperatorBindings::new([(OperatorBinding::new("memory").unwrap(), operator)]).unwrap();
     let source: Location = "memory:/large.typk".parse().unwrap();
-    let request =
-        PackArchiveAcquisitionRequest::new(source, AcquisitionLimits::new(4).unwrap()).unwrap();
-    let mut acquisition = pin!(acquire_pack_archive(&bindings, &request));
+    let request = PackArchiveReadRequest::new(source, ReadLimits::new(4).unwrap()).unwrap();
+    let mut read = pin!(read_pack_archive(&bindings, &request));
 
-    let error = expect_ready(acquisition.as_mut()).unwrap_err();
+    let error = expect_ready(read.as_mut()).unwrap_err();
 
     assert!(matches!(
         error.cause(),
-        PackArchiveAcquisitionErrorCause::Limit(AcquisitionLimitError::Exceeded {
-            resource: AcquisitionResource::ArchiveBytes,
+        PackArchiveReadErrorCause::Limit(ReadLimitError::Exceeded {
+            resource: ReadResource::ArchiveBytes,
             ceiling: 4,
             observed_at_least: 5,
         })
@@ -128,12 +123,11 @@ fn request_rejects_non_object_locations_before_resolution() {
     ] {
         let source: Location = source.parse().unwrap();
         let error =
-            PackArchiveAcquisitionRequest::new(source.clone(), AcquisitionLimits::new(8).unwrap())
-                .unwrap_err();
+            PackArchiveReadRequest::new(source.clone(), ReadLimits::new(8).unwrap()).unwrap_err();
 
         assert!(matches!(
             error,
-            PackArchiveAcquisitionRequestError::InvalidSourceRole {
+            PackArchiveReadRequestError::InvalidSourceRole {
                 location,
                 source: role_error,
             } if location == source && role_error == expected
@@ -163,12 +157,9 @@ fn preserves_empty_short_and_exact_ceiling_archives() {
         let service = ScriptedService::new(Capabilities::all(), [], [script], 8);
         let bindings = bindings(&service);
         let request = request(path, ceiling);
-        let mut acquisition = pin!(acquire_pack_archive(&bindings, &request));
+        let mut read = pin!(read_pack_archive(&bindings, &request));
 
-        assert_eq!(
-            expect_ready(acquisition.as_mut()).unwrap().as_slice(),
-            expected
-        );
+        assert_eq!(expect_ready(read.as_mut()).unwrap().as_slice(), expected);
         assert!(matches!(
             service.log().entries().last(),
             Some(OperationLogEntry::ReadCompleted { id: 0 })
@@ -187,14 +178,14 @@ fn reports_archive_limit_with_only_one_probe_byte_retained() {
     let service = ScriptedService::new(Capabilities::all(), [], [script], 8);
     let bindings = bindings(&service);
     let request = request("large.typk", 4);
-    let mut acquisition = pin!(acquire_pack_archive(&bindings, &request));
+    let mut read = pin!(read_pack_archive(&bindings, &request));
 
-    let error = expect_ready(acquisition.as_mut()).unwrap_err();
+    let error = expect_ready(read.as_mut()).unwrap_err();
 
     assert!(matches!(
         error.cause(),
-        PackArchiveAcquisitionErrorCause::Limit(AcquisitionLimitError::Exceeded {
-            resource: AcquisitionResource::ArchiveBytes,
+        PackArchiveReadErrorCause::Limit(ReadLimitError::Exceeded {
+            resource: ReadResource::ArchiveBytes,
             ceiling: 4,
             observed_at_least: 5,
         })
@@ -214,11 +205,11 @@ fn keeps_absence_unsupported_resolution_and_read_failures_distinct() {
     let absent_service = ScriptedService::new(Capabilities::all(), [], [], 8);
     let absent_bindings = bindings(&absent_service);
     let absent_request = request("absent.typk", 8);
-    let mut absent = pin!(acquire_pack_archive(&absent_bindings, &absent_request));
+    let mut absent = pin!(read_pack_archive(&absent_bindings, &absent_request));
     let absent = expect_ready(absent.as_mut()).unwrap_err();
     assert!(matches!(
         absent.cause(),
-        PackArchiveAcquisitionErrorCause::ObjectAbsent(source)
+        PackArchiveReadErrorCause::ObjectAbsent(source)
             if source.kind() == opendal::ErrorKind::NotFound
     ));
     assert_eq!(
@@ -247,14 +238,14 @@ fn keeps_absence_unsupported_resolution_and_read_failures_distinct() {
     );
     let unsupported_bindings = bindings(&unsupported_service);
     let unsupported_request = request("unsupported.typk", 8);
-    let mut unsupported = pin!(acquire_pack_archive(
+    let mut unsupported = pin!(read_pack_archive(
         &unsupported_bindings,
         &unsupported_request
     ));
     let unsupported = expect_ready(unsupported.as_mut()).unwrap_err();
     assert!(matches!(
         unsupported.cause(),
-        PackArchiveAcquisitionErrorCause::ReadUnsupported
+        PackArchiveReadErrorCause::ReadUnsupported
     ));
     assert!(
         unsupported
@@ -279,11 +270,11 @@ fn keeps_absence_unsupported_resolution_and_read_failures_distinct() {
     let read_service = ScriptedService::new(Capabilities::all(), [], [read_script], 8);
     let read_bindings = bindings(&read_service);
     let read_request = request("broken.typk", 32);
-    let mut read = pin!(acquire_pack_archive(&read_bindings, &read_request));
+    let mut read = pin!(read_pack_archive(&read_bindings, &read_request));
     let read = expect_ready(read.as_mut()).unwrap_err();
     assert!(matches!(
         read.cause(),
-        PackArchiveAcquisitionErrorCause::Read(source)
+        PackArchiveReadErrorCause::Read(source)
             if source.kind() == opendal::ErrorKind::PermissionDenied
     ));
     assert_safe_outer_diagnostics(&read, "archive", "broken.typk");
@@ -300,24 +291,21 @@ fn keeps_absence_unsupported_resolution_and_read_failures_distinct() {
     let partial_service = ScriptedService::new(Capabilities::all(), [], [partial_not_found], 8);
     let partial_bindings = bindings(&partial_service);
     let partial_request = request("partial.typk", 32);
-    let partial = expect_ready(pin!(acquire_pack_archive(
-        &partial_bindings,
-        &partial_request
-    )))
-    .unwrap_err();
+    let partial =
+        expect_ready(pin!(read_pack_archive(&partial_bindings, &partial_request))).unwrap_err();
     assert!(matches!(
         partial.cause(),
-        PackArchiveAcquisitionErrorCause::Read(source)
+        PackArchiveReadErrorCause::Read(source)
             if source.kind() == opendal::ErrorKind::NotFound
     ));
 
     let resolver = RejectingResolver;
     let resolve_request = request("secret.typk", 8);
-    let mut resolve = pin!(acquire_pack_archive(&resolver, &resolve_request));
+    let mut resolve = pin!(read_pack_archive(&resolver, &resolve_request));
     let resolve = expect_ready(resolve.as_mut()).unwrap_err();
     assert!(matches!(
         resolve.cause(),
-        PackArchiveAcquisitionErrorCause::ResolveOperator(source)
+        PackArchiveReadErrorCause::ResolveOperator(source)
             if source.downcast_ref::<ResolverFailure>().is_some()
     ));
     assert!(
@@ -334,7 +322,7 @@ fn keeps_absence_unsupported_resolution_and_read_failures_distinct() {
 }
 
 #[test]
-fn dropping_pending_acquisition_returns_no_terminal_value() {
+fn dropping_pending_read_returns_no_terminal_value() {
     let pending = PendingPoint::new();
     let script = ReadScript::new(
         "pending.typk",
@@ -349,8 +337,8 @@ fn dropping_pending_acquisition_returns_no_terminal_value() {
     let configured_bindings = bindings(&service);
     let request = request("pending.typk", 16);
     {
-        let mut acquisition = pin!(acquire_pack_archive(&configured_bindings, &request));
-        assert!(matches!(poll_once(acquisition.as_mut()), Poll::Pending));
+        let mut read = pin!(read_pack_archive(&configured_bindings, &request));
+        assert!(matches!(poll_once(read.as_mut()), Poll::Pending));
         assert!(pending.was_observed());
     }
 
@@ -387,7 +375,7 @@ fn dropping_pending_acquisition_returns_no_terminal_value() {
     .unwrap();
     let replay_service = ScriptedService::new(Capabilities::all(), [], [replay], 8);
     let replay_bindings = bindings(&replay_service);
-    let mut replay = pin!(acquire_pack_archive(&replay_bindings, &request));
+    let mut replay = pin!(read_pack_archive(&replay_bindings, &request));
 
     assert_eq!(
         expect_ready(replay.as_mut()).unwrap().as_slice(),
@@ -400,12 +388,12 @@ fn dropping_pending_acquisition_returns_no_terminal_value() {
 }
 
 #[test]
-fn operator_bindings_produce_a_send_acquisition_future() {
+fn operator_bindings_produce_a_send_read_future() {
     let service = ScriptedService::new(Capabilities::all(), [], [], 1);
     let bindings = bindings(&service);
     let request = request("archive.typk", 8);
 
-    assert_send(acquire_pack_archive(&bindings, &request));
+    assert_send(read_pack_archive(&bindings, &request));
 }
 
 fn expect_ready<F: Future>(future: std::pin::Pin<&mut F>) -> F::Output {
@@ -419,10 +407,10 @@ fn poll_once<F: Future>(future: std::pin::Pin<&mut F>) -> Poll<F::Output> {
     future.poll(&mut Context::from_waker(Waker::noop()))
 }
 
-fn request(path: &str, ceiling: u64) -> PackArchiveAcquisitionRequest {
+fn request(path: &str, ceiling: u64) -> PackArchiveReadRequest {
     let source =
         Location::from_operation_path(OperatorBinding::new("archive").unwrap(), path).unwrap();
-    PackArchiveAcquisitionRequest::new(source, AcquisitionLimits::new(ceiling).unwrap()).unwrap()
+    PackArchiveReadRequest::new(source, ReadLimits::new(ceiling).unwrap()).unwrap()
 }
 
 fn bindings(service: &ScriptedService) -> OperatorBindings {
@@ -430,7 +418,7 @@ fn bindings(service: &ScriptedService) -> OperatorBindings {
 }
 
 fn assert_safe_outer_diagnostics(
-    error: &typst_pack::opendal::pack_archive::PackArchiveAcquisitionError,
+    error: &typst_pack::opendal::pack_archive::PackArchiveReadError,
     binding: &str,
     operation_path: &str,
 ) {

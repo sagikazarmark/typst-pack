@@ -38,9 +38,9 @@ fn opendal_location_regressions_preserve_canonical_objects_and_alias_rejections(
 #[test]
 fn compilation_artifact_key_regressions_replay_through_request_construction() {
     use typst_pack::opendal::Location;
-    use typst_pack::opendal::publication::{
-        CompilationArtifactKeyIssue, CompilationArtifactPublicationRequest,
-        CompilationArtifactPublicationRequestIssue, PublicationPolicy,
+    use typst_pack::opendal::write::{
+        CompilationArtifactKeyIssue, CompilationArtifactWriteRequest,
+        CompilationArtifactWriteRequestIssue, WritePolicy,
     };
 
     let pack = Pack::builder("main.typ")
@@ -62,11 +62,11 @@ fn compilation_artifact_key_regressions_replay_through_request_construction() {
     let destination: Location = "fuzz:/artifacts/".parse().unwrap();
 
     for keys in [["tree%", "tree%/page%2F.svg"], ["a\u{feff}", "a\u{200b}"]] {
-        let request = CompilationArtifactPublicationRequest::new(
+        let request = CompilationArtifactWriteRequest::new(
             &result,
             destination.clone(),
             keys,
-            PublicationPolicy::CreateOrVerify,
+            WritePolicy::CreateOrVerify,
         )
         .unwrap();
         assert_eq!(request.artifact_keys(), keys);
@@ -83,16 +83,16 @@ fn compilation_artifact_key_regressions_replay_through_request_construction() {
             CompilationArtifactKeyIssue::NormalizationAlias { index: 1 },
         ),
     ] {
-        let rejection = CompilationArtifactPublicationRequest::new(
+        let rejection = CompilationArtifactWriteRequest::new(
             &result,
             destination.clone(),
             [key, "valid.svg"],
-            PublicationPolicy::CreateOrVerify,
+            WritePolicy::CreateOrVerify,
         )
         .unwrap_err();
         assert!(matches!(
             rejection.issues(),
-            [CompilationArtifactPublicationRequestIssue::InvalidArtifactKey {
+            [CompilationArtifactWriteRequestIssue::InvalidArtifactKey {
                 artifact_index: 0,
                 reason: actual,
                 ..
@@ -125,7 +125,7 @@ fn pack_archive_decoding_regressions_replay_through_the_public_decoder() {
     }
 }
 
-#[cfg(feature = "package-acquisition")]
+#[cfg(feature = "package-reading")]
 #[test]
 fn package_archive_expansion_regressions_replay_through_the_public_expander() {
     let spec: typst::syntax::package::PackageSpec = "@preview/fuzz:1.0.0".parse().unwrap();
@@ -143,7 +143,7 @@ fn package_archive_expansion_regressions_replay_through_the_public_expander() {
                     bytes,
                     typst_pack::PackageExpansionLimits::reference_v1(),
                 ),
-                Err(typst_pack::PackageAcquisitionError::MalformedArchive { .. }),
+                Err(typst_pack::PackageReadError::MalformedArchive { .. }),
             ),
             "package archive regression {name} was unexpectedly accepted"
         );
@@ -252,24 +252,24 @@ fn compilation_request_regressions_replay_both_acceptance_and_rejection() {
 
 #[cfg(feature = "fs")]
 #[test]
-fn typkignore_and_publication_state_regressions_replay_natively() {
+fn typkignore_and_write_state_regressions_replay_natively() {
     use typst_pack::pack_archive::CommitCertainty;
     use typst_pack::{
-        FilesystemMergePolicy, FilesystemProjectGatherError, FilesystemProjectLimits,
-        PackExtractionSelection, gather_filesystem_project, plan_pack_extraction,
-        publish_pack_extraction_plan_to_filesystem,
+        FilesystemMergePolicy, FilesystemProjectLimits, FilesystemProjectReadError,
+        PackExtractionSelection, plan_pack_extraction, read_filesystem_project,
+        write_pack_extraction_plan_to_filesystem,
     };
 
     let malformed = tempfile::tempdir().unwrap();
     std::fs::write(malformed.path().join("main.typ"), b"main").unwrap();
     std::fs::write(malformed.path().join(".typkignore"), [0xff]).unwrap();
     assert!(matches!(
-        gather_filesystem_project(
+        read_filesystem_project(
             malformed.path(),
             "main.typ",
             FilesystemProjectLimits::reference_v1(),
         ),
-        Err(FilesystemProjectGatherError::InvalidPolicy { .. })
+        Err(FilesystemProjectReadError::InvalidPolicy { .. })
     ));
 
     let pack = Pack::builder("main.typ")
@@ -281,15 +281,15 @@ fn typkignore_and_publication_state_regressions_replay_natively() {
     for policy in [
         FilesystemMergePolicy::MergeCreateOnly,
         FilesystemMergePolicy::MergeReplaceExactFiles,
-        FilesystemMergePolicy::PublishNewTree,
+        FilesystemMergePolicy::WriteNewTree,
     ] {
         let directory = tempfile::tempdir().unwrap();
-        let destination = directory.path().join("published");
-        if policy != FilesystemMergePolicy::PublishNewTree {
+        let destination = directory.path().join("written");
+        if policy != FilesystemMergePolicy::WriteNewTree {
             std::fs::create_dir(&destination).unwrap();
         }
-        let receipt = publish_pack_extraction_plan_to_filesystem(&plan, &destination, policy)
-            .unwrap_or_else(|error| panic!("publication regression {policy:?} failed: {error}"));
+        let receipt = write_pack_extraction_plan_to_filesystem(&plan, &destination, policy)
+            .unwrap_or_else(|error| panic!("write regression {policy:?} failed: {error}"));
         assert_eq!(receipt.completed().len(), 1);
         assert_eq!(
             std::fs::read(destination.join("main.typ")).unwrap(),
@@ -298,10 +298,10 @@ fn typkignore_and_publication_state_regressions_replay_natively() {
     }
 
     let directory = tempfile::tempdir().unwrap();
-    let destination = directory.path().join("published");
+    let destination = directory.path().join("written");
     std::fs::create_dir(&destination).unwrap();
     std::fs::write(destination.join("main.typ"), b"existing").unwrap();
-    let error = publish_pack_extraction_plan_to_filesystem(
+    let error = write_pack_extraction_plan_to_filesystem(
         &plan,
         &destination,
         FilesystemMergePolicy::MergeCreateOnly,

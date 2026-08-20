@@ -16,17 +16,16 @@ use scripted_opendal::{
 };
 use typst_pack::ProjectSnapshotAssembly;
 use typst_pack::opendal::pack_assembly::{
-    ProjectAcquisitionCeilings, ProjectAcquisitionEntry, ProjectAcquisitionErrorCause,
-    ProjectAcquisitionIssue, ProjectAcquisitionLimitError, ProjectAcquisitionLimits,
-    ProjectAcquisitionLimitsError, ProjectAcquisitionRequest, ProjectAcquisitionRequestError,
-    ProjectAcquisitionResource, acquire_project,
+    ProjectReadCeilings, ProjectReadEntry, ProjectReadErrorCause, ProjectReadIssue,
+    ProjectReadLimitError, ProjectReadLimits, ProjectReadLimitsError, ProjectReadRequest,
+    ProjectReadRequestError, ProjectReadResource, read_project,
 };
 use typst_pack::opendal::{
     Location, LocationRoleError, OperatorBinding, OperatorBindings, OperatorResolver,
 };
 
 #[test]
-fn acquires_every_yielded_project_file_and_hands_exact_entries_to_snapshot_assembly() {
+fn reads_every_yielded_project_file_and_hands_exact_entries_to_snapshot_assembly() {
     let list = ListScript::new(
         "/",
         4,
@@ -48,17 +47,15 @@ fn acquires_every_yielded_project_file_and_hands_exact_entries_to_snapshot_assem
     let bindings = OperatorBindings::new([(binding.clone(), service.operator())]).unwrap();
     let source = Location::from_operation_path(binding, "").unwrap();
     let request =
-        ProjectAcquisitionRequest::new(source.clone(), ProjectAcquisitionLimits::reference_v1())
-            .unwrap();
+        ProjectReadRequest::new(source.clone(), ProjectReadLimits::reference_v1()).unwrap();
 
     assert_eq!(request.source(), &source);
-    assert_eq!(request.limits(), ProjectAcquisitionLimits::reference_v1());
+    assert_eq!(request.limits(), ProjectReadLimits::reference_v1());
 
-    let acquisition = expect_ready(pin!(acquire_project(&bindings, &request))).unwrap();
-    assert_eq!(acquisition.source(), &source);
+    let read = expect_ready(pin!(read_project(&bindings, &request))).unwrap();
+    assert_eq!(read.source(), &source);
     assert_eq!(
-        acquisition
-            .entries()
+        read.entries()
             .iter()
             .map(|entry| (
                 entry.relative_path(),
@@ -74,10 +71,10 @@ fn acquires_every_yielded_project_file_and_hands_exact_entries_to_snapshot_assem
         ]
     );
 
-    let (acquired_source, entries) = acquisition.into_parts();
-    assert_eq!(acquired_source, source);
+    let (read_source, entries) = read.into_parts();
+    assert_eq!(read_source, source);
     let snapshot = ProjectSnapshotAssembly::new("main.typ")
-        .assemble(entries.into_iter().map(ProjectAcquisitionEntry::into_parts))
+        .assemble(entries.into_iter().map(ProjectReadEntry::into_parts))
         .unwrap();
 
     assert_eq!(snapshot.file("main.typ"), Some(b"= Main".as_slice()));
@@ -90,8 +87,8 @@ fn acquires_every_yielded_project_file_and_hands_exact_entries_to_snapshot_assem
 
 #[test]
 fn named_project_ceilings_validate_probe_room_and_payload_relationships() {
-    let reference = ProjectAcquisitionCeilings::reference_v1();
-    let narrowed = ProjectAcquisitionLimits::new(ProjectAcquisitionCeilings {
+    let reference = ProjectReadCeilings::reference_v1();
+    let narrowed = ProjectReadLimits::new(ProjectReadCeilings {
         listed_entries: u64::MAX,
         listed_path_bytes: u64::MAX,
         total_listed_path_bytes: u64::MAX,
@@ -109,24 +106,24 @@ fn named_project_ceilings_validate_probe_room_and_payload_relationships() {
 
     for (resource, ceilings) in [
         (
-            ProjectAcquisitionResource::ObjectBytes,
-            ProjectAcquisitionCeilings {
+            ProjectReadResource::ObjectBytes,
+            ProjectReadCeilings {
                 object_bytes: u64::MAX,
                 total_bytes: u64::MAX,
                 ..reference
             },
         ),
         (
-            ProjectAcquisitionResource::TotalBytes,
-            ProjectAcquisitionCeilings {
+            ProjectReadResource::TotalBytes,
+            ProjectReadCeilings {
                 total_bytes: u64::MAX,
                 ..reference
             },
         ),
     ] {
         assert!(matches!(
-            ProjectAcquisitionLimits::new(ceilings),
-            Err(ProjectAcquisitionLimitsError::CannotProbe {
+            ProjectReadLimits::new(ceilings),
+            Err(ProjectReadLimitsError::CannotProbe {
                 resource: actual,
                 ceiling: u64::MAX,
             }) if actual == resource
@@ -134,12 +131,12 @@ fn named_project_ceilings_validate_probe_room_and_payload_relationships() {
     }
 
     assert!(matches!(
-        ProjectAcquisitionLimits::new(ProjectAcquisitionCeilings {
+        ProjectReadLimits::new(ProjectReadCeilings {
             object_bytes: 2,
             total_bytes: 1,
             ..reference
         }),
-        Err(ProjectAcquisitionLimitsError::ObjectBytesExceedTotalBytes {
+        Err(ProjectReadLimitsError::ObjectBytesExceedTotalBytes {
             object_bytes: 2,
             total_bytes: 1,
         })
@@ -150,12 +147,11 @@ fn named_project_ceilings_validate_probe_room_and_payload_relationships() {
 fn request_rejects_an_exact_object_before_operator_resolution() {
     let source: Location = "project:/main.typ".parse().unwrap();
     let error =
-        ProjectAcquisitionRequest::new(source.clone(), ProjectAcquisitionLimits::reference_v1())
-            .unwrap_err();
+        ProjectReadRequest::new(source.clone(), ProjectReadLimits::reference_v1()).unwrap_err();
 
     assert!(matches!(
         error,
-        ProjectAcquisitionRequestError::InvalidSourceRole {
+        ProjectReadRequestError::InvalidSourceRole {
             location,
             source: LocationRoleError::PrefixMissingTrailingSlash,
         } if location == source
@@ -177,28 +173,28 @@ fn structural_issues_are_typed_canonical_and_precede_all_reads() {
     )
     .unwrap();
     let service = ScriptedService::new(Capabilities::all(), [list], [], 16);
-    let request = request("project/", ProjectAcquisitionLimits::reference_v1());
+    let request = request("project/", ProjectReadLimits::reference_v1());
     let bindings = bindings(&service);
 
-    let error = expect_ready(pin!(acquire_project(&bindings, &request))).unwrap_err();
-    let ProjectAcquisitionErrorCause::Structural(survey) = error.cause() else {
+    let error = expect_ready(pin!(read_project(&bindings, &request))).unwrap_err();
+    let ProjectReadErrorCause::Structural(survey) = error.cause() else {
         panic!("unexpected cause: {:?}", error.cause());
     };
     assert_eq!(
         survey.issues(),
         [
-            ProjectAcquisitionIssue::ListedPathOutsidePrefix {
+            ProjectReadIssue::ListedPathOutsidePrefix {
                 operation_path: "project-sibling/a".to_owned(),
             },
-            ProjectAcquisitionIssue::InvalidRelativeOperationPath {
+            ProjectReadIssue::InvalidRelativeOperationPath {
                 operation_path: "project/a//b".to_owned(),
             },
-            ProjectAcquisitionIssue::DuplicateListedObject {
+            ProjectReadIssue::DuplicateListedObject {
                 operation_path: "project/main.typ".to_owned(),
             },
-            ProjectAcquisitionIssue::UnsupportedEntryKind {
+            ProjectReadIssue::UnsupportedEntryKind {
                 operation_path: "project/z".to_owned(),
-                kind: typst_pack::opendal::pack_assembly::ProjectAcquisitionEntryKind::Unknown,
+                kind: typst_pack::opendal::pack_assembly::ProjectReadEntryKind::Unknown,
             },
         ]
     );
@@ -214,35 +210,35 @@ fn structural_issues_are_typed_canonical_and_precede_all_reads() {
 
 #[test]
 fn project_limits_map_every_operation_specific_resource_at_exact_boundaries() {
-    let reference = ProjectAcquisitionCeilings::reference_v1();
+    let reference = ProjectReadCeilings::reference_v1();
     let cases = [
         (
-            ProjectAcquisitionResource::ListedEntries,
-            ProjectAcquisitionCeilings {
+            ProjectReadResource::ListedEntries,
+            ProjectReadCeilings {
                 listed_entries: 0,
                 ..reference
             },
             ListEntry::directory("p/dir/"),
         ),
         (
-            ProjectAcquisitionResource::ListedPathBytes,
-            ProjectAcquisitionCeilings {
+            ProjectReadResource::ListedPathBytes,
+            ProjectReadCeilings {
                 listed_path_bytes: 1,
                 ..reference
             },
             ListEntry::directory("p/dir/"),
         ),
         (
-            ProjectAcquisitionResource::TotalListedPathBytes,
-            ProjectAcquisitionCeilings {
+            ProjectReadResource::TotalListedPathBytes,
+            ProjectReadCeilings {
                 total_listed_path_bytes: 1,
                 ..reference
             },
             ListEntry::file("p/a"),
         ),
         (
-            ProjectAcquisitionResource::SelectedFiles,
-            ProjectAcquisitionCeilings {
+            ProjectReadResource::SelectedFiles,
+            ProjectReadCeilings {
                 selected_files: 0,
                 ..reference
             },
@@ -253,14 +249,14 @@ fn project_limits_map_every_operation_specific_resource_at_exact_boundaries() {
     for (resource, ceilings, entry) in cases {
         let list = ListScript::new("p/", 1, [ListStep::page([entry])]).unwrap();
         let service = ScriptedService::new(Capabilities::all(), [list], [], 8);
-        let limits = ProjectAcquisitionLimits::new(ceilings).unwrap();
+        let limits = ProjectReadLimits::new(ceilings).unwrap();
         let request = request("p/", limits);
         let configured = bindings(&service);
-        let error = expect_ready(pin!(acquire_project(&configured, &request))).unwrap_err();
+        let error = expect_ready(pin!(read_project(&configured, &request))).unwrap_err();
 
         assert!(matches!(
             error.cause(),
-            ProjectAcquisitionErrorCause::Limit(ProjectAcquisitionLimitError::Exceeded {
+            ProjectReadErrorCause::Limit(ProjectReadLimitError::Exceeded {
                 resource: actual,
                 ..
             }) if *actual == resource
@@ -270,7 +266,7 @@ fn project_limits_map_every_operation_specific_resource_at_exact_boundaries() {
     let list = ListScript::new("p/", 1, [ListStep::page([ListEntry::file("p/a")])]).unwrap();
     let read = ReadScript::new("p/a", 1, [ReadStep::chunk(b"four")]).unwrap();
     let service = ScriptedService::new(Capabilities::all(), [list], [read], 8);
-    let limits = ProjectAcquisitionLimits::new(ProjectAcquisitionCeilings {
+    let limits = ProjectReadLimits::new(ProjectReadCeilings {
         object_bytes: 3,
         total_bytes: 8,
         ..reference
@@ -278,11 +274,11 @@ fn project_limits_map_every_operation_specific_resource_at_exact_boundaries() {
     .unwrap();
     let object_request = request("p/", limits);
     let configured = bindings(&service);
-    let error = expect_ready(pin!(acquire_project(&configured, &object_request))).unwrap_err();
+    let error = expect_ready(pin!(read_project(&configured, &object_request))).unwrap_err();
     assert!(matches!(
         error.cause(),
-        ProjectAcquisitionErrorCause::Limit(ProjectAcquisitionLimitError::Exceeded {
-            resource: ProjectAcquisitionResource::ObjectBytes,
+        ProjectReadErrorCause::Limit(ProjectReadLimitError::Exceeded {
+            resource: ProjectReadResource::ObjectBytes,
             ceiling: 3,
             observed_at_least: 4,
         })
@@ -302,7 +298,7 @@ fn project_limits_map_every_operation_specific_resource_at_exact_boundaries() {
         ReadScript::new("p/b", 1, [ReadStep::chunk(b"34")]).unwrap(),
     ];
     let service = ScriptedService::new(Capabilities::all(), [list], reads, 12);
-    let limits = ProjectAcquisitionLimits::new(ProjectAcquisitionCeilings {
+    let limits = ProjectReadLimits::new(ProjectReadCeilings {
         object_bytes: 3,
         total_bytes: 3,
         ..reference
@@ -310,11 +306,11 @@ fn project_limits_map_every_operation_specific_resource_at_exact_boundaries() {
     .unwrap();
     let request = request("p/", limits);
     let configured = bindings(&service);
-    let error = expect_ready(pin!(acquire_project(&configured, &request))).unwrap_err();
+    let error = expect_ready(pin!(read_project(&configured, &request))).unwrap_err();
     assert!(matches!(
         error.cause(),
-        ProjectAcquisitionErrorCause::Limit(ProjectAcquisitionLimitError::Exceeded {
-            resource: ProjectAcquisitionResource::TotalBytes,
+        ProjectReadErrorCause::Limit(ProjectReadLimitError::Exceeded {
+            resource: ProjectReadResource::TotalBytes,
             ceiling: 3,
             observed_at_least: 4,
         })
@@ -338,9 +334,9 @@ fn mutation_disappearance_and_cancellation_retain_exact_typed_evidence() {
         ReadScript::new("race/changing.typ", 1, [ReadStep::chunk(b"during listing")]).unwrap();
     let service = ScriptedService::new(Capabilities::all(), [list], [original], 8);
     let configured = bindings(&service);
-    let request = request("race/", ProjectAcquisitionLimits::reference_v1());
-    let acquired = expect_ready(pin!(acquire_project(&configured, &request))).unwrap();
-    assert_eq!(acquired.entries()[0].bytes(), b"after listing");
+    let request = request("race/", ProjectReadLimits::reference_v1());
+    let read = expect_ready(pin!(read_project(&configured, &request))).unwrap();
+    assert_eq!(read.entries()[0].bytes(), b"after listing");
 
     let absent_list = ListScript::new(
         "race/",
@@ -350,11 +346,11 @@ fn mutation_disappearance_and_cancellation_retain_exact_typed_evidence() {
     .unwrap();
     let absent_service = ScriptedService::new(Capabilities::all(), [absent_list], [], 8);
     let absent_bindings = bindings(&absent_service);
-    let absent = expect_ready(pin!(acquire_project(&absent_bindings, &request))).unwrap_err();
+    let absent = expect_ready(pin!(read_project(&absent_bindings, &request))).unwrap_err();
     assert_eq!(absent.failed_path(), Some("race/gone.typ"));
     assert!(matches!(
         absent.cause(),
-        ProjectAcquisitionErrorCause::ListedObjectAbsent(source)
+        ProjectReadErrorCause::ListedObjectAbsent(source)
             if source.kind() == ErrorKind::NotFound
     ));
 
@@ -373,8 +369,8 @@ fn mutation_disappearance_and_cancellation_retain_exact_typed_evidence() {
         ScriptedService::new(Capabilities::all(), [pending_list], [pending_read], 8);
     let pending_bindings = bindings(&pending_service);
     {
-        let mut acquisition = pin!(acquire_project(&pending_bindings, &request));
-        assert!(matches!(poll_once(acquisition.as_mut()), Poll::Pending));
+        let mut read = pin!(read_project(&pending_bindings, &request));
+        assert!(matches!(poll_once(read.as_mut()), Poll::Pending));
         assert!(pending.was_observed());
     }
     assert_eq!(
@@ -390,13 +386,13 @@ fn mutation_disappearance_and_cancellation_retain_exact_typed_evidence() {
 fn operator_bindings_make_the_public_project_future_send() {
     let service = ScriptedService::new(Capabilities::all(), [], [], 1);
     let configured = bindings(&service);
-    let request = request("project/", ProjectAcquisitionLimits::reference_v1());
+    let request = request("project/", ProjectReadLimits::reference_v1());
 
-    assert_send(acquire_project(&configured, &request));
+    assert_send(read_project(&configured, &request));
 }
 
 #[test]
-fn memory_acquires_root_and_non_root_projects_through_the_public_operation() {
+fn memory_reads_root_and_non_root_projects_through_the_public_operation() {
     for (prefix, path, relative) in [
         ("", "main.typ", "main.typ"),
         ("project/", "project/main.typ", "main.typ"),
@@ -405,12 +401,12 @@ fn memory_acquires_root_and_non_root_projects_through_the_public_operation() {
         expect_ready(pin!(operator.write(path, b"memory project".to_vec()))).unwrap();
         let configured =
             OperatorBindings::new([(OperatorBinding::new("project").unwrap(), operator)]).unwrap();
-        let request = request(prefix, ProjectAcquisitionLimits::reference_v1());
+        let request = request(prefix, ProjectReadLimits::reference_v1());
 
-        let acquisition = expect_ready(pin!(acquire_project(&configured, &request))).unwrap();
-        assert_eq!(acquisition.entries().len(), 1);
-        assert_eq!(acquisition.entries()[0].relative_path(), relative);
-        assert_eq!(acquisition.entries()[0].bytes(), b"memory project");
+        let read = expect_ready(pin!(read_project(&configured, &request))).unwrap();
+        assert_eq!(read.entries().len(), 1);
+        assert_eq!(read.entries()[0].relative_path(), relative);
+        assert_eq!(read.entries()[0].bytes(), b"memory project");
     }
 }
 
@@ -433,14 +429,14 @@ fn failures_keep_native_causes_typed_but_out_of_outer_diagnostics() {
     .unwrap();
     let service = ScriptedService::new(Capabilities::all(), [list], [read], 16);
     let configured = bindings(&service);
-    let request = request("project/", ProjectAcquisitionLimits::reference_v1());
+    let request = request("project/", ProjectReadLimits::reference_v1());
 
-    let error = expect_ready(pin!(acquire_project(&configured, &request))).unwrap_err();
+    let error = expect_ready(pin!(read_project(&configured, &request))).unwrap_err();
     assert_eq!(error.source_location(), request.source());
     assert_eq!(error.failed_path(), Some("project/secret.typ"));
     assert!(matches!(
         error.cause(),
-        ProjectAcquisitionErrorCause::Read(source)
+        ProjectReadErrorCause::Read(source)
             if source.kind() == ErrorKind::PermissionDenied
     ));
     assert_eq!(
@@ -466,12 +462,12 @@ fn failures_keep_native_causes_typed_but_out_of_outer_diagnostics() {
 
 #[test]
 fn resolver_failures_are_boxed_and_reachable_through_the_typed_cause() {
-    let request = request("project/", ProjectAcquisitionLimits::reference_v1());
+    let request = request("project/", ProjectReadLimits::reference_v1());
 
-    let error = expect_ready(pin!(acquire_project(&FailingResolver, &request))).unwrap_err();
+    let error = expect_ready(pin!(read_project(&FailingResolver, &request))).unwrap_err();
     assert!(matches!(
         error.cause(),
-        ProjectAcquisitionErrorCause::ResolveOperator(source)
+        ProjectReadErrorCause::ResolveOperator(source)
             if source.downcast_ref::<ResolveFailure>().is_some()
     ));
     assert!(
@@ -498,10 +494,10 @@ fn poll_once<F: Future>(future: std::pin::Pin<&mut F>) -> Poll<F::Output> {
     future.poll(&mut Context::from_waker(Waker::noop()))
 }
 
-fn request(path: &str, limits: ProjectAcquisitionLimits) -> ProjectAcquisitionRequest {
+fn request(path: &str, limits: ProjectReadLimits) -> ProjectReadRequest {
     let source =
         Location::from_operation_path(OperatorBinding::new("project").unwrap(), path).unwrap();
-    ProjectAcquisitionRequest::new(source, limits).unwrap()
+    ProjectReadRequest::new(source, limits).unwrap()
 }
 
 fn bindings(service: &ScriptedService) -> OperatorBindings {

@@ -21,10 +21,9 @@ use scripted_opendal::{
     PendingPoint, ReadScript, ReadStep, ScriptedService,
 };
 use typst_pack::opendal::pack_assembly::{
-    FontAcquisitionCeilings, FontAcquisitionErrorCause, FontAcquisitionIssue,
-    FontAcquisitionLimitError, FontAcquisitionLimits, FontAcquisitionLimitsError,
-    FontAcquisitionRequest, FontAcquisitionRequestIssue, FontAcquisitionResource, FontSource,
-    acquire_fonts,
+    FontReadCeilings, FontReadErrorCause, FontReadIssue, FontReadLimitError, FontReadLimits,
+    FontReadLimitsError, FontReadRequest, FontReadRequestIssue, FontReadResource, FontSource,
+    read_fonts,
 };
 use typst_pack::opendal::{
     Location, LocationRoleError, OperatorBinding, OperatorBindings, OperatorResolver,
@@ -32,7 +31,7 @@ use typst_pack::opendal::{
 use typst_pack::{FontContainer, FontContainerError, FontDisposition};
 
 #[test]
-fn acquires_font_containers_in_source_then_relative_path_order() {
+fn reads_font_containers_in_source_then_relative_path_order() {
     let lists = [
         ListScript::new(
             "first/",
@@ -78,16 +77,13 @@ fn acquires_font_containers_in_source_then_relative_path_order() {
             FontDisposition::External,
         ),
     ];
-    let request =
-        FontAcquisitionRequest::new(sources.clone(), FontAcquisitionLimits::reference_v1())
-            .unwrap();
+    let request = FontReadRequest::new(sources.clone(), FontReadLimits::reference_v1()).unwrap();
 
     assert_eq!(request.sources(), &sources);
-    let acquisition = expect_ready(pin!(acquire_fonts(&bindings, &request))).unwrap();
-    assert_eq!(acquisition.sources(), &sources);
+    let read = expect_ready(pin!(read_fonts(&bindings, &request))).unwrap();
+    assert_eq!(read.sources(), &sources);
     assert_eq!(
-        acquisition
-            .entries()
+        read.entries()
             .iter()
             .map(|entry| (
                 entry.source_index(),
@@ -114,8 +110,8 @@ fn acquires_font_containers_in_source_then_relative_path_order() {
         ]
     );
 
-    let (acquired_sources, entries) = acquisition.into_parts();
-    assert_eq!(acquired_sources, sources);
+    let (read_sources, entries) = read.into_parts();
+    assert_eq!(read_sources, sources);
     let (source_index, source, path, disposition, bytes) =
         entries.into_iter().next().unwrap().into_parts();
     assert_eq!(source_index, 0);
@@ -151,12 +147,11 @@ fn listing_permutations_produce_the_same_font_order() {
             12,
         );
         let configured = bindings(&service);
-        let request = request(&["fonts/"], FontAcquisitionLimits::reference_v1());
+        let request = request(&["fonts/"], FontReadLimits::reference_v1());
 
-        let acquisition = expect_ready(pin!(acquire_fonts(&configured, &request))).unwrap();
+        let read = expect_ready(pin!(read_fonts(&configured, &request))).unwrap();
         assert_eq!(
-            acquisition
-                .entries()
+            read.entries()
                 .iter()
                 .map(|entry| entry.relative_path())
                 .collect::<Vec<_>>(),
@@ -167,7 +162,7 @@ fn listing_permutations_produce_the_same_font_order() {
 
 #[test]
 fn named_font_ceilings_validate_probe_room_and_payload_relationships() {
-    let reference = FontAcquisitionCeilings::reference_v1();
+    let reference = FontReadCeilings::reference_v1();
     assert_eq!(reference.listed_entries, 100_000);
     assert_eq!(reference.listed_path_bytes, 64 * 1024);
     assert_eq!(reference.total_listed_path_bytes, 64 * 1024 * 1024);
@@ -175,7 +170,7 @@ fn named_font_ceilings_validate_probe_room_and_payload_relationships() {
     assert_eq!(reference.container_bytes, 256 * 1024 * 1024);
     assert_eq!(reference.total_bytes, 2 * 1024 * 1024 * 1024);
 
-    let narrowed = FontAcquisitionLimits::new(FontAcquisitionCeilings {
+    let narrowed = FontReadLimits::new(FontReadCeilings {
         listed_entries: u64::MAX,
         listed_path_bytes: u64::MAX,
         total_listed_path_bytes: u64::MAX,
@@ -195,36 +190,36 @@ fn named_font_ceilings_validate_probe_room_and_payload_relationships() {
 
     for (resource, ceilings) in [
         (
-            FontAcquisitionResource::ContainerBytes,
-            FontAcquisitionCeilings {
+            FontReadResource::ContainerBytes,
+            FontReadCeilings {
                 container_bytes: u64::MAX,
                 total_bytes: u64::MAX,
                 ..reference
             },
         ),
         (
-            FontAcquisitionResource::TotalBytes,
-            FontAcquisitionCeilings {
+            FontReadResource::TotalBytes,
+            FontReadCeilings {
                 total_bytes: u64::MAX,
                 ..reference
             },
         ),
     ] {
         assert!(matches!(
-            FontAcquisitionLimits::new(ceilings),
-            Err(FontAcquisitionLimitsError::CannotProbe {
+            FontReadLimits::new(ceilings),
+            Err(FontReadLimitsError::CannotProbe {
                 resource: actual,
                 ceiling: u64::MAX,
             }) if actual == resource
         ));
     }
     assert!(matches!(
-        FontAcquisitionLimits::new(FontAcquisitionCeilings {
+        FontReadLimits::new(FontReadCeilings {
             container_bytes: 2,
             total_bytes: 1,
             ..reference
         }),
-        Err(FontAcquisitionLimitsError::ContainerBytesExceedTotalBytes {
+        Err(FontReadLimitsError::ContainerBytesExceedTotalBytes {
             container_bytes: 2,
             total_bytes: 1,
         })
@@ -233,35 +228,35 @@ fn named_font_ceilings_validate_probe_room_and_payload_relationships() {
 
 #[test]
 fn every_font_resource_maps_exact_and_plus_one_boundaries() {
-    let reference = FontAcquisitionCeilings::reference_v1();
+    let reference = FontReadCeilings::reference_v1();
     let survey_cases = [
         (
-            FontAcquisitionResource::ListedEntries,
-            FontAcquisitionCeilings {
+            FontReadResource::ListedEntries,
+            FontReadCeilings {
                 listed_entries: 0,
                 ..reference
             },
             ListEntry::directory("p/dir/"),
         ),
         (
-            FontAcquisitionResource::ListedPathBytes,
-            FontAcquisitionCeilings {
+            FontReadResource::ListedPathBytes,
+            FontReadCeilings {
                 listed_path_bytes: 5,
                 ..reference
             },
             ListEntry::directory("p/long/"),
         ),
         (
-            FontAcquisitionResource::TotalListedPathBytes,
-            FontAcquisitionCeilings {
+            FontReadResource::TotalListedPathBytes,
+            FontReadCeilings {
                 total_listed_path_bytes: 11,
                 ..reference
             },
             ListEntry::file("p/a.ttf"),
         ),
         (
-            FontAcquisitionResource::SelectedContainers,
-            FontAcquisitionCeilings {
+            FontReadResource::SelectedContainers,
+            FontReadCeilings {
                 selected_containers: 0,
                 ..reference
             },
@@ -276,28 +271,26 @@ fn every_font_resource_maps_exact_and_plus_one_boundaries() {
             8,
         );
         let configured = bindings(&service);
-        let request = request(&["p/"], FontAcquisitionLimits::new(ceilings).unwrap());
-        let error = expect_ready(pin!(acquire_fonts(&configured, &request))).unwrap_err();
+        let request = request(&["p/"], FontReadLimits::new(ceilings).unwrap());
+        let error = expect_ready(pin!(read_fonts(&configured, &request))).unwrap_err();
 
         assert!(matches!(
             error.cause(),
-            FontAcquisitionErrorCause::Limit(FontAcquisitionLimitError::Exceeded {
+            FontReadErrorCause::Limit(FontReadLimitError::Exceeded {
                 resource: actual,
                 ..
             }) if *actual == resource
         ));
     }
 
-    for (resource, container_bytes, total_bytes) in
-        [(FontAcquisitionResource::ContainerBytes, 3, 8)]
-    {
+    for (resource, container_bytes, total_bytes) in [(FontReadResource::ContainerBytes, 3, 8)] {
         let service = ScriptedService::new(
             Capabilities::all(),
             [ListScript::new("p/", 1, [ListStep::page([ListEntry::file("p/a.ttf")])]).unwrap()],
             [ReadScript::new("p/a.ttf", 1, [ReadStep::chunk(b"four")]).unwrap()],
             8,
         );
-        let limits = FontAcquisitionLimits::new(FontAcquisitionCeilings {
+        let limits = FontReadLimits::new(FontReadCeilings {
             container_bytes,
             total_bytes,
             ..reference
@@ -305,11 +298,11 @@ fn every_font_resource_maps_exact_and_plus_one_boundaries() {
         .unwrap();
         let configured = bindings(&service);
         let request = request(&["p/"], limits);
-        let error = expect_ready(pin!(acquire_fonts(&configured, &request))).unwrap_err();
+        let error = expect_ready(pin!(read_fonts(&configured, &request))).unwrap_err();
 
         assert!(matches!(
             error.cause(),
-            FontAcquisitionErrorCause::Limit(FontAcquisitionLimitError::Exceeded {
+            FontReadErrorCause::Limit(FontReadLimitError::Exceeded {
                 resource: actual,
                 observed_at_least: 4,
                 ..
@@ -323,7 +316,7 @@ fn every_font_resource_maps_exact_and_plus_one_boundaries() {
         [ReadScript::new("p/a.ttf", 1, [ReadStep::chunk(b"four")]).unwrap()],
         8,
     );
-    let exact_limits = FontAcquisitionLimits::new(FontAcquisitionCeilings {
+    let exact_limits = FontReadLimits::new(FontReadCeilings {
         listed_entries: 1,
         listed_path_bytes: 7,
         total_listed_path_bytes: 12,
@@ -334,7 +327,7 @@ fn every_font_resource_maps_exact_and_plus_one_boundaries() {
     .unwrap();
     let configured = bindings(&exact_service);
     let exact_request = request(&["p/"], exact_limits);
-    let exact = expect_ready(pin!(acquire_fonts(&configured, &exact_request))).unwrap();
+    let exact = expect_ready(pin!(read_fonts(&configured, &exact_request))).unwrap();
     assert_eq!(exact.entries()[0].bytes(), b"four");
 
     let precedence_service = ScriptedService::new(
@@ -343,7 +336,7 @@ fn every_font_resource_maps_exact_and_plus_one_boundaries() {
         [],
         8,
     );
-    let precedence_limits = FontAcquisitionLimits::new(FontAcquisitionCeilings {
+    let precedence_limits = FontReadLimits::new(FontReadCeilings {
         listed_entries: 0,
         listed_path_bytes: 0,
         total_listed_path_bytes: 0,
@@ -354,11 +347,11 @@ fn every_font_resource_maps_exact_and_plus_one_boundaries() {
     .unwrap();
     let configured = bindings(&precedence_service);
     let precedence_request = request(&["p/"], precedence_limits);
-    let error = expect_ready(pin!(acquire_fonts(&configured, &precedence_request))).unwrap_err();
+    let error = expect_ready(pin!(read_fonts(&configured, &precedence_request))).unwrap_err();
     assert!(matches!(
         error.cause(),
-        FontAcquisitionErrorCause::Limit(FontAcquisitionLimitError::Exceeded {
-            resource: FontAcquisitionResource::ListedEntries,
+        FontReadErrorCause::Limit(FontReadLimitError::Exceeded {
+            resource: FontReadResource::ListedEntries,
             ceiling: 0,
             observed_at_least: 1,
         })
@@ -373,17 +366,16 @@ fn request_aggregates_invalid_source_roles_in_caller_order() {
         FontSource::new("fonts:/two.otf".parse().unwrap(), FontDisposition::External),
     ];
 
-    let rejection =
-        FontAcquisitionRequest::new(sources, FontAcquisitionLimits::reference_v1()).unwrap_err();
+    let rejection = FontReadRequest::new(sources, FontReadLimits::reference_v1()).unwrap_err();
     assert_eq!(
         rejection.issues(),
         [
-            FontAcquisitionRequestIssue::InvalidSourceRole {
+            FontReadRequestIssue::InvalidSourceRole {
                 source_index: 0,
                 location: "fonts:/one.ttf".parse().unwrap(),
                 source: LocationRoleError::PrefixMissingTrailingSlash,
             },
-            FontAcquisitionRequestIssue::InvalidSourceRole {
+            FontReadRequestIssue::InvalidSourceRole {
                 source_index: 2,
                 location: "fonts:/two.otf".parse().unwrap(),
                 source: LocationRoleError::PrefixMissingTrailingSlash,
@@ -392,7 +384,7 @@ fn request_aggregates_invalid_source_roles_in_caller_order() {
     );
     assert_eq!(
         rejection.to_string(),
-        "Font Acquisition request rejected with 2 issue(s)"
+        "Font Read request rejected with 2 issue(s)"
     );
 }
 
@@ -418,12 +410,9 @@ fn all_source_surveys_finish_before_reads_and_one_binding_is_resolved_once() {
     ];
     let service = ScriptedService::new(Capabilities::all(), lists, reads, 16);
     let resolver = CountingResolver::new(service.operator());
-    let request = request(
-        &["first/", "second/"],
-        FontAcquisitionLimits::reference_v1(),
-    );
+    let request = request(&["first/", "second/"], FontReadLimits::reference_v1());
 
-    expect_ready(pin!(acquire_fonts(&resolver, &request))).unwrap();
+    expect_ready(pin!(read_fonts(&resolver, &request))).unwrap();
     assert_eq!(resolver.calls.load(Ordering::SeqCst), 1);
     let log = service.log();
     let first_read = log
@@ -461,19 +450,19 @@ fn survey_and_payload_limits_are_shared_across_sources() {
         [],
         12,
     );
-    let limits = FontAcquisitionLimits::new(FontAcquisitionCeilings {
+    let limits = FontReadLimits::new(FontReadCeilings {
         listed_entries: 1,
-        ..FontAcquisitionCeilings::reference_v1()
+        ..FontReadCeilings::reference_v1()
     })
     .unwrap();
     let listed_request = request(&["first/", "second/"], limits);
     let listed_bindings = bindings(&listed_service);
-    let listed = expect_ready(pin!(acquire_fonts(&listed_bindings, &listed_request))).unwrap_err();
+    let listed = expect_ready(pin!(read_fonts(&listed_bindings, &listed_request))).unwrap_err();
     assert_eq!(listed.source_index(), 1);
     assert!(matches!(
         listed.cause(),
-        FontAcquisitionErrorCause::Limit(FontAcquisitionLimitError::Exceeded {
-            resource: FontAcquisitionResource::ListedEntries,
+        FontReadErrorCause::Limit(FontReadLimitError::Exceeded {
+            resource: FontReadResource::ListedEntries,
             ceiling: 1,
             observed_at_least: 2,
         })
@@ -501,21 +490,20 @@ fn survey_and_payload_limits_are_shared_across_sources() {
         ],
         16,
     );
-    let limits = FontAcquisitionLimits::new(FontAcquisitionCeilings {
+    let limits = FontReadLimits::new(FontReadCeilings {
         container_bytes: 3,
         total_bytes: 3,
-        ..FontAcquisitionCeilings::reference_v1()
+        ..FontReadCeilings::reference_v1()
     })
     .unwrap();
     let payload_request = request(&["first/", "second/"], limits);
     let payload_bindings = bindings(&payload_service);
-    let payload =
-        expect_ready(pin!(acquire_fonts(&payload_bindings, &payload_request))).unwrap_err();
+    let payload = expect_ready(pin!(read_fonts(&payload_bindings, &payload_request))).unwrap_err();
     assert_eq!(payload.source_index(), 1);
     assert!(matches!(
         payload.cause(),
-        FontAcquisitionErrorCause::Limit(FontAcquisitionLimitError::Exceeded {
-            resource: FontAcquisitionResource::TotalBytes,
+        FontReadErrorCause::Limit(FontReadLimitError::Exceeded {
+            resource: FontReadResource::TotalBytes,
             ceiling: 3,
             observed_at_least: 4,
         })
@@ -544,25 +532,22 @@ fn structural_issues_are_aggregated_in_source_then_path_order() {
         12,
     );
     let configured = bindings(&service);
-    let request = request(
-        &["first/", "second/"],
-        FontAcquisitionLimits::reference_v1(),
-    );
+    let request = request(&["first/", "second/"], FontReadLimits::reference_v1());
 
-    let error = expect_ready(pin!(acquire_fonts(&configured, &request))).unwrap_err();
+    let error = expect_ready(pin!(read_fonts(&configured, &request))).unwrap_err();
     assert_eq!(error.source_index(), 0);
-    let FontAcquisitionErrorCause::Structural(survey) = error.cause() else {
+    let FontReadErrorCause::Structural(survey) = error.cause() else {
         panic!("unexpected cause: {:?}", error.cause());
     };
     assert_eq!(
         survey.issues(),
         [
-            FontAcquisitionIssue::UnsupportedEntryKind {
+            FontReadIssue::UnsupportedEntryKind {
                 source_index: 0,
                 operation_path: "first/z.ttf".to_owned(),
-                kind: typst_pack::opendal::pack_assembly::FontAcquisitionEntryKind::Unknown,
+                kind: typst_pack::opendal::pack_assembly::FontReadEntryKind::Unknown,
             },
-            FontAcquisitionIssue::ListedPathOutsidePrefix {
+            FontReadIssue::ListedPathOutsidePrefix {
                 source_index: 1,
                 operation_path: "outside/a.ttf".to_owned(),
             },
@@ -580,7 +565,7 @@ fn structural_issues_are_aggregated_in_source_then_path_order() {
 
 #[test]
 fn disappearance_cancellation_and_native_diagnostics_keep_source_evidence() {
-    let request = request(&["fonts/"], FontAcquisitionLimits::reference_v1());
+    let request = request(&["fonts/"], FontReadLimits::reference_v1());
     let replacement =
         ReadScript::new("fonts/changing.ttf", 1, [ReadStep::chunk(b"after listing")]).unwrap();
     let mutation_service = ScriptedService::new(
@@ -603,7 +588,7 @@ fn disappearance_cancellation_and_native_diagnostics_keep_source_evidence() {
         8,
     );
     let mutation_bindings = bindings(&mutation_service);
-    let mutation = expect_ready(pin!(acquire_fonts(&mutation_bindings, &request))).unwrap();
+    let mutation = expect_ready(pin!(read_fonts(&mutation_bindings, &request))).unwrap();
     assert_eq!(mutation.entries()[0].bytes(), b"after listing");
 
     let absent_service = ScriptedService::new(
@@ -618,13 +603,13 @@ fn disappearance_cancellation_and_native_diagnostics_keep_source_evidence() {
         8,
     );
     let configured = bindings(&absent_service);
-    let absent = expect_ready(pin!(acquire_fonts(&configured, &request))).unwrap_err();
+    let absent = expect_ready(pin!(read_fonts(&configured, &request))).unwrap_err();
     assert_eq!(absent.source_index(), 0);
     assert_eq!(absent.source_location(), request.sources()[0].source());
     assert_eq!(absent.failed_path(), Some("fonts/gone.ttf"));
     assert!(matches!(
         absent.cause(),
-        FontAcquisitionErrorCause::ListedObjectAbsent(source)
+        FontReadErrorCause::ListedObjectAbsent(source)
             if source.kind() == ErrorKind::NotFound
     ));
 
@@ -645,8 +630,8 @@ fn disappearance_cancellation_and_native_diagnostics_keep_source_evidence() {
     );
     let pending_bindings = bindings(&pending_service);
     {
-        let mut acquisition = pin!(acquire_fonts(&pending_bindings, &request));
-        assert!(matches!(poll_once(acquisition.as_mut()), Poll::Pending));
+        let mut read = pin!(read_fonts(&pending_bindings, &request));
+        assert!(matches!(poll_once(read.as_mut()), Poll::Pending));
         assert!(pending.was_observed());
     }
     assert_eq!(
@@ -673,10 +658,10 @@ fn disappearance_cancellation_and_native_diagnostics_keep_source_evidence() {
     );
     let list_failure_bindings = bindings(&list_failure_service);
     let list_failure =
-        expect_ready(pin!(acquire_fonts(&list_failure_bindings, &request))).unwrap_err();
+        expect_ready(pin!(read_fonts(&list_failure_bindings, &request))).unwrap_err();
     assert!(matches!(
         list_failure.cause(),
-        FontAcquisitionErrorCause::List(source)
+        FontReadErrorCause::List(source)
             if source.kind() == ErrorKind::PermissionDenied
     ));
     assert!(
@@ -707,10 +692,10 @@ fn disappearance_cancellation_and_native_diagnostics_keep_source_evidence() {
         12,
     );
     let failure_bindings = bindings(&failure_service);
-    let error = expect_ready(pin!(acquire_fonts(&failure_bindings, &request))).unwrap_err();
+    let error = expect_ready(pin!(read_fonts(&failure_bindings, &request))).unwrap_err();
     assert!(matches!(
         error.cause(),
-        FontAcquisitionErrorCause::Read(source)
+        FontReadErrorCause::Read(source)
             if source.kind() == ErrorKind::PermissionDenied
     ));
     assert_eq!(
@@ -736,12 +721,12 @@ fn disappearance_cancellation_and_native_diagnostics_keep_source_evidence() {
 
 #[test]
 fn resolver_failures_are_boxed_and_reachable_through_the_typed_cause() {
-    let request = request(&["fonts/"], FontAcquisitionLimits::reference_v1());
+    let request = request(&["fonts/"], FontReadLimits::reference_v1());
 
-    let error = expect_ready(pin!(acquire_fonts(&FailingResolver, &request))).unwrap_err();
+    let error = expect_ready(pin!(read_fonts(&FailingResolver, &request))).unwrap_err();
     assert!(matches!(
         error.cause(),
-        FontAcquisitionErrorCause::ResolveOperator(source)
+        FontReadErrorCause::ResolveOperator(source)
             if source.downcast_ref::<ResolveFailure>().is_some()
     ));
     assert!(
@@ -761,13 +746,13 @@ fn resolver_failures_are_boxed_and_reachable_through_the_typed_cause() {
 fn operator_bindings_make_the_public_font_future_send() {
     let service = ScriptedService::new(Capabilities::all(), [], [], 1);
     let configured = bindings(&service);
-    let request = FontAcquisitionRequest::new([], FontAcquisitionLimits::reference_v1()).unwrap();
+    let request = FontReadRequest::new([], FontReadLimits::reference_v1()).unwrap();
 
-    assert_send(acquire_fonts(&configured, &request));
+    assert_send(read_fonts(&configured, &request));
 }
 
 #[test]
-fn memory_acquires_root_and_non_root_font_prefixes_without_ambient_fonts() {
+fn memory_reads_root_and_non_root_font_prefixes_without_ambient_fonts() {
     for (prefix, path, relative) in [
         ("", "root.ttf", "root.ttf"),
         ("fonts/", "fonts/nested.OTF", "nested.OTF"),
@@ -779,25 +764,25 @@ fn memory_acquires_root_and_non_root_font_prefixes_without_ambient_fonts() {
         .unwrap();
         let binding = OperatorBinding::new("fonts").unwrap();
         let configured = OperatorBindings::new([(binding.clone(), operator)]).unwrap();
-        let request = FontAcquisitionRequest::new(
+        let request = FontReadRequest::new(
             [FontSource::new(
                 Location::from_operation_path(binding, prefix).unwrap(),
                 FontDisposition::External,
             )],
-            FontAcquisitionLimits::reference_v1(),
+            FontReadLimits::reference_v1(),
         )
         .unwrap();
 
-        let acquisition = expect_ready(pin!(acquire_fonts(&configured, &request))).unwrap();
-        assert_eq!(acquisition.entries().len(), 1);
-        assert_eq!(acquisition.entries()[0].relative_path(), relative);
-        assert_eq!(acquisition.entries()[0].bytes(), b"exact container input");
+        let read = expect_ready(pin!(read_fonts(&configured, &request))).unwrap();
+        assert_eq!(read.entries().len(), 1);
+        assert_eq!(read.entries()[0].relative_path(), relative);
+        assert_eq!(read.entries()[0].bytes(), b"exact container input");
     }
 }
 
 #[cfg(feature = "embedded-fonts")]
 #[test]
-fn exact_acquired_bytes_build_the_authoritative_font_catalog() {
+fn exact_read_bytes_build_the_authoritative_font_catalog() {
     use typst_pack::{FontCatalog, FontCatalogEntry, FontContainer};
 
     let bytes = fonts::typst_container();
@@ -805,25 +790,25 @@ fn exact_acquired_bytes_build_the_authoritative_font_catalog() {
     expect_ready(pin!(operator.write("fonts/container.ttf", bytes.clone()))).unwrap();
     let binding = OperatorBinding::new("fonts").unwrap();
     let configured = OperatorBindings::new([(binding.clone(), operator)]).unwrap();
-    let request = FontAcquisitionRequest::new(
+    let request = FontReadRequest::new(
         [FontSource::new(
             Location::from_operation_path(binding, "fonts/").unwrap(),
             FontDisposition::External,
         )],
-        FontAcquisitionLimits::reference_v1(),
+        FontReadLimits::reference_v1(),
     )
     .unwrap();
 
-    let (_, entries) = expect_ready(pin!(acquire_fonts(&configured, &request)))
+    let (_, entries) = expect_ready(pin!(read_fonts(&configured, &request)))
         .unwrap()
         .into_parts();
     let mut catalog = FontCatalog::new();
     for entry in entries {
-        let (_, _, path, disposition, acquired) = entry.into_parts();
+        let (_, _, path, disposition, read) = entry.into_parts();
         assert_eq!(path, "container.ttf");
-        assert_eq!(acquired, bytes);
+        assert_eq!(read, bytes);
         catalog.push(FontCatalogEntry::new(
-            FontContainer::new(acquired).unwrap(),
+            FontContainer::new(read).unwrap(),
             disposition,
         ));
     }
@@ -845,9 +830,9 @@ fn poll_once<F: Future>(future: std::pin::Pin<&mut F>) -> Poll<F::Output> {
     future.poll(&mut Context::from_waker(Waker::noop()))
 }
 
-fn request(paths: &[&str], limits: FontAcquisitionLimits) -> FontAcquisitionRequest {
+fn request(paths: &[&str], limits: FontReadLimits) -> FontReadRequest {
     let binding = OperatorBinding::new("fonts").unwrap();
-    FontAcquisitionRequest::new(
+    FontReadRequest::new(
         paths.iter().enumerate().map(|(index, path)| {
             FontSource::new(
                 Location::from_operation_path(binding.clone(), path).unwrap(),

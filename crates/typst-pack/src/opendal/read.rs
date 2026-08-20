@@ -52,7 +52,7 @@ impl<'a, R: OperatorResolver + ?Sized> ResolvedOperators<'a, R> {
     }
 }
 
-pub(crate) trait ExactPathAcquisitionOperation {
+pub(crate) trait ExactPathReadOperation {
     type Error;
 
     fn read(&self, source: opendal::Error) -> Self::Error;
@@ -60,7 +60,7 @@ pub(crate) trait ExactPathAcquisitionOperation {
     fn accounting_overflow(&self) -> Self::Error;
 }
 
-pub(crate) async fn acquire_exact_path<O: ExactPathAcquisitionOperation>(
+pub(crate) async fn read_exact_path<O: ExactPathReadOperation>(
     operator: &opendal::Operator,
     operation_path: &str,
     retention_ceiling: u64,

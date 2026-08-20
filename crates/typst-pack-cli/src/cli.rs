@@ -24,26 +24,24 @@ use typst_pack::cli_support::{
     emit_creation_warnings, pdf_standard_requiring_tags, validate_pdf_standards,
 };
 use typst_pack::pack_archive::{
-    AcquisitionLimits, DecodeLimits, FORMAT_VERSION, FileAcquisitionError, FilePublicationPolicy,
-    OpenPackError, open_pack as open_pack_archive, read_pack as read_pack_archive, save_pack,
-    write_pack,
+    DecodeLimits, FORMAT_VERSION, FileReadError, FileWritePolicy, OpenPackError, ReadLimits,
+    open_pack as open_pack_archive, read_pack as read_pack_archive, save_pack, write_pack,
 };
 use typst_pack::{
-    CompilationArtifact, CompilationArtifactPathPublicationError,
-    CompilationArtifactPublicationError, CompilationFulfillmentSet, CompilationLimits,
-    CompilationOutputSpecification, CompilationReportOutcome, CompilationStatus, CreationTimestamp,
-    DocumentTime, HtmlOutputSpecification, OutputFormat, PackCompilationRequest, PackOverrideSet,
+    CompilationArtifact, CompilationArtifactPathWriteError, CompilationArtifactWriteError,
+    CompilationFulfillmentSet, CompilationLimits, CompilationOutputSpecification,
+    CompilationReportOutcome, CompilationStatus, CreationTimestamp, DocumentTime,
+    HtmlOutputSpecification, OutputFormat, PackCompilationRequest, PackOverrideSet,
     PackageTreeFulfillment, PageRange, PageSelection, PdfOutputSpecification,
     PngOutputSpecification, SvgOutputSpecification, TypstTarget, parse_page_selection,
-    publish_compilation_artifacts_to_filesystem_paths, resolve_external_font_requirements,
-    resolve_filesystem_publication_paths,
+    resolve_external_font_requirements, resolve_filesystem_write_paths,
+    write_compilation_artifacts_to_filesystem_paths,
 };
 use typst_pack::{
     FILE_EXTENSION, FilesystemMergePolicy, FilesystemPackAssembler, FilesystemPackAssemblerConfig,
-    FilesystemPackAssemblyError, FilesystemPackAssemblyRequest,
-    FilesystemPublicationPreflightIssue, Pack, PackCreationError, PackExtractionPublicationError,
-    PackExtractionSelection, PackMetadata, plan_pack_extraction,
-    publish_pack_extraction_plan_to_filesystem,
+    FilesystemPackAssemblyError, FilesystemPackAssemblyRequest, FilesystemWritePreflightIssue,
+    Pack, PackCreationError, PackExtractionSelection, PackExtractionWriteError, PackMetadata,
+    plan_pack_extraction, write_pack_extraction_plan_to_filesystem,
 };
 
 const ENV_PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
@@ -679,8 +677,8 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
     let timing_error = timing_error.map(|error| error.to_string());
     let report = match report {
         Ok(report) => report,
-        Err(FilesystemPackAssemblyError::ProjectGather(
-            typst_pack::FilesystemProjectGatherError::Snapshot(error),
+        Err(FilesystemPackAssemblyError::ProjectRead(
+            typst_pack::FilesystemProjectReadError::Snapshot(error),
         )) if matches!(
             error.issues(),
             [typst_pack::ProjectSnapshotIssue::MissingEntrypoint { .. }]
@@ -741,9 +739,9 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
         .try_exists()
         .map_err(|error| format!("cannot inspect `{}`: {error}", output.display()))?
     {
-        FilePublicationPolicy::ReplaceExisting
+        FileWritePolicy::ReplaceExisting
     } else {
-        FilePublicationPolicy::CreateNew
+        FileWritePolicy::CreateNew
     };
     save_pack(&output, report.pack(), policy).map_err(|error| error.to_string())?;
 
@@ -866,8 +864,8 @@ fn extract_command(args: ExtractArgs) -> CliResult {
     } else {
         FilesystemMergePolicy::MergeCreateOnly
     };
-    let receipt = publish_pack_extraction_plan_to_filesystem(&plan, &output, policy)
-        .map_err(|error| format_extraction_publication_error(&error))?;
+    let receipt = write_pack_extraction_plan_to_filesystem(&plan, &output, policy)
+        .map_err(|error| format_extraction_write_error(&error))?;
 
     println!(
         "extracted {} file(s) into `{}`",
@@ -877,22 +875,21 @@ fn extract_command(args: ExtractArgs) -> CliResult {
     Ok(())
 }
 
-fn format_extraction_publication_error(error: &PackExtractionPublicationError) -> String {
+fn format_extraction_write_error(error: &PackExtractionWriteError) -> String {
     match error.preflight_issues().and_then(|issues| issues.first()) {
-        Some(FilesystemPublicationPreflightIssue::ExistingTarget { relative_path }) => format!(
+        Some(FilesystemWritePreflightIssue::ExistingTarget { relative_path }) => format!(
             "`{}` already exists (pass force to overwrite)",
             error.destination().join(relative_path).display()
         ),
-        Some(FilesystemPublicationPreflightIssue::ConflictingTarget { relative_path, .. }) => {
+        Some(FilesystemWritePreflightIssue::ConflictingTarget { relative_path, .. }) => {
             format!(
                 "existing destination entry `{}` conflicts with extraction",
                 error.destination().join(relative_path).display()
             )
         }
-        Some(FilesystemPublicationPreflightIssue::ConflictingAncestor { ancestor, .. })
-        | Some(FilesystemPublicationPreflightIssue::ConflictingDestinationRoot {
-            path: ancestor,
-            ..
+        Some(FilesystemWritePreflightIssue::ConflictingAncestor { ancestor, .. })
+        | Some(FilesystemWritePreflightIssue::ConflictingDestinationRoot {
+            path: ancestor, ..
         }) => format!(
             "existing destination entry `{}` conflicts with extraction",
             ancestor.display()
@@ -1048,14 +1045,14 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         .iter()
         .filter(|requirement| !requirement.is_embedded())
     {
-        let acquired = packages.acquire(requirement.spec()).map_err(|error| {
+        let read = packages.read(requirement.spec()).map_err(|error| {
             CliError::Message(format!(
                 "external package fulfillment for {} is unavailable: {}",
                 requirement.spec(),
                 error
             ))
         })?;
-        let (tree, root) = acquired.into_parts();
+        let (tree, root) = read.into_parts();
         if let Some(root) = root {
             package_roots.insert(requirement.spec().to_string(), root);
         }
@@ -1122,7 +1119,7 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         .map(|(spec, tree)| PackageTreeFulfillment::new(spec, tree))
         .collect::<Vec<_>>();
     let fulfillments = CompilationFulfillmentSet::new(package_fulfillments, font_fulfillments)
-        .expect("filesystem acquisition supplies each exact dependency at most once");
+        .expect("filesystem read supplies each exact dependency at most once");
     request = request.fulfillments(fulfillments);
     let timed = compile_with_timing_with_limits(
         request,
@@ -1234,16 +1231,15 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
                         .write_all(output.artifacts()[0].bytes())
                         .map_err(|err| format!("cannot write output to stdout: {err}"))?;
                 } else {
-                    let (destination, relative_paths) =
-                        resolve_filesystem_publication_paths(&targets)
-                            .map_err(|error| error.to_string())?;
-                    publish_compilation_artifacts_to_filesystem_paths(
+                    let (destination, relative_paths) = resolve_filesystem_write_paths(&targets)
+                        .map_err(|error| error.to_string())?;
+                    write_compilation_artifacts_to_filesystem_paths(
                         output,
                         destination,
                         &relative_paths,
                         FilesystemMergePolicy::MergeReplaceExactFiles,
                     )
-                    .map_err(|error| format_compilation_publication_error(&error))?;
+                    .map_err(|error| format_compilation_write_error(&error))?;
                 }
                 Ok::<_, String>((targets, output_is_stdout))
             })();
@@ -1300,21 +1296,19 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     command_result
 }
 
-fn format_compilation_publication_error(error: &CompilationArtifactPathPublicationError) -> String {
-    error.publication_error().map_or_else(
+fn format_compilation_write_error(error: &CompilationArtifactPathWriteError) -> String {
+    error.write_error().map_or_else(
         || error.to_string(),
-        format_compilation_filesystem_publication_error,
+        format_compilation_filesystem_write_error,
     )
 }
 
-fn format_compilation_filesystem_publication_error(
-    error: &CompilationArtifactPublicationError,
-) -> String {
+fn format_compilation_filesystem_write_error(error: &CompilationArtifactWriteError) -> String {
     if let Some(issue) = error.preflight_issues().and_then(|issues| issues.first()) {
         let relative_path = match issue {
-            FilesystemPublicationPreflightIssue::ExistingTarget { relative_path }
-            | FilesystemPublicationPreflightIssue::ConflictingTarget { relative_path, .. }
-            | FilesystemPublicationPreflightIssue::ConflictingAncestor { relative_path, .. } => {
+            FilesystemWritePreflightIssue::ExistingTarget { relative_path }
+            | FilesystemWritePreflightIssue::ConflictingTarget { relative_path, .. }
+            | FilesystemWritePreflightIssue::ConflictingAncestor { relative_path, .. } => {
                 Some(relative_path)
             }
             _ => None,
@@ -1407,11 +1401,11 @@ fn normalize_output_path(path: &Path) -> PathBuf {
 fn read_pack(path: &Path) -> Result<Pack, String> {
     open_pack_archive(
         path,
-        AcquisitionLimits::reference_v1(),
+        ReadLimits::reference_v1(),
         DecodeLimits::reference_v1(),
     )
     .map_err(|error| match error {
-        OpenPackError::Acquire(FileAcquisitionError::Open { source, .. }) => {
+        OpenPackError::Read(FileReadError::Open { source, .. }) => {
             format!("cannot open `{}`: {source}", path.display())
         }
         error => error.to_string(),
@@ -1422,7 +1416,7 @@ fn read_pack_input(path: &Path) -> Result<Pack, String> {
     if path == Path::new("-") {
         return read_pack_archive(
             std::io::stdin().lock(),
-            AcquisitionLimits::reference_v1(),
+            ReadLimits::reference_v1(),
             DecodeLimits::reference_v1(),
         )
         .map_err(|error| format!("cannot read Pack from stdin: {error}"));
@@ -1732,7 +1726,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn artifact_publication_resolves_symlink_and_parent_components_natively() {
+    fn artifact_write_resolves_symlink_and_parent_components_natively() {
         use std::os::unix::fs::symlink;
 
         let directory = tempfile::tempdir().unwrap();
@@ -1742,14 +1736,14 @@ mod tests {
         symlink(&nested, directory.path().join("linked")).unwrap();
         let target = directory.path().join("linked/../output.pdf");
 
-        let (destination, relative) = resolve_filesystem_publication_paths(&[target]).unwrap();
+        let (destination, relative) = resolve_filesystem_write_paths(&[target]).unwrap();
 
         assert_eq!(destination, actual.canonicalize().unwrap());
         assert_eq!(relative, [PathBuf::from("output.pdf")]);
     }
 
     #[test]
-    fn artifact_publication_resolves_distinct_native_output_parents() {
+    fn artifact_write_resolves_distinct_native_output_parents() {
         use std::os::unix::fs::symlink;
 
         let directory = tempfile::tempdir().unwrap();
@@ -1765,7 +1759,7 @@ mod tests {
             directory.path().join("second-link/../output-2.svg"),
         ];
 
-        let (destination, relative) = resolve_filesystem_publication_paths(&targets).unwrap();
+        let (destination, relative) = resolve_filesystem_write_paths(&targets).unwrap();
 
         assert_eq!(destination, actual.canonicalize().unwrap());
         assert_eq!(
