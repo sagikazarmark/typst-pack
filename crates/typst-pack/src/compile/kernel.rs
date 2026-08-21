@@ -18,12 +18,10 @@ use super::fulfillment::{
     CompilationFulfillmentReport, CompilationFulfillmentSet, FontFulfillmentReport,
     InvalidCompilationFulfillmentSet, PackageFulfillmentReport, verify_compilation_fulfillment_set,
 };
-#[cfg(test)]
-use super::identity::ImplementationRole;
 use super::identity::{DiagnosticProducer, ImplementationIdentity};
 use crate::domain::{DocumentTime, TypstTarget};
 use crate::embedded::EmbeddedTypst;
-use crate::limits::{LimitError, Limits, LimitsError, ResourceKind};
+use crate::limits::{LimitError, Limits, ResourceKind};
 use crate::payload::SharedBytes;
 use crate::world::PackWorld;
 use crate::world_trace::{WorldTrace, logical_path};
@@ -43,9 +41,6 @@ impl ResourceKind<3> {
     pub const ExportWorkers: Self = Self::new(6);
 }
 
-/// A supplied compilation ceiling that cannot support bounded accounting.
-pub type CompilationLimitsError = LimitsError<CompilationResource>;
-
 /// A mandatory compilation export ceiling was exceeded or could not be accounted.
 pub type CompilationLimitError = LimitError<CompilationResource>;
 
@@ -54,6 +49,7 @@ pub type CompilationLimits = Limits<CompilationResource>;
 
 impl Limits<CompilationResource> {
     /// Constructs validated mandatory finite compilation ceilings.
+    #[track_caller]
     pub fn new(
         source_pages: u64,
         artifacts: u64,
@@ -62,7 +58,7 @@ impl Limits<CompilationResource> {
         artifact_bytes: u64,
         retained_artifact_bytes: u64,
         export_workers: u64,
-    ) -> Result<Self, CompilationLimitsError> {
+    ) -> Self {
         let limits = Self::from_ceilings([
             source_pages,
             artifacts,
@@ -72,7 +68,7 @@ impl Limits<CompilationResource> {
             retained_artifact_bytes,
             export_workers,
         ])
-        .validate_probe_resources([
+        .assert_probe_resources([
             CompilationResource::SourcePages,
             CompilationResource::Artifacts,
             CompilationResource::PixelsPerArtifact,
@@ -80,11 +76,12 @@ impl Limits<CompilationResource> {
             CompilationResource::ArtifactBytes,
             CompilationResource::RetainedArtifactBytes,
             CompilationResource::ExportWorkers,
-        ])?;
-        if export_workers == 0 {
-            return Err(CompilationLimitsError::ZeroWorkers);
-        }
-        Ok(limits)
+        ]);
+        assert!(
+            export_workers > 0,
+            "the ExportWorkers ceiling must be greater than zero"
+        );
+        limits
     }
 
     /// The first-party bounded compilation export profile.
@@ -101,7 +98,8 @@ impl Limits<CompilationResource> {
     }
 
     /// Replaces the export-worker ceiling while preserving every other limit.
-    pub fn with_export_workers(self, export_workers: u64) -> Result<Self, CompilationLimitsError> {
+    #[track_caller]
+    pub fn with_export_workers(self, export_workers: u64) -> Self {
         Self::new(
             self.source_pages(),
             self.artifacts(),
@@ -2537,15 +2535,8 @@ mod result_identity_tests {
         fn mutations(
             identity: ImplementationIdentity,
             implementation: &'static str,
-        ) -> [ImplementationIdentity; 8] {
+        ) -> [ImplementationIdentity; 7] {
             [
-                ImplementationIdentity {
-                    role: match identity.role {
-                        ImplementationRole::Engine => ImplementationRole::Exporter,
-                        ImplementationRole::Exporter => ImplementationRole::Engine,
-                    },
-                    ..identity
-                },
                 ImplementationIdentity {
                     implementation,
                     ..identity
@@ -2666,7 +2657,7 @@ mod result_identity_tests {
         let execute = |workers| {
             export_artifacts_bounded(
                 vec![0u8, 1],
-                CompilationLimits::new(2, 2, 1, 1, 0, 2, workers).unwrap(),
+                CompilationLimits::new(2, 2, 1, 1, 0, 2, workers),
                 |item| {
                     if item == 1 {
                         Err(CompileError::PngExport {

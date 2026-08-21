@@ -133,7 +133,7 @@ use super::read::recursive::{
 };
 use super::{BoxError, Location, LocationRoleError, OperatorResolver};
 use crate::FontDisposition;
-use crate::limits::{LimitError, Limits, LimitsError, ResourceKind};
+use crate::limits::{LimitError, Limits, ResourceKind};
 use crate::redacted_error::RedactedError;
 
 fn aggregate_issue_message<T: fmt::Display>(issues: &[T], summary: &str) -> String {
@@ -187,15 +187,13 @@ impl ResourceKind<9> {
     pub const TotalBytes: Self = Self::new(5);
 }
 
-/// A supplied Project Read ceiling is internally inconsistent.
-pub type ProjectReadLimitsError = LimitsError<ProjectReadResource>;
-
 /// Mandatory finite limits for OpenDAL Project Read.
 pub type ProjectReadLimits = Limits<ProjectReadResource>;
 
 impl Limits<ProjectReadResource> {
     /// Validates all named read ceilings.
-    pub fn new(ceilings: ProjectReadCeilings) -> Result<Self, ProjectReadLimitsError> {
+    #[track_caller]
+    pub fn new(ceilings: ProjectReadCeilings) -> Self {
         let limits = Self::from_ceilings([
             ceilings.listed_entries,
             ceilings.listed_path_bytes,
@@ -205,17 +203,21 @@ impl Limits<ProjectReadResource> {
             ceilings.total_bytes,
             0,
         ])
-        .validate_probe_resources([
+        .assert_probe_resources([
+            ProjectReadResource::ListedEntries,
+            ProjectReadResource::ListedPathBytes,
+            ProjectReadResource::TotalListedPathBytes,
+            ProjectReadResource::SelectedFiles,
             ProjectReadResource::ObjectBytes,
             ProjectReadResource::TotalBytes,
-        ])?;
-        if ceilings.object_bytes > ceilings.total_bytes {
-            return Err(ProjectReadLimitsError::ObjectBytesExceedTotalBytes {
-                object_bytes: ceilings.object_bytes,
-                total_bytes: ceilings.total_bytes,
-            });
-        }
-        Ok(limits)
+        ]);
+        assert!(
+            ceilings.object_bytes <= ceilings.total_bytes,
+            "the ObjectBytes ceiling {} exceeds the TotalBytes ceiling {}",
+            ceilings.object_bytes,
+            ceilings.total_bytes
+        );
+        limits
     }
 
     /// The validated first-party version-1 Project Read limits.
@@ -760,15 +762,13 @@ impl ResourceKind<10> {
     pub const TotalBytes: Self = Self::new(5);
 }
 
-/// A supplied Font Read ceiling is internally inconsistent.
-pub type FontReadLimitsError = LimitsError<FontReadResource>;
-
 /// Mandatory finite limits for OpenDAL Font Read.
 pub type FontReadLimits = Limits<FontReadResource>;
 
 impl Limits<FontReadResource> {
     /// Validates all named read ceilings.
-    pub fn new(ceilings: FontReadCeilings) -> Result<Self, FontReadLimitsError> {
+    #[track_caller]
+    pub fn new(ceilings: FontReadCeilings) -> Self {
         let limits = Self::from_ceilings([
             ceilings.listed_entries,
             ceilings.listed_path_bytes,
@@ -778,17 +778,21 @@ impl Limits<FontReadResource> {
             ceilings.total_bytes,
             0,
         ])
-        .validate_probe_resources([
+        .assert_probe_resources([
+            FontReadResource::ListedEntries,
+            FontReadResource::ListedPathBytes,
+            FontReadResource::TotalListedPathBytes,
+            FontReadResource::SelectedContainers,
             FontReadResource::ContainerBytes,
             FontReadResource::TotalBytes,
-        ])?;
-        if ceilings.container_bytes > ceilings.total_bytes {
-            return Err(FontReadLimitsError::ContainerBytesExceedTotalBytes {
-                container_bytes: ceilings.container_bytes,
-                total_bytes: ceilings.total_bytes,
-            });
-        }
-        Ok(limits)
+        ]);
+        assert!(
+            ceilings.container_bytes <= ceilings.total_bytes,
+            "the ContainerBytes ceiling {} exceeds the TotalBytes ceiling {}",
+            ceilings.container_bytes,
+            ceilings.total_bytes
+        );
+        limits
     }
 
     /// The validated first-party version-1 Font Read limits.

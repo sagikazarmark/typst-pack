@@ -17,8 +17,8 @@ use scripted_opendal::{
 use typst_pack::ProjectSnapshotAssembly;
 use typst_pack::opendal::pack_assembly::{
     ProjectReadCeilings, ProjectReadEntry, ProjectReadErrorCause, ProjectReadIssue,
-    ProjectReadLimitError, ProjectReadLimits, ProjectReadLimitsError, ProjectReadRequest,
-    ProjectReadRequestError, ProjectReadResource, read_project,
+    ProjectReadLimitError, ProjectReadLimits, ProjectReadRequest, ProjectReadRequestError,
+    ProjectReadResource, read_project,
 };
 use typst_pack::opendal::{
     Location, LocationRoleError, OperatorBinding, OperatorBindings, OperatorResolver,
@@ -89,58 +89,58 @@ fn reads_every_yielded_project_file_and_hands_exact_entries_to_snapshot_assembly
 fn named_project_ceilings_validate_probe_room_and_payload_relationships() {
     let reference = ProjectReadCeilings::reference_v1();
     let narrowed = ProjectReadLimits::new(ProjectReadCeilings {
-        listed_entries: u64::MAX,
-        listed_path_bytes: u64::MAX,
-        total_listed_path_bytes: u64::MAX,
+        listed_entries: u64::MAX - 1,
+        listed_path_bytes: u64::MAX - 1,
+        total_listed_path_bytes: u64::MAX - 1,
         total_bytes: reference.object_bytes,
         ..reference
-    })
-    .unwrap();
+    });
 
-    assert_eq!(narrowed.listed_entries(), u64::MAX);
-    assert_eq!(narrowed.listed_path_bytes(), u64::MAX);
-    assert_eq!(narrowed.total_listed_path_bytes(), u64::MAX);
+    assert_eq!(narrowed.listed_entries(), u64::MAX - 1);
+    assert_eq!(narrowed.listed_path_bytes(), u64::MAX - 1);
+    assert_eq!(narrowed.total_listed_path_bytes(), u64::MAX - 1);
     assert_eq!(narrowed.selected_files(), reference.selected_files);
     assert_eq!(narrowed.object_bytes(), reference.object_bytes);
     assert_eq!(narrowed.total_bytes(), reference.object_bytes);
 
-    for (resource, ceilings) in [
-        (
-            ProjectReadResource::ObjectBytes,
-            ProjectReadCeilings {
-                object_bytes: u64::MAX,
-                total_bytes: u64::MAX,
-                ..reference
-            },
-        ),
-        (
-            ProjectReadResource::TotalBytes,
-            ProjectReadCeilings {
-                total_bytes: u64::MAX,
-                ..reference
-            },
-        ),
+    for ceilings in [
+        ProjectReadCeilings {
+            listed_entries: u64::MAX,
+            ..reference
+        },
+        ProjectReadCeilings {
+            listed_path_bytes: u64::MAX,
+            ..reference
+        },
+        ProjectReadCeilings {
+            total_listed_path_bytes: u64::MAX,
+            ..reference
+        },
+        ProjectReadCeilings {
+            selected_files: u64::MAX,
+            ..reference
+        },
+        ProjectReadCeilings {
+            object_bytes: u64::MAX,
+            total_bytes: u64::MAX,
+            ..reference
+        },
+        ProjectReadCeilings {
+            total_bytes: u64::MAX,
+            ..reference
+        },
     ] {
-        assert!(matches!(
-            ProjectReadLimits::new(ceilings),
-            Err(ProjectReadLimitsError::CannotProbe {
-                resource: actual,
-                ceiling: u64::MAX,
-            }) if actual == resource
-        ));
+        assert!(std::panic::catch_unwind(|| ProjectReadLimits::new(ceilings)).is_err());
     }
 
-    assert!(matches!(
-        ProjectReadLimits::new(ProjectReadCeilings {
+    assert!(
+        std::panic::catch_unwind(|| ProjectReadLimits::new(ProjectReadCeilings {
             object_bytes: 2,
             total_bytes: 1,
             ..reference
-        }),
-        Err(ProjectReadLimitsError::ObjectBytesExceedTotalBytes {
-            object_bytes: 2,
-            total_bytes: 1,
-        })
-    ));
+        }))
+        .is_err()
+    );
 }
 
 #[test]
@@ -249,7 +249,7 @@ fn project_limits_map_every_operation_specific_resource_at_exact_boundaries() {
     for (resource, ceilings, entry) in cases {
         let list = ListScript::new("p/", 1, [ListStep::page([entry])]).unwrap();
         let service = ScriptedService::new(Capabilities::all(), [list], [], 8);
-        let limits = ProjectReadLimits::new(ceilings).unwrap();
+        let limits = ProjectReadLimits::new(ceilings);
         let request = request("p/", limits);
         let configured = bindings(&service);
         let error = expect_ready(pin!(read_project(&configured, &request))).unwrap_err();
@@ -270,8 +270,7 @@ fn project_limits_map_every_operation_specific_resource_at_exact_boundaries() {
         object_bytes: 3,
         total_bytes: 8,
         ..reference
-    })
-    .unwrap();
+    });
     let object_request = request("p/", limits);
     let configured = bindings(&service);
     let error = expect_ready(pin!(read_project(&configured, &object_request))).unwrap_err();
@@ -302,8 +301,7 @@ fn project_limits_map_every_operation_specific_resource_at_exact_boundaries() {
         object_bytes: 3,
         total_bytes: 3,
         ..reference
-    })
-    .unwrap();
+    });
     let request = request("p/", limits);
     let configured = bindings(&service);
     let error = expect_ready(pin!(read_project(&configured, &request))).unwrap_err();

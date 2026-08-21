@@ -7,12 +7,12 @@ use std::fs;
 use typst::syntax::package::PackageSpec;
 use typst_pack::{
     FilesystemPackageAuthority, FilesystemPackageAuthorityReadError, FilesystemPackageLimitError,
-    FilesystemPackageLimits, FilesystemPackageLimitsError, FilesystemPackageReadError,
-    FilesystemPackageResource, PackageReadFailureReason, read_filesystem_package,
+    FilesystemPackageLimits, FilesystemPackageReadError, FilesystemPackageResource,
+    PackageReadFailureReason, read_filesystem_package,
 };
 
 fn limits(values: [u64; 4]) -> FilesystemPackageLimits {
-    FilesystemPackageLimits::new(values[0], values[1], values[2], values[3]).unwrap()
+    FilesystemPackageLimits::new(values[0], values[1], values[2], values[3])
 }
 
 fn write_package(base: &std::path::Path, marker: &[u8]) -> std::path::PathBuf {
@@ -41,15 +41,14 @@ fn every_package_source_ceiling_must_leave_room_for_a_plus_one_probe() {
         FilesystemPackageResource::PackageTreeBytes,
     ];
 
-    for (index, resource) in resources.into_iter().enumerate() {
+    for (index, _resource) in resources.into_iter().enumerate() {
         let mut values = [1; 4];
         values[index] = u64::MAX;
-        assert_eq!(
-            FilesystemPackageLimits::new(values[0], values[1], values[2], values[3]),
-            Err(FilesystemPackageLimitsError::CannotProbe {
-                resource,
-                ceiling: u64::MAX,
+        assert!(
+            std::panic::catch_unwind(|| {
+                FilesystemPackageLimits::new(values[0], values[1], values[2], values[3])
             })
+            .is_err()
         );
     }
 }

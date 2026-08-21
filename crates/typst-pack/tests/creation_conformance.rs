@@ -1387,7 +1387,7 @@ fn an_archive_beyond_the_expansion_ceiling_fails_the_resume_loop() {
         .registry_archive(
             "oversized",
             archive(&[("lib.typ", 128 * 1024 * 1024, b"#let value = 1")]),
-            typst_pack::PackageExpansionLimits::new(1 << 20, 10, 1 << 20, 4096, 4096).unwrap(),
+            typst_pack::PackageExpansionLimits::new(1 << 20, 10, 1 << 20, 4096, 4096),
         );
 
     assert_package_reading_failure(

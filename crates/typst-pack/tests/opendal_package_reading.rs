@@ -18,9 +18,8 @@ use scripted_opendal::{
 use typst_pack::PackageReadFailureReason;
 use typst_pack::opendal::pack_assembly::{
     PackageArchiveReadCeilings, PackageArchiveReadLimitError, PackageArchiveReadResource,
-    PackageRead, PackageReadCeilings, PackageReadErrorCause, PackageReadLimits,
-    PackageReadLimitsError, PackageReadRequest, PackageReadRequestIssue, PackageReadResource,
-    PackageTreeReadCeilings, PackageTreeSource, read_package,
+    PackageRead, PackageReadCeilings, PackageReadErrorCause, PackageReadLimits, PackageReadRequest,
+    PackageReadRequestIssue, PackageTreeReadCeilings, PackageTreeSource, read_package,
 };
 #[cfg(feature = "package-reading")]
 use typst_pack::opendal::pack_assembly::{
@@ -228,18 +227,15 @@ fn request_aggregates_invalid_roles_and_limits_keep_the_reference_profile() {
     assert_eq!(reference.trees.selected_files, 50_000);
     assert_eq!(reference.trees.total_bytes, 512 * 1024 * 1024);
     assert_eq!(reference.archives.archive_bytes, 128 * 1024 * 1024);
-    assert!(matches!(
-        PackageReadLimits::new(PackageReadCeilings {
+    assert!(
+        std::panic::catch_unwind(|| PackageReadLimits::new(PackageReadCeilings {
             archives: PackageArchiveReadCeilings {
                 archive_bytes: u64::MAX,
             },
             ..reference
-        }),
-        Err(PackageReadLimitsError::CannotProbe {
-            resource: PackageReadResource::ArchiveBytes,
-            ceiling: u64::MAX,
-        })
-    ));
+        }))
+        .is_err()
+    );
 }
 
 #[test]
@@ -557,8 +553,7 @@ fn public_tree_errors_preserve_every_typed_cause_family() {
             ..PackageTreeReadCeilings::reference_v1()
         },
         ..PackageReadCeilings::reference_v1()
-    })
-    .unwrap();
+    });
     assert!(matches!(
         tree_error(&limited, limits).cause(),
         PackageReadErrorCause::TreeLimit(_)
@@ -586,8 +581,7 @@ fn present_oversized_cache_is_terminal_before_registry() {
     let limits = PackageReadLimits::new(PackageReadCeilings {
         archives: PackageArchiveReadCeilings { archive_bytes: 4 },
         ..PackageReadCeilings::reference_v1()
-    })
-    .unwrap();
+    });
     let request = PackageReadRequest::new(
         "@preview/example:1.2.3".parse().unwrap(),
         [],
@@ -882,8 +876,7 @@ fn unavailable_expansion_limit_and_catalog_failures_update_the_failure_map() {
         reference.member_name_bytes(),
         reference.member_bytes(),
         reference.total_expanded_bytes(),
-    )
-    .unwrap();
+    );
     let expansion_error = insert_read_package(
         &mut PackageCatalog::new(),
         &mut PackageReadFailures::new(),

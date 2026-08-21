@@ -22,8 +22,7 @@ use scripted_opendal::{
 };
 use typst_pack::opendal::pack_assembly::{
     FontReadCeilings, FontReadErrorCause, FontReadIssue, FontReadLimitError, FontReadLimits,
-    FontReadLimitsError, FontReadRequest, FontReadRequestIssue, FontReadResource, FontSource,
-    read_fonts,
+    FontReadRequest, FontReadRequestIssue, FontReadResource, FontSource, read_fonts,
 };
 use typst_pack::opendal::{
     Location, LocationRoleError, OperatorBinding, OperatorBindings, OperatorResolver,
@@ -171,16 +170,15 @@ fn named_font_ceilings_validate_probe_room_and_payload_relationships() {
     assert_eq!(reference.total_bytes, 2 * 1024 * 1024 * 1024);
 
     let narrowed = FontReadLimits::new(FontReadCeilings {
-        listed_entries: u64::MAX,
-        listed_path_bytes: u64::MAX,
-        total_listed_path_bytes: u64::MAX,
+        listed_entries: u64::MAX - 1,
+        listed_path_bytes: u64::MAX - 1,
+        total_listed_path_bytes: u64::MAX - 1,
         total_bytes: reference.container_bytes,
         ..reference
-    })
-    .unwrap();
-    assert_eq!(narrowed.listed_entries(), u64::MAX);
-    assert_eq!(narrowed.listed_path_bytes(), u64::MAX);
-    assert_eq!(narrowed.total_listed_path_bytes(), u64::MAX);
+    });
+    assert_eq!(narrowed.listed_entries(), u64::MAX - 1);
+    assert_eq!(narrowed.listed_path_bytes(), u64::MAX - 1);
+    assert_eq!(narrowed.total_listed_path_bytes(), u64::MAX - 1);
     assert_eq!(
         narrowed.selected_containers(),
         reference.selected_containers
@@ -188,42 +186,43 @@ fn named_font_ceilings_validate_probe_room_and_payload_relationships() {
     assert_eq!(narrowed.container_bytes(), reference.container_bytes);
     assert_eq!(narrowed.total_bytes(), reference.container_bytes);
 
-    for (resource, ceilings) in [
-        (
-            FontReadResource::ContainerBytes,
-            FontReadCeilings {
-                container_bytes: u64::MAX,
-                total_bytes: u64::MAX,
-                ..reference
-            },
-        ),
-        (
-            FontReadResource::TotalBytes,
-            FontReadCeilings {
-                total_bytes: u64::MAX,
-                ..reference
-            },
-        ),
+    for ceilings in [
+        FontReadCeilings {
+            listed_entries: u64::MAX,
+            ..reference
+        },
+        FontReadCeilings {
+            listed_path_bytes: u64::MAX,
+            ..reference
+        },
+        FontReadCeilings {
+            total_listed_path_bytes: u64::MAX,
+            ..reference
+        },
+        FontReadCeilings {
+            selected_containers: u64::MAX,
+            ..reference
+        },
+        FontReadCeilings {
+            container_bytes: u64::MAX,
+            total_bytes: u64::MAX,
+            ..reference
+        },
+        FontReadCeilings {
+            total_bytes: u64::MAX,
+            ..reference
+        },
     ] {
-        assert!(matches!(
-            FontReadLimits::new(ceilings),
-            Err(FontReadLimitsError::CannotProbe {
-                resource: actual,
-                ceiling: u64::MAX,
-            }) if actual == resource
-        ));
+        assert!(std::panic::catch_unwind(|| FontReadLimits::new(ceilings)).is_err());
     }
-    assert!(matches!(
-        FontReadLimits::new(FontReadCeilings {
+    assert!(
+        std::panic::catch_unwind(|| FontReadLimits::new(FontReadCeilings {
             container_bytes: 2,
             total_bytes: 1,
             ..reference
-        }),
-        Err(FontReadLimitsError::ContainerBytesExceedTotalBytes {
-            container_bytes: 2,
-            total_bytes: 1,
-        })
-    ));
+        }))
+        .is_err()
+    );
 }
 
 #[test]
@@ -271,7 +270,7 @@ fn every_font_resource_maps_exact_and_plus_one_boundaries() {
             8,
         );
         let configured = bindings(&service);
-        let request = request(&["p/"], FontReadLimits::new(ceilings).unwrap());
+        let request = request(&["p/"], FontReadLimits::new(ceilings));
         let error = expect_ready(pin!(read_fonts(&configured, &request))).unwrap_err();
 
         assert!(matches!(
@@ -294,8 +293,7 @@ fn every_font_resource_maps_exact_and_plus_one_boundaries() {
             container_bytes,
             total_bytes,
             ..reference
-        })
-        .unwrap();
+        });
         let configured = bindings(&service);
         let request = request(&["p/"], limits);
         let error = expect_ready(pin!(read_fonts(&configured, &request))).unwrap_err();
@@ -323,8 +321,7 @@ fn every_font_resource_maps_exact_and_plus_one_boundaries() {
         selected_containers: 1,
         container_bytes: 4,
         total_bytes: 4,
-    })
-    .unwrap();
+    });
     let configured = bindings(&exact_service);
     let exact_request = request(&["p/"], exact_limits);
     let exact = expect_ready(pin!(read_fonts(&configured, &exact_request))).unwrap();
@@ -343,8 +340,7 @@ fn every_font_resource_maps_exact_and_plus_one_boundaries() {
         selected_containers: 0,
         container_bytes: 0,
         total_bytes: 0,
-    })
-    .unwrap();
+    });
     let configured = bindings(&precedence_service);
     let precedence_request = request(&["p/"], precedence_limits);
     let error = expect_ready(pin!(read_fonts(&configured, &precedence_request))).unwrap_err();
@@ -453,8 +449,7 @@ fn survey_and_payload_limits_are_shared_across_sources() {
     let limits = FontReadLimits::new(FontReadCeilings {
         listed_entries: 1,
         ..FontReadCeilings::reference_v1()
-    })
-    .unwrap();
+    });
     let listed_request = request(&["first/", "second/"], limits);
     let listed_bindings = bindings(&listed_service);
     let listed = expect_ready(pin!(read_fonts(&listed_bindings, &listed_request))).unwrap_err();
@@ -494,8 +489,7 @@ fn survey_and_payload_limits_are_shared_across_sources() {
         container_bytes: 3,
         total_bytes: 3,
         ..FontReadCeilings::reference_v1()
-    })
-    .unwrap();
+    });
     let payload_request = request(&["first/", "second/"], limits);
     let payload_bindings = bindings(&payload_service);
     let payload = expect_ready(pin!(read_fonts(&payload_bindings, &payload_request))).unwrap_err();

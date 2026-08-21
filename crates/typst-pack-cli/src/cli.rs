@@ -972,15 +972,17 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     initialize_jobs(args.automation.jobs);
 
     let pack = read_pack_input(&args.pack)?;
-    let mut override_paths = Vec::new();
-    for pair in args.overrides.chunks_exact(2) {
-        let pack_path = pair[0]
-            .to_str()
-            .ok_or("Pack Override project path must be valid UTF-8")?;
-        override_paths.push(pack_path);
-        PackOverrideSet::validate_paths(&pack, override_paths.iter().copied())
-            .map_err(|error| CliError::Message(error.to_string()))?;
-    }
+    let override_paths = args
+        .overrides
+        .chunks_exact(2)
+        .map(|pair| {
+            pair[0]
+                .to_str()
+                .ok_or("Pack Override project path must be valid UTF-8")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    PackOverrideSet::validate_paths(&pack, override_paths)
+        .map_err(|error| CliError::Message(error.to_string()))?;
     let host_dependencies = Arc::new(Mutex::new(BTreeSet::new()));
     let mut overrides = PackOverrideSet::new(&pack);
     for pair in args.overrides.chunks_exact(2) {
@@ -1100,11 +1102,8 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
             .with_timezone(&chrono::Utc)
             .timestamp()
     });
-    let font_fulfillments = resolve_external_font_requirements(
-        &pack,
-        supplied_fonts.into_iter().map(|data| data.into_vec()),
-    )
-    .map_err(|error| CliError::Message(error.to_string()))?;
+    let font_fulfillments = resolve_external_font_requirements(&pack, supplied_fonts)
+        .map_err(|error| CliError::Message(error.to_string()))?;
     let mut request = PackCompilationRequest::new(pack, output_specification)
         .inputs(parse_inputs(&args.compilation.inputs))
         .document_time(DocumentTime::UnixTimestamp(document_timestamp));
@@ -1476,9 +1475,7 @@ fn reference_compilation_limits(worker_count: usize) -> CompilationLimits {
     let worker_count = u64::try_from(worker_count)
         .unwrap_or(limits.export_workers())
         .clamp(1, limits.export_workers());
-    limits
-        .with_export_workers(worker_count)
-        .expect("the first-party worker ceiling is finite and nonzero")
+    limits.with_export_workers(worker_count)
 }
 
 fn write_dependencies(

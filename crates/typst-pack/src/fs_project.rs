@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 use crate::error_display::format_error_list;
-use crate::limits::{LimitError, Limits, LimitsError, ResourceKind};
+use crate::limits::{LimitError, Limits, ResourceKind};
 use crate::pack::names_pack_path;
 use crate::project_snapshot::{ProjectSnapshot, ProjectSnapshotAssembly, ProjectSnapshotError};
 
@@ -28,8 +28,6 @@ impl ResourceKind<0> {
     pub const TotalSelectedBytes: Self = Self::new(4);
 }
 
-pub type FilesystemProjectLimitsError = LimitsError<FilesystemProjectResource>;
-
 /// A filesystem project exceeded a mandatory reading ceiling.
 pub type FilesystemProjectLimitError = LimitError<FilesystemProjectResource>;
 
@@ -38,13 +36,14 @@ pub type FilesystemProjectLimits = Limits<FilesystemProjectResource>;
 
 impl Limits<FilesystemProjectResource> {
     /// Constructs validated mandatory finite reading ceilings.
+    #[track_caller]
     pub fn new(
         visited_entries: u64,
         selected_files: u64,
         root_policy_bytes: u64,
         selected_file_bytes: u64,
         total_selected_bytes: u64,
-    ) -> Result<Self, FilesystemProjectLimitsError> {
+    ) -> Self {
         Self::from_ceilings([
             visited_entries,
             selected_files,
@@ -54,7 +53,7 @@ impl Limits<FilesystemProjectResource> {
             0,
             0,
         ])
-        .validate_probe_resources([
+        .assert_probe_resources([
             FilesystemProjectResource::VisitedEntries,
             FilesystemProjectResource::SelectedFiles,
             FilesystemProjectResource::RootPolicyBytes,

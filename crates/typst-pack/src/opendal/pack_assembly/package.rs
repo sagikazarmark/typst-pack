@@ -10,7 +10,7 @@ use super::super::read::recursive::{
 };
 use super::super::read::{ExactPathReadOperation, ResolvedOperators, read_exact_path};
 use super::super::{Location, LocationRoleError, OperatorResolver};
-use crate::limits::{LimitError, Limits, LimitsError, ResourceKind};
+use crate::limits::{LimitError, Limits, ResourceKind};
 use crate::package_catalog::PackageTreeError;
 use crate::read_layout;
 use crate::redacted_error::RedactedError;
@@ -65,15 +65,13 @@ impl ResourceKind<11> {
     pub const TotalBytes: Self = Self::new(5);
 }
 
-/// A supplied Package Tree Read ceiling is internally inconsistent.
-pub type PackageTreeReadLimitsError = LimitsError<PackageTreeReadResource>;
-
 /// Mandatory finite limits for OpenDAL Package Tree Read.
 pub type PackageTreeReadLimits = Limits<PackageTreeReadResource>;
 
 impl Limits<PackageTreeReadResource> {
     /// Validates every named Package Tree Read ceiling.
-    pub fn new(ceilings: PackageTreeReadCeilings) -> Result<Self, PackageTreeReadLimitsError> {
+    #[track_caller]
+    pub fn new(ceilings: PackageTreeReadCeilings) -> Self {
         let limits = Self::from_ceilings([
             ceilings.listed_entries,
             ceilings.listed_path_bytes,
@@ -83,17 +81,21 @@ impl Limits<PackageTreeReadResource> {
             ceilings.total_bytes,
             0,
         ])
-        .validate_probe_resources([
+        .assert_probe_resources([
+            PackageTreeReadResource::ListedEntries,
+            PackageTreeReadResource::ListedPathBytes,
+            PackageTreeReadResource::TotalListedPathBytes,
+            PackageTreeReadResource::SelectedFiles,
             PackageTreeReadResource::ObjectBytes,
             PackageTreeReadResource::TotalBytes,
-        ])?;
-        if ceilings.object_bytes > ceilings.total_bytes {
-            return Err(PackageTreeReadLimitsError::ObjectBytesExceedTotalBytes {
-                object_bytes: ceilings.object_bytes,
-                total_bytes: ceilings.total_bytes,
-            });
-        }
-        Ok(limits)
+        ]);
+        assert!(
+            ceilings.object_bytes <= ceilings.total_bytes,
+            "the ObjectBytes ceiling {} exceeds the TotalBytes ceiling {}",
+            ceilings.object_bytes,
+            ceilings.total_bytes
+        );
+        limits
     }
 
     /// The validated first-party version-1 limits.
@@ -168,19 +170,15 @@ impl ResourceKind<12> {
     pub const ArchiveBytes: Self = Self::new(0);
 }
 
-/// A supplied Package Archive Read ceiling is invalid.
-pub type PackageArchiveReadLimitsError = LimitsError<PackageArchiveReadResource>;
-
 /// Mandatory finite limits for one raw Package Archive Read.
 pub type PackageArchiveReadLimits = Limits<PackageArchiveReadResource>;
 
 impl Limits<PackageArchiveReadResource> {
     /// Validates the named raw archive ceiling.
-    pub fn new(
-        ceilings: PackageArchiveReadCeilings,
-    ) -> Result<Self, PackageArchiveReadLimitsError> {
+    #[track_caller]
+    pub fn new(ceilings: PackageArchiveReadCeilings) -> Self {
         Self::from_ceilings([ceilings.archive_bytes, 0, 0, 0, 0, 0, 0])
-            .validate_probe_resources([PackageArchiveReadResource::ArchiveBytes])
+            .assert_probe_resources([PackageArchiveReadResource::ArchiveBytes])
     }
 
     /// The validated first-party version-1 limits.
@@ -230,19 +228,16 @@ impl ResourceKind<13> {
     pub const ArchiveBytes: Self = Self::new(6);
 }
 
-/// A supplied Package Read limit family is invalid.
-pub type PackageReadLimitsError = LimitsError<PackageReadResource>;
-
 /// Mandatory finite limits for Package Read fallback.
 pub type PackageReadLimits = Limits<PackageReadResource>;
 
 impl Limits<PackageReadResource> {
     /// Validates both Package Read limit families.
-    pub fn new(ceilings: PackageReadCeilings) -> Result<Self, PackageReadLimitsError> {
-        let trees = PackageTreeReadLimits::new(ceilings.trees).map_err(map_tree_limits_error)?;
-        let archives =
-            PackageArchiveReadLimits::new(ceilings.archives).map_err(map_archive_limits_error)?;
-        Ok(Self::from_ceilings([
+    #[track_caller]
+    pub fn new(ceilings: PackageReadCeilings) -> Self {
+        let trees = PackageTreeReadLimits::new(ceilings.trees);
+        let archives = PackageArchiveReadLimits::new(ceilings.archives);
+        Self::from_ceilings([
             trees.listed_entries(),
             trees.listed_path_bytes(),
             trees.total_listed_path_bytes(),
@@ -250,7 +245,7 @@ impl Limits<PackageReadResource> {
             trees.object_bytes(),
             trees.total_bytes(),
             archives.archive_bytes(),
-        ]))
+        ])
     }
 
     /// Limits shared across ordered Package Tree candidates.
@@ -282,54 +277,6 @@ impl Limits<PackageReadResource> {
             512 * 1024 * 1024,
             128 * 1024 * 1024,
         ])
-    }
-}
-
-fn map_tree_limits_error(error: PackageTreeReadLimitsError) -> PackageReadLimitsError {
-    match error {
-        PackageTreeReadLimitsError::CannotProbe { resource, ceiling } => {
-            PackageReadLimitsError::CannotProbe {
-                resource: match resource {
-                    PackageTreeReadResource::ListedEntries => {
-                        PackageReadResource::TreeListedEntries
-                    }
-                    PackageTreeReadResource::ListedPathBytes => {
-                        PackageReadResource::TreeListedPathBytes
-                    }
-                    PackageTreeReadResource::TotalListedPathBytes => {
-                        PackageReadResource::TreeTotalListedPathBytes
-                    }
-                    PackageTreeReadResource::SelectedFiles => {
-                        PackageReadResource::TreeSelectedFiles
-                    }
-                    PackageTreeReadResource::ObjectBytes => PackageReadResource::TreeObjectBytes,
-                    PackageTreeReadResource::TotalBytes => PackageReadResource::TreeTotalBytes,
-                    _ => unreachable!("unknown Package Tree Read resource"),
-                },
-                ceiling,
-            }
-        }
-        PackageTreeReadLimitsError::ObjectBytesExceedTotalBytes {
-            object_bytes,
-            total_bytes,
-        } => PackageReadLimitsError::ObjectBytesExceedTotalBytes {
-            object_bytes,
-            total_bytes,
-        },
-        _ => unreachable!("unrelated Package Tree Read limits error"),
-    }
-}
-
-fn map_archive_limits_error(error: PackageArchiveReadLimitsError) -> PackageReadLimitsError {
-    match error {
-        PackageArchiveReadLimitsError::CannotProbe {
-            resource: PackageArchiveReadResource::ArchiveBytes,
-            ceiling,
-        } => PackageReadLimitsError::CannotProbe {
-            resource: PackageReadResource::ArchiveBytes,
-            ceiling,
-        },
-        _ => unreachable!("unrelated Package Archive Read limits error"),
     }
 }
 
@@ -1740,8 +1687,8 @@ mod tests {
 
     use super::{
         PackageReadErrorCause, PackageTreeReadCeilings, PackageTreeReadLimitError,
-        PackageTreeReadLimits, PackageTreeReadLimitsError, PackageTreeReadResource,
-        PackageTreeSource, read_package_tree_candidates,
+        PackageTreeReadLimits, PackageTreeReadResource, PackageTreeSource,
+        read_package_tree_candidates,
     };
 
     #[test]
@@ -1831,56 +1778,56 @@ mod tests {
         assert_eq!(reference.total_bytes, 512 * 1024 * 1024);
 
         let narrowed = PackageTreeReadLimits::new(PackageTreeReadCeilings {
-            listed_entries: u64::MAX,
-            listed_path_bytes: u64::MAX,
-            total_listed_path_bytes: u64::MAX,
+            listed_entries: u64::MAX - 1,
+            listed_path_bytes: u64::MAX - 1,
+            total_listed_path_bytes: u64::MAX - 1,
             total_bytes: reference.object_bytes,
             ..reference
-        })
-        .unwrap();
-        assert_eq!(narrowed.listed_entries(), u64::MAX);
-        assert_eq!(narrowed.listed_path_bytes(), u64::MAX);
-        assert_eq!(narrowed.total_listed_path_bytes(), u64::MAX);
+        });
+        assert_eq!(narrowed.listed_entries(), u64::MAX - 1);
+        assert_eq!(narrowed.listed_path_bytes(), u64::MAX - 1);
+        assert_eq!(narrowed.total_listed_path_bytes(), u64::MAX - 1);
         assert_eq!(narrowed.selected_files(), reference.selected_files);
         assert_eq!(narrowed.object_bytes(), reference.object_bytes);
         assert_eq!(narrowed.total_bytes(), reference.object_bytes);
 
-        for (resource, ceilings) in [
-            (
-                PackageTreeReadResource::ObjectBytes,
-                PackageTreeReadCeilings {
-                    object_bytes: u64::MAX,
-                    total_bytes: u64::MAX,
-                    ..reference
-                },
-            ),
-            (
-                PackageTreeReadResource::TotalBytes,
-                PackageTreeReadCeilings {
-                    total_bytes: u64::MAX,
-                    ..reference
-                },
-            ),
+        for ceilings in [
+            PackageTreeReadCeilings {
+                listed_entries: u64::MAX,
+                ..reference
+            },
+            PackageTreeReadCeilings {
+                listed_path_bytes: u64::MAX,
+                ..reference
+            },
+            PackageTreeReadCeilings {
+                total_listed_path_bytes: u64::MAX,
+                ..reference
+            },
+            PackageTreeReadCeilings {
+                selected_files: u64::MAX,
+                ..reference
+            },
+            PackageTreeReadCeilings {
+                object_bytes: u64::MAX,
+                total_bytes: u64::MAX,
+                ..reference
+            },
+            PackageTreeReadCeilings {
+                total_bytes: u64::MAX,
+                ..reference
+            },
         ] {
-            assert!(matches!(
-                PackageTreeReadLimits::new(ceilings),
-                Err(PackageTreeReadLimitsError::CannotProbe {
-                    resource: actual,
-                    ceiling: u64::MAX,
-                }) if actual == resource
-            ));
+            assert!(std::panic::catch_unwind(|| PackageTreeReadLimits::new(ceilings)).is_err());
         }
-        assert!(matches!(
-            PackageTreeReadLimits::new(PackageTreeReadCeilings {
+        assert!(
+            std::panic::catch_unwind(|| PackageTreeReadLimits::new(PackageTreeReadCeilings {
                 object_bytes: 2,
                 total_bytes: 1,
                 ..reference
-            }),
-            Err(PackageTreeReadLimitsError::ObjectBytesExceedTotalBytes {
-                object_bytes: 2,
-                total_bytes: 1,
-            })
-        ));
+            }))
+            .is_err()
+        );
     }
 
     #[test]
@@ -1935,7 +1882,7 @@ mod tests {
                 &bindings,
                 &spec(),
                 &[source("trees/")],
-                PackageTreeReadLimits::new(ceilings).unwrap(),
+                PackageTreeReadLimits::new(ceilings),
             )))
             .unwrap_err();
             assert!(matches!(
@@ -1976,8 +1923,7 @@ mod tests {
                 object_bytes: 3,
                 total_bytes: 8,
                 ..reference
-            })
-            .unwrap(),
+            }),
         )))
         .unwrap_err();
         assert!(matches!(
@@ -2025,8 +1971,7 @@ mod tests {
                 object_bytes: 3,
                 total_bytes: 3,
                 ..reference
-            })
-            .unwrap(),
+            }),
         )))
         .unwrap_err();
         assert!(matches!(
@@ -2068,8 +2013,7 @@ mod tests {
         let limits = PackageTreeReadLimits::new(PackageTreeReadCeilings {
             listed_entries: 1,
             ..PackageTreeReadCeilings::reference_v1()
-        })
-        .unwrap();
+        });
 
         let error = expect_ready(pin!(read_package_tree_candidates(
             &bindings,
@@ -2142,8 +2086,7 @@ mod tests {
             selected_files: 1,
             object_bytes: 1,
             total_bytes: 1,
-        })
-        .unwrap();
+        });
         let bindings = configured(&service);
         let read = expect_ready(pin!(read_package_tree_candidates(
             &bindings,

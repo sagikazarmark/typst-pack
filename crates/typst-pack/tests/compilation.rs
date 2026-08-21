@@ -3,13 +3,12 @@ use std::num::NonZeroUsize;
 use typst_pack::{
     CompilationAccessKind, CompilationFulfillmentIssue, CompilationFulfillmentSet,
     CompilationFulfillmentSetIssue, CompilationLimitError, CompilationLimits,
-    CompilationLimitsError, CompilationOperationOutcome, CompilationOutputSpecification,
-    CompilationReport, CompilationReportOutcome, CompilationRequestIssue,
-    CompilationRequestRejection, CompilationResource, CompilationResult, CompilationStatus,
-    DiagnosticPhase, DiagnosticProducer, DocumentTime, HtmlOutputSpecification, OutputFormat, Pack,
-    PackCompilationRequest, PackMetadata, PackOverrideSet, PackOverrideSetError, PackageTree,
-    PackageTreeFulfillment, PdfOutputSpecification, PngOutputSpecification, SvgOutputSpecification,
-    compile_with_limits,
+    CompilationOperationOutcome, CompilationOutputSpecification, CompilationReport,
+    CompilationReportOutcome, CompilationRequestIssue, CompilationRequestRejection,
+    CompilationResource, CompilationResult, CompilationStatus, DiagnosticPhase, DiagnosticProducer,
+    DocumentTime, HtmlOutputSpecification, OutputFormat, Pack, PackCompilationRequest,
+    PackMetadata, PackOverrideSet, PackOverrideSetError, PackageTree, PackageTreeFulfillment,
+    PdfOutputSpecification, PngOutputSpecification, SvgOutputSpecification, compile_with_limits,
 };
 #[cfg(feature = "embedded-fonts")]
 use typst_pack::{FontContainer, FontContainerFulfillment, resolve_external_font_requirements};
@@ -123,39 +122,28 @@ fn compilation_limits_reject_unbounded_ceilings_and_zero_workers() {
         CompilationResource::ExportWorkers,
     ];
 
-    for (index, resource) in fields.into_iter().enumerate() {
+    for (index, _resource) in fields.into_iter().enumerate() {
         let mut values = [1; 7];
         values[index] = u64::MAX;
-        assert!(matches!(
-            CompilationLimits::new(
+        assert!(
+            std::panic::catch_unwind(|| CompilationLimits::new(
                 values[0], values[1], values[2], values[3], values[4], values[5], values[6],
-            ),
-            Err(CompilationLimitsError::CannotProbe {
-                resource: actual,
-                ceiling: u64::MAX,
-            }) if actual == resource
-        ));
+            ))
+            .is_err()
+        );
     }
 
-    assert!(matches!(
-        CompilationLimits::new(1, 1, 1, 1, 1, 1, 0),
-        Err(CompilationLimitsError::ZeroWorkers)
-    ));
+    assert!(std::panic::catch_unwind(|| CompilationLimits::new(1, 1, 1, 1, 1, 1, 0)).is_err());
 }
 
 #[test]
 fn compilation_limits_can_reduce_the_reference_worker_ceiling() {
-    let limits = CompilationLimits::reference_v1()
-        .with_export_workers(1)
-        .unwrap();
+    let limits = CompilationLimits::reference_v1().with_export_workers(1);
 
     assert_eq!(limits.source_pages(), 10_000);
     assert_eq!(limits.artifacts(), 10_000);
     assert_eq!(limits.export_workers(), 1);
-    assert!(matches!(
-        limits.with_export_workers(0),
-        Err(CompilationLimitsError::ZeroWorkers)
-    ));
+    assert!(std::panic::catch_unwind(|| limits.with_export_workers(0)).is_err());
 }
 
 #[test]
@@ -180,8 +168,7 @@ fn source_page_limit_is_an_accepted_operation_outcome() {
                 1024 * 1024,
                 10 * 1024 * 1024,
                 1,
-            )
-            .unwrap(),
+            ),
         )
         .unwrap();
         assert!(report.result().is_some());
@@ -197,8 +184,7 @@ fn source_page_limit_is_an_accepted_operation_outcome() {
             1024 * 1024,
             10 * 1024 * 1024,
             1,
-        )
-        .unwrap(),
+        ),
     )
     .unwrap();
 
@@ -233,8 +219,7 @@ fn selected_artifact_count_is_bounded_before_export() {
                 1024 * 1024,
                 10 * 1024 * 1024,
                 1,
-            )
-            .unwrap(),
+            ),
         )
         .unwrap();
         assert!(report.result().is_some());
@@ -250,8 +235,7 @@ fn selected_artifact_count_is_bounded_before_export() {
             1024 * 1024,
             10 * 1024 * 1024,
             1,
-        )
-        .unwrap(),
+        ),
     )
     .unwrap();
 
@@ -279,7 +263,7 @@ fn png_pixels_per_artifact_are_bounded_before_rendering() {
     for ceiling in [101, 100] {
         let report = compile_with_limits(
             PackCompilationRequest::new(fixed_size_page_pack(1), specification.clone()),
-            CompilationLimits::new(1, 1, ceiling, 1_000, 1024 * 1024, 1024 * 1024, 1).unwrap(),
+            CompilationLimits::new(1, 1, ceiling, 1_000, 1024 * 1024, 1024 * 1024, 1),
         )
         .unwrap();
         assert!(report.result().is_some());
@@ -287,7 +271,7 @@ fn png_pixels_per_artifact_are_bounded_before_rendering() {
 
     let report = compile_with_limits(
         PackCompilationRequest::new(fixed_size_page_pack(1), specification),
-        CompilationLimits::new(1, 1, 99, 1_000, 1024 * 1024, 1024 * 1024, 1).unwrap(),
+        CompilationLimits::new(1, 1, 99, 1_000, 1024 * 1024, 1024 * 1024, 1),
     )
     .unwrap();
 
@@ -306,7 +290,7 @@ fn png_pixels_per_artifact_are_bounded_before_rendering() {
 
 #[test]
 fn total_png_pixels_use_checked_canonical_accounting() {
-    let limits = CompilationLimits::new(2, 2, 100, 199, 1024 * 1024, 2 * 1024 * 1024, 2).unwrap();
+    let limits = CompilationLimits::new(2, 2, 100, 199, 1024 * 1024, 2 * 1024 * 1024, 2);
     let specification = CompilationOutputSpecification::Png(PngOutputSpecification {
         pixels_per_inch: Some(72.0),
         ..PngOutputSpecification::default()
@@ -316,8 +300,7 @@ fn total_png_pixels_use_checked_canonical_accounting() {
         assert!(
             compile_with_limits(
                 PackCompilationRequest::new(fixed_size_page_pack(2), specification.clone()),
-                CompilationLimits::new(2, 2, 100, ceiling, 1024 * 1024, 2 * 1024 * 1024, 2,)
-                    .unwrap(),
+                CompilationLimits::new(2, 2, 100, ceiling, 1024 * 1024, 2 * 1024 * 1024, 2,),
             )
             .unwrap()
             .result()
@@ -354,15 +337,13 @@ fn artifact_bytes_are_bounded_after_generation_without_a_partial_result() {
     .unwrap();
     let byte_length = u64::try_from(baseline.artifacts()[0].bytes().len()).unwrap();
     let limits =
-        CompilationLimits::new(1, 1, 1_000_000, 1_000_000, byte_length - 1, byte_length, 1)
-            .unwrap();
+        CompilationLimits::new(1, 1, 1_000_000, 1_000_000, byte_length - 1, byte_length, 1);
 
     for ceiling in [byte_length + 1, byte_length] {
         assert!(
             compile_with_limits(
                 PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)),
-                CompilationLimits::new(1, 1, 1_000_000, 1_000_000, ceiling, byte_length, 1,)
-                    .unwrap(),
+                CompilationLimits::new(1, 1, 1_000_000, 1_000_000, ceiling, byte_length, 1,),
             )
             .unwrap()
             .result()
@@ -414,8 +395,7 @@ fn retained_artifact_bytes_use_checked_canonical_accounting() {
         *byte_lengths.iter().max().unwrap(),
         retained - 1,
         2,
-    )
-    .unwrap();
+    );
 
     for ceiling in [retained + 1, retained] {
         assert!(
@@ -429,8 +409,7 @@ fn retained_artifact_bytes_use_checked_canonical_accounting() {
                     *byte_lengths.iter().max().unwrap(),
                     ceiling,
                     2,
-                )
-                .unwrap(),
+                ),
             )
             .unwrap()
             .result()
@@ -475,22 +454,24 @@ fn compilation_limits_and_worker_scheduling_do_not_change_canonical_results() {
         .clone()
     };
 
-    let sequential = compile_under_limits(
-        CompilationLimits::new(
-            6,
-            6,
-            2_000_000,
-            6_000_000,
-            2 * 1024 * 1024,
-            6 * 1024 * 1024,
-            1,
-        )
-        .unwrap(),
-    );
-    let parallel = compile_under_limits(
-        CompilationLimits::new(5, 5, 1_000_000, 5_000_000, 1024 * 1024, 5 * 1024 * 1024, 4)
-            .unwrap(),
-    );
+    let sequential = compile_under_limits(CompilationLimits::new(
+        6,
+        6,
+        2_000_000,
+        6_000_000,
+        2 * 1024 * 1024,
+        6 * 1024 * 1024,
+        1,
+    ));
+    let parallel = compile_under_limits(CompilationLimits::new(
+        5,
+        5,
+        1_000_000,
+        5_000_000,
+        1024 * 1024,
+        5 * 1024 * 1024,
+        4,
+    ));
 
     assert_eq!(
         sequential.compilation_identity(),
@@ -532,7 +513,7 @@ proptest! {
                     1024 * 1024,
                     5 * 1024 * 1024,
                     workers,
-                ).unwrap(),
+                ),
             ).unwrap().result().unwrap().clone()
         };
 
@@ -744,7 +725,12 @@ fn external_font_requirements_are_resolved_from_matching_source_containers() {
 
     let fulfillments = resolve_external_font_requirements(
         &pack,
-        [unrelated, external.clone(), external.clone(), embedded],
+        [
+            unrelated.as_slice(),
+            external.as_slice(),
+            external.as_slice(),
+            embedded.as_slice(),
+        ],
     )
     .unwrap();
 

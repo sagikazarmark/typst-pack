@@ -17,7 +17,7 @@ use typst::foundations::Bytes;
 use typst::syntax::package::PackageSpec;
 
 use crate::Pack;
-use crate::limits::{LimitError, Limits, LimitsError, ResourceKind};
+use crate::limits::{LimitError, Limits, ResourceKind};
 use crate::package_catalog::{PackageTree, PackageTreeError};
 use crate::read_layout;
 
@@ -53,9 +53,6 @@ impl ResourceKind<6> {
     pub const TotalExpandedBytes: Self = Self::new(4);
 }
 
-/// A supplied expansion ceiling that cannot support bounded accounting.
-pub type PackageExpansionLimitsError = LimitsError<PackageExpansionResource>;
-
 /// A package archive exceeded a mandatory expansion ceiling.
 pub type PackageExpansionLimitError = LimitError<PackageExpansionResource>;
 
@@ -64,13 +61,14 @@ pub type PackageExpansionLimits = Limits<PackageExpansionResource>;
 
 impl Limits<PackageExpansionResource> {
     /// Constructs a validated set of mandatory finite expansion ceilings.
+    #[track_caller]
     pub fn new(
         compressed_archive_bytes: u64,
         members: u64,
         member_name_bytes: u64,
         member_bytes: u64,
         total_expanded_bytes: u64,
-    ) -> Result<Self, PackageExpansionLimitsError> {
+    ) -> Self {
         Self::from_ceilings([
             compressed_archive_bytes,
             members,
@@ -80,7 +78,7 @@ impl Limits<PackageExpansionResource> {
             0,
             0,
         ])
-        .validate_probe_resources([
+        .assert_probe_resources([
             PackageExpansionResource::CompressedArchiveBytes,
             PackageExpansionResource::Members,
             PackageExpansionResource::MemberNameBytes,

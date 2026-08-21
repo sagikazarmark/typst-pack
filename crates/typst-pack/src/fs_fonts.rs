@@ -12,7 +12,7 @@ use crate::font_catalog::typst_embedded_font_containers;
 use crate::font_catalog::{
     FontCatalog, FontCatalogEntry, FontContainer, FontContainerError, FontDisposition,
 };
-use crate::limits::{LimitError, Limits, LimitsError, ResourceKind};
+use crate::limits::{LimitError, Limits, ResourceKind};
 
 /// A resource bounded during filesystem Font Catalog reading.
 pub type FilesystemFontResource = ResourceKind<2>;
@@ -25,8 +25,6 @@ impl ResourceKind<2> {
     pub const TotalAcceptedBytes: Self = Self::new(3);
 }
 
-pub type FilesystemFontLimitsError = LimitsError<FilesystemFontResource>;
-
 /// A filesystem font source exceeded a mandatory reading ceiling.
 pub type FilesystemFontLimitError = LimitError<FilesystemFontResource>;
 
@@ -35,12 +33,13 @@ pub type FilesystemFontLimits = Limits<FilesystemFontResource>;
 
 impl Limits<FilesystemFontResource> {
     /// Constructs validated mandatory finite reading ceilings.
+    #[track_caller]
     pub fn new(
         visited_entries: u64,
         accepted_containers: u64,
         container_bytes: u64,
         total_accepted_bytes: u64,
-    ) -> Result<Self, FilesystemFontLimitsError> {
+    ) -> Self {
         Self::from_ceilings([
             visited_entries,
             accepted_containers,
@@ -50,7 +49,7 @@ impl Limits<FilesystemFontResource> {
             0,
             0,
         ])
-        .validate_probe_resources([
+        .assert_probe_resources([
             FilesystemFontResource::VisitedEntries,
             FilesystemFontResource::AcceptedContainers,
             FilesystemFontResource::ContainerBytes,
@@ -1086,7 +1085,7 @@ mod tests {
             &boundary,
             &selected,
             0,
-            FilesystemFontLimits::new(1, 1, 16, 16).unwrap(),
+            FilesystemFontLimits::new(1, 1, 16, 16),
         )
         .unwrap_err();
 
@@ -1119,7 +1118,7 @@ mod tests {
             &boundary,
             &selected,
             0,
-            FilesystemFontLimits::new(1, 1, 16, 16).unwrap(),
+            FilesystemFontLimits::new(1, 1, 16, 16),
         )
         .unwrap_err();
 

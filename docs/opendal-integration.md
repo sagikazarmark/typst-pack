@@ -98,9 +98,10 @@ adds `PackageTreeRead`, `CachedPackageArchiveRead`,
 `*RequestError` or an aggregated `*RequestRejection`, according to whether the
 request has one or several independently invalid locations.
 
-Each limits preset has matching `*Ceilings`, `*Resource`, `*Limits`,
-`*LimitsError`, and `*LimitError` names. These are operation-specific aliases of
-the shared generic limits implementation, not interchangeable resource profiles.
+Each limits preset has matching `*Ceilings`, `*Resource`, `*Limits`, and
+`*LimitError` names. These are operation-specific aliases of the shared generic
+limits implementation, not interchangeable resource profiles. Invalid limit
+construction is a programmer error and panics.
 
 Writes expose `OpenDalWritePhase`, operation-specific `*WriteError` and
 `*WriteErrorCause` types, and request validation errors. Compilation artifact
@@ -145,11 +146,11 @@ application-specific values:
 ```rust
 use typst_pack::opendal::pack_assembly::{ProjectReadCeilings, ProjectReadLimits};
 
-let limits = ProjectReadLimits::new(ProjectReadCeilings {
+let _limits = ProjectReadLimits::new(ProjectReadCeilings {
+    object_bytes: 16 * 1024 * 1024,
     total_bytes: 64 * 1024 * 1024,
     ..ProjectReadCeilings::reference_v1()
-})?;
-# Ok::<(), Box<dyn std::error::Error>>(())
+});
 ```
 
 | Operation | `reference_v1()` ceilings |
@@ -275,6 +276,6 @@ Version 0.5 introduced the optional OpenDAL integration.
 - Enabling `opendal` changes implementation-attested compilation and result identities, just as enabling `fs`, `parallel`, or `diagnostics` does. Include the enabled feature set in any identity-keyed cache namespace.
 - Backend configuration, credentials, retries, and exact service guarantees remain application policy; typst-pack neither installs nor weakens them.
 
-Version 0.6 renamed the original read/write surface. See the complete
+Version 0.6 renamed the original acquisition/publication surface to read/write. See the complete
 [0.6 rename table](../README.md#migrating-to-06); no old names remain as
 compatibility aliases.

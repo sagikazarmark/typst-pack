@@ -9,9 +9,9 @@ mod font_bytes;
 use std::fs;
 
 use typst_pack::{
-    FilesystemFontEntryKind, FilesystemFontIssue, FilesystemFontLimits, FilesystemFontLimitsError,
-    FilesystemFontOperation, FilesystemFontReadError, FilesystemFontResource, FilesystemFontSource,
-    FontDisposition, read_filesystem_fonts,
+    FilesystemFontEntryKind, FilesystemFontIssue, FilesystemFontLimits, FilesystemFontOperation,
+    FilesystemFontReadError, FilesystemFontResource, FilesystemFontSource, FontDisposition,
+    read_filesystem_fonts,
 };
 
 #[cfg(feature = "embedded-fonts")]
@@ -21,7 +21,7 @@ use typst_pack::{CanonicalIdentity, FilesystemFontLimitError};
 
 #[cfg(feature = "embedded-fonts")]
 fn limits(values: [u64; 4]) -> FilesystemFontLimits {
-    FilesystemFontLimits::new(values[0], values[1], values[2], values[3]).unwrap()
+    FilesystemFontLimits::new(values[0], values[1], values[2], values[3])
 }
 
 #[test]
@@ -43,15 +43,14 @@ fn every_font_source_ceiling_must_leave_room_for_a_plus_one_probe() {
         FilesystemFontResource::TotalAcceptedBytes,
     ];
 
-    for (index, resource) in resources.into_iter().enumerate() {
+    for (index, _resource) in resources.into_iter().enumerate() {
         let mut values = [1; 4];
         values[index] = u64::MAX;
-        assert_eq!(
-            FilesystemFontLimits::new(values[0], values[1], values[2], values[3]),
-            Err(FilesystemFontLimitsError::CannotProbe {
-                resource,
-                ceiling: u64::MAX,
+        assert!(
+            std::panic::catch_unwind(|| {
+                FilesystemFontLimits::new(values[0], values[1], values[2], values[3])
             })
+            .is_err()
         );
     }
 }

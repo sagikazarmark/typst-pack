@@ -4,7 +4,7 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 
 use super::{DecodeError, DecodeLimits, decode};
-use crate::limits::{LimitError, Limits, LimitsError, ResourceKind};
+use crate::limits::{LimitError, Limits, ResourceKind};
 use crate::{Pack, PackArchiveBytes};
 
 /// A resource bounded during Pack Archive Read.
@@ -15,9 +15,6 @@ impl ResourceKind<7> {
     pub const ArchiveBytes: Self = Self::new(0);
 }
 
-/// A supplied read ceiling that cannot support bounded accounting.
-pub type ReadLimitsError = LimitsError<ReadResource>;
-
 /// Pack Archive Read exceeded a mandatory ceiling.
 pub type ReadLimitError = LimitError<ReadResource>;
 
@@ -26,9 +23,10 @@ pub type ReadLimits = Limits<ReadResource>;
 
 impl Limits<ReadResource> {
     /// Constructs a validated read ceiling.
-    pub fn new(archive_bytes: u64) -> Result<Self, ReadLimitsError> {
+    #[track_caller]
+    pub fn new(archive_bytes: u64) -> Self {
         Self::from_ceilings([archive_bytes, 0, 0, 0, 0, 0, 0])
-            .validate_probe_resources([ReadResource::ArchiveBytes])
+            .assert_probe_resources([ReadResource::ArchiveBytes])
     }
 
     /// The first-party read limit for version-1 Pack Archives.

@@ -118,17 +118,17 @@ impl<R: Resource> Limits<R> {
         }
     }
 
-    pub(crate) fn validate_probe_resources(
-        self,
-        resources: impl IntoIterator<Item = R>,
-    ) -> Result<Self, LimitsError<R>> {
+    #[track_caller]
+    pub(crate) fn assert_probe_resources(self, resources: impl IntoIterator<Item = R>) -> Self {
         for resource in resources {
             let ceiling = self.ceiling(resource);
-            if ceiling == u64::MAX {
-                return Err(LimitsError::CannotProbe { resource, ceiling });
-            }
+            assert_ne!(
+                ceiling,
+                u64::MAX,
+                "the {resource:?} ceiling must leave room for a plus-one probe"
+            );
         }
-        Ok(self)
+        self
     }
 
     /// Returns the finite ceiling for one resource.
@@ -145,58 +145,6 @@ impl<R: Resource> fmt::Debug for Limits<R> {
             .finish()
     }
 }
-
-/// A supplied ceiling family that cannot support bounded accounting.
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum LimitsError<R: Resource> {
-    CannotProbe {
-        resource: R,
-        ceiling: u64,
-    },
-    ZeroWorkers,
-    ObjectBytesExceedTotalBytes {
-        object_bytes: u64,
-        total_bytes: u64,
-    },
-    ContainerBytesExceedTotalBytes {
-        container_bytes: u64,
-        total_bytes: u64,
-    },
-}
-
-impl<R: Resource> fmt::Display for LimitsError<R> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            Self::CannotProbe {
-                resource,
-                ceiling: _,
-            } => write!(
-                formatter,
-                "the {resource:?} ceiling must leave room for a plus-one probe"
-            ),
-            Self::ZeroWorkers => {
-                formatter.write_str("the ExportWorkers ceiling must be greater than zero")
-            }
-            Self::ObjectBytesExceedTotalBytes {
-                object_bytes,
-                total_bytes,
-            } => write!(
-                formatter,
-                "the ObjectBytes ceiling {object_bytes} exceeds the TotalBytes ceiling {total_bytes}"
-            ),
-            Self::ContainerBytesExceedTotalBytes {
-                container_bytes,
-                total_bytes,
-            } => write!(
-                formatter,
-                "the ContainerBytes ceiling {container_bytes} exceeds the TotalBytes ceiling {total_bytes}"
-            ),
-        }
-    }
-}
-
-impl<R: Resource> std::error::Error for LimitsError<R> {}
 
 /// A mandatory resource ceiling was exceeded or could not be accounted.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]

@@ -8,8 +8,7 @@ use typst_pack::{PackageExpansionLimits, expand_package_archive};
 
 fuzz_target!(|data: &[u8]| {
     let spec = PackageSpec::from_str("@preview/fuzz:1.0.0").unwrap();
-    let limits = PackageExpansionLimits::new(64 * 1024, 128, 8 * 1024, 16 * 1024, 64 * 1024)
-        .unwrap();
+    let limits = PackageExpansionLimits::new(64 * 1024, 128, 8 * 1024, 16 * 1024, 64 * 1024);
     let _ = expand_package_archive(spec.clone(), data, limits);
     let varied_limits = PackageExpansionLimits::new(
         u64::from(data.get(1).copied().unwrap_or_default()) * 256,
@@ -17,8 +16,7 @@ fuzz_target!(|data: &[u8]| {
         u64::from(data.get(3).copied().unwrap_or_default()) * 32,
         u64::from(data.get(4).copied().unwrap_or_default()) * 64,
         u64::from(data.get(5).copied().unwrap_or_default()) * 256,
-    )
-    .unwrap();
+    );
     let _ = expand_package_archive(spec.clone(), data, varied_limits);
 
     let mode = data.first().copied().unwrap_or_default() % 8;

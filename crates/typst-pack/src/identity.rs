@@ -46,9 +46,7 @@ pub struct CanonicalIdentity {
 
 impl Hash for CanonicalIdentity {
     fn hash<H: Hasher>(&self, state: &mut H) {
-        self.role.hash(state);
-        self.schema().hash(state);
-        self.algorithm().hash(state);
+        // Schema-v1 projections hashed the digest-only identity newtypes.
         self.digest.hash(state);
     }
 }

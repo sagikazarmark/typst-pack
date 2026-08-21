@@ -310,7 +310,8 @@ Compilation and encoding now have convenient reference limits. Use
 use `compile_with_limits`, `encode_with_limits`, `write_pack_with_limits`, or
 `save_pack_with_limits` to narrow them. Limits remain required at trust
 boundaries, including archive decoding, package expansion, stream/file reads,
-and filesystem or OpenDAL read requests.
+and filesystem or OpenDAL read requests. Invalid custom limit configurations
+are programmer errors and panic during construction.
 
 Pack Extraction and Compilation Output Artifact writes now share the crate-root
 `*WriteEntry`, `*WriteProgress`, and `*WriteReceipt` types across filesystem and

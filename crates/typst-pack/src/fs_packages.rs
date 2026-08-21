@@ -27,7 +27,7 @@ use typst::syntax::package::PackageSpec;
 use typst_kit::packages::FsPackages;
 
 use crate::error_display::format_error_list;
-use crate::limits::{LimitError, Limits, LimitsError, ResourceKind};
+use crate::limits::{LimitError, Limits, ResourceKind};
 use crate::package_catalog::{PackageTree, PackageTreeError};
 use crate::package_failure::{PackageReadFailure, PackageReadFailureReason};
 #[cfg(feature = "egress")]
@@ -53,8 +53,6 @@ impl ResourceKind<1> {
     pub const PackageTreeBytes: Self = Self::new(3);
 }
 
-pub type FilesystemPackageLimitsError = LimitsError<FilesystemPackageResource>;
-
 /// A filesystem package exceeded a mandatory reading ceiling.
 pub type FilesystemPackageLimitError = LimitError<FilesystemPackageResource>;
 
@@ -62,12 +60,13 @@ pub type FilesystemPackageLimitError = LimitError<FilesystemPackageResource>;
 pub type FilesystemPackageLimits = Limits<FilesystemPackageResource>;
 
 impl Limits<FilesystemPackageResource> {
+    #[track_caller]
     pub fn new(
         visited_entries: u64,
         selected_files: u64,
         selected_file_bytes: u64,
         package_tree_bytes: u64,
-    ) -> Result<Self, FilesystemPackageLimitsError> {
+    ) -> Self {
         Self::from_ceilings([
             visited_entries,
             selected_files,
@@ -77,7 +76,7 @@ impl Limits<FilesystemPackageResource> {
             0,
             0,
         ])
-        .validate_probe_resources([
+        .assert_probe_resources([
             FilesystemPackageResource::VisitedEntries,
             FilesystemPackageResource::SelectedFiles,
             FilesystemPackageResource::SelectedFileBytes,
@@ -1213,7 +1212,7 @@ mod tests {
     fn registry_expansion_limits_retain_the_typed_cause_without_claiming_malformed_bytes() {
         let spec = "@preview/example:1.0.0".parse().unwrap();
         let archive = package_archive(&[("lib.typ", b"12345")]);
-        let limits = PackageExpansionLimits::new(1024 * 1024, 10, 100, 4, 100).unwrap();
+        let limits = PackageExpansionLimits::new(1024 * 1024, 10, 100, 4, 100);
 
         let error = read_registry_tree(
             &spec,

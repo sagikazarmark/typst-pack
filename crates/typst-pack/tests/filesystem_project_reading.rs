@@ -6,12 +6,11 @@ use std::fs;
 
 use typst_pack::{
     FilesystemProjectIssue, FilesystemProjectLimitError, FilesystemProjectLimits,
-    FilesystemProjectLimitsError, FilesystemProjectReadError, FilesystemProjectResource,
-    read_filesystem_project,
+    FilesystemProjectReadError, FilesystemProjectResource, read_filesystem_project,
 };
 
 fn limits(values: [u64; 5]) -> FilesystemProjectLimits {
-    FilesystemProjectLimits::new(values[0], values[1], values[2], values[3], values[4]).unwrap()
+    FilesystemProjectLimits::new(values[0], values[1], values[2], values[3], values[4])
 }
 
 const GENEROUS_LIMITS: FilesystemProjectLimits = FilesystemProjectLimits::reference_v1();
@@ -37,15 +36,14 @@ fn every_project_source_ceiling_must_leave_room_for_a_plus_one_probe() {
         FilesystemProjectResource::TotalSelectedBytes,
     ];
 
-    for (index, resource) in resources.into_iter().enumerate() {
+    for (index, _resource) in resources.into_iter().enumerate() {
         let mut values = [1; 5];
         values[index] = u64::MAX;
-        assert_eq!(
-            FilesystemProjectLimits::new(values[0], values[1], values[2], values[3], values[4]),
-            Err(FilesystemProjectLimitsError::CannotProbe {
-                resource,
-                ceiling: u64::MAX,
-            })
+        assert!(
+            std::panic::catch_unwind(|| FilesystemProjectLimits::new(
+                values[0], values[1], values[2], values[3], values[4]
+            ))
+            .is_err()
         );
     }
 }

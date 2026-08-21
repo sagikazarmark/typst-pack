@@ -56,17 +56,17 @@ pub use compile::{
     CompilationAccessTrace, CompilationArtifact, CompilationDiagnostic, CompilationDocumentSummary,
     CompilationFulfillmentIssue, CompilationFulfillmentReport, CompilationFulfillmentSet,
     CompilationFulfillmentSetError, CompilationFulfillmentSetIssue, CompilationLimitError,
-    CompilationLimits, CompilationLimitsError, CompilationOperationOutcome,
-    CompilationOutputSpecification, CompilationReport, CompilationReportOutcome,
-    CompilationRequestIssue, CompilationRequestRejection, CompilationResource, CompilationResult,
-    CompilationStatus, CreationTimestamp, DiagnosticHint, DiagnosticPhase, DiagnosticProducer,
-    DiagnosticSeverity, DiagnosticTracepoint, FontContainerFulfillment, FontFulfillmentReport,
-    HtmlOutputSpecification, ImplementationIdentity, ImplementationRole,
-    InvalidCompilationFulfillmentSet, LogicalSpan, OutputFormat, PackCompilationRequest,
-    PackCompilationWarning, PackOverrideSet, PackOverrideSetError, PackageFulfillmentReport,
-    PackageTreeFulfillment, PageRange, PageSelection, PdfOutputSpecification,
-    PdfStandardsValidationError, PngOutputSpecification, SvgOutputSpecification, TracepointKind,
-    compile, compile_with_limits, parse_page_selection, resolve_external_font_requirements,
+    CompilationLimits, CompilationOperationOutcome, CompilationOutputSpecification,
+    CompilationReport, CompilationReportOutcome, CompilationRequestIssue,
+    CompilationRequestRejection, CompilationResource, CompilationResult, CompilationStatus,
+    CreationTimestamp, DiagnosticHint, DiagnosticPhase, DiagnosticProducer, DiagnosticSeverity,
+    DiagnosticTracepoint, FontContainerFulfillment, FontFulfillmentReport, HtmlOutputSpecification,
+    ImplementationIdentity, ImplementationRole, InvalidCompilationFulfillmentSet, LogicalSpan,
+    OutputFormat, PackCompilationRequest, PackCompilationWarning, PackOverrideSet,
+    PackOverrideSetError, PackageFulfillmentReport, PackageTreeFulfillment, PageRange,
+    PageSelection, PdfOutputSpecification, PdfStandardsValidationError, PngOutputSpecification,
+    SvgOutputSpecification, TracepointKind, compile, compile_with_limits, parse_page_selection,
+    resolve_external_font_requirements,
 };
 pub use creation::{
     DependencyDiscoveryRejection, DiscoverySpecification, DiscoverySpecificationError,
@@ -102,26 +102,26 @@ pub use fs_assembly::{
 #[cfg(feature = "fs")]
 pub use fs_fonts::{
     FilesystemFontContainerIssue, FilesystemFontEntryKind, FilesystemFontIssue,
-    FilesystemFontLimitError, FilesystemFontLimits, FilesystemFontLimitsError,
-    FilesystemFontOperation, FilesystemFontReadError, FilesystemFontResource, FilesystemFontSource,
+    FilesystemFontLimitError, FilesystemFontLimits, FilesystemFontOperation,
+    FilesystemFontReadError, FilesystemFontResource, FilesystemFontSource,
     FilesystemFontSurveyError, FilesystemFontValidationError, read_filesystem_fonts,
 };
 #[cfg(feature = "fs")]
 pub use fs_packages::{
     FilesystemPackageAuthority, FilesystemPackageAuthorityReadError, FilesystemPackageEntryKind,
     FilesystemPackageIssue, FilesystemPackageLimitError, FilesystemPackageLimits,
-    FilesystemPackageLimitsError, FilesystemPackageOperation, FilesystemPackageReadError,
-    FilesystemPackageResource, FilesystemPackageSurveyError, ReadPackage, read_filesystem_package,
+    FilesystemPackageOperation, FilesystemPackageReadError, FilesystemPackageResource,
+    FilesystemPackageSurveyError, ReadPackage, read_filesystem_package,
 };
 #[cfg(feature = "fs")]
 pub use fs_project::{
     FilesystemProjectEntryKind, FilesystemProjectIssue, FilesystemProjectLimitError,
-    FilesystemProjectLimits, FilesystemProjectLimitsError, FilesystemProjectOperation,
-    FilesystemProjectPolicyError, FilesystemProjectReadError, FilesystemProjectResource,
-    FilesystemProjectSurveyError, IGNORE_FILE, read_filesystem_project,
+    FilesystemProjectLimits, FilesystemProjectOperation, FilesystemProjectPolicyError,
+    FilesystemProjectReadError, FilesystemProjectResource, FilesystemProjectSurveyError,
+    IGNORE_FILE, read_filesystem_project,
 };
 pub use identity::{CanonicalIdentity, CanonicalIdentityRole};
-pub use limits::{LimitError, Limits, LimitsError, Resource, ResourceKind};
+pub use limits::{LimitError, Limits, Resource, ResourceKind};
 pub use manifest::PackMetadata;
 pub use pack::{
     FILE_EXTENSION, FontFaceIdentity, FontRequirement, Pack, PackBuildError, PackBuilder, PackFont,
@@ -139,9 +139,8 @@ pub use package_failure::{PackageReadFailure, PackageReadFailureReason, PackageR
 #[cfg(feature = "package-reading")]
 pub use package_reading::{
     PACKAGE_REGISTRY_NAMESPACE, PACKAGE_REGISTRY_URL, PackageArchiveReadError,
-    PackageExpansionLimitError, PackageExpansionLimits, PackageExpansionLimitsError,
-    PackageExpansionResource, PackageReadError, expand_package_archive, package_archive_url,
-    read_package_archive,
+    PackageExpansionLimitError, PackageExpansionLimits, PackageExpansionResource, PackageReadError,
+    expand_package_archive, package_archive_url, read_package_archive,
 };
 pub use payload::PackArchiveBytes;
 pub use project_snapshot::{

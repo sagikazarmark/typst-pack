@@ -59,7 +59,7 @@ fuzz_target!(|data: &[u8]| {
         FilesystemProjectLimits::reference_v1()
     } else {
         let value = |index: usize| data.get(index).copied().unwrap_or_default() as u64;
-        FilesystemProjectLimits::new(value(1), value(2), value(3), value(4), value(5)).unwrap()
+        FilesystemProjectLimits::new(value(1), value(2), value(3), value(4), value(5))
     };
 
     let _ = read_filesystem_project(root, "main.typ", limits);

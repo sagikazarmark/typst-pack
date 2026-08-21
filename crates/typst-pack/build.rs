@@ -17,14 +17,27 @@ fn main() {
     }
 
     let features = enabled_feature_set();
-    println!(
-        "cargo:rustc-env=TYPST_PACK_FEATURE_SET={}",
-        if features.is_empty() {
-            "none".to_owned()
-        } else {
-            features.join(",")
-        }
-    );
+    let feature_set = if features.is_empty() {
+        "none".to_owned()
+    } else {
+        features.join(",")
+    };
+    println!("cargo:rustc-env=TYPST_PACK_FEATURE_SET={feature_set}");
+
+    // Identity schema v1 predates the public feature rename and must stay stable.
+    let identity_features = features
+        .iter()
+        .map(|feature| match feature.as_str() {
+            "package-reading" => "package-acquisition",
+            feature => feature,
+        })
+        .collect::<Vec<_>>();
+    let identity_feature_set = if identity_features.is_empty() {
+        "none".to_owned()
+    } else {
+        identity_features.join(",")
+    };
+    println!("cargo:rustc-env=TYPST_PACK_IDENTITY_FEATURE_SET={identity_feature_set}");
 }
 
 fn stage_readme() {

@@ -1,8 +1,7 @@
 use std::io::{self, Cursor, Read};
 
 use typst_pack::pack_archive::{
-    ReadError, ReadLimitError, ReadLimits, ReadLimitsError, ReadPackError, ReadResource, read,
-    read_pack,
+    ReadError, ReadLimitError, ReadLimits, ReadPackError, ReadResource, read, read_pack,
 };
 
 #[test]
@@ -15,20 +14,14 @@ fn reference_v1_profile_bounds_exact_archive_bytes() {
 
 #[test]
 fn read_limits_reject_an_unprobeable_ceiling() {
-    assert!(matches!(
-        ReadLimits::new(u64::MAX),
-        Err(ReadLimitsError::CannotProbe {
-            resource: ReadResource::ArchiveBytes,
-            ceiling: u64::MAX,
-        })
-    ));
+    assert!(std::panic::catch_unwind(|| ReadLimits::new(u64::MAX)).is_err());
 }
 
 #[test]
 fn stream_read_handles_short_reads_and_preserves_exact_bytes() {
     let mut reader = ChunkedReader::new(b"exact archive bytes", 2);
 
-    let archive = read(&mut reader, ReadLimits::new(19).unwrap()).unwrap();
+    let archive = read(&mut reader, ReadLimits::new(19)).unwrap();
 
     assert_eq!(archive.as_slice(), b"exact archive bytes");
     assert!(reader.reads > 1);
@@ -49,12 +42,12 @@ fn read_archive_debug_excludes_payload_bytes() {
 fn stream_read_accepts_the_boundary_and_probes_only_one_byte_past_it() {
     let bytes = b"12345";
     for ceiling in [bytes.len() as u64 + 1, bytes.len() as u64] {
-        let archive = read(Cursor::new(bytes), ReadLimits::new(ceiling).unwrap()).unwrap();
+        let archive = read(Cursor::new(bytes), ReadLimits::new(ceiling)).unwrap();
         assert_eq!(archive.as_slice(), bytes);
     }
 
     let mut one_over = ChunkedReader::new(b"123456789", 9);
-    let error = read(&mut one_over, ReadLimits::new(5).unwrap()).unwrap_err();
+    let error = read(&mut one_over, ReadLimits::new(5)).unwrap_err();
 
     assert!(matches!(
         error,
@@ -69,7 +62,7 @@ fn stream_read_accepts_the_boundary_and_probes_only_one_byte_past_it() {
 
 #[test]
 fn stream_read_returns_a_typed_read_error_without_partial_bytes() {
-    let error = read(FailinReader, ReadLimits::new(10).unwrap()).unwrap_err();
+    let error = read(FailinReader, ReadLimits::new(10)).unwrap_err();
 
     assert!(matches!(error, ReadError::Read(_)));
 }
@@ -79,7 +72,7 @@ fn read_pack_returns_exact_read_bytes_when_decoding_fails() {
     let expected = b"not a Pack Archive";
     let error = read_pack(
         Cursor::new(expected),
-        ReadLimits::new(expected.len() as u64).unwrap(),
+        ReadLimits::new(expected.len() as u64),
         typst_pack::pack_archive::DecodeLimits::reference_v1(),
     )
     .unwrap_err();
@@ -101,10 +94,10 @@ fn file_read_uses_known_size_preflight_and_exact_reads() {
     let path = directory.path().join("archive.typk");
     std::fs::write(&path, b"12345").unwrap();
 
-    let archive = read_file(&path, ReadLimits::new(5).unwrap()).unwrap();
+    let archive = read_file(&path, ReadLimits::new(5)).unwrap();
     assert_eq!(archive.as_slice(), b"12345");
 
-    let error = read_file(&path, ReadLimits::new(4).unwrap()).unwrap_err();
+    let error = read_file(&path, ReadLimits::new(4)).unwrap_err();
     assert_eq!(error.phase(), FileReadPhase::Metadata);
     assert!(matches!(
         error,
@@ -122,7 +115,7 @@ fn file_read_uses_known_size_preflight_and_exact_reads() {
     std::fs::write(&path, invalid).unwrap();
     let error = open_pack(
         &path,
-        ReadLimits::new(invalid.len() as u64).unwrap(),
+        ReadLimits::new(invalid.len() as u64),
         typst_pack::pack_archive::DecodeLimits::reference_v1(),
     )
     .unwrap_err();

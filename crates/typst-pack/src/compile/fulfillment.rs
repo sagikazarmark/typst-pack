@@ -91,7 +91,7 @@ pub fn resolve_external_font_requirements<I, S>(
 ) -> Result<Vec<FontContainerFulfillment>, crate::FontContainerError>
 where
     I: IntoIterator<Item = S>,
-    S: Into<Vec<u8>>,
+    S: AsRef<[u8]>,
 {
     let required = pack
         .font_requirements()
@@ -101,10 +101,10 @@ where
         .collect::<BTreeSet<_>>();
     let mut fulfillments = BTreeMap::new();
     for source in sources {
-        let data = source.into();
-        let identity = CanonicalIdentity::for_font_container_bytes(&data);
+        let data = source.as_ref();
+        let identity = CanonicalIdentity::for_font_container_bytes(data);
         if required.contains(&identity) && !fulfillments.contains_key(&identity) {
-            let container = FontContainer::new(data)?;
+            let container = FontContainer::new(data.to_vec())?;
             fulfillments.insert(identity, FontContainerFulfillment::new(identity, container));
         }
     }

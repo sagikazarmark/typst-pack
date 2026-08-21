@@ -1,5 +1,7 @@
 //! Embedded implementation identities and diagnostic attribution.
 
+use std::hash::{Hash, Hasher};
+
 /// The role of an embedded implementation in compilation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ImplementationRole {
@@ -8,7 +10,7 @@ pub enum ImplementationRole {
 }
 
 /// The exact embedded implementation that participated in a result.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ImplementationIdentity {
     pub(super) role: ImplementationRole,
     pub(super) implementation: &'static str,
@@ -18,6 +20,24 @@ pub struct ImplementationIdentity {
     pub(super) target_features: &'static str,
     pub(super) feature_set: &'static str,
     pub(super) debug_assertions: bool,
+}
+
+impl Hash for ImplementationIdentity {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        // The role is represented by the engine/exporter position in schema v1.
+        self.implementation.hash(state);
+        self.version.hash(state);
+        self.source_checksum.hash(state);
+        self.target.hash(state);
+        self.target_features.hash(state);
+        let feature_set = if self.feature_set == env!("TYPST_PACK_FEATURE_SET") {
+            env!("TYPST_PACK_IDENTITY_FEATURE_SET")
+        } else {
+            self.feature_set
+        };
+        feature_set.hash(state);
+        self.debug_assertions.hash(state);
+    }
 }
 
 impl ImplementationIdentity {

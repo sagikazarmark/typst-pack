@@ -1,7 +1,7 @@
 use proptest::prelude::*;
 use typst_pack::pack_archive::{
-    DecodeLimits, EncodeError, EncodeLimitError, EncodeLimits, EncodeLimitsError, EncodeResource,
-    RepresentationError, decode, encode_with_limits as encode,
+    DecodeLimits, EncodeError, EncodeLimitError, EncodeLimits, EncodeResource, RepresentationError,
+    decode, encode_with_limits as encode,
 };
 use typst_pack::{
     CanonicalIdentity, FontFaceIdentity, FontRequirement, Pack, PackFontCatalogFace, PackMetadata,
@@ -58,16 +58,17 @@ fn encode_limits_reject_an_unprobeable_ceiling() {
         EncodeResource::TotalContentBytes,
     ];
 
-    for (index, resource) in resources.into_iter().enumerate() {
+    for (index, _resource) in resources.into_iter().enumerate() {
         let mut values = [1; 6];
         values[index] = u64::MAX;
-        assert!(matches!(
-            EncodeLimits::new(values[0], values[1], values[2], values[3], values[4], values[5]),
-            Err(EncodeLimitsError::CannotProbe {
-                resource: reported,
-                ceiling: u64::MAX,
-            }) if reported == resource
-        ));
+        assert!(
+            std::panic::catch_unwind(|| {
+                EncodeLimits::new(
+                    values[0], values[1], values[2], values[3], values[4], values[5],
+                )
+            })
+            .is_err()
+        );
     }
 }
 
@@ -139,14 +140,13 @@ fn encode_limits_for(resource: EncodeResource, ceiling: u64) -> EncodeLimits {
     EncodeLimits::new(
         values[0], values[1], values[2], values[3], values[4], values[5],
     )
-    .unwrap()
 }
 
 #[test]
 fn member_limit_accepts_the_boundary_and_rejects_one_over() {
     let pack = simple_pack();
-    let at_boundary = EncodeLimits::new(10_000, 2, 1_000, 1_000, 1_000, 1_000).unwrap();
-    let one_over = EncodeLimits::new(10_000, 1, 1_000, 1_000, 1_000, 1_000).unwrap();
+    let at_boundary = EncodeLimits::new(10_000, 2, 1_000, 1_000, 1_000, 1_000);
+    let one_over = EncodeLimits::new(10_000, 1, 1_000, 1_000, 1_000, 1_000);
 
     assert!(encode(&pack, at_boundary).is_ok());
     assert!(matches!(
@@ -162,8 +162,8 @@ fn member_limit_accepts_the_boundary_and_rejects_one_over() {
 #[test]
 fn generated_member_name_limit_accepts_the_boundary_and_rejects_one_over() {
     let pack = simple_pack();
-    let at_boundary = EncodeLimits::new(10_000, 10, 31, 1_000, 1_000, 1_000).unwrap();
-    let one_over = EncodeLimits::new(10_000, 10, 30, 1_000, 1_000, 1_000).unwrap();
+    let at_boundary = EncodeLimits::new(10_000, 10, 31, 1_000, 1_000, 1_000);
+    let one_over = EncodeLimits::new(10_000, 10, 30, 1_000, 1_000, 1_000);
 
     assert!(encode(&pack, at_boundary).is_ok());
     assert!(matches!(
@@ -180,9 +180,9 @@ fn generated_member_name_limit_accepts_the_boundary_and_rejects_one_over() {
 fn content_limits_accept_the_boundary_and_reject_one_over() {
     let pack = simple_pack();
     let identity = pack.identity();
-    let at_boundary = EncodeLimits::new(10_000, 10, 1_000, 1_000, 5, 5).unwrap();
-    let member_one_over = EncodeLimits::new(10_000, 10, 1_000, 1_000, 4, 1_000).unwrap();
-    let total_one_over = EncodeLimits::new(10_000, 10, 1_000, 1_000, 1_000, 4).unwrap();
+    let at_boundary = EncodeLimits::new(10_000, 10, 1_000, 1_000, 5, 5);
+    let member_one_over = EncodeLimits::new(10_000, 10, 1_000, 1_000, 4, 1_000);
+    let total_one_over = EncodeLimits::new(10_000, 10, 1_000, 1_000, 1_000, 4);
 
     assert!(encode(&pack, at_boundary).is_ok());
     assert!(matches!(
@@ -252,14 +252,10 @@ fn generated_output_limits_accept_the_boundary_and_reject_one_over() {
         archive.by_name("typst-pack.toml").unwrap().size()
     };
     let archive_bytes = baseline.len();
-    let manifest_at_boundary =
-        EncodeLimits::new(10_000, 10, 1_000, manifest_bytes, 1_000, 1_000).unwrap();
-    let manifest_one_over =
-        EncodeLimits::new(10_000, 10, 1_000, manifest_bytes - 1, 1_000, 1_000).unwrap();
-    let archive_at_boundary =
-        EncodeLimits::new(archive_bytes, 10, 1_000, 1_000, 1_000, 1_000).unwrap();
-    let archive_one_over =
-        EncodeLimits::new(archive_bytes - 1, 10, 1_000, 1_000, 1_000, 1_000).unwrap();
+    let manifest_at_boundary = EncodeLimits::new(10_000, 10, 1_000, manifest_bytes, 1_000, 1_000);
+    let manifest_one_over = EncodeLimits::new(10_000, 10, 1_000, manifest_bytes - 1, 1_000, 1_000);
+    let archive_at_boundary = EncodeLimits::new(archive_bytes, 10, 1_000, 1_000, 1_000, 1_000);
+    let archive_one_over = EncodeLimits::new(archive_bytes - 1, 10, 1_000, 1_000, 1_000, 1_000);
 
     assert!(encode(&pack, manifest_at_boundary).is_ok());
     assert!(matches!(
@@ -309,7 +305,7 @@ fn manifest_encoding_is_incrementally_bounded_and_escapes_metadata() {
         .metadata(PackMetadata::new().with_name("a".repeat(100_000)))
         .build()
         .unwrap();
-    let limits = EncodeLimits::new(1_000_000, 10, 1_000, 64, 1_000, 1_000).unwrap();
+    let limits = EncodeLimits::new(1_000_000, 10, 1_000, 64, 1_000, 1_000);
     assert!(matches!(
         encode(&oversized, limits),
         Err(EncodeError::Limit(EncodeLimitError::Exceeded {

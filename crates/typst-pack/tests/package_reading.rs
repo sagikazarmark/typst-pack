@@ -17,9 +17,9 @@ use typst::syntax::package::PackageSpec;
 use typst_pack::{
     DiscoverySpecification, DocumentTime, FontCatalog, PackCreationInput, PackCreationOutcome,
     PackageArchiveReadError, PackageCatalog, PackageDisposition, PackageExpansionLimitError,
-    PackageExpansionLimits, PackageExpansionLimitsError, PackageExpansionResource,
-    PackageReadError, PackageReadFailures, PackageTree, PackageTreeIssue, ProjectSnapshotAssembly,
-    TypstTarget, create, expand_package_archive, package_archive_url, read_package_archive,
+    PackageExpansionLimits, PackageExpansionResource, PackageReadError, PackageReadFailures,
+    PackageTree, PackageTreeIssue, ProjectSnapshotAssembly, TypstTarget, create,
+    expand_package_archive, package_archive_url, read_package_archive,
 };
 
 fn spec(text: &str) -> PackageSpec {
@@ -90,7 +90,6 @@ fn limits(
         member_bytes,
         total_expanded_bytes,
     )
-    .unwrap()
 }
 
 fn limits_for(resource: PackageExpansionResource, ceiling: u64) -> PackageExpansionLimits {
@@ -127,15 +126,14 @@ fn every_package_expansion_ceiling_must_leave_room_for_a_plus_one_probe() {
         PackageExpansionResource::TotalExpandedBytes,
     ];
 
-    for (index, resource) in ceilings.into_iter().enumerate() {
+    for (index, _resource) in ceilings.into_iter().enumerate() {
         let mut values = [1; 5];
         values[index] = u64::MAX;
-        assert_eq!(
-            PackageExpansionLimits::new(values[0], values[1], values[2], values[3], values[4]),
-            Err(PackageExpansionLimitsError::CannotProbe {
-                resource,
-                ceiling: u64::MAX,
+        assert!(
+            std::panic::catch_unwind(|| {
+                PackageExpansionLimits::new(values[0], values[1], values[2], values[3], values[4])
             })
+            .is_err()
         );
     }
 }

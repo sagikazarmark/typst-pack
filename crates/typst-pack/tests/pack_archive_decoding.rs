@@ -1,8 +1,8 @@
 use typst_pack::PackArchiveBytes;
 use typst_pack::PackInvariantIssue;
 use typst_pack::pack_archive::{
-    ArchiveError, DecodeError, DecodeLimitError, DecodeLimits, DecodeLimitsError, DecodeResource,
-    ManifestError, decode,
+    ArchiveError, DecodeError, DecodeLimitError, DecodeLimits, DecodeResource, ManifestError,
+    decode,
 };
 
 const ACCEPTED: &[u8] = include_bytes!("fixtures/pack-archive-v1/accepted-python.typk");
@@ -30,16 +30,17 @@ fn decode_limits_reject_an_unprobeable_ceiling() {
         DecodeResource::TotalContentBytes,
     ];
 
-    for (index, resource) in resources.into_iter().enumerate() {
+    for (index, _resource) in resources.into_iter().enumerate() {
         let mut values = [1; 6];
         values[index] = u64::MAX;
-        assert!(matches!(
-            DecodeLimits::new(values[0], values[1], values[2], values[3], values[4], values[5]),
-            Err(DecodeLimitsError::CannotProbe {
-                resource: reported,
-                ceiling: u64::MAX,
-            }) if reported == resource
-        ));
+        assert!(
+            std::panic::catch_unwind(|| {
+                DecodeLimits::new(
+                    values[0], values[1], values[2], values[3], values[4], values[5],
+                )
+            })
+            .is_err()
+        );
     }
 }
 
@@ -95,7 +96,6 @@ fn decode_limits_for(resource: DecodeResource, ceiling: u64) -> DecodeLimits {
     DecodeLimits::new(
         values[0], values[1], values[2], values[3], values[4], values[5],
     )
-    .unwrap()
 }
 
 #[test]
@@ -122,9 +122,8 @@ fn reference_v1_profile_decodes_borrowed_exact_archive_bytes() {
 fn archive_byte_limit_rejects_before_zip_parsing() {
     let archive = PackArchiveBytes::from_vec(ACCEPTED.to_vec());
     let ceiling = archive.len() - 1;
-    let at_boundary =
-        DecodeLimits::new(archive.len(), 100, 10_000, 10_000, 10_000, 100_000).unwrap();
-    let limits = DecodeLimits::new(ceiling, 100, 10_000, 10_000, 10_000, 100_000).unwrap();
+    let at_boundary = DecodeLimits::new(archive.len(), 100, 10_000, 10_000, 10_000, 100_000);
+    let limits = DecodeLimits::new(ceiling, 100, 10_000, 10_000, 10_000, 100_000);
 
     assert!(decode(&archive, at_boundary).is_ok());
     let error = decode(&archive, limits).unwrap_err();
@@ -142,8 +141,8 @@ fn archive_byte_limit_rejects_before_zip_parsing() {
 #[test]
 fn member_limit_accepts_the_boundary_and_rejects_one_over() {
     let archive = PackArchiveBytes::from_vec(ACCEPTED.to_vec());
-    let at_boundary = DecodeLimits::new(10_000, 6, 10_000, 10_000, 10_000, 100_000).unwrap();
-    let one_over = DecodeLimits::new(10_000, 5, 10_000, 10_000, 10_000, 100_000).unwrap();
+    let at_boundary = DecodeLimits::new(10_000, 6, 10_000, 10_000, 10_000, 100_000);
+    let one_over = DecodeLimits::new(10_000, 5, 10_000, 10_000, 10_000, 100_000);
 
     assert!(decode(&archive, at_boundary).is_ok());
     assert!(matches!(
@@ -159,8 +158,8 @@ fn member_limit_accepts_the_boundary_and_rejects_one_over() {
 #[test]
 fn raw_member_name_limit_accepts_the_boundary_and_rejects_one_over() {
     let archive = PackArchiveBytes::from_vec(ACCEPTED.to_vec());
-    let at_boundary = DecodeLimits::new(10_000, 10, 84, 10_000, 10_000, 100_000).unwrap();
-    let one_over = DecodeLimits::new(10_000, 10, 83, 10_000, 10_000, 100_000).unwrap();
+    let at_boundary = DecodeLimits::new(10_000, 10, 84, 10_000, 10_000, 100_000);
+    let one_over = DecodeLimits::new(10_000, 10, 83, 10_000, 10_000, 100_000);
 
     assert!(decode(&archive, at_boundary).is_ok());
     match decode(&archive, one_over).unwrap_err() {
@@ -176,8 +175,8 @@ fn raw_member_name_limit_accepts_the_boundary_and_rejects_one_over() {
 #[test]
 fn manifest_limit_accepts_the_boundary_and_rejects_one_over() {
     let archive = PackArchiveBytes::from_vec(ACCEPTED.to_vec());
-    let at_boundary = DecodeLimits::new(10_000, 10, 1_000, 415, 1_000, 10_000).unwrap();
-    let one_over = DecodeLimits::new(10_000, 10, 1_000, 414, 1_000, 10_000).unwrap();
+    let at_boundary = DecodeLimits::new(10_000, 10, 1_000, 415, 1_000, 10_000);
+    let one_over = DecodeLimits::new(10_000, 10, 1_000, 414, 1_000, 10_000);
 
     assert!(decode(&archive, at_boundary).is_ok());
     assert!(matches!(
@@ -193,8 +192,8 @@ fn manifest_limit_accepts_the_boundary_and_rejects_one_over() {
 #[test]
 fn content_member_limit_accepts_the_boundary_and_rejects_one_over() {
     let archive = PackArchiveBytes::from_vec(ACCEPTED.to_vec());
-    let at_boundary = DecodeLimits::new(10_000, 10, 1_000, 1_000, 18, 10_000).unwrap();
-    let one_over = DecodeLimits::new(10_000, 10, 1_000, 1_000, 17, 10_000).unwrap();
+    let at_boundary = DecodeLimits::new(10_000, 10, 1_000, 1_000, 18, 10_000);
+    let one_over = DecodeLimits::new(10_000, 10, 1_000, 1_000, 17, 10_000);
 
     assert!(decode(&archive, at_boundary).is_ok());
     assert!(matches!(
@@ -210,8 +209,8 @@ fn content_member_limit_accepts_the_boundary_and_rejects_one_over() {
 #[test]
 fn total_content_limit_accepts_the_boundary_and_rejects_one_over() {
     let archive = PackArchiveBytes::from_vec(ACCEPTED.to_vec());
-    let at_boundary = DecodeLimits::new(10_000, 10, 1_000, 1_000, 1_000, 31).unwrap();
-    let one_over = DecodeLimits::new(10_000, 10, 1_000, 1_000, 1_000, 30).unwrap();
+    let at_boundary = DecodeLimits::new(10_000, 10, 1_000, 1_000, 1_000, 31);
+    let one_over = DecodeLimits::new(10_000, 10, 1_000, 1_000, 1_000, 30);
 
     assert!(decode(&archive, at_boundary).is_ok());
     assert!(matches!(
@@ -483,7 +482,7 @@ fn invalid_manifest_package_spec_is_an_invalid_pack() {
 fn incremental_metering_rejects_a_dishonest_member_size() {
     let bytes = with_declared_uncompressed_size(ACCEPTED.to_vec(), "project/main.typ", 17);
     let archive = PackArchiveBytes::from_vec(bytes);
-    let limits = DecodeLimits::new(10_000, 10, 1_000, 1_000, 17, 10_000).unwrap();
+    let limits = DecodeLimits::new(10_000, 10, 1_000, 1_000, 17, 10_000);
 
     assert!(matches!(
         decode(&archive, limits),
@@ -499,7 +498,7 @@ fn incremental_metering_rejects_a_dishonest_member_size() {
 fn incremental_metering_rejects_a_dishonest_total_size() {
     let bytes = with_declared_uncompressed_size(ACCEPTED.to_vec(), "project/main.typ", 17);
     let archive = PackArchiveBytes::from_vec(bytes);
-    let limits = DecodeLimits::new(10_000, 10, 1_000, 1_000, 100, 30).unwrap();
+    let limits = DecodeLimits::new(10_000, 10, 1_000, 1_000, 100, 30);
 
     assert!(matches!(
         decode(&archive, limits),

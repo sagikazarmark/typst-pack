@@ -15,7 +15,7 @@ use typst::syntax::package::PackageSpec;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
-use crate::limits::{LimitError, Limits, LimitsError, ResourceKind};
+use crate::limits::{LimitError, Limits, ResourceKind};
 use crate::manifest::PackManifest;
 pub use crate::manifest::{FORMAT_VERSION, MANIFEST_PATH, PackManifestError as ManifestError};
 use crate::pack::{
@@ -40,9 +40,6 @@ impl ResourceKind<4> {
     pub const TotalContentBytes: Self = Self::new(5);
 }
 
-/// A supplied encode ceiling that cannot support bounded accounting.
-pub type EncodeLimitsError = LimitsError<EncodeResource>;
-
 /// A Pack Archive exceeded a mandatory encode ceiling.
 pub type EncodeLimitError = LimitError<EncodeResource>;
 
@@ -65,6 +62,7 @@ pub type EncodeLimits = Limits<EncodeResource>;
 
 impl Limits<EncodeResource> {
     /// Constructs a validated set of mandatory finite encode ceilings.
+    #[track_caller]
     pub fn new(
         archive_bytes: u64,
         members: u64,
@@ -72,7 +70,7 @@ impl Limits<EncodeResource> {
         manifest_bytes: u64,
         member_bytes: u64,
         total_content_bytes: u64,
-    ) -> Result<Self, EncodeLimitsError> {
+    ) -> Self {
         Self::from_ceilings([
             archive_bytes,
             members,
@@ -82,7 +80,7 @@ impl Limits<EncodeResource> {
             total_content_bytes,
             0,
         ])
-        .validate_probe_resources([
+        .assert_probe_resources([
             EncodeResource::ArchiveBytes,
             EncodeResource::Members,
             EncodeResource::GeneratedMemberNameBytes,
@@ -675,9 +673,6 @@ impl ResourceKind<5> {
     pub const TotalContentBytes: Self = Self::new(5);
 }
 
-/// A supplied decode ceiling that cannot support bounded accounting.
-pub type DecodeLimitsError = LimitsError<DecodeResource>;
-
 /// A Pack Archive exceeded a mandatory decode ceiling.
 pub type DecodeLimitError = LimitError<DecodeResource>;
 
@@ -775,6 +770,7 @@ pub type DecodeLimits = Limits<DecodeResource>;
 
 impl Limits<DecodeResource> {
     /// Constructs a validated set of mandatory finite decode ceilings.
+    #[track_caller]
     pub fn new(
         archive_bytes: u64,
         members: u64,
@@ -782,7 +778,7 @@ impl Limits<DecodeResource> {
         manifest_bytes: u64,
         member_bytes: u64,
         total_content_bytes: u64,
-    ) -> Result<Self, DecodeLimitsError> {
+    ) -> Self {
         Self::from_ceilings([
             archive_bytes,
             members,
@@ -792,7 +788,7 @@ impl Limits<DecodeResource> {
             total_content_bytes,
             0,
         ])
-        .validate_probe_resources([
+        .assert_probe_resources([
             DecodeResource::ArchiveBytes,
             DecodeResource::Members,
             DecodeResource::RawMemberNameBytes,

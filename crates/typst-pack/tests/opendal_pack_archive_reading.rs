@@ -35,7 +35,7 @@ fn reads_exact_pack_archive_bytes_without_decoding() {
     let binding = OperatorBinding::new("archive").unwrap();
     let bindings = OperatorBindings::new([(binding, service.operator())]).unwrap();
     let source = "archive:/packs/document.typk".parse().unwrap();
-    let limits = ReadLimits::new(10).unwrap();
+    let limits = ReadLimits::new(10);
     let request = PackArchiveReadRequest::new(source, limits).unwrap();
 
     assert_eq!(request.source().to_string(), "archive:/packs/document.typk");
@@ -82,8 +82,7 @@ fn memory_reads_empty_short_exact_and_chunked_archives() {
             OperatorBindings::new([(OperatorBinding::new("memory").unwrap(), operator)]).unwrap();
         let source =
             Location::from_operation_path(OperatorBinding::new("memory").unwrap(), path).unwrap();
-        let request =
-            PackArchiveReadRequest::new(source, ReadLimits::new(ceiling).unwrap()).unwrap();
+        let request = PackArchiveReadRequest::new(source, ReadLimits::new(ceiling)).unwrap();
         let mut read = pin!(read_pack_archive(&bindings, &request));
 
         assert_eq!(expect_ready(read.as_mut()).unwrap().as_slice(), bytes);
@@ -100,7 +99,7 @@ fn memory_reports_one_byte_over_the_archive_ceiling() {
     let bindings =
         OperatorBindings::new([(OperatorBinding::new("memory").unwrap(), operator)]).unwrap();
     let source: Location = "memory:/large.typk".parse().unwrap();
-    let request = PackArchiveReadRequest::new(source, ReadLimits::new(4).unwrap()).unwrap();
+    let request = PackArchiveReadRequest::new(source, ReadLimits::new(4)).unwrap();
     let mut read = pin!(read_pack_archive(&bindings, &request));
 
     let error = expect_ready(read.as_mut()).unwrap_err();
@@ -122,8 +121,7 @@ fn request_rejects_non_object_locations_before_resolution() {
         ("archive:/packs/", LocationRoleError::ObjectHasTrailingSlash),
     ] {
         let source: Location = source.parse().unwrap();
-        let error =
-            PackArchiveReadRequest::new(source.clone(), ReadLimits::new(8).unwrap()).unwrap_err();
+        let error = PackArchiveReadRequest::new(source.clone(), ReadLimits::new(8)).unwrap_err();
 
         assert!(matches!(
             error,
@@ -410,7 +408,7 @@ fn poll_once<F: Future>(future: std::pin::Pin<&mut F>) -> Poll<F::Output> {
 fn request(path: &str, ceiling: u64) -> PackArchiveReadRequest {
     let source =
         Location::from_operation_path(OperatorBinding::new("archive").unwrap(), path).unwrap();
-    PackArchiveReadRequest::new(source, ReadLimits::new(ceiling).unwrap()).unwrap()
+    PackArchiveReadRequest::new(source, ReadLimits::new(ceiling)).unwrap()
 }
 
 fn bindings(service: &ScriptedService) -> OperatorBindings {
