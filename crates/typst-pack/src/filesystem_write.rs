@@ -2526,14 +2526,13 @@ fn commit_windows_file(
 
 #[cfg(windows)]
 fn commit_windows_handle(
-    parent: &Dir,
+    _parent: &Dir,
     staging_handle: std::os::windows::io::RawHandle,
     target_name: &std::ffi::OsStr,
     replace: bool,
 ) -> io::Result<()> {
     use std::mem::{offset_of, size_of};
     use std::os::windows::ffi::OsStrExt;
-    use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_RENAME_INFO, FILE_RENAME_INFO_0, FileRenameInfoEx, SetFileInformationByHandle,
     };
@@ -2556,7 +2555,8 @@ fn commit_windows_handle(
                     0
                 },
         };
-        (*info).RootDirectory = parent.as_raw_handle().cast();
+        // A simple name with no root handle is the documented same-directory form.
+        (*info).RootDirectory = std::ptr::null_mut();
         (*info).FileNameLength = u32::try_from(name_bytes)
             .map_err(|_| io::Error::other("destination file name is too long"))?;
         std::ptr::copy_nonoverlapping(

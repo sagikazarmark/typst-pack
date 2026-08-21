@@ -1,0 +1,80 @@
+name: typst-pack-minio
+
+x-minio-environment: &minio-environment
+  TYPST_PACK_MINIO_ACCESS_KEY: ${TYPST_PACK_MINIO_ACCESS_KEY:?required}
+  TYPST_PACK_MINIO_SECRET_KEY: ${TYPST_PACK_MINIO_SECRET_KEY:?required}
+  TYPST_PACK_MINIO_PARTIAL_ACCESS_KEY: ${TYPST_PACK_MINIO_PARTIAL_ACCESS_KEY:?required}
+  TYPST_PACK_MINIO_PARTIAL_SECRET_KEY: ${TYPST_PACK_MINIO_PARTIAL_SECRET_KEY:?required}
+  TYPST_PACK_MINIO_BUCKET: ${TYPST_PACK_MINIO_BUCKET:?required}
+  TYPST_PACK_MINIO_PREFIX: ${TYPST_PACK_MINIO_PREFIX:?required}
+
+services:
+  minio:
+    image: docker.io/minio/minio:RELEASE.2025-04-22T22-12-26Z@sha256:a1ea29fa28355559ef137d71fc570e508a214ec84ff8083e39bc5428980b015e
+    command: ["server", "/data"]
+    environment:
+      MINIO_ROOT_USER: ${TYPST_PACK_MINIO_ACCESS_KEY:?required}
+      MINIO_ROOT_PASSWORD: ${TYPST_PACK_MINIO_SECRET_KEY:?required}
+      MINIO_BROWSER: "off"
+    ports:
+      - "127.0.0.1:${TYPST_PACK_MINIO_PORT:?required}:9000"
+    volumes:
+      - minio-data:/data
+    healthcheck:
+      test: ["CMD", "curl", "--fail", "--silent", "http://localhost:9000/minio/health/ready"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 2s
+
+  bootstrap:
+    image: docker.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment: *minio-environment
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        mc alias set local http://minio:9000 \
+          "$$TYPST_PACK_MINIO_ACCESS_KEY" \
+          "$$TYPST_PACK_MINIO_SECRET_KEY"
+        mc mb --ignore-existing "local/$$TYPST_PACK_MINIO_BUCKET"
+        cat >/tmp/partial-policy.json <<EOF
+        {
+          "Version": "2012-10-17",
+          "Statement": [{
+            "Effect": "Allow",
+            "Action": ["s3:PutObject"],
+            "Resource": [
+              "arn:aws:s3:::$$TYPST_PACK_MINIO_BUCKET/$$TYPST_PACK_MINIO_PREFIX/publication/partial/assets/logo.bin"
+            ]
+          }]
+        }
+        EOF
+        mc admin policy create local typst-pack-partial /tmp/partial-policy.json
+        mc admin user add local \
+          "$$TYPST_PACK_MINIO_PARTIAL_ACCESS_KEY" \
+          "$$TYPST_PACK_MINIO_PARTIAL_SECRET_KEY"
+        mc admin policy attach local typst-pack-partial \
+          --user "$$TYPST_PACK_MINIO_PARTIAL_ACCESS_KEY"
+        mc ready local --cluster-read
+
+  cleanup:
+    image: docker.io/minio/mc:RELEASE.2025-08-13T08-35-41Z@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment: *minio-environment
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        set -eu
+        mc alias set local http://minio:9000 \
+          "$$TYPST_PACK_MINIO_ACCESS_KEY" \
+          "$$TYPST_PACK_MINIO_SECRET_KEY"
+        mc rb --force "local/$$TYPST_PACK_MINIO_BUCKET"
+
+volumes:
+  minio-data:

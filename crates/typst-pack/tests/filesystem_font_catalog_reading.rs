@@ -291,14 +291,14 @@ fn malformed_eligible_font_bytes_retain_the_container_validation_cause() {
 fn only_supported_font_container_suffixes_are_selected_case_insensitively() {
     let dir = tempfile::tempdir().unwrap();
     let candidates = [
-        ("container.ttf", true),
-        ("container.TTF", true),
-        ("container.ttc", true),
-        ("container.Ttc", true),
-        ("container.otf", true),
-        ("container.OTF", true),
-        ("container.otc", true),
-        ("container.oTc", true),
+        ("lower-ttf.ttf", true),
+        ("upper-ttf.TTF", true),
+        ("lower-ttc.ttc", true),
+        ("mixed-ttc.Ttc", true),
+        ("lower-otf.otf", true),
+        ("upper-otf.OTF", true),
+        ("lower-otc.otc", true),
+        ("mixed-otc.oTc", true),
         ("ignored.woff", false),
         ("ignored.woff2", false),
         ("ignored.txt", false),

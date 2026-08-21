@@ -1,0 +1,59 @@
+name: OpenDAL MinIO compatibility
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  minio:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 25
+    env:
+      COMPOSE_PROJECT_NAME: typst-pack-minio-${{ github.run_id }}-${{ github.run_attempt }}
+      TYPST_PACK_REQUIRE_MINIO: "1"
+      TYPST_PACK_MINIO_PORT: "19000"
+      TYPST_PACK_MINIO_ENDPOINT: http://127.0.0.1:19000
+      TYPST_PACK_MINIO_BUCKET: typst-pack-${{ github.run_id }}-${{ github.run_attempt }}
+      TYPST_PACK_MINIO_PREFIX: integration
+      TYPST_PACK_MINIO_ACCESS_KEY: typst-pack-admin
+      TYPST_PACK_MINIO_SECRET_KEY: typst-pack-admin-secret-2026
+      TYPST_PACK_MINIO_PARTIAL_ACCESS_KEY: typst-pack-partial
+      TYPST_PACK_MINIO_PARTIAL_SECRET_KEY: typst-pack-partial-secret-2026
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.92.0
+      - name: Start pinned MinIO fixture
+        run: |
+          docker compose --file crates/typst-pack/tests/fixtures/minio/compose.yml config --quiet
+          timeout 180s docker compose --file crates/typst-pack/tests/fixtures/minio/compose.yml pull
+          timeout 90s docker compose --file crates/typst-pack/tests/fixtures/minio/compose.yml up --detach --wait --wait-timeout 60 minio
+          timeout 60s docker compose --file crates/typst-pack/tests/fixtures/minio/compose.yml run --rm bootstrap
+      - name: Run ignored MinIO contract
+        run: |
+          timeout --signal=TERM --kill-after=10s 600s cargo test --locked \
+            --package typst-pack \
+            --no-default-features \
+            --features opendal,package-reading,embedded-fonts \
+            --test opendal_minio \
+            -- \
+            --ignored \
+            --exact minio_validates_surviving_storage_contracts \
+            --nocapture \
+            --test-threads=1
+      - name: Capture MinIO diagnostics
+        if: failure()
+        run: docker compose --file crates/typst-pack/tests/fixtures/minio/compose.yml logs --no-color minio || true
+      - name: Remove isolated MinIO state
+        if: always()
+        run: |
+          status=0
+          timeout 60s docker compose --file crates/typst-pack/tests/fixtures/minio/compose.yml run --rm cleanup || status=$?
+          timeout 60s docker compose --file crates/typst-pack/tests/fixtures/minio/compose.yml down --volumes --remove-orphans || status=$?
+          exit "$status"
