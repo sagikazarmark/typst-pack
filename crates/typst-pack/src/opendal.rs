@@ -1,7 +1,4 @@
-//! Asynchronous storage integration using caller-supplied OpenDAL operators.
-//!
-//! Backend services, credentials, transports, TLS, executors, runtimes, layers,
-//! retry policy, and polling remain the caller's responsibility.
+#![doc = include_str!("../../../docs/opendal-integration.md")]
 
 pub mod location;
 pub mod pack_archive;

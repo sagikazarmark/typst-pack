@@ -199,37 +199,108 @@ inserted Package Tree; retain the residue and report or replay it separately.
 
 ## External compilation fulfillments
 
-There is no OpenDAL compilation-read API. Read external package archives and
-font objects directly with the application's `Operator` values, enforce
-application limits, construct core fulfillment values, and then call `compile`:
+There is no OpenDAL compilation-read API. Read external package files or
+archives and font objects directly with the application's `Operator` values,
+enforce application limits, construct core fulfillment values, and then call
+`compile`. This example reads Package Tree files from known object keys; an
+application using package archives can instead expand each bounded archive into
+a `PackageTree` before constructing its fulfillment.
 
-```rust,ignore
+```rust,no_run
+use std::io;
+
+use opendal::Operator;
 use typst_pack::{
-    CompilationFulfillmentSet, FontContainerFulfillment, PackageExpansionLimits,
-    PackageTreeFulfillment, expand_package_archive, resolve_external_font_requirements,
+    CompilationFulfillmentSet, CompilationOutputSpecification, CompilationReport, Pack,
+    PackCompilationRequest, PackageTree, PackageTreeFulfillment,
+    resolve_external_font_requirements,
 };
 
-let package_bytes = package_operator.read(package_key).await?.to_vec();
-check_package_download_limit(package_bytes.len())?;
-let tree = expand_package_archive(
-    package_spec.clone(),
-    &package_bytes,
-    PackageExpansionLimits::reference_v1(),
-)?;
-let package = PackageTreeFulfillment::new(package_spec, tree);
+struct PackageSource<'a> {
+    specification: &'a str,
+    files: &'a [(&'a str, &'a str)], // Package path and object key.
+}
 
-let font_bytes = font_operator.read(font_key).await?.to_vec();
-check_font_download_limit(font_bytes.len())?;
-let fonts = resolve_external_font_requirements(&pack, [font_bytes])?;
-let fulfillments = CompilationFulfillmentSet::new([package], fonts)?;
-let request = request.fulfillments(fulfillments);
-let report = typst_pack::compile(request)?;
+async fn read_bounded(
+    operator: &Operator,
+    key: &str,
+    object_limit: u64,
+    remaining_total: &mut u64,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let ceiling = object_limit.min(*remaining_total);
+    let probe_end = ceiling
+        .checked_add(1)
+        .ok_or_else(|| io::Error::other("download limit overflow"))?;
+    let bytes = operator.reader(key).await?.read(0..probe_end).await?;
+    let observed = u64::try_from(bytes.len())?;
+    if observed > ceiling {
+        return Err(io::Error::other("download limit exceeded").into());
+    }
+    *remaining_total -= observed;
+    Ok(bytes.to_vec())
+}
+
+async fn compile_with_external_inputs(
+    package_operator: &Operator,
+    package_sources: &[PackageSource<'_>],
+    font_operator: &Operator,
+    font_keys: &[&str],
+    pack: &Pack,
+    output: CompilationOutputSpecification,
+) -> Result<CompilationReport, Box<dyn std::error::Error>> {
+    let mut package_bytes_remaining = 512 * 1024 * 1024;
+    let mut packages = Vec::new();
+    for requirement in pack
+        .package_requirements()
+        .iter()
+        .filter(|requirement| !requirement.is_embedded())
+    {
+        let specification = requirement.spec().to_string();
+        let source = package_sources
+            .iter()
+            .find(|source| source.specification == specification.as_str())
+            .ok_or_else(|| io::Error::other(format!("no source for {specification}")))?;
+        let mut entries = Vec::with_capacity(source.files.len());
+        for &(path, key) in source.files {
+            let bytes = read_bounded(
+                package_operator,
+                key,
+                64 * 1024 * 1024,
+                &mut package_bytes_remaining,
+            )
+            .await?;
+            entries.push((path, bytes));
+        }
+        let tree = PackageTree::from_owned_entries(entries)?;
+        packages.push(PackageTreeFulfillment::new(requirement.spec().clone(), tree));
+    }
+
+    let mut font_bytes_remaining = 2 * 1024 * 1024 * 1024;
+    let mut font_sources = Vec::with_capacity(font_keys.len());
+    for &key in font_keys {
+        font_sources.push(
+            read_bounded(
+                font_operator,
+                key,
+                256 * 1024 * 1024,
+                &mut font_bytes_remaining,
+            )
+            .await?,
+        );
+    }
+    let fonts = resolve_external_font_requirements(pack, font_sources)?;
+    let fulfillments = CompilationFulfillmentSet::new(packages, fonts)?;
+    let request = PackCompilationRequest::new(pack.clone(), output).fulfillments(fulfillments);
+
+    Ok(typst_pack::compile(request)?)
+}
 ```
 
 The core verifies complete package-tree identities, font-container identities,
 and required font faces before invoking Typst. Direct reads are not implicitly
 bounded by typst-pack; enforce transport and retained-byte ceilings at that
-trust boundary.
+trust boundary. See [#241](https://github.com/sagikazarmark/typst-pack/issues/241)
+for the use case and design record behind a possible first-party facade.
 
 ## Recovery and partial effects
 
@@ -277,5 +348,5 @@ Version 0.5 introduced the optional OpenDAL integration.
 - Backend configuration, credentials, retries, and exact service guarantees remain application policy; typst-pack neither installs nor weakens them.
 
 Version 0.6 renamed the original acquisition/publication surface to read/write. See the complete
-[0.6 rename table](../README.md#migrating-to-06); no old names remain as
+[0.6 rename table](https://github.com/sagikazarmark/typst-pack#migrating-to-06); no old names remain as
 compatibility aliases.
