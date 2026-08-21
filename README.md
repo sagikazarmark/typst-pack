@@ -75,6 +75,9 @@ For PNG and SVG output, `{p}` is the one-based source page number, `{0p}` and
 Multi-page output needs a page placeholder. All output paths are checked for
 duplicates before anything is written.
 
+See [CLI examples](docs/cli-examples.md) for additional create, compile,
+extraction, and Pack Override commands.
+
 ### Project files
 
 `create` includes every eligible regular file beneath the project root, not
