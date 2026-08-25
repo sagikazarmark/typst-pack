@@ -152,6 +152,7 @@ pub enum PackArchiveWriteRequestError {
 ///     Ok(WriteThenReadOutcome::Matching { read, decoded })
 /// }
 /// ```
+#[allow(clippy::result_large_err)]
 pub async fn write_pack_archive<R: OperatorResolver + ?Sized>(
     resolver: &R,
     request: &PackArchiveWriteRequest,
@@ -361,6 +362,7 @@ pub enum PackageCacheArchiveWriteRequestError {
 /// }
 /// # }
 /// ```
+#[allow(clippy::result_large_err)]
 pub async fn write_package_cache_archive<R: OperatorResolver + ?Sized>(
     resolver: &R,
     request: &PackageCacheArchiveWriteRequest,
@@ -740,6 +742,7 @@ fn validate_artifact_key(key: &str) -> Result<(), CompilationArtifactKeyIssue> {
 ///     Ok(())
 /// }
 /// ```
+#[allow(clippy::result_large_err)]
 pub fn write_pack_extraction_plan<'a, R: OperatorResolver + ?Sized>(
     resolver: &'a R,
     request: &'a PackExtractionWriteRequest,
@@ -962,6 +965,7 @@ fn pack_extraction_write_error(
 ///     Ok(())
 /// }
 /// ```
+#[allow(clippy::result_large_err)]
 pub fn write_compilation_artifacts<'a, R: OperatorResolver + ?Sized>(
     resolver: &'a R,
     request: &'a CompilationArtifactWriteRequest,

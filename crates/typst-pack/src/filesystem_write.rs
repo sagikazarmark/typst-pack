@@ -1587,7 +1587,7 @@ fn platform_case_insensitive(destination: &Path) -> bool {
         return false;
     }
     let status = unsafe { status.assume_init() };
-    status.f_flags as u32 & MNT_CASE_SENSITIVE == 0
+    status.f_flags & MNT_CASE_SENSITIVE == 0
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]

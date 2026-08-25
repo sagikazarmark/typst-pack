@@ -183,10 +183,10 @@ type TypstPack {
   """
   Audit the packaged OpenDAL feature graph and build its docs on Linux.
   """
-  testOpendalCompatibility: String! @check {
+  testOpendalCompatibility(ws: Workspace!): String! @check {
     self
       .rust
-      .container
+      .container(ws)
       .withExec(["bash", "scripts/check-opendal-compatibility.sh"])
       .withExec([
         "cargo", "doc", "--locked",

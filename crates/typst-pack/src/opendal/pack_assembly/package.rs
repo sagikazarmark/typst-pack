@@ -749,6 +749,7 @@ impl PackageRead {
 /// Only definite absence advances fallback. Registry lookup is skipped when the
 /// official registry does not serve the requested namespace. This operation
 /// returns exact raw values and performs no archive expansion or cache write.
+#[allow(clippy::result_large_err)]
 pub async fn read_package<R: OperatorResolver + ?Sized>(
     resolver: &R,
     request: &PackageReadRequest,
@@ -846,6 +847,7 @@ enum ArchiveSource {
     Registry,
 }
 
+#[allow(clippy::result_large_err)]
 async fn read_archive_candidate<R: OperatorResolver + ?Sized>(
     resolved: &mut ResolvedOperators<'_, R>,
     spec: &PackageSpec,
@@ -1554,6 +1556,7 @@ fn package_tree_survey_message(issues: &[PackageTreeReadIssue]) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::result_large_err)]
 pub(crate) async fn read_package_tree_candidates<R: OperatorResolver + ?Sized>(
     resolver: &R,
     spec: &PackageSpec,
@@ -1564,6 +1567,7 @@ pub(crate) async fn read_package_tree_candidates<R: OperatorResolver + ?Sized>(
     read_package_tree_candidates_with_resolved(&mut resolved, spec, sources, limits).await
 }
 
+#[allow(clippy::result_large_err)]
 async fn read_package_tree_candidates_with_resolved<R: OperatorResolver + ?Sized>(
     resolved: &mut ResolvedOperators<'_, R>,
     spec: &PackageSpec,

@@ -10,6 +10,13 @@ use typst_pack::{
     ProjectSnapshotIssue, compile_with_limits,
 };
 
+/// Resolves a temporary directory to a destination the write preflight accepts.
+///
+/// macOS temp paths can start with `/var`, a symlink to `/private/var`.
+fn temp_path(directory: &tempfile::TempDir) -> std::path::PathBuf {
+    std::fs::canonicalize(directory.path()).unwrap()
+}
+
 #[cfg(feature = "opendal")]
 #[test]
 fn opendal_location_regressions_preserve_canonical_objects_and_alias_rejections() {
@@ -284,7 +291,7 @@ fn typkignore_and_write_state_regressions_replay_natively() {
         FilesystemMergePolicy::WriteNewTree,
     ] {
         let directory = tempfile::tempdir().unwrap();
-        let destination = directory.path().join("written");
+        let destination = temp_path(&directory).join("written");
         if policy != FilesystemMergePolicy::WriteNewTree {
             std::fs::create_dir(&destination).unwrap();
         }
@@ -298,7 +305,7 @@ fn typkignore_and_write_state_regressions_replay_natively() {
     }
 
     let directory = tempfile::tempdir().unwrap();
-    let destination = directory.path().join("written");
+    let destination = temp_path(&directory).join("written");
     std::fs::create_dir(&destination).unwrap();
     std::fs::write(destination.join("main.typ"), b"existing").unwrap();
     let error = write_pack_extraction_plan_to_filesystem(

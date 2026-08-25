@@ -131,6 +131,23 @@ fn aliases_and_unsupported_entries_are_aggregated_after_the_structural_survey() 
     ));
 }
 
+/// Reports whether the filesystem backing `directory` stores non-UTF-8 names.
+///
+/// Linux filesystems accept arbitrary bytes, while APFS and HFS+ reject them
+/// with `EILSEQ`. An unrepresentable path cannot be staged where the
+/// filesystem refuses to record one.
+#[cfg(unix)]
+fn stores_non_unicode_names(directory: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStringExt;
+
+    let probe = directory.join(std::ffi::OsString::from_vec(b"probe-\xff".to_vec()));
+    if fs::write(&probe, b"probe").is_err() {
+        return false;
+    }
+    fs::remove_file(probe).unwrap();
+    true
+}
+
 #[cfg(unix)]
 #[test]
 fn unrepresentable_paths_are_reported_by_the_filesystem_survey() {
@@ -138,6 +155,10 @@ fn unrepresentable_paths_are_reported_by_the_filesystem_survey() {
     use std::os::unix::ffi::OsStringExt;
 
     let dir = tempfile::tempdir().unwrap();
+    if !stores_non_unicode_names(dir.path()) {
+        eprintln!("skipped: the temporary filesystem rejects non-UTF-8 names");
+        return;
+    }
     fs::write(dir.path().join("main.typ"), b"main").unwrap();
     fs::write(dir.path().join(OsString::from_vec(vec![0xff])), b"bytes").unwrap();
 

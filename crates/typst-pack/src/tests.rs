@@ -2061,6 +2061,13 @@ mod fs {
     use std::fs;
     use std::path::Path;
 
+    /// Resolves a temporary directory to a destination the write preflight accepts.
+    ///
+    /// macOS temp paths can start with `/var`, a symlink to `/private/var`.
+    fn temp_path(directory: &tempfile::TempDir) -> std::path::PathBuf {
+        std::fs::canonicalize(directory.path()).unwrap()
+    }
+
     /// Creates a project directory with an image, a data file, an included
     /// chapter, and an import from a local package, plus the package itself
     /// in a separate directory laid out like a package path.
@@ -2255,9 +2262,10 @@ Rows: #csv("data.csv").len()
     #[test]
     fn extract_writes_project_and_packages() {
         let dir = tempfile::tempdir().unwrap();
-        let assembly_report = pack_fixture(dir.path());
+        let root = temp_path(&dir);
+        let assembly_report = pack_fixture(&root);
 
-        let target = dir.path().join("extracted");
+        let target = root.join("extracted");
         let plan = plan_pack_extraction(
             assembly_report.pack(),
             PackExtractionSelection::new(true, true),
@@ -2322,7 +2330,8 @@ Rows: #csv("data.csv").len()
             .build()
             .unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("extracted");
+        let root = temp_path(&dir);
+        let target = root.join("extracted");
         fs::create_dir(&target).unwrap();
         fs::write(target.join("z.txt"), b"external").unwrap();
 
@@ -2352,7 +2361,7 @@ Rows: #csv("data.csv").len()
         assert_eq!(receipt.completed().len(), 2);
         assert_eq!(fs::read(target.join("z.txt")).unwrap(), b"packed");
 
-        let blocked_target = dir.path().join("blocked");
+        let blocked_target = root.join("blocked");
         fs::create_dir(&blocked_target).unwrap();
         fs::write(blocked_target.join("tree"), b"external").unwrap();
         let nested_pack = Pack::builder("main.typ")
@@ -2395,8 +2404,9 @@ Rows: #csv("data.csv").len()
             .build()
             .unwrap();
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("extracted");
-        let outside = dir.path().join("outside");
+        let root = temp_path(&dir);
+        let target = root.join("extracted");
+        let outside = root.join("outside");
         fs::create_dir(&target).unwrap();
         fs::create_dir(&outside).unwrap();
         symlink(&outside, target.join("assets")).unwrap();
@@ -2468,7 +2478,8 @@ Rows: #csv("data.csv").len()
             pack_font_path(&pack.fonts()[1])
         );
         let dir = tempfile::tempdir().unwrap();
-        let target = dir.path().join("extracted");
+        let root = temp_path(&dir);
+        let target = root.join("extracted");
 
         let plan = plan_pack_extraction(&pack, PackExtractionSelection::new(false, true)).unwrap();
         let receipt = write_pack_extraction_plan_to_filesystem(
