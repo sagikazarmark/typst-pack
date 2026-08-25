@@ -155,6 +155,42 @@ type TypstPack {
   }
 
   """
+  Type-check the cfg(windows) code paths without a Windows runner.
+  """
+  checkWindows: String! @check {
+    let target = "x86_64-pc-windows-gnu"
+
+    # Checking never links, but dependency build scripts still run: psm
+    # assembles a per-architecture source and stacker compiles windows.c, so
+    # both need a Windows-targeting C toolchain and archiver. Nothing in the
+    # crate gates on target_env, so this reaches the same source the msvc
+    # matrix job compiles; it does not replace that job, which also links and
+    # runs the suite.
+    Dagger
+      .rust(
+        version: self.rustVersion,
+        container: self
+          .rustContainer
+          .withExec([
+            "apt-get", "install", "-y", "--no-install-recommends",
+            "gcc-mingw-w64-x86-64", "binutils-mingw-w64-x86-64",
+          ]),
+        targets: [target],
+      )
+      .container
+      .withEnvVariable("CC_x86_64_pc_windows_gnu", "x86_64-w64-mingw32-gcc")
+      .withEnvVariable("AR_x86_64_pc_windows_gnu", "x86_64-w64-mingw32-ar")
+      .withExec([
+        "cargo", "check", "--locked",
+        "--package", "typst-pack",
+        "--no-default-features",
+        "--features", "fs,opendal,package-reading,embedded-fonts",
+        "--target", target,
+      ])
+      .stdout
+  }
+
+  """
   Run the filesystem suite for a build with no HTTP client in its dependency graph.
   """
   testFsWithoutEgress(ws: Workspace!): String! @check {
