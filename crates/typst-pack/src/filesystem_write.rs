@@ -1878,6 +1878,12 @@ fn open_directory_nofollow(path: &Path) -> io::Result<std::fs::File> {
     const FILE_SHARE_ALL: u32 = 0x7;
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    // These flags stay raw rather than becoming `cap_fs_ext`'s `maybe_dir` and
+    // `follow`, which the reader traversal uses. `maybe_dir` also clears
+    // `FILE_SHARE_DELETE`, so that a directory cannot be renamed underneath a
+    // sandboxed lookup; this handle only interrogates the volume and shares
+    // everything, so it must not pin an ancestor of the caller's destination.
     let file = std::fs::OpenOptions::new()
         .read(true)
         .share_mode(FILE_SHARE_ALL)
@@ -2144,6 +2150,11 @@ fn open_tree_staging_directory(parent: &Dir, name: &std::ffi::OsStr) -> io::Resu
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
+    // These flags stay raw rather than becoming `cap_fs_ext`'s `maybe_dir` and
+    // `follow`, which the reader traversal uses. `maybe_dir` also clears
+    // `FILE_SHARE_DELETE`, and this handle is opened precisely so that the
+    // staging tree stays renamable and removable while it is held: the commit
+    // and the residue cleanup both need that.
     let mut options = OpenOptions::new();
     options
         .read(true)
