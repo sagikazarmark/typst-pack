@@ -189,7 +189,6 @@ fn structural_creation_supports_gitignore_pattern_syntax() {
             "!keep.tmp\n",
             " leading.txt\n",
             "trailing.txt   \n",
-            "literal\\ \n",
         ),
     )
     .unwrap();
@@ -203,7 +202,6 @@ fn structural_creation_supports_gitignore_pattern_syntax() {
     fs::write(project.join("nested/keep.tmp"), "packed").unwrap();
     fs::write(project.join(" leading.txt"), "ignored").unwrap();
     fs::write(project.join("trailing.txt"), "ignored").unwrap();
-    fs::write(project.join("literal "), "ignored").unwrap();
 
     let report = no_font_assembler().assemble(request(&project)).unwrap();
 
@@ -216,6 +214,27 @@ fn structural_creation_supports_gitignore_pattern_syntax() {
             "nested/keep.tmp",
             "nested/root-only.secret",
         ]
+    );
+}
+
+// Windows drops a trailing space from a file name, so only a unix filesystem
+// can hold the name an escaped trailing space is written to match.
+#[cfg(unix)]
+#[test]
+fn structural_creation_matches_an_escaped_trailing_space() {
+    let dir = tempfile::tempdir().unwrap();
+    let project = dir.path().join("project");
+    fs::create_dir_all(&project).unwrap();
+    fs::write(project.join("main.typ"), "Hello").unwrap();
+    fs::write(project.join(".typkignore"), "literal\\ \n").unwrap();
+    fs::write(project.join("literal "), "ignored").unwrap();
+    fs::write(project.join("literal"), "packed").unwrap();
+
+    let report = no_font_assembler().assemble(request(&project)).unwrap();
+
+    assert_eq!(
+        project_files(report.pack()),
+        [".typkignore", "literal", "main.typ"]
     );
 }
 
