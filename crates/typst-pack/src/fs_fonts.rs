@@ -1,8 +1,7 @@
 //! Font Catalog reading for the reference filesystem Font Authority.
 
+#[cfg(windows)]
 use std::fs::File;
-#[cfg(not(unix))]
-use std::fs::OpenOptions;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
@@ -12,6 +11,7 @@ use crate::font_catalog::typst_embedded_font_containers;
 use crate::font_catalog::{
     FontCatalog, FontCatalogEntry, FontContainer, FontContainerError, FontDisposition,
 };
+use crate::fs_traversal::{self, TraversalPolicy, UnsupportedEntry};
 use crate::limits::{LimitError, Limits, ResourceKind};
 
 /// A resource bounded during filesystem Font Catalog reading.
@@ -582,7 +582,7 @@ fn survey_root(
         if !file_type.is_file() {
             state.issues.push(FilesystemFontIssue::UnsupportedEntry {
                 path: entry.path().to_owned(),
-                kind: unsupported_kind(&file_type),
+                kind: UnsupportedEntry::of(&file_type).into(),
             });
             continue;
         }
@@ -704,128 +704,6 @@ fn read_bounded(
     Ok(bytes)
 }
 
-#[cfg(unix)]
-fn open_without_following(
-    root: &Path,
-    _boundary: &Path,
-    path: &Path,
-) -> Result<File, FilesystemFontReadError> {
-    use std::ffi::CString;
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::ffi::OsStrExt;
-
-    let relative = path
-        .strip_prefix(root)
-        .expect("a selected font path remains beneath its root");
-    let mut components = relative.components().peekable();
-    let mut current = root.to_owned();
-    let root_path =
-        CString::new(root.as_os_str().as_bytes()).expect("filesystem paths contain no NUL bytes");
-    // SAFETY: the NUL-terminated path remains valid for the call, and a
-    // successful descriptor is immediately owned.
-    let root_descriptor = unsafe {
-        libc::open(
-            root_path.as_ptr(),
-            libc::O_RDONLY
-                | libc::O_CLOEXEC
-                | libc::O_NONBLOCK
-                | libc::O_NOFOLLOW
-                | libc::O_DIRECTORY,
-        )
-    };
-    if root_descriptor < 0 {
-        if std::fs::symlink_metadata(root).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-            return Err(alias_error(root));
-        }
-        return Err(FilesystemFontReadError::io(
-            FilesystemFontOperation::ReadContainer,
-            root,
-            std::io::Error::last_os_error(),
-        ));
-    }
-    // SAFETY: `open` returned a new owned descriptor.
-    let mut directory = unsafe { File::from_raw_fd(root_descriptor) };
-    while let Some(component) = components.next() {
-        current.push(component.as_os_str());
-        let name = CString::new(component.as_os_str().as_bytes())
-            .expect("filesystem path components contain no NUL bytes");
-        let final_component = components.peek().is_none();
-        let flags = libc::O_RDONLY
-            | libc::O_CLOEXEC
-            | libc::O_NONBLOCK
-            | libc::O_NOFOLLOW
-            | if final_component {
-                0
-            } else {
-                libc::O_DIRECTORY
-            };
-        // SAFETY: the directory descriptor and NUL-terminated component remain
-        // valid for the call, and a successful descriptor is immediately owned.
-        let descriptor = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
-        if descriptor < 0 {
-            if std::fs::symlink_metadata(&current)
-                .is_ok_and(|metadata| metadata.file_type().is_symlink())
-            {
-                return Err(alias_error(&current));
-            }
-            return Err(FilesystemFontReadError::io(
-                FilesystemFontOperation::ReadContainer,
-                &current,
-                std::io::Error::last_os_error(),
-            ));
-        }
-        // SAFETY: `openat` returned a new owned descriptor.
-        let opened = unsafe { File::from_raw_fd(descriptor) };
-        if final_component {
-            return validate_opened_file(opened, &current);
-        }
-        directory = opened;
-    }
-    unreachable!("a selected font file has a path beneath the root")
-}
-
-#[cfg(not(unix))]
-fn open_without_following(
-    root: &Path,
-    boundary: &Path,
-    path: &Path,
-) -> Result<File, FilesystemFontReadError> {
-    #[cfg(not(windows))]
-    let _ = boundary;
-    if let Some(alias) = first_alias(root, path) {
-        return Err(alias_error(&alias));
-    }
-
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-    let file = match options.open(path) {
-        Ok(file) => file,
-        Err(error) => {
-            if let Some(alias) = first_alias(root, path) {
-                return Err(alias_error(&alias));
-            }
-            return Err(FilesystemFontReadError::io(
-                FilesystemFontOperation::ReadContainer,
-                path,
-                error,
-            ));
-        }
-    };
-    if let Some(alias) = first_alias(root, path) {
-        return Err(alias_error(&alias));
-    }
-    let file = validate_opened_file(file, path)?;
-    #[cfg(windows)]
-    validate_windows_boundary(&file, boundary, path)?;
-    Ok(file)
-}
-
 #[cfg(windows)]
 fn validate_windows_boundary(
     file: &File,
@@ -866,42 +744,64 @@ fn validate_windows_boundary(
     Ok(())
 }
 
-fn validate_opened_file(file: File, path: &Path) -> Result<File, FilesystemFontReadError> {
-    let metadata = file.metadata().map_err(|error| {
-        FilesystemFontReadError::io(FilesystemFontOperation::ReadContainer, path, error)
-    })?;
-    if metadata.file_type().is_symlink() {
-        return Err(alias_error(path));
+/// The font reader's vocabulary for the shared symlink-refusing open.
+///
+/// Font roots come from host configuration rather than from an already
+/// established project or package root, so an aliased root is refused here.
+struct FontTraversal;
+
+impl TraversalPolicy for FontTraversal {
+    type Error = FilesystemFontReadError;
+
+    const ROOT_INVARIANT: &'static str = "a selected font path remains beneath its root";
+    const ALIASED_ROOT_IS_REFUSED: bool = true;
+
+    fn io(&self, path: &Path, source: std::io::Error) -> Self::Error {
+        FilesystemFontReadError::io(FilesystemFontOperation::ReadContainer, path, source)
     }
-    if !metadata.file_type().is_file() {
-        return Err(FilesystemFontReadError::Survey(FilesystemFontSurveyError {
+
+    fn alias(&self, path: &Path) -> Self::Error {
+        alias_error(path)
+    }
+
+    fn unsupported_entry(&self, path: &Path, entry: UnsupportedEntry) -> Self::Error {
+        FilesystemFontReadError::Survey(FilesystemFontSurveyError {
             issues: vec![FilesystemFontIssue::UnsupportedEntry {
                 path: path.to_owned(),
-                kind: unsupported_kind(&metadata.file_type()),
+                kind: entry.into(),
             }],
-        }));
+        })
     }
-    Ok(file)
 }
 
-#[cfg(not(unix))]
-fn first_alias(root: &Path, path: &Path) -> Option<PathBuf> {
-    let relative = path
-        .strip_prefix(root)
-        .expect("a selected font path remains beneath its root");
-    let mut current = root.to_owned();
-    if std::fs::symlink_metadata(&current).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
-        return Some(current);
-    }
-    for component in relative.components() {
-        current.push(component.as_os_str());
-        if std::fs::symlink_metadata(&current)
-            .is_ok_and(|metadata| metadata.file_type().is_symlink())
-        {
-            return Some(current);
+impl From<UnsupportedEntry> for FilesystemFontEntryKind {
+    fn from(entry: UnsupportedEntry) -> Self {
+        match entry {
+            UnsupportedEntry::Socket => Self::Socket,
+            UnsupportedEntry::Fifo => Self::Fifo,
+            UnsupportedEntry::BlockDevice => Self::BlockDevice,
+            UnsupportedEntry::CharacterDevice => Self::CharacterDevice,
+            UnsupportedEntry::Unknown => Self::Unknown,
         }
     }
-    None
+}
+
+/// Opens one selected font container beneath `root`.
+///
+/// Windows exposes no open-time no-follow flag, so the opened handle is
+/// additionally confirmed to resolve inside `boundary`.
+fn open_without_following(
+    root: &Path,
+    boundary: &Path,
+    path: &Path,
+) -> Result<std::fs::File, FilesystemFontReadError> {
+    #[cfg(not(windows))]
+    let _ = boundary;
+
+    let file = fs_traversal::open_without_following(&FontTraversal, root, path)?;
+    #[cfg(windows)]
+    validate_windows_boundary(&file, boundary, path)?;
+    Ok(file)
 }
 
 fn alias_error(path: &Path) -> FilesystemFontReadError {
@@ -916,27 +816,6 @@ fn font_eligible(path: &Path) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())
         .is_some_and(crate::read_layout::is_font_container_extension)
-}
-
-fn unsupported_kind(file_type: &std::fs::FileType) -> FilesystemFontEntryKind {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileTypeExt;
-
-        if file_type.is_socket() {
-            return FilesystemFontEntryKind::Socket;
-        }
-        if file_type.is_fifo() {
-            return FilesystemFontEntryKind::Fifo;
-        }
-        if file_type.is_block_device() {
-            return FilesystemFontEntryKind::BlockDevice;
-        }
-        if file_type.is_char_device() {
-            return FilesystemFontEntryKind::CharacterDevice;
-        }
-    }
-    FilesystemFontEntryKind::Unknown
 }
 
 fn checked_add(

@@ -49,6 +49,7 @@ parallel = ["dep:rayon"]
 # with this feature alone cannot download under any runtime configuration. Not
 # available on wasm targets.
 fs = [
+    "dep:cap-fs-ext",
     "dep:cap-primitives",
     "dep:cap-std",
     "dep:fontconfig-parser",
@@ -75,6 +76,7 @@ egress = [
 ]
 
 [dependencies]
+cap-fs-ext = { version = "4", default-features = false, features = ["std", "cap-std"], optional = true }
 cap-primitives = { version = "4", optional = true }
 cap-std = { version = "4", optional = true }
 ecow = "0.2"
@@ -111,7 +113,7 @@ libc = { version = "0.2", optional = true }
 fontconfig-parser = { version = "0.5", default-features = false, optional = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Storage_FileSystem"], optional = true }
+windows-sys = { version = "0.61", features = ["Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"], optional = true }
 
 [dev-dependencies]
 # The reading suite writes the archives the helpers expand.

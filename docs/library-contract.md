@@ -64,6 +64,33 @@ source reading, and OpenDAL read requests. Limits bound documented retained or
 generated resources, not process RSS, allocator overhead, compiler internals,
 elapsed time, or aggregate concurrency between independent operations.
 
+## Filesystem adapter
+
+The filesystem readers resolve every component of a selected path beneath its
+root without following a symlink. An entry that is, or lies behind, a symlink is
+refused as an alias issue, and an eligible entry that is not a regular file is
+refused as a typed unsupported-entry issue. These refusals apply when the bytes
+are read, not only when the structure is surveyed, so an entry that becomes an
+alias or an unsupported kind after the survey is still refused.
+
+Font roots are host configuration and are opened as configured, so an aliased
+font root is itself a refusal. Project and package roots are established before
+traversal begins and are opened as given. Project membership comes from the
+reader's root `.typkignore` policy; nested policy files are ordinary project
+files.
+
+`FilesystemMergePolicy::WriteNewTree` requires an absent destination, stages the
+complete plan, and exposes it through one root commit where the platform
+supports one. A policy the destination cannot honor is reported as
+`FilesystemWriteErrorCause::UnsupportedPolicy` rather than weakened to a merge.
+The adapter makes no crash-durability claim.
+
+These refusals are validation, not confinement. The adapter uses the process's
+ambient authority and claims nothing against a filesystem peer acting between
+operations beyond the refusals above. One assembly's read values are each exact
+as observed by their source adapter; the adapter does not establish that they
+coexisted at a single instant.
+
 ## Writes and recovery
 
 Write policy is explicit. Filesystem APIs provide policies with their documented

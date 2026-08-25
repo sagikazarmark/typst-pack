@@ -284,6 +284,11 @@ struct WriteFaults {
     write_fault_after: usize,
     flush_fault_file: Option<usize>,
     commit_fault_file: Option<usize>,
+    // The fault this injects is a Unix symlink race. The Windows analogue is a
+    // directory junction swapped in for an ancestor, which needs a reparse
+    // point rather than a symlink; that fault is not implemented, so the
+    // ancestor race has no Windows fuzz coverage.
+    #[cfg(unix)]
     ancestor_symlink_race_file: Option<usize>,
     new_tree_commit_unsupported: bool,
     new_tree_policy_unsupported: bool,
@@ -299,6 +304,7 @@ impl Default for WriteFaults {
             write_fault_after: usize::MAX,
             flush_fault_file: None,
             commit_fault_file: None,
+            #[cfg(unix)]
             ancestor_symlink_race_file: None,
             new_tree_commit_unsupported: false,
             new_tree_policy_unsupported: false,
@@ -317,6 +323,7 @@ impl From<FilesystemWriteFaultProbe> for WriteFaults {
             write_fault_after: probe.write_fault_after,
             flush_fault_file: probe.flush_fault_file,
             commit_fault_file: probe.commit_fault_file,
+            #[cfg(unix)]
             ancestor_symlink_race_file: probe.ancestor_symlink_race_file,
             new_tree_commit_unsupported: probe.new_tree_commit_unsupported,
             new_tree_policy_unsupported: probe.new_tree_policy_unsupported,
@@ -1878,6 +1885,12 @@ fn open_directory_nofollow(path: &Path) -> io::Result<std::fs::File> {
     const FILE_SHARE_ALL: u32 = 0x7;
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+
+    // These flags stay raw rather than becoming `cap_fs_ext`'s `maybe_dir` and
+    // `follow`, which the reader traversal uses. `maybe_dir` also clears
+    // `FILE_SHARE_DELETE`, so that a directory cannot be renamed underneath a
+    // sandboxed lookup; this handle only interrogates the volume and shares
+    // everything, so it must not pin an ancestor of the caller's destination.
     let file = std::fs::OpenOptions::new()
         .read(true)
         .share_mode(FILE_SHARE_ALL)
@@ -2144,6 +2157,11 @@ fn open_tree_staging_directory(parent: &Dir, name: &std::ffi::OsStr) -> io::Resu
     const FILE_FLAG_BACKUP_SEMANTICS: u32 = 0x0200_0000;
     const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 
+    // These flags stay raw rather than becoming `cap_fs_ext`'s `maybe_dir` and
+    // `follow`, which the reader traversal uses. `maybe_dir` also clears
+    // `FILE_SHARE_DELETE`, and this handle is opened precisely so that the
+    // staging tree stays renamable and removable while it is held: the commit
+    // and the residue cleanup both need that.
     let mut options = OpenOptions::new();
     options
         .read(true)
@@ -2524,6 +2542,18 @@ fn commit_windows_file(
     commit_windows_handle(parent, staging_file.as_raw_handle(), target_name, replace)
 }
 
+// The commit resolves a simple target name against the captured parent
+// directory handle, the way the unix commits resolve one against a directory
+// descriptor. `SetFileInformationByHandle` cannot express that: it rewrites
+// `FileName` into a fully qualified NT path before it reaches the kernel,
+// resolving a relative name against the process working directory, and passes
+// `RootDirectory` through unchanged. A null root then renames the staging file
+// toward the working directory, off-volume in the general case
+// (`ERROR_NOT_SAME_DEVICE`), and a captured root pairs a handle with an
+// absolute name, which the kernel rejects (`ERROR_INVALID_PARAMETER`). The
+// rename request therefore goes to `NtSetInformationFile`, which performs no
+// such rewrite. `FileRenameInformationEx` is the same operation the volume
+// advertised through `FILE_SUPPORTS_POSIX_UNLINK_RENAME` before staging began.
 #[cfg(windows)]
 fn commit_windows_handle(
     parent: &Dir,
@@ -2531,38 +2561,36 @@ fn commit_windows_handle(
     target_name: &std::ffi::OsStr,
     replace: bool,
 ) -> io::Result<()> {
-    use std::mem::{offset_of, size_of};
+    use std::mem::{MaybeUninit, offset_of, size_of};
     use std::os::windows::ffi::OsStrExt;
     use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::Storage::FileSystem::{
-        FILE_RENAME_INFO, FILE_RENAME_INFO_0, FileRenameInfoEx, SetFileInformationByHandle,
+    use windows_sys::Wdk::Storage::FileSystem::{
+        FILE_RENAME_INFORMATION, FILE_RENAME_INFORMATION_0, FILE_RENAME_POSIX_SEMANTICS,
+        FILE_RENAME_REPLACE_IF_EXISTS, FileRenameInformationEx, NtSetInformationFile,
     };
+    use windows_sys::Win32::Foundation::RtlNtStatusToDosError;
+    use windows_sys::Win32::System::IO::IO_STATUS_BLOCK;
 
-    const FILE_RENAME_FLAG_REPLACE_IF_EXISTS: u32 = 0x1;
-    const FILE_RENAME_FLAG_POSIX_SEMANTICS: u32 = 0x2;
+    const STATUS_SUCCESS: i32 = 0;
     let name = target_name.encode_wide().collect::<Vec<_>>();
     let name_bytes = name.len() * size_of::<u16>();
     // FileNameLength excludes the trailing NUL, but the request buffer includes it.
-    let bytes = offset_of!(FILE_RENAME_INFO, FileName) + name_bytes + size_of::<u16>();
+    let bytes = offset_of!(FILE_RENAME_INFORMATION, FileName) + name_bytes + size_of::<u16>();
     let words = bytes.div_ceil(size_of::<usize>());
     let mut buffer = vec![0usize; words];
-    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
-    // The commit keeps the captured directory handle rather than an ambient
-    // path, so the rename resolves the simple target name against that
-    // handle. It has to outlive the request.
+    let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+    // The captured directory handle has to outlive the request.
     let parent_directory = parent.try_clone()?.into_std_file();
-    unsafe {
-        (*info).Anonymous = FILE_RENAME_INFO_0 {
-            Flags: FILE_RENAME_FLAG_POSIX_SEMANTICS
+    let mut status_block = MaybeUninit::<IO_STATUS_BLOCK>::uninit();
+    let status = unsafe {
+        (*info).Anonymous = FILE_RENAME_INFORMATION_0 {
+            Flags: FILE_RENAME_POSIX_SEMANTICS
                 | if replace {
-                    FILE_RENAME_FLAG_REPLACE_IF_EXISTS
+                    FILE_RENAME_REPLACE_IF_EXISTS
                 } else {
                     0
                 },
         };
-        // A null root directory would require `FileName` to carry a fully
-        // qualified path; a simple name resolves off-volume and reports
-        // `ERROR_NOT_SAME_DEVICE`.
         (*info).RootDirectory = parent_directory.as_raw_handle().cast();
         (*info).FileNameLength = u32::try_from(name_bytes)
             .map_err(|_| io::Error::other("destination file name is too long"))?;
@@ -2571,17 +2599,21 @@ fn commit_windows_handle(
             std::ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
             name.len(),
         );
-        if SetFileInformationByHandle(
+        NtSetInformationFile(
             staging_handle.cast(),
-            FileRenameInfoEx,
+            status_block.as_mut_ptr(),
             info.cast(),
             u32::try_from(bytes).map_err(|_| io::Error::other("rename request is too large"))?,
-        ) != 0
-        {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
-        }
+            FileRenameInformationEx,
+        )
+    };
+    if status == STATUS_SUCCESS {
+        Ok(())
+    } else {
+        // The same translation the Win32 wrapper applies before it reports a
+        // failed request through `GetLastError`.
+        let code = unsafe { RtlNtStatusToDosError(status) };
+        Err(io::Error::from_raw_os_error(code as i32))
     }
 }
 
@@ -2593,16 +2625,20 @@ fn commit_policy_unsupported(error: &io::Error) -> bool {
         })
 }
 
+// `ERROR_INVALID_PARAMETER` is deliberately absent. The volume advertises
+// `FILE_SUPPORTS_POSIX_UNLINK_RENAME` before staging begins, so a commit the
+// filesystem cannot perform reports the request as unsupported rather than as
+// malformed; reading a rejected parameter as an unsupported policy hid a
+// malformed rename request behind a typed refusal.
 #[cfg(windows)]
 fn commit_policy_unsupported(error: &io::Error) -> bool {
     const ERROR_INVALID_FUNCTION: i32 = 1;
     const ERROR_NOT_SUPPORTED: i32 = 50;
-    const ERROR_INVALID_PARAMETER: i32 = 87;
 
     error.kind() == io::ErrorKind::Unsupported
         || matches!(
             error.raw_os_error(),
-            Some(ERROR_INVALID_FUNCTION | ERROR_NOT_SUPPORTED | ERROR_INVALID_PARAMETER)
+            Some(ERROR_INVALID_FUNCTION | ERROR_NOT_SUPPORTED)
         )
 }
 
@@ -2862,11 +2898,24 @@ mod tests {
         assert_eq!(error.commit_certainty(), CommitCertainty::Indeterminate);
         assert_eq!(error.progress().completed()[0].relative_path(), "a.txt");
         assert_eq!(error.staging_residue_status(), StagingResidueStatus::Absent);
-        assert!(matches!(
-            error.cause(),
-            FilesystemWriteErrorCause::Io(source)
-                if source.kind() == io::ErrorKind::NotFound
-        ));
+        assert!(
+            matches!(error.cause(), FilesystemWriteErrorCause::Io(_)),
+            "{error:?}"
+        );
+        // The fault removes the staging name. The unix commit renames that
+        // name and reports the miss as `ENOENT`; the Windows commit renames
+        // the still-open staging handle, which the kernel refuses with a code
+        // of its own. What this test pins down is the commit failing with the
+        // progress it kept, not how a platform spells the refusal.
+        #[cfg(not(windows))]
+        assert!(
+            matches!(
+                error.cause(),
+                FilesystemWriteErrorCause::Io(source)
+                    if source.kind() == io::ErrorKind::NotFound
+            ),
+            "{error:?}"
+        );
         assert_eq!(std::fs::read(destination.join("a.txt")).unwrap(), b"a");
         assert!(!destination.join("b.txt").exists());
     }

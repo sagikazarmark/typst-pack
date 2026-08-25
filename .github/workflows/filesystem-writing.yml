@@ -29,23 +29,38 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.92.0
         with:
           targets: ${{ matrix.target }}
+      # Compile coverage only: the OpenDAL adapter has no platform-specific
+      # code, so its behavior is exercised once on Linux by the `opendal` job.
       - if: ${{ !cancelled() }}
         run: cargo check --locked -p typst-pack --no-default-features --features opendal --target ${{ matrix.target }}
       - if: ${{ !cancelled() }}
         run: cargo check --locked -p typst-pack --no-default-features --features opendal,package-reading --target ${{ matrix.target }}
-      - if: ${{ !cancelled() }}
-        run: cargo test --locked -p typst-pack --no-default-features --features opendal --target ${{ matrix.target }} --lib opendal::read::tests
-      - if: ${{ !cancelled() }}
-        run: cargo test --locked -p typst-pack --no-default-features --features opendal --target ${{ matrix.target }} --lib opendal::pack_assembly::package::tests
-      - if: ${{ !cancelled() }}
-        run: cargo test --locked -p typst-pack --no-default-features --features opendal --target ${{ matrix.target }} --lib opendal::write::tests
-      - if: ${{ !cancelled() }}
-        run: cargo test --locked -p typst-pack --no-default-features --features opendal --target ${{ matrix.target }} --test opendal_location --test opendal_bindings --test opendal_font_reading --test opendal_package_reading --test opendal_pack_archive_writing --test opendal_package_cache_archive_writing --test opendal_compilation_artifact_writing --test opendal_pack_extraction_writing
-      - if: ${{ !cancelled() }}
-        run: cargo test --locked -p typst-pack --no-default-features --features opendal,package-reading --target ${{ matrix.target }} --test opendal_package_reading --test opendal_package_cache_archive_writing
+      # The filesystem adapter is where platform behavior lives: symlink and
+      # alias refusal, entry kinds, staging, and commit all differ per target.
       - if: ${{ !cancelled() }}
         run: cargo test --locked -p typst-pack --no-default-features --features fs,opendal,package-reading,embedded-fonts --target ${{ matrix.target }} --test creation_conformance
       - if: ${{ !cancelled() }}
         run: cargo test --locked -p typst-pack --features fs,embedded-fonts --lib filesystem_write::tests
       - if: ${{ !cancelled() }}
         run: cargo test --locked -p typst-pack --features fs,embedded-fonts --test filesystem_project_reading --test filesystem_font_catalog_reading --test filesystem_package_reading --test filesystem_pack_assembly --test fs_creation --test pack_archive_reading --test pack_archive_writing --test filesystem_writing
+
+  opendal:
+    name: opendal (feature-isolated)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@1.92.0
+      # The Dagger `test` check runs these with every feature enabled. Running
+      # them again with only `opendal` active keeps the feature gates honest.
+      - if: ${{ !cancelled() }}
+        run: cargo test --locked -p typst-pack --no-default-features --features opendal --lib opendal::read::tests
+      - if: ${{ !cancelled() }}
+        run: cargo test --locked -p typst-pack --no-default-features --features opendal --lib opendal::pack_assembly::package::tests
+      - if: ${{ !cancelled() }}
+        run: cargo test --locked -p typst-pack --no-default-features --features opendal --lib opendal::write::tests
+      - if: ${{ !cancelled() }}
+        run: cargo test --locked -p typst-pack --no-default-features --features opendal --test opendal_location --test opendal_bindings --test opendal_font_reading --test opendal_package_reading --test opendal_pack_archive_writing --test opendal_package_cache_archive_writing --test opendal_compilation_artifact_writing --test opendal_pack_extraction_writing
+      - if: ${{ !cancelled() }}
+        run: cargo test --locked -p typst-pack --no-default-features --features opendal,package-reading --test opendal_package_reading --test opendal_package_cache_archive_writing

@@ -7,9 +7,6 @@
 //! directories, then the package cache, then a download unless creation is
 //! offline or the build has no egress compiled in to download with.
 
-use std::fs::File;
-#[cfg(not(unix))]
-use std::fs::OpenOptions;
 #[cfg(feature = "egress")]
 use std::io::BufReader;
 use std::io::Read;
@@ -27,6 +24,7 @@ use typst::syntax::package::PackageSpec;
 use typst_kit::packages::FsPackages;
 
 use crate::error_display::format_error_list;
+use crate::fs_traversal::{self, TraversalPolicy, UnsupportedEntry};
 use crate::limits::{LimitError, Limits, ResourceKind};
 use crate::package_catalog::{PackageTree, PackageTreeError};
 use crate::package_failure::{PackageReadFailure, PackageReadFailureReason};
@@ -325,7 +323,7 @@ pub fn read_filesystem_package(
         if !file_type.is_file() {
             issues.push(FilesystemPackageIssue::UnsupportedEntry {
                 path: entry.path().to_owned(),
-                kind: unsupported_kind(&file_type),
+                kind: UnsupportedEntry::of(&file_type).into(),
             });
             continue;
         }
@@ -398,7 +396,7 @@ pub fn read_filesystem_package(
     let mut actual_total = 0u64;
     let mut entries = Vec::with_capacity(selected.len());
     for (path, source) in selected {
-        let mut file = open_without_following(root, &source)?;
+        let mut file = fs_traversal::open_without_following(&PackageTraversal, root, &source)?;
         let bytes = read_bounded_package_file(
             &mut file,
             &source,
@@ -476,128 +474,42 @@ fn read_bounded_package_file(
     Ok(bytes)
 }
 
-#[cfg(unix)]
-fn open_without_following(root: &Path, path: &Path) -> Result<File, FilesystemPackageReadError> {
-    use std::ffi::CString;
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::ffi::OsStrExt;
+/// The package reader's vocabulary for the shared symlink-refusing open.
+struct PackageTraversal;
 
-    let relative = path
-        .strip_prefix(root)
-        .expect("a selected package path remains beneath its root");
-    let mut components = relative.components().peekable();
-    let mut current = root.to_owned();
-    let mut directory = File::open(root).map_err(|error| {
-        FilesystemPackageReadError::io(FilesystemPackageOperation::ReadSelectedFile, root, error)
-    })?;
-    while let Some(component) = components.next() {
-        current.push(component.as_os_str());
-        let name = CString::new(component.as_os_str().as_bytes())
-            .expect("filesystem path components contain no NUL bytes");
-        let final_component = components.peek().is_none();
-        let flags = libc::O_RDONLY
-            | libc::O_CLOEXEC
-            | libc::O_NONBLOCK
-            | libc::O_NOFOLLOW
-            | if final_component {
-                0
-            } else {
-                libc::O_DIRECTORY
-            };
-        // SAFETY: the directory descriptor and NUL-terminated component remain
-        // valid for the call, and a successful descriptor is immediately owned.
-        let descriptor = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
-        if descriptor < 0 {
-            if std::fs::symlink_metadata(&current)
-                .is_ok_and(|metadata| metadata.file_type().is_symlink())
-            {
-                return Err(alias_error(&current));
-            }
-            return Err(FilesystemPackageReadError::io(
-                FilesystemPackageOperation::ReadSelectedFile,
-                &current,
-                std::io::Error::last_os_error(),
-            ));
-        }
-        // SAFETY: `openat` returned a new owned descriptor.
-        let opened = unsafe { File::from_raw_fd(descriptor) };
-        if final_component {
-            return validate_opened_file(opened, &current);
-        }
-        directory = opened;
+impl TraversalPolicy for PackageTraversal {
+    type Error = FilesystemPackageReadError;
+
+    const ROOT_INVARIANT: &'static str = "a selected package path remains beneath its root";
+
+    fn io(&self, path: &Path, source: std::io::Error) -> Self::Error {
+        FilesystemPackageReadError::io(FilesystemPackageOperation::ReadSelectedFile, path, source)
     }
-    unreachable!("a selected package file has a path beneath the root")
+
+    fn alias(&self, path: &Path) -> Self::Error {
+        alias_error(path)
+    }
+
+    fn unsupported_entry(&self, path: &Path, entry: UnsupportedEntry) -> Self::Error {
+        FilesystemPackageReadError::Survey(FilesystemPackageSurveyError {
+            issues: vec![FilesystemPackageIssue::UnsupportedEntry {
+                path: path.to_owned(),
+                kind: entry.into(),
+            }],
+        })
+    }
 }
 
-#[cfg(not(unix))]
-fn open_without_following(root: &Path, path: &Path) -> Result<File, FilesystemPackageReadError> {
-    if let Some(alias) = first_alias(root, path) {
-        return Err(alias_error(&alias));
-    }
-
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-
-    let file = match options.open(path) {
-        Ok(file) => file,
-        Err(error) => {
-            if let Some(alias) = first_alias(root, path) {
-                return Err(alias_error(&alias));
-            }
-            return Err(FilesystemPackageReadError::io(
-                FilesystemPackageOperation::ReadSelectedFile,
-                path,
-                error,
-            ));
-        }
-    };
-    if let Some(alias) = first_alias(root, path) {
-        return Err(alias_error(&alias));
-    }
-    validate_opened_file(file, path)
-}
-
-fn validate_opened_file(file: File, path: &Path) -> Result<File, FilesystemPackageReadError> {
-    let metadata = file.metadata().map_err(|error| {
-        FilesystemPackageReadError::io(FilesystemPackageOperation::ReadSelectedFile, path, error)
-    })?;
-    if metadata.file_type().is_symlink() {
-        return Err(alias_error(path));
-    }
-    if !metadata.file_type().is_file() {
-        return Err(FilesystemPackageReadError::Survey(
-            FilesystemPackageSurveyError {
-                issues: vec![FilesystemPackageIssue::UnsupportedEntry {
-                    path: path.to_owned(),
-                    kind: unsupported_kind(&metadata.file_type()),
-                }],
-            },
-        ));
-    }
-    Ok(file)
-}
-
-#[cfg(not(unix))]
-fn first_alias(root: &Path, path: &Path) -> Option<PathBuf> {
-    let relative = path
-        .strip_prefix(root)
-        .expect("a selected package path remains beneath its root");
-    let mut current = root.to_owned();
-    for component in relative.components() {
-        current.push(component.as_os_str());
-        if std::fs::symlink_metadata(&current)
-            .is_ok_and(|metadata| metadata.file_type().is_symlink())
-        {
-            return Some(current);
+impl From<UnsupportedEntry> for FilesystemPackageEntryKind {
+    fn from(entry: UnsupportedEntry) -> Self {
+        match entry {
+            UnsupportedEntry::Socket => Self::Socket,
+            UnsupportedEntry::Fifo => Self::Fifo,
+            UnsupportedEntry::BlockDevice => Self::BlockDevice,
+            UnsupportedEntry::CharacterDevice => Self::CharacterDevice,
+            UnsupportedEntry::Unknown => Self::Unknown,
         }
     }
-    None
 }
 
 fn alias_error(path: &Path) -> FilesystemPackageReadError {
@@ -613,27 +525,6 @@ fn slash_path(path: &Path) -> Option<String> {
         .map(|component| component.as_os_str().to_str())
         .collect::<Option<Vec<_>>>()
         .map(|components| components.join("/"))
-}
-
-fn unsupported_kind(file_type: &std::fs::FileType) -> FilesystemPackageEntryKind {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileTypeExt;
-
-        if file_type.is_socket() {
-            return FilesystemPackageEntryKind::Socket;
-        }
-        if file_type.is_fifo() {
-            return FilesystemPackageEntryKind::Fifo;
-        }
-        if file_type.is_block_device() {
-            return FilesystemPackageEntryKind::BlockDevice;
-        }
-        if file_type.is_char_device() {
-            return FilesystemPackageEntryKind::CharacterDevice;
-        }
-    }
-    FilesystemPackageEntryKind::Unknown
 }
 
 fn checked_add(

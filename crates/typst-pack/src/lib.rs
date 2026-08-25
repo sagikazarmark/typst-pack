@@ -25,6 +25,8 @@ mod fs_fonts;
 mod fs_packages;
 #[cfg(feature = "fs")]
 mod fs_project;
+#[cfg(feature = "fs")]
+mod fs_traversal;
 mod identity;
 mod limits;
 mod manifest;
