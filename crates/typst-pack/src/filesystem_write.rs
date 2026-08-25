@@ -2898,11 +2898,24 @@ mod tests {
         assert_eq!(error.commit_certainty(), CommitCertainty::Indeterminate);
         assert_eq!(error.progress().completed()[0].relative_path(), "a.txt");
         assert_eq!(error.staging_residue_status(), StagingResidueStatus::Absent);
-        assert!(matches!(
-            error.cause(),
-            FilesystemWriteErrorCause::Io(source)
-                if source.kind() == io::ErrorKind::NotFound
-        ));
+        assert!(
+            matches!(error.cause(), FilesystemWriteErrorCause::Io(_)),
+            "{error:?}"
+        );
+        // The fault removes the staging name. The unix commit renames that
+        // name and reports the miss as `ENOENT`; the Windows commit renames
+        // the still-open staging handle, which the kernel refuses with a code
+        // of its own. What this test pins down is the commit failing with the
+        // progress it kept, not how a platform spells the refusal.
+        #[cfg(not(windows))]
+        assert!(
+            matches!(
+                error.cause(),
+                FilesystemWriteErrorCause::Io(source)
+                    if source.kind() == io::ErrorKind::NotFound
+            ),
+            "{error:?}"
+        );
         assert_eq!(std::fs::read(destination.join("a.txt")).unwrap(), b"a");
         assert!(!destination.join("b.txt").exists());
     }
