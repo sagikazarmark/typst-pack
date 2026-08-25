@@ -2781,9 +2781,18 @@ fn retained_residue(staging: Option<PathBuf>, status: StagingResidueStatus) -> O
 mod tests {
     use super::*;
 
+    // macOS temp paths can start with `/var`, a symlink to `/private/var`, so
+    // a unix destination is resolved before it reaches the write preflight.
+    #[cfg(unix)]
     fn temp_path(directory: &tempfile::TempDir) -> PathBuf {
-        // macOS temp paths can start with `/var`, a symlink to `/private/var`.
         std::fs::canonicalize(directory.path()).unwrap()
+    }
+
+    // Windows temp paths are not reached through a symlink, and canonicalizing
+    // one yields a `\\?\` verbatim path that no caller would supply.
+    #[cfg(not(unix))]
+    fn temp_path(directory: &tempfile::TempDir) -> PathBuf {
+        directory.path().to_owned()
     }
 
     #[test]
