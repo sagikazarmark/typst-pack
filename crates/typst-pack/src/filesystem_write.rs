@@ -284,6 +284,11 @@ struct WriteFaults {
     write_fault_after: usize,
     flush_fault_file: Option<usize>,
     commit_fault_file: Option<usize>,
+    // The fault this injects is a Unix symlink race. The Windows analogue is a
+    // directory junction swapped in for an ancestor, which needs a reparse
+    // point rather than a symlink; that fault is not implemented, so the
+    // ancestor race has no Windows fuzz coverage.
+    #[cfg(unix)]
     ancestor_symlink_race_file: Option<usize>,
     new_tree_commit_unsupported: bool,
     new_tree_policy_unsupported: bool,
@@ -299,6 +304,7 @@ impl Default for WriteFaults {
             write_fault_after: usize::MAX,
             flush_fault_file: None,
             commit_fault_file: None,
+            #[cfg(unix)]
             ancestor_symlink_race_file: None,
             new_tree_commit_unsupported: false,
             new_tree_policy_unsupported: false,
@@ -317,6 +323,7 @@ impl From<FilesystemWriteFaultProbe> for WriteFaults {
             write_fault_after: probe.write_fault_after,
             flush_fault_file: probe.flush_fault_file,
             commit_fault_file: probe.commit_fault_file,
+            #[cfg(unix)]
             ancestor_symlink_race_file: probe.ancestor_symlink_race_file,
             new_tree_commit_unsupported: probe.new_tree_commit_unsupported,
             new_tree_policy_unsupported: probe.new_tree_policy_unsupported,
