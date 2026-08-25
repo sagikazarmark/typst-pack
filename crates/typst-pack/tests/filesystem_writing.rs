@@ -537,17 +537,22 @@ fn rejected_compilation_results_are_not_written() {
 ///
 /// Linux filesystems accept arbitrary bytes, while APFS and HFS+ reject them
 /// with `EILSEQ`. A caller-selected unrepresentable path cannot be written
-/// where the filesystem refuses to record one.
+/// where the filesystem refuses to record one. Only that rejection reports an
+/// unsupported encoding; every other probe failure is a real fault and is
+/// raised rather than silently skipped.
 #[cfg(unix)]
 fn stores_non_unicode_names(directory: &std::path::Path) -> bool {
     use std::os::unix::ffi::OsStringExt as _;
 
     let probe = directory.join(std::ffi::OsString::from_vec(b"probe-\xff".to_vec()));
-    if std::fs::write(&probe, b"probe").is_err() {
-        return false;
+    match std::fs::write(&probe, b"probe") {
+        Ok(()) => {
+            std::fs::remove_file(probe).unwrap();
+            true
+        }
+        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => false,
+        Err(error) => panic!("probing non-UTF-8 filename support failed: {error}"),
     }
-    std::fs::remove_file(probe).unwrap();
-    true
 }
 
 #[cfg(unix)]
