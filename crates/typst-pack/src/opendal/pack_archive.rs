@@ -77,6 +77,7 @@ pub enum PackArchiveReadRequestError {
 ///     Ok(())
 /// }
 /// ```
+#[allow(clippy::result_large_err)]
 pub async fn read_pack_archive<R: OperatorResolver + ?Sized>(
     resolver: &R,
     request: &PackArchiveReadRequest,

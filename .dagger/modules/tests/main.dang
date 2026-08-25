@@ -8,8 +8,13 @@ type Tests {
     .source
     .directory("fixtures/packages")
 
-  let pack: File! {
-    Dagger.typstPack.create(
+  let typstPack: TypstPack! {
+    Dagger.typstPack(rustVersion: "1.98-slim-trixie")
+  }
+
+  let pack(ws: Workspace!): File! {
+    self.typstPack.create(
+      ws,
       project: self.project,
       input: "main.typ",
       packageDir: self.packages,
@@ -20,9 +25,9 @@ type Tests {
   """
   Create a pack and inspect its structural project files and vendored package.
   """
-  createInspect: Void @check {
-    let pack = self.pack
-    let output = Dagger.typstPack.inspect(pack)
+  createInspect(ws: Workspace!): Void @check {
+    let pack = self.pack(ws)
+    let output = self.typstPack.inspect(ws, pack)
 
     assert { pack.name == "project.typk" }
     assert { output.contains("entrypoint: main.typ") }
@@ -39,20 +44,22 @@ type Tests {
   """
   Create, inspect, and compile a pack whose package dependency is not vendored.
   """
-  noVendorPackagesLifecycle: Void @check {
-    let pack = Dagger.typstPack.create(
+  noVendorPackagesLifecycle(ws: Workspace!): Void @check {
+    let pack = self.typstPack.create(
+      ws,
       project: self.project,
       input: "main.typ",
       noVendorPackages: true,
       packageDir: self.packages,
       offline: true,
     )
-    let inspection = Dagger.typstPack.inspect(pack)
+    let inspection = self.typstPack.inspect(ws, pack)
 
     assert { inspection.contains("unvendored packages:") }
     assert { inspection.contains("@local/greet:0.1.0") }
 
-    let output = Dagger.typstPack.compile(
+    let output = self.typstPack.compile(
+      ws,
       pack: pack,
       format: TypstPackOutputFormat.SVG,
       packageDir: self.packages,
@@ -66,7 +73,7 @@ type Tests {
   """
   Delegate typed creation and compilation values through the public Pack lifecycle.
   """
-  publicCompilationLifecycle: Void @check {
+  publicCompilationLifecycle(ws: Workspace!): Void @check {
     let source = Dagger
       .currentModule
       .source
@@ -75,7 +82,8 @@ type Tests {
       .currentModule
       .source
       .directory("fixtures/adapter-lifecycle-overrides")
-    let pack = Dagger.typstPack.create(
+    let pack = self.typstPack.create(
+      ws,
       project: source,
       input: "main.typ",
       noVendorPackages: true,
@@ -86,9 +94,10 @@ type Tests {
       offline: true,
     )
 
-    let pdf = Dagger
+    let pdf = self
       .typstPack
       .compile(
+        ws,
         pack: pack,
         features: [TypstPackFeature.A11Y_EXTRAS],
         sysInputs: ["mode=compilation"],
@@ -99,7 +108,8 @@ type Tests {
         offline: true,
       )
       .file("output.pdf")
-    let pages = Dagger.typstPack.compile(
+    let pages = self.typstPack.compile(
+      ws,
       pack: pack,
       format: TypstPackOutputFormat.PNG,
       features: [TypstPackFeature.A11Y_EXTRAS],
@@ -123,9 +133,10 @@ type Tests {
 
     # A later compilation and staging query cannot rewrite the first File value.
     let stagedDigest = pdf.digest
-    let baseline = Dagger
+    let baseline = self
       .typstPack
       .compile(
+        ws,
         pack: pack,
         sysInputs: ["mode=creation"],
         creationTimestamp: 1700000000,
@@ -143,7 +154,7 @@ type Tests {
   """
   Keep compilation failures distinct from failures querying staged delivery values.
   """
-  compilationAndDeliveryFailures: Void @check {
+  compilationAndDeliveryFailures(ws: Workspace!): Void @check {
     let source = Dagger
       .currentModule
       .source
@@ -152,7 +163,8 @@ type Tests {
       .currentModule
       .source
       .directory("fixtures/adapter-lifecycle-invalid")
-    let pack = Dagger.typstPack.create(
+    let pack = self.typstPack.create(
+      ws,
       project: source,
       input: "main.typ",
       packageDir: self.packages,
@@ -161,9 +173,10 @@ type Tests {
 
     #nofmt Dagger's embedded Dang still requires try/catch.
     let compilationFailed = try {
-      let count = Dagger
+      let count = self
         .typstPack
         .compile(
+          ws,
           pack: pack,
           sysInputs: ["mode=compilation"],
           overrideDir: invalid,
@@ -182,9 +195,10 @@ type Tests {
 
     #nofmt Dagger's embedded Dang still requires try/catch.
     let deliveryFailed = try {
-      let size = Dagger
+      let size = self
         .typstPack
         .compile(
+          ws,
           pack: pack,
           sysInputs: ["mode=creation"],
         )
@@ -206,8 +220,8 @@ type Tests {
   """
   Extract a pack back into project files and vendored packages.
   """
-  extract: Void @check {
-    let extracted = Dagger.typstPack.extract(pack: self.pack, packages: true)
+  extract(ws: Workspace!): Void @check {
+    let extracted = self.typstPack.extract(ws, pack: self.pack(ws), packages: true)
 
     assert {
       extracted
@@ -250,27 +264,30 @@ type Tests {
   """
   Compile PDFs with observable standard and timestamp controls.
   """
-  compilePdf: Void @check {
-    let baseline = Dagger
+  compilePdf(ws: Workspace!): Void @check {
+    let baseline = self
       .typstPack
       .compile(
-        pack: self.pack,
+        ws,
+        pack: self.pack(ws),
         creationTimestamp: 1700000000,
       )
       .file("output.pdf")
-    let standard = Dagger
+    let standard = self
       .typstPack
       .compile(
-        pack: self.pack,
+        ws,
+        pack: self.pack(ws),
         creationTimestamp: 1700000000,
         pdfStandards: [TypstPackPdfStandard.V2_0],
         certificate: self.project.file("notes.txt"),
       )
       .file("output.pdf")
-    let later = Dagger
+    let later = self
       .typstPack
       .compile(
-        pack: self.pack,
+        ws,
+        pack: self.pack(ws),
         creationTimestamp: 1700000001,
       )
       .file("output.pdf")
@@ -286,18 +303,19 @@ type Tests {
   """
   A representative target does not select structural project files.
   """
-  creationTarget: Void @check {
+  creationTarget(ws: Workspace!): Void @check {
     let source = Dagger
       .currentModule
       .source
       .directory("fixtures/targets")
-    let pack = Dagger.typstPack.create(
+    let pack = self.typstPack.create(
+      ws,
       project: source,
       input: "main.typ",
       target: TypstPackTypstTarget.HTML,
       features: [TypstPackFeature.HTML],
     )
-    let output = Dagger.typstPack.inspect(pack)
+    let output = self.typstPack.inspect(ws, pack)
 
     assert { output.contains("paged.txt") }
     assert { output.contains("html.txt") }
@@ -308,22 +326,24 @@ type Tests {
   """
   Forward sys.inputs through Pack creation, inspection, and final compilation.
   """
-  sysInputsLifecycle: Void @check {
+  sysInputsLifecycle(ws: Workspace!): Void @check {
     let source = Dagger
       .currentModule
       .source
       .directory("fixtures/sys-inputs")
-    let pack = Dagger.typstPack.create(
+    let pack = self.typstPack.create(
+      ws,
       project: source,
       input: "main.typ",
       sysInputs: ["phase=creation"],
       ignoreEmbeddedFonts: true,
     )
-    let inspection = Dagger.typstPack.inspect(pack)
+    let inspection = self.typstPack.inspect(ws, pack)
 
     assert { inspection.contains("resources/discovered.txt") }
 
-    let output = Dagger.typstPack.compile(
+    let output = self.typstPack.compile(
+      ws,
       pack: pack,
       format: TypstPackOutputFormat.SVG,
       sysInputs: ["phase=compilation"],
@@ -338,15 +358,16 @@ type Tests {
   """
   Embed the fonts used during creation when requested.
   """
-  fontControls: Void @check {
-    let pack = Dagger.typstPack.create(
+  fontControls(ws: Workspace!): Void @check {
+    let pack = self.typstPack.create(
+      ws,
       project: self.project,
       input: "main.typ",
       packageDir: self.packages,
       embedFonts: true,
       includeTypstEmbeddedFonts: true,
     )
-    let output = Dagger.typstPack.inspect(pack)
+    let output = self.typstPack.inspect(ws, pack)
 
     assert { output.contains("embedded fonts:") }
 
@@ -356,9 +377,10 @@ type Tests {
   """
   Compile a pack to PNG.
   """
-  compilePng: Void @check {
-    let output = Dagger.typstPack.compile(
-      pack: self.pack,
+  compilePng(ws: Workspace!): Void @check {
+    let output = self.typstPack.compile(
+      ws,
+      pack: self.pack(ws),
       format: TypstPackOutputFormat.PNG,
     )
     let png = output.file("page-1.png")
@@ -372,18 +394,18 @@ type Tests {
   """
   Preserve omitted and fractional PPI values across the module boundary.
   """
-  compilePpi: Void @check {
-    let default = Dagger
+  compilePpi(ws: Workspace!): Void @check {
+    let default = self
       .typstPack
-      .compile(pack: self.pack, format: TypstPackOutputFormat.PNG)
+      .compile(ws, pack: self.pack(ws), format: TypstPackOutputFormat.PNG)
       .file("page-1.png")
-    let explicitDefault = Dagger
+    let explicitDefault = self
       .typstPack
-      .compile(pack: self.pack, format: TypstPackOutputFormat.PNG, ppi: "144")
+      .compile(ws, pack: self.pack(ws), format: TypstPackOutputFormat.PNG, ppi: "144")
       .file("page-1.png")
-    let fractional = Dagger
+    let fractional = self
       .typstPack
-      .compile(pack: self.pack, format: TypstPackOutputFormat.PNG, ppi: "72.5")
+      .compile(ws, pack: self.pack(ws), format: TypstPackOutputFormat.PNG, ppi: "72.5")
       .file("page-1.png")
     assert { default.digest == explicitDefault.digest }
     assert { default.digest != fractional.digest }
@@ -394,12 +416,12 @@ type Tests {
   """
   Reject an explicitly empty PPI value through the public compile function.
   """
-  compileRejectsEmptyPpi: Void @check {
+  compileRejectsEmptyPpi(ws: Workspace!): Void @check {
     #nofmt Dagger's embedded Dang still requires try/catch.
     let rejected = try {
-      let count = Dagger
+      let count = self
         .typstPack
-        .compile(pack: self.pack, format: TypstPackOutputFormat.PNG, ppi: "")
+        .compile(ws, pack: self.pack(ws), format: TypstPackOutputFormat.PNG, ppi: "")
         .entries
         .length
       count < 0
@@ -417,18 +439,20 @@ type Tests {
   """
   Compile selected source pages to deterministically named page artifacts.
   """
-  compileSelectedPages: Void @check {
+  compileSelectedPages(ws: Workspace!): Void @check {
     let source = Dagger
       .currentModule
       .source
       .directory("fixtures/multi-page")
-    let pack = Dagger.typstPack.create(
+    let pack = self.typstPack.create(
+      ws,
       project: source,
       input: "main.typ",
       features: [TypstPackFeature.A11Y_EXTRAS],
       ignoreEmbeddedFonts: true,
     )
-    let output = Dagger.typstPack.compile(
+    let output = self.typstPack.compile(
+      ws,
       pack: pack,
       format: TypstPackOutputFormat.PNG,
       pages: "5,2",
@@ -449,9 +473,10 @@ type Tests {
   """
   Compile a pack to HTML without redundantly selecting the derived HTML feature.
   """
-  compileHtml: Void @check {
-    let output = Dagger.typstPack.compile(
-      pack: self.pack,
+  compileHtml(ws: Workspace!): Void @check {
+    let output = self.typstPack.compile(
+      ws,
+      pack: self.pack(ws),
       format: TypstPackOutputFormat.HTML,
     )
     let html = output.file("output.html")

@@ -533,10 +533,38 @@ fn rejected_compilation_results_are_not_written() {
     assert!(!destination.exists());
 }
 
+/// Reports whether the filesystem backing `directory` stores non-UTF-8 names.
+///
+/// Linux filesystems accept arbitrary bytes, while APFS and HFS+ reject them
+/// with `EILSEQ`. A caller-selected unrepresentable path cannot be written
+/// where the filesystem refuses to record one. Only that rejection reports an
+/// unsupported encoding; every other probe failure is a real fault and is
+/// raised rather than silently skipped.
+#[cfg(unix)]
+fn stores_non_unicode_names(directory: &std::path::Path) -> bool {
+    use std::os::unix::ffi::OsStringExt as _;
+
+    let probe = directory.join(std::ffi::OsString::from_vec(b"probe-\xff".to_vec()));
+    match std::fs::write(&probe, b"probe") {
+        Ok(()) => {
+            std::fs::remove_file(probe).unwrap();
+            true
+        }
+        Err(error) if error.raw_os_error() == Some(libc::EILSEQ) => false,
+        Err(error) => panic!("probing non-UTF-8 filename support failed: {error}"),
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn caller_selected_artifact_write_supports_non_unicode_platform_paths() {
     use std::os::unix::ffi::OsStringExt as _;
+
+    let directory = tempfile::tempdir().unwrap();
+    if !stores_non_unicode_names(directory.path()) {
+        eprintln!("skipped: the temporary filesystem rejects non-UTF-8 names");
+        return;
+    }
 
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"= Written".to_vec())
@@ -552,7 +580,6 @@ fn caller_selected_artifact_write_supports_non_unicode_platform_paths() {
     )
     .unwrap();
     let result = report.result().unwrap();
-    let directory = tempfile::tempdir().unwrap();
     let destination = temp_path(&directory).join("artifacts");
     let relative =
         std::path::PathBuf::from(std::ffi::OsString::from_vec(b"report-\xff.pdf".to_vec()));

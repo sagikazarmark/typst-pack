@@ -992,7 +992,9 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     let pack = read_pack_input(&args.pack)?;
     let override_paths = args
         .overrides
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             pair[0]
                 .to_str()
@@ -1003,7 +1005,7 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         .map_err(|error| CliError::Message(error.to_string()))?;
     let host_dependencies = Arc::new(Mutex::new(BTreeSet::new()));
     let mut overrides = PackOverrideSet::new(&pack);
-    for pair in args.overrides.chunks_exact(2) {
+    for pair in args.overrides.as_chunks::<2>().0 {
         let pack_path = pair[0]
             .to_str()
             .expect("Pack Override paths were validated before filesystem access");

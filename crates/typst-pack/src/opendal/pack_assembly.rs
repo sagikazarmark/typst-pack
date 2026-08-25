@@ -474,6 +474,7 @@ impl ProjectReadSurveyError {
 ///     Ok(())
 /// }
 /// ```
+#[allow(clippy::result_large_err)]
 pub async fn read_project<R: OperatorResolver + ?Sized>(
     resolver: &R,
     request: &ProjectReadRequest,
@@ -1153,6 +1154,7 @@ impl FontReadSurveyError {
 ///     Ok(())
 /// }
 /// ```
+#[allow(clippy::result_large_err)]
 pub async fn read_fonts<R: OperatorResolver + ?Sized>(
     resolver: &R,
     request: &FontReadRequest,

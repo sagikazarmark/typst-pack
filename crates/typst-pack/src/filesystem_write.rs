@@ -1587,7 +1587,7 @@ fn platform_case_insensitive(destination: &Path) -> bool {
         return false;
     }
     let status = unsafe { status.assume_init() };
-    status.f_flags as u32 & MNT_CASE_SENSITIVE == 0
+    status.f_flags & MNT_CASE_SENSITIVE == 0
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]
@@ -2526,13 +2526,14 @@ fn commit_windows_file(
 
 #[cfg(windows)]
 fn commit_windows_handle(
-    _parent: &Dir,
+    parent: &Dir,
     staging_handle: std::os::windows::io::RawHandle,
     target_name: &std::ffi::OsStr,
     replace: bool,
 ) -> io::Result<()> {
     use std::mem::{offset_of, size_of};
     use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_RENAME_INFO, FILE_RENAME_INFO_0, FileRenameInfoEx, SetFileInformationByHandle,
     };
@@ -2546,6 +2547,10 @@ fn commit_windows_handle(
     let words = bytes.div_ceil(size_of::<usize>());
     let mut buffer = vec![0usize; words];
     let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    // The commit keeps the captured directory handle rather than an ambient
+    // path, so the rename resolves the simple target name against that
+    // handle. It has to outlive the request.
+    let parent_directory = parent.try_clone()?.into_std_file();
     unsafe {
         (*info).Anonymous = FILE_RENAME_INFO_0 {
             Flags: FILE_RENAME_FLAG_POSIX_SEMANTICS
@@ -2555,8 +2560,10 @@ fn commit_windows_handle(
                     0
                 },
         };
-        // A simple name with no root handle is the documented same-directory form.
-        (*info).RootDirectory = std::ptr::null_mut();
+        // A null root directory would require `FileName` to carry a fully
+        // qualified path; a simple name resolves off-volume and reports
+        // `ERROR_NOT_SAME_DEVICE`.
+        (*info).RootDirectory = parent_directory.as_raw_handle().cast();
         (*info).FileNameLength = u32::try_from(name_bytes)
             .map_err(|_| io::Error::other("destination file name is too long"))?;
         std::ptr::copy_nonoverlapping(
@@ -2781,9 +2788,18 @@ fn retained_residue(staging: Option<PathBuf>, status: StagingResidueStatus) -> O
 mod tests {
     use super::*;
 
+    // macOS temp paths can start with `/var`, a symlink to `/private/var`, so
+    // a unix destination is resolved before it reaches the write preflight.
+    #[cfg(unix)]
     fn temp_path(directory: &tempfile::TempDir) -> PathBuf {
-        // macOS temp paths can start with `/var`, a symlink to `/private/var`.
         std::fs::canonicalize(directory.path()).unwrap()
+    }
+
+    // Windows temp paths are not reached through a symlink, and canonicalizing
+    // one yields a `\\?\` verbatim path that no caller would supply.
+    #[cfg(not(unix))]
+    fn temp_path(directory: &tempfile::TempDir) -> PathBuf {
+        directory.path().to_owned()
     }
 
     #[test]
@@ -2837,10 +2853,11 @@ mod tests {
             core_error,
         );
 
-        assert_eq!(error.phase(), FilesystemWritePhase::Commit);
+        assert_eq!(error.phase(), FilesystemWritePhase::Commit, "{error:?}");
         assert_eq!(
             error.failed_target(),
-            Some(destination.join("b.txt").as_path())
+            Some(destination.join("b.txt").as_path()),
+            "{error:?}"
         );
         assert_eq!(error.commit_certainty(), CommitCertainty::Indeterminate);
         assert_eq!(error.progress().completed()[0].relative_path(), "a.txt");
