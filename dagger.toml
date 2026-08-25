@@ -4,21 +4,20 @@ ignore = [".devenv", "target"]
 source = "."
 entrypoint = true
 
+settings.rustVersion = "1.98-slim-trixie"
+
 [modules.tests]
 source = ".dagger/modules/tests"
 
 [modules.rust]
 source = "github.com/sagikazarmark/daggerverse-beta/rust"
 
-[modules.rust.settings]
-version = "1.97-slim-trixie"
+settings.version = "1.98-slim-trixie"
 
 [modules.dagger-gha]
 source = "github.com/sagikazarmark/daggerverse-beta/dagger-gha"
 
-[modules.dagger-gha.settings]
-lock = '"PINNED"'
-skip = ['"rust:build"', '"rust:test"']
+settings.skip = ['"rust:build"', '"rust:test"']
 
 [modules.dang]
 source = "github.com/sagikazarmark/daggerverse-beta/dang"

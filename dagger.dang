@@ -6,13 +6,12 @@ type TypstPack {
   let officialTypst: File!
 
   new(
+    rustVersion: String!,
     """
     Cache volume for Typst package downloads.
     """
     packageCache: CacheVolume! = Dagger.cacheVolume("typst-pack-packages"),
   ) {
-    let rustVersion: String! = "1.97-slim-trixie@sha256:14c4fe50ea427dc42381a1a09a9a839c1d2346a2e508cd491bf02c659dbc0ed7"
-
     let packages = ["pkg-config", "libssl-dev", "curl", "xz-utils", "jq"]
 
     let container = Dagger
@@ -51,10 +50,11 @@ type TypstPack {
   """
   The typst-pack CLI.
   """
-  build: File! @check {
+  build(ws: Workspace!): File! @check {
     self
       .rust
       .build(
+        ws,
         release: true,
         package: ["typst-pack-cli"],
         bin: ["typst-pack"],
@@ -125,21 +125,21 @@ type TypstPack {
   """
   Run the complete Rust test suite with every crate feature enabled.
   """
-  test: String! @check {
-    self.rust.test(all: true, allFeatures: true)
+  test(ws: Workspace!): String! @check {
+    self.rust.test(ws, all: true, allFeatures: true)
   }
 
   """
   Run the featureless core suite, including identity compatibility checks.
   """
-  testCore: String! @check {
-    self.rust.test(package: ["typst-pack"], noDefaultFeatures: true)
+  testCore(ws: Workspace!): String! @check {
+    self.rust.test(ws, package: ["typst-pack"], noDefaultFeatures: true)
   }
 
   """
   Keep the featureless core, Pack Creation and fixed Document Time included, on wasm.
   """
-  buildWasm: Directory! @check {
+  buildWasm(ws: Workspace!): Directory! @check {
     Dagger
       .rust(
         version: self.rustVersion,
@@ -147,6 +147,7 @@ type TypstPack {
         targets: ["wasm32-unknown-unknown"],
       )
       .build(
+        ws,
         noDefaultFeatures: true,
         package: ["typst-pack"],
         target: ["wasm32-unknown-unknown"],
@@ -156,10 +157,10 @@ type TypstPack {
   """
   Run the filesystem suite for a build with no HTTP client in its dependency graph.
   """
-  testFsWithoutEgress: String! @check {
+  testFsWithoutEgress(ws: Workspace!): String! @check {
     # Every crate this manifest can activate that speaks HTTP.
     let transportCrates = ["env_proxy", "ureq", "webpki-roots"]
-    let container = self.rust.container
+    let container = self.rust.container(ws)
     let withoutEgress = container.withExec(dependencyGraphCommand("fs")).stdout
     let withEgress = container.withExec(dependencyGraphCommand("egress")).stdout
 
@@ -176,7 +177,7 @@ type TypstPack {
 
     self
       .rust
-      .test(package: ["typst-pack"], noDefaultFeatures: true, feature: ["fs"])
+      .test(ws, package: ["typst-pack"], noDefaultFeatures: true, feature: ["fs"])
   }
 
   """
@@ -200,28 +201,29 @@ type TypstPack {
   """
   Run the ordinary CLI test suite without internal test-only features.
   """
-  testCli: String! @check {
+  testCli(ws: Workspace!): String! @check {
     self
       .rust
-      .test(package: ["typst-pack-cli"], test: ["cli"])
+      .test(ws, package: ["typst-pack-cli"], test: ["cli"])
   }
 
   """
   Differential-gate shared CLI behavior against the exact embedded Typst release.
   """
-  testCliParity: String! @check {
+  testCliParity(ws: Workspace!): String! @check {
     Dagger
       .rust(
         version: self.rustVersion,
         container: self
           .rustContainer
           .withFile("/usr/local/bin/typst", self.officialTypst)
-          .withFile("/usr/local/bin/typst-pack", self.build),
+          .withFile("/usr/local/bin/typst-pack", self.build(ws)),
       )
       .withEnvVariable("TYPST_PACK_OFFICIAL_TYPST", "/usr/local/bin/typst")
       .withEnvVariable("TYPST_PACK_REQUIRE_OFFICIAL_TYPST", "1")
       .withEnvVariable("TYPST_PACK_TEST_BINARY", "/usr/local/bin/typst-pack")
       .test(
+        ws,
         package: ["typst-pack-cli"],
         allFeatures: true,
         test: ["official_typst_cli"],
@@ -231,7 +233,7 @@ type TypstPack {
   """
   A Debian container with the typst-pack CLI installed.
   """
-  container: Container! {
+  container(ws: Workspace!): Container! {
     Dagger
       .container
       .from("debian:trixie-slim")
@@ -239,7 +241,7 @@ type TypstPack {
       .withEnvVariable("DEBIAN_FRONTEND", "noninteractive")
       .withExec(["apt-get", "update"])
       .withExec(["apt-get", "install", "-y", "--no-install-recommends", "ca-certificates"])
-      .withFile("/usr/local/bin/typst-pack", self.build)
+      .withFile("/usr/local/bin/typst-pack", self.build(ws))
       .withEnvVariable("TYPST_PACKAGE_CACHE_PATH", "/work/package-cache")
       .withMountedCache("/work/package-cache", self.packageCache)
   }
@@ -248,6 +250,7 @@ type TypstPack {
   Pack a Typst project into a typst-pack archive.
   """
   create(
+    ws: Workspace!,
     """
     Typst project directory. It is mounted at /work/project.
     """
@@ -352,7 +355,7 @@ type TypstPack {
     authors.each { author => args += ["--author", author] }
 
     let container = self
-      .container
+      .container(ws)
       .withWorkdir("/work/project")
       .withMountedDirectory(".", project)
 
@@ -376,13 +379,14 @@ type TypstPack {
   Show what is inside a typst-pack archive.
   """
   inspect(
+    ws: Workspace!,
     """
     Pack file to inspect. It is mounted at /work/src/project.typk.
     """
     pack: File!,
   ): String! {
     self
-      .container
+      .container(ws)
       .withWorkdir("/work/src")
       .withMountedFile("project.typk", pack)
       .withExec(["typst-pack", "inspect", "project.typk"])
@@ -393,6 +397,7 @@ type TypstPack {
   Extract a typst-pack archive into a directory.
   """
   extract(
+    ws: Workspace!,
     """
     Pack file to extract. It is mounted at /work/src/project.typk.
     """
@@ -417,7 +422,7 @@ type TypstPack {
     if (all) { args += ["--all"] }
 
     self
-      .container
+      .container(ws)
       .withWorkdir("/work/src")
       .withMountedFile("project.typk", pack)
       .withExec(["mkdir", "-p", "/work/out"])
@@ -429,6 +434,7 @@ type TypstPack {
   Compile a typst-pack archive to a directory of output artifacts.
   """
   compile(
+    ws: Workspace!,
     """
     Pack file to compile. It is mounted at /work/src/project.typk.
     """
@@ -544,7 +550,7 @@ type TypstPack {
     if (offline) { args += ["--offline"] }
 
     let container = self
-      .container
+      .container(ws)
       .withWorkdir("/work/src")
       .withMountedFile("project.typk", pack)
 
