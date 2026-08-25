@@ -303,6 +303,27 @@ impl Pack {
     ///
     /// `entrypoint` is the root-relative path of the main file, e.g.
     /// `main.typ`.
+    ///
+    /// Building directly does not run Dependency Discovery: the pack contains
+    /// exactly the files added here and declares no package or font
+    /// requirements. Use [`create`](crate::create) when the library should
+    /// discover requirements from values the caller already holds.
+    ///
+    /// ```
+    /// use typst_pack::Pack;
+    /// use typst_pack::pack_archive::encode;
+    ///
+    /// let pack = Pack::builder("main.typ")
+    ///     .file("main.typ", b"= Report\n".to_vec())?
+    ///     .file("data/figures.csv", b"quarter,revenue\nQ1,120\n".to_vec())?
+    ///     .build()?;
+    ///
+    /// assert_eq!(pack.entrypoint(), "main.typ");
+    ///
+    /// let archive = encode(&pack)?;
+    /// assert!(!archive.as_slice().is_empty());
+    /// # Ok::<(), Box<dyn std::error::Error>>(())
+    /// ```
     pub fn builder(entrypoint: impl Into<String>) -> PackBuilder {
         PackBuilder::new(entrypoint)
     }

@@ -99,3 +99,20 @@ impl CanonicalIdentity {
             .map(|digest| Self::from_digest(role, digest))
     }
 }
+
+impl std::fmt::Display for CanonicalIdentityRole {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+/// Renders the role-qualified digest, the form used by diagnostics and `inspect`.
+///
+/// This is a readable projection, not the equality contract: comparisons must
+/// use the whole [`CanonicalIdentity`], which also separates schema and
+/// algorithm.
+impl std::fmt::Display for CanonicalIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(formatter, "{}:{:032x}", self.role.as_str(), self.digest)
+    }
+}

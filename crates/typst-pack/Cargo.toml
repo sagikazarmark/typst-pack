@@ -12,7 +12,18 @@ keywords = ["typst", "documents", "packaging", "archive", "fonts"]
 categories = ["command-line-utilities", "text-processing", "filesystem"]
 
 [package.metadata.docs.rs]
-features = ["opendal", "package-reading"]
+# Every public capability, so docs.rs documents the whole crate. Omitting `fs`
+# here previously hid the filesystem assembly and write APIs that the README's
+# first example uses. `_test-package-download-probe` is internal and stays off.
+features = [
+    "diagnostics",
+    "egress",
+    "embedded-fonts",
+    "fs",
+    "opendal",
+    "package-reading",
+    "parallel",
+]
 
 [features]
 default = []
@@ -57,7 +68,6 @@ fs = [
 # graph.
 egress = [
     "dep:env_proxy",
-    "dep:rustls-pemfile",
     "dep:ureq",
     "dep:webpki-roots",
     "fs",
@@ -79,7 +89,6 @@ serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "1.1"
 unicode-normalization = { version = "0.1", optional = true }
-rustls-pemfile = { version = "2", optional = true }
 tar = { version = "0.4", default-features = false, optional = true }
 # Typst crates share internal types and must resolve to the same exact release.
 typst = { workspace = true }

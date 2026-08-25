@@ -29,8 +29,9 @@ use typst_pack::pack_archive::{
 };
 use typst_pack::{
     CompilationArtifact, CompilationArtifactPathWriteError, CompilationArtifactWriteError,
-    CompilationFulfillmentSet, CompilationLimits, CompilationOutputSpecification,
-    CompilationReportOutcome, CompilationStatus, CreationTimestamp, DocumentTime,
+    CompilationFulfillmentIssue, CompilationFulfillmentSet, CompilationLimits,
+    CompilationOperationOutcome, CompilationOutputSpecification, CompilationReportOutcome,
+    CompilationRequestRejection, CompilationStatus, CreationTimestamp, DocumentTime,
     HtmlOutputSpecification, OutputFormat, PackCompilationRequest, PackOverrideSet,
     PackageTreeFulfillment, PageRange, PageSelection, PdfOutputSpecification,
     PngOutputSpecification, SvgOutputSpecification, TypstTarget, parse_page_selection,
@@ -827,20 +828,37 @@ fn inspect(args: InspectArgs) -> CliResult {
         println!("\nembedded fonts:");
         for font in pack.fonts() {
             let identity = font.identity();
-            let digest = identity
-                .container()
-                .digest()
-                .iter()
-                .map(|byte| format!("{byte:02x}"))
-                .collect::<String>();
             println!(
-                "  {}:{}:{}:{digest} face {} ({}) - {}",
-                identity.container().role().as_str(),
-                identity.container().schema(),
-                identity.container().algorithm(),
+                "  {} face {} ({}) - {}",
+                identity.container(),
                 identity.index(),
                 human_size(font.data().len()),
                 font.info().family,
+            );
+        }
+    }
+
+    // Fonts are external by default, and a Font Requirement carries only content
+    // identity, so this listing is the only place a recipient can learn what a
+    // pack expects them to supply.
+    let required_fonts = pack
+        .font_requirements()
+        .iter()
+        .filter(|requirement| !requirement.is_embedded())
+        .collect::<Vec<_>>();
+    if !required_fonts.is_empty() {
+        println!("\nrequired fonts (supply with --font-path at compile time):");
+        for requirement in required_fonts {
+            let faces = requirement
+                .face_indices()
+                .iter()
+                .map(u32::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            println!(
+                "  {} ({}, face {faces})",
+                requirement.container_identity(),
+                human_size(requirement.container_length() as usize),
             );
         }
     }
@@ -1125,7 +1143,7 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         reference_compilation_limits(rayon::current_num_threads()),
         args.automation.timings.clone(),
     )
-    .map_err(|error| CliError::Message(error.to_string()))?;
+    .map_err(|error| rejected_request_error(&error))?;
     let (outcome, timing_error) = timed.into_parts();
 
     let diagnostic_format = args.automation.diagnostic_format.into();
@@ -1149,7 +1167,10 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
             let CompilationReportOutcome::Operation { outcome, .. } = report.outcome() else {
                 unreachable!("the timing adapter returned a result as an operation")
             };
-            (None, Some(Err(CliError::Message(outcome.to_string()))))
+            (
+                None,
+                Some(Err(unfulfilled_dependencies_error(outcome, &args.pack))),
+            )
         }
         None => (None, None),
     };
@@ -1627,6 +1648,78 @@ fn emit_compilation_diagnostics(
 ) {
     let mut stream = StandardStream::stderr(color);
     execution.emit_diagnostics(&mut stream, format);
+}
+
+/// Presents a rejected request as its summary plus one hint per issue.
+///
+/// The aggregate `Display` deliberately does not enumerate its issues, so a
+/// caller that only formats the error drops every actionable detail.
+fn rejected_request_error(rejection: &CompilationRequestRejection) -> CliError {
+    let issues = rejection.issues();
+    if let [issue] = issues {
+        return CliError::Message(issue.to_string());
+    }
+    CliError::Hinted {
+        message: rejection.to_string(),
+        hints: issues.iter().map(ToString::to_string).collect(),
+    }
+}
+
+/// Presents an unfulfilled dependency set with the recovery the user needs.
+///
+/// Font containers are matched by content digest, so a missing one has no name
+/// to report: the hints point at `inspect`, which lists the same identities.
+fn unfulfilled_dependencies_error(outcome: &CompilationOperationOutcome, pack: &Path) -> CliError {
+    let CompilationOperationOutcome::InvalidFulfillmentSet(invalid) = outcome else {
+        return CliError::Message(outcome.to_string());
+    };
+    let issues = invalid.issues();
+    let mut hints = issues.iter().map(ToString::to_string).collect::<Vec<_>>();
+
+    let missing_fonts = issues
+        .iter()
+        .filter(|issue| {
+            matches!(
+                issue,
+                CompilationFulfillmentIssue::MissingExternalFont { .. }
+            )
+        })
+        .count();
+    let missing_packages = issues
+        .iter()
+        .filter(|issue| {
+            matches!(
+                issue,
+                CompilationFulfillmentIssue::MissingExternalPackage { .. }
+            )
+        })
+        .count();
+
+    if missing_fonts > 0 || missing_packages > 0 {
+        hints.push(format!(
+            "`typst-pack inspect {}` lists every requirement this pack expects to be supplied",
+            pack.display()
+        ));
+    }
+    if missing_fonts > 0 {
+        hints.push(
+            "supply the font files with --font-path, or repack with `create --embed-fonts` so \
+             the pack carries them"
+                .to_owned(),
+        );
+    }
+    if missing_packages > 0 {
+        hints.push(
+            "supply the packages through --package-path, or repack without \
+             --no-vendor-packages so the pack carries them"
+                .to_owned(),
+        );
+    }
+
+    CliError::Hinted {
+        message: invalid.to_string(),
+        hints,
+    }
 }
 
 fn emit_owned_error(message: &str, color: ColorChoice) {

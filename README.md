@@ -125,104 +125,50 @@ assembly should download missing Typst Universe packages.
 
 The [library contract](docs/library-contract.md) describes identity,
 dependency fulfillment, environment independence, write policies, retry
-material, and partial effects. The [OpenDAL guide](docs/opendal-integration.md)
+material, and partial effects. The [OpenDAL guide](crates/typst-pack/docs/opendal-integration.md)
 documents asynchronous storage integration.
 
-### Assemble from the filesystem
+### Common workflows
 
-```rust,ignore
-use std::path::Path;
-use typst_pack::pack_archive::encode;
-use typst_pack::{
-    FilesystemPackAssembler, FilesystemPackAssemblerConfig,
-    FilesystemPackAssemblyRequest,
-};
+Each entry links to a compile-checked example on docs.rs, so the code shown
+there is verified against the release you are reading about.
 
-let assembler = FilesystemPackAssembler::new(FilesystemPackAssemblerConfig::new());
-let report = assembler.assemble(
-    FilesystemPackAssemblyRequest::new(
-        Path::new("path/to/project"),
-        Path::new("main.typ"),
-    )
-    .embed_fonts(true),
-)?;
-let archive = encode(report.pack())?;
-```
+| Task | Start here |
+| --- | --- |
+| Pack a project directory from disk | [`FilesystemPackAssembler`](https://docs.rs/typst-pack/latest/typst_pack/struct.FilesystemPackAssembler.html) |
+| Pack in-memory bytes with no filesystem | [`Pack::builder`](https://docs.rs/typst-pack/latest/typst_pack/struct.Pack.html#method.builder) |
+| Supply packages yourself and resume creation | [`create`](https://docs.rs/typst-pack/latest/typst_pack/fn.create.html) |
+| Swap a contained file for one compile | [`PackOverrideSet`](https://docs.rs/typst-pack/latest/typst_pack/struct.PackOverrideSet.html) |
+| Read and write packs through object storage | [OpenDAL guide](crates/typst-pack/docs/opendal-integration.md) |
 
-### Build in memory
+The shortest complete example — build a pack in memory and encode it:
 
-```rust,ignore
+```rust
 use typst_pack::Pack;
 use typst_pack::pack_archive::encode;
 
 let pack = Pack::builder("main.typ")
-    .file("main.typ", source_text.as_bytes().to_vec())?
-    .file("figure.png", image_bytes)?
-    .build()?;
-let archive = encode(&pack)?;
+    .file("main.typ", b"= Report\n".to_vec())
+    .expect("main.typ is a valid project path")
+    .build()
+    .expect("the entrypoint is contained");
+
+let archive = encode(&pack).expect("the pack fits the reference encode limits");
+assert!(!archive.as_slice().is_empty());
 ```
 
-Building directly with `Pack::builder` does not discover dependencies. Use
-`create` with a `ProjectSnapshot`, `PackageCatalog`, and `FontCatalog` when the
-library should run dependency discovery over values already held by the caller.
-
-### Resume creation when packages are missing
+`Pack::builder` does not discover dependencies: the pack contains exactly the
+files added to it. Use `create` when the library should run dependency
+discovery over values the caller already holds, and a Pack Assembler when it
+should also read those values from a source.
 
 Pack creation is stateless and resumable. If the representative compile reaches
-a package that is not in the supplied catalog, read or fetch that exact package,
-insert its tree, and call `create` again:
-
-```rust,ignore
-use typst_pack::{
-    PackCreationInput, PackCreationOutcome, PackageCatalog, PackageDisposition,
-    PackageReadFailures, create,
-};
-
-let mut packages = PackageCatalog::new();
-let package_failures = PackageReadFailures::new();
-let pack = loop {
-    match create(PackCreationInput {
-        project: &project,
-        packages: &packages,
-        fonts: &fonts,
-        package_failures: &package_failures,
-        discovery: &discovery,
-        metadata: None,
-    })? {
-        PackCreationOutcome::Created { pack, .. } => break pack,
-        PackCreationOutcome::MissingPackageSpecifications(missing) => {
-            for spec in missing {
-                let tree = read_tree(&spec)?;
-                packages.insert(spec, tree, PackageDisposition::Embedded)?;
-            }
-        }
-    }
-};
-```
-
-The `package-reading` feature provides official registry URL construction and
-bounded `.tar.gz` expansion without choosing an HTTP client. OpenDAL provides
-`read_package` and `insert_read_package` for the same lifecycle over configured
-operators.
-
-### Compile with a Pack Override
-
-```rust,ignore
-use typst_pack::{
-    CompilationOutputSpecification, PackCompilationRequest, PackOverrideSet,
-    PdfOutputSpecification, compile,
-};
-
-let overrides = PackOverrideSet::new(&pack)
-    .replace("assets/logo.png", customer_logo)?;
-let request = PackCompilationRequest::new(
-    pack,
-    CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
-)
-.overrides(overrides);
-let report = compile(request)?;
-let pdf = report.result().expect("semantic result").artifacts()[0].bytes();
-```
+a package that is not in the supplied catalog, creation reports that exact
+specification instead of failing; add its tree and call `create` again. The
+`package-reading` feature provides official registry URL construction and
+bounded `.tar.gz` expansion without choosing an HTTP client, and OpenDAL
+provides `read_package` and `insert_read_package` for the same lifecycle over
+configured operators.
 
 A Pack Override can replace only a project path already contained in the pack.
 It cannot add a path or change package or font requirements.
@@ -329,12 +275,32 @@ The request-origin and inventory wrappers were removed:
 `PackageTreeFulfillment`, `FontContainerFulfillment`, and the fulfillment report;
 `CompilationAccessTrace` also remains available on a result.
 
+`CanonicalIdentity` and `CanonicalIdentityRole` now implement `Display`,
+rendering as `role:digest`. Equality is unchanged and still covers role, schema,
+and algorithm, so compare whole identity values rather than the rendered string.
+
+Dependency-fulfillment failures report what is missing. Every
+`CompilationFulfillmentIssue` message names the package or font container
+involved instead of dumping a `Debug` projection, and
+`InvalidCompilationFulfillmentSet` no longer summarizes a single issue as a
+count. Present these failures through `issues()`: the aggregate `Display` is a
+summary, not the detail.
+
+`typst-pack inspect` gained a `required fonts` section listing the external Font
+Requirements a recipient must supply, and its `embedded fonts` lines now use the
+shorter `role:digest` identity form. `typst-pack compile` reports each
+unfulfilled dependency as a hint with the recovery to try.
+
+The `egress` feature no longer links `rustls-pemfile`. Custom `--cert` PEM
+parsing moved to `rustls-pki-types`, which absorbed it; behavior is unchanged,
+including that a file with no PEM section adds no trust anchor.
+
 ### Migrating to 0.5
 
 Version 0.5 added the optional OpenDAL adapter. Existing builds that do not
 enable `opendal` are unaffected. Applications that enable it must select their
 own backend, transport, runtime, credentials, and retry behavior. See
-[Migrating to 0.5](docs/opendal-integration.md#migrating-to-05) for dependency,
+[Migrating to 0.5](crates/typst-pack/docs/opendal-integration.md#migrating-to-05) for dependency,
 composition, target, identity, and cache guidance.
 
 ### Migrating to 0.4

@@ -1055,20 +1055,32 @@ impl RustlsDownloader {
         }
     }
 
+    /// Reads one PEM file of extra trust anchors on top of the bundled roots.
+    ///
+    /// PEM parsing comes from rustls-pki-types, which absorbed it from the
+    /// now-unmaintained rustls-pemfile (RUSTSEC-2025-0134).
+    fn root_store(path: &Path) -> Result<ureq::rustls::RootCertStore, String> {
+        use ureq::rustls::pki_types::CertificateDer;
+        use ureq::rustls::pki_types::pem::PemObject;
+
+        let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
+        let reader = BufReader::new(file);
+        let mut roots = ureq::rustls::RootCertStore {
+            roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
+        };
+        for certificate in CertificateDer::pem_reader_iter(reader) {
+            let certificate = certificate.map_err(|error| error.to_string())?;
+            roots.add(certificate).map_err(|error| error.to_string())?;
+        }
+        Ok(roots)
+    }
+
     fn tls_config(&self) -> std::io::Result<Option<Arc<ureq::rustls::ClientConfig>>> {
         match self.tls.get_or_init(|| {
             let Some(path) = &self.certificate else {
                 return Ok(None);
             };
-            let file = std::fs::File::open(path).map_err(|error| error.to_string())?;
-            let mut reader = BufReader::new(file);
-            let mut roots = ureq::rustls::RootCertStore {
-                roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-            };
-            for certificate in rustls_pemfile::certs(&mut reader) {
-                let certificate = certificate.map_err(|error| error.to_string())?;
-                roots.add(certificate).map_err(|error| error.to_string())?;
-            }
+            let roots = Self::root_store(path)?;
             let tls = ureq::rustls::ClientConfig::builder()
                 .with_root_certificates(roots)
                 .with_no_client_auth();
@@ -1131,6 +1143,90 @@ impl typst_kit::downloader::Downloader for RustlsDownloader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The custom-certificate path is the crate's only PEM parsing. It has no
+    /// process-level coverage, so this pins the behavior directly.
+    #[cfg(feature = "egress")]
+    const TEST_CERTIFICATE_PEM: &str = "\
+-----BEGIN CERTIFICATE-----\n\
+MIIDHTCCAgWgAwIBAgIUd7rNizjvFLekUK8kk8YGERd1Ru8wDQYJKoZIhvcNAQEL\n\
+BQAwHTEbMBkGA1UEAwwSdHlwc3QtcGFjayB0ZXN0IENBMCAXDTI2MDgyNTEyNTcz\n\
+NloYDzIxMjYwODAxMTI1NzM2WjAdMRswGQYDVQQDDBJ0eXBzdC1wYWNrIHRlc3Qg\n\
+Q0EwggEiMA0GCSqGSIb3DQEBAQUAA4IBDwAwggEKAoIBAQDaimCA3A7auE+n08On\n\
+4RKiJPJzM8Aqv9zYvjXRJsMuo1aXBme9MLYEAu+T9DCxPWaVJYEKqZEkNYJVOF04\n\
+5ONBZYsk7uQ8a72DZtBV123RXWPa/cD9ieXVgN4oRC2FdfyELyTcUHtRo1zFlSSx\n\
+dz2TY0Zzk5ON62d1O89zdeUPJ/mah4jxuPJeFPTeJZFdYOjaOSUr06MVWgYQ1hC0\n\
+nNYG3rFqVucb+83stE1nZFBAegwrdE6poQUFT3rE+ApxVzHDWi1gaD3VVBszmMjZ\n\
+FwufcnW2kCXVvmM5YebnvLyqIHvNddWkMygWSPwAJDFXWRdi6MzYkoC1qTpbkj8J\n\
+PI+7AgMBAAGjUzBRMB0GA1UdDgQWBBRlvjvjxE0mp20Do4trUIL0RMDa8jAfBgNV\n\
+HSMEGDAWgBRlvjvjxE0mp20Do4trUIL0RMDa8jAPBgNVHRMBAf8EBTADAQH/MA0G\n\
+CSqGSIb3DQEBCwUAA4IBAQAigZCXG4KVwXHFE7G0wLxWuWizmLgj2fEU7W0Wy1rp\n\
+qXEOlKCNG0MX/JTlqydyv+ZSKPMyl9eX+SPFlhlm/Az8kPHYWd7CqdO4Kz0fSEhx\n\
+IrChOWM5OfEUn+JXRSDJnBFcYVgucKdeC9yiP3WqQc0fJ5j14+tWUsMU1lr/392L\n\
+xZni29e/+sP8VvO2eGO+CyYsAlgTJ0Ka1QwSJYS3jLMfYhsNpMpnmzL7bAy+Uyuz\n\
+/Xt4qjy1STvhUAruckTFLjJ/6i0GK2mm0XjI4/xXoyh2c40yj16l87Ncur2bjQ3o\n\
+D/11HiutermQt0RJByBT1FPDdLyRtRPwY1PoAi2/OlAb\n\
+-----END CERTIFICATE-----\n\
+";
+
+    #[cfg(feature = "egress")]
+    #[test]
+    fn custom_certificate_pem_is_added_to_the_root_store() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ca.pem");
+        std::fs::write(&path, TEST_CERTIFICATE_PEM).unwrap();
+
+        // The bundled roots plus exactly the one certificate supplied here.
+        let roots = RustlsDownloader::root_store(&path).expect("a valid PEM certificate is read");
+        assert_eq!(roots.roots.len(), webpki_roots::TLS_SERVER_ROOTS.len() + 1);
+
+        let downloader = RustlsDownloader::new("typst-pack-test", Some(path));
+        assert!(
+            downloader
+                .tls_config()
+                .expect("a valid PEM certificate is accepted")
+                .is_some()
+        );
+    }
+
+    /// A file with no PEM section adds no trust anchor and is not an error, so
+    /// a misdirected `--cert` silently falls back to the bundled roots. This
+    /// matches the rustls-pemfile behavior it replaced.
+    #[cfg(feature = "egress")]
+    #[test]
+    fn certificate_file_without_a_pem_section_keeps_the_default_roots() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ca.pem");
+        std::fs::write(&path, "not a certificate").unwrap();
+
+        let roots =
+            RustlsDownloader::root_store(&path).expect("a section-free file is not an error");
+        assert_eq!(roots.roots.len(), webpki_roots::TLS_SERVER_ROOTS.len());
+    }
+
+    #[cfg(feature = "egress")]
+    #[test]
+    fn corrupt_certificate_pem_is_rejected() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("ca.pem");
+        std::fs::write(
+            &path,
+            "-----BEGIN CERTIFICATE-----\nnot base64!!\n-----END CERTIFICATE-----\n",
+        )
+        .unwrap();
+
+        assert!(RustlsDownloader::root_store(&path).is_err());
+
+        let downloader = RustlsDownloader::new("typst-pack-test", Some(path));
+        assert!(downloader.tls_config().is_err());
+    }
+
+    #[cfg(feature = "egress")]
+    #[test]
+    fn absent_certificate_leaves_the_default_roots_in_place() {
+        let downloader = RustlsDownloader::new("typst-pack-test", None);
+        assert!(downloader.tls_config().unwrap().is_none());
+    }
 
     #[cfg(feature = "egress")]
     fn package_archive(files: &[(&str, &[u8])]) -> Vec<u8> {

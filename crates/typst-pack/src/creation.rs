@@ -185,6 +185,49 @@ pub enum PackCreationError {
 /// Creation borrows validated bytes and has nothing to re-read. A Pack represents the
 /// exact values its source adapters read, without guaranteeing that values
 /// from mutable sources all coexisted at one instant.
+///
+/// # Resuming until every package is supplied
+///
+/// The caller owns the retry loop, so any source can back it — a registry, a
+/// local directory, an object store, or a test fixture.
+///
+/// ```no_run
+/// use typst::syntax::package::PackageSpec;
+/// use typst_pack::{
+///     DiscoverySpecification, FontCatalog, Pack, PackCreationInput, PackCreationOutcome,
+///     PackageCatalog, PackageDisposition, PackageReadFailures, PackageTree, ProjectSnapshot,
+///     create,
+/// };
+///
+/// fn assemble(
+///     project: &ProjectSnapshot,
+///     fonts: &FontCatalog,
+///     discovery: &DiscoverySpecification,
+///     mut read_tree: impl FnMut(&PackageSpec) -> Result<PackageTree, Box<dyn std::error::Error>>,
+/// ) -> Result<Pack, Box<dyn std::error::Error>> {
+///     let mut packages = PackageCatalog::new();
+///     let package_failures = PackageReadFailures::new();
+///     loop {
+///         let outcome = create(PackCreationInput {
+///             project,
+///             packages: &packages,
+///             fonts,
+///             package_failures: &package_failures,
+///             discovery,
+///             metadata: None,
+///         })?;
+///         match outcome {
+///             PackCreationOutcome::Created { pack, .. } => return Ok(pack),
+///             PackCreationOutcome::MissingPackageSpecifications(missing) => {
+///                 for spec in missing {
+///                     let tree = read_tree(&spec)?;
+///                     packages.insert(spec, tree, PackageDisposition::Embedded)?;
+///                 }
+///             }
+///         }
+///     }
+/// }
+/// ```
 pub fn create(input: PackCreationInput<'_>) -> Result<PackCreationOutcome, PackCreationError> {
     let entrypoint = VirtualPath::new(input.project.entrypoint())
         .expect("Project Snapshot entrypoint invariant violated");

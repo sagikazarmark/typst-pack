@@ -258,6 +258,32 @@ impl CompilationOutputSpecification {
 }
 
 /// An immutable set of contained project-file replacements bound to one Pack.
+///
+/// An override replaces the bytes at a project path the Pack already contains.
+/// It cannot add a path, remove one, or change package or font authority, so
+/// one pack can serve many recipients without being rebuilt.
+///
+/// ```no_run
+/// use typst_pack::{
+///     CompilationOutputSpecification, Pack, PackCompilationRequest, PackOverrideSet,
+///     PdfOutputSpecification, compile,
+/// };
+///
+/// # fn run(pack: Pack, customer_logo: Vec<u8>) -> Result<(), Box<dyn std::error::Error>> {
+/// let overrides = PackOverrideSet::new(&pack).replace("assets/logo.png", customer_logo)?;
+/// let request = PackCompilationRequest::new(
+///     pack,
+///     CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
+/// )
+/// .overrides(overrides);
+///
+/// let report = compile(request)?;
+/// let result = report.result().expect("the compilation was accepted");
+/// let pdf = result.artifacts()[0].bytes();
+/// # let _ = pdf;
+/// # Ok(())
+/// # }
+/// ```
 #[derive(Debug, Clone)]
 pub struct PackOverrideSet {
     pack_identity: CanonicalIdentity,

@@ -1,4 +1,4 @@
-#![doc = include_str!("../../../docs/opendal-integration.md")]
+#![doc = include_str!("../docs/opendal-integration.md")]
 
 pub mod location;
 pub mod pack_archive;

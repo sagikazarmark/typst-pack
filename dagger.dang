@@ -158,7 +158,7 @@ type TypstPack {
   """
   testFsWithoutEgress: String! @check {
     # Every crate this manifest can activate that speaks HTTP.
-    let transportCrates = ["env_proxy", "rustls-pemfile", "ureq", "webpki-roots"]
+    let transportCrates = ["env_proxy", "ureq", "webpki-roots"]
     let container = self.rust.container
     let withoutEgress = container.withExec(dependencyGraphCommand("fs")).stdout
     let withEgress = container.withExec(dependencyGraphCommand("egress")).stdout

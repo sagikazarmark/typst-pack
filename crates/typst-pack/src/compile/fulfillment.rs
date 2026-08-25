@@ -116,7 +116,7 @@ where
 pub enum CompilationFulfillmentSetIssue {
     #[error("package specification {spec} is fulfilled more than once")]
     DuplicatePackageSpecification { spec: PackageSpec },
-    #[error("Font Container Identity {identity:?} is fulfilled more than once")]
+    #[error("font container {identity} is fulfilled more than once")]
     DuplicateFontContainerIdentity { identity: CanonicalIdentity },
 }
 
@@ -303,16 +303,20 @@ impl CompilationFulfillmentReport {
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[non_exhaustive]
 pub enum CompilationFulfillmentIssue {
-    #[error("external package fulfillment for {spec} is missing")]
+    #[error("required package {spec} was not supplied")]
     MissingExternalPackage { spec: PackageSpec },
-    #[error("package fulfillment for undeclared specification {spec} supplied {actual:?}")]
+    #[error("package fulfillment for undeclared specification {spec} supplied {actual}")]
     UndeclaredPackage {
         spec: PackageSpec,
         actual: CanonicalIdentity,
     },
     #[error("embedded package {spec} was unexpectedly fulfilled externally")]
     UnexpectedEmbeddedPackage { spec: PackageSpec },
-    #[error("package fulfillment for {spec} supplied {actual:?}, expected {expected:?}")]
+    #[error(
+        "package fulfillment for {spec} supplied {actual} ({actual_file_count} files, \
+         {actual_byte_length} bytes), expected {expected} ({expected_file_count} files, \
+         {expected_byte_length} bytes)"
+    )]
     MismatchedPackageTree {
         spec: PackageSpec,
         expected: CanonicalIdentity,
@@ -322,23 +326,26 @@ pub enum CompilationFulfillmentIssue {
         expected_byte_length: u64,
         actual_byte_length: u64,
     },
-    #[error("external Font Container fulfillment for {identity:?} is missing")]
+    #[error("required font container {identity} was not supplied")]
     MissingExternalFont { identity: CanonicalIdentity },
-    #[error("Font Container fulfillment for undeclared identity {identity:?} supplied {actual:?}")]
+    #[error("font container fulfillment for undeclared identity {identity} supplied {actual}")]
     UndeclaredFont {
         identity: CanonicalIdentity,
         actual: CanonicalIdentity,
     },
-    #[error("embedded Font Container {identity:?} was unexpectedly fulfilled externally")]
+    #[error("embedded font container {identity} was unexpectedly fulfilled externally")]
     UnexpectedEmbeddedFont { identity: CanonicalIdentity },
-    #[error("Font Container fulfillment for {expected:?} supplied {actual:?}")]
+    #[error(
+        "font container fulfillment for {expected} supplied {actual} \
+         ({actual_length} bytes, expected {expected_length} bytes)"
+    )]
     MismatchedFontContainer {
         expected: CanonicalIdentity,
         actual: CanonicalIdentity,
         expected_length: u64,
         actual_length: u64,
     },
-    #[error("Font Container {identity:?} has no required face at index {index}")]
+    #[error("font container {identity} has no required face at index {index}")]
     MissingFontFace {
         identity: CanonicalIdentity,
         index: u32,
@@ -346,8 +353,11 @@ pub enum CompilationFulfillmentIssue {
 }
 
 /// Complete canonical evidence that a fulfillment set is not exact.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("Compilation Fulfillment Set has {} deviation(s)", .issues.len())]
+///
+/// The [`Display`](std::fmt::Display) form summarizes the deviation; callers
+/// that present failures to a person should enumerate [`Self::issues`], because
+/// only the individual issues name the packages and font containers involved.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InvalidCompilationFulfillmentSet {
     pub(super) issues: Vec<CompilationFulfillmentIssue>,
 }
@@ -357,6 +367,21 @@ impl InvalidCompilationFulfillmentSet {
         &self.issues
     }
 }
+
+impl std::fmt::Display for InvalidCompilationFulfillmentSet {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let [issue] = self.issues.as_slice() {
+            return write!(formatter, "{issue}");
+        }
+        write!(
+            formatter,
+            "the pack's dependencies were not fulfilled ({} issues)",
+            self.issues.len()
+        )
+    }
+}
+
+impl std::error::Error for InvalidCompilationFulfillmentSet {}
 
 pub(super) fn verify_compilation_fulfillment_set(
     pack: &Pack,

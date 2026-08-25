@@ -296,6 +296,35 @@ impl<'a> FilesystemPackAssemblyRequest<'a> {
 }
 
 /// Reusable filesystem Pack Assembly over configured concrete authorities.
+///
+/// One assembler holds the host policy — font paths, package directories, the
+/// clock, and the finite profile — and serves many requests. It runs Dependency
+/// Discovery and repeats [`create`](crate::create) until it produces a Pack.
+///
+/// ```no_run
+/// use std::path::Path;
+///
+/// use typst_pack::pack_archive::encode;
+/// use typst_pack::{
+///     FilesystemPackAssembler, FilesystemPackAssemblerConfig, FilesystemPackAssemblyRequest,
+/// };
+///
+/// # fn run() -> Result<(), Box<dyn std::error::Error>> {
+/// let assembler = FilesystemPackAssembler::new(FilesystemPackAssemblerConfig::new());
+/// let report = assembler.assemble(
+///     FilesystemPackAssemblyRequest::new(Path::new("path/to/project"), Path::new("main.typ"))
+///         .embed_fonts(true),
+/// )?;
+///
+/// for warning in report.warnings() {
+///     eprintln!("discovery warning: {}", warning.message);
+/// }
+///
+/// let archive = encode(report.pack())?;
+/// std::fs::write("project.typk", archive.as_slice())?;
+/// # Ok(())
+/// # }
+/// ```
 pub struct FilesystemPackAssembler {
     authority: FilesystemPackageAuthority,
     font_paths: Vec<PathBuf>,
