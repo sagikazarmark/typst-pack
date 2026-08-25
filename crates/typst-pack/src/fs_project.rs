@@ -1,14 +1,12 @@
 //! Project reading for the reference filesystem source.
 
-use std::fs::File;
-#[cfg(not(unix))]
-use std::fs::OpenOptions;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
 use crate::error_display::format_error_list;
+use crate::fs_traversal::{self, TraversalPolicy, UnsupportedEntry};
 use crate::limits::{LimitError, Limits, ResourceKind};
 use crate::pack::names_pack_path;
 use crate::project_snapshot::{ProjectSnapshot, ProjectSnapshotAssembly, ProjectSnapshotError};
@@ -338,7 +336,7 @@ pub fn read_filesystem_project(
         if !file_type.is_file() {
             issues.push(FilesystemProjectIssue::UnsupportedEntry {
                 path: entry.path().to_owned(),
-                kind: unsupported_kind(&file_type),
+                kind: UnsupportedEntry::of(&file_type).into(),
             });
             continue;
         }
@@ -491,7 +489,7 @@ fn read_policy(
             FilesystemProjectSurveyError {
                 issues: vec![FilesystemProjectIssue::UnsupportedEntry {
                     path: path.to_owned(),
-                    kind: unsupported_kind(&file_type),
+                    kind: UnsupportedEntry::of(&file_type).into(),
                 }],
             },
         ));
@@ -578,7 +576,8 @@ fn read_bounded(
         .map(|(_, allowance, _, _)| *allowance)
         .min()
         .expect("a bounded read has at least one ceiling");
-    let mut file = open_without_following(root, path, operation)?;
+    let mut file =
+        fs_traversal::open_without_following(&ProjectTraversal { operation }, root, path)?;
     let mut bytes = Vec::new();
     file.by_ref()
         .take(probe_ceiling + 1)
@@ -601,135 +600,44 @@ fn read_bounded(
     Ok(bytes)
 }
 
-#[cfg(unix)]
-fn open_without_following(
-    root: &Path,
-    path: &Path,
+/// The project reader's vocabulary for the shared symlink-refusing open.
+struct ProjectTraversal {
     operation: FilesystemProjectOperation,
-) -> Result<File, FilesystemProjectReadError> {
-    use std::ffi::CString;
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::ffi::OsStrExt;
-
-    let relative = path
-        .strip_prefix(root)
-        .expect("a selected path remains beneath its project root");
-    let mut components = relative.components().peekable();
-    let mut current = root.to_owned();
-    let mut directory =
-        File::open(root).map_err(|error| FilesystemProjectReadError::io(operation, root, error))?;
-    while let Some(component) = components.next() {
-        current.push(component.as_os_str());
-        let name = CString::new(component.as_os_str().as_bytes())
-            .expect("filesystem path components contain no NUL bytes");
-        let final_component = components.peek().is_none();
-        let flags = libc::O_RDONLY
-            | libc::O_CLOEXEC
-            | libc::O_NONBLOCK
-            | libc::O_NOFOLLOW
-            | if final_component {
-                0
-            } else {
-                libc::O_DIRECTORY
-            };
-        // SAFETY: the directory descriptor and NUL-terminated component remain
-        // valid for the call, and a successful descriptor is immediately owned.
-        let descriptor = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
-        if descriptor < 0 {
-            if std::fs::symlink_metadata(&current)
-                .is_ok_and(|metadata| metadata.file_type().is_symlink())
-            {
-                return Err(alias_error(&current));
-            }
-            return Err(FilesystemProjectReadError::io(
-                operation,
-                &current,
-                std::io::Error::last_os_error(),
-            ));
-        }
-        // SAFETY: `openat` returned a new owned descriptor.
-        let opened = unsafe { File::from_raw_fd(descriptor) };
-        if final_component {
-            return validate_opened_file(opened, &current, operation);
-        }
-        directory = opened;
-    }
-    unreachable!("a selected project file has a path beneath the root")
 }
 
-#[cfg(not(unix))]
-fn open_without_following(
-    root: &Path,
-    path: &Path,
-    operation: FilesystemProjectOperation,
-) -> Result<File, FilesystemProjectReadError> {
-    if let Some(alias) = first_alias(root, path) {
-        return Err(alias_error(&alias));
+impl TraversalPolicy for ProjectTraversal {
+    type Error = FilesystemProjectReadError;
+
+    const ROOT_INVARIANT: &'static str = "a selected path remains beneath its project root";
+
+    fn io(&self, path: &Path, source: std::io::Error) -> Self::Error {
+        FilesystemProjectReadError::io(self.operation, path, source)
     }
 
-    let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
+    fn alias(&self, path: &Path) -> Self::Error {
+        alias_error(path)
     }
 
-    let file = match options.open(path) {
-        Ok(file) => file,
-        Err(error) => {
-            if let Some(alias) = first_alias(root, path) {
-                return Err(alias_error(&alias));
-            }
-            return Err(FilesystemProjectReadError::io(operation, path, error));
-        }
-    };
-    if let Some(alias) = first_alias(root, path) {
-        return Err(alias_error(&alias));
+    fn unsupported_entry(&self, path: &Path, entry: UnsupportedEntry) -> Self::Error {
+        FilesystemProjectReadError::Survey(FilesystemProjectSurveyError {
+            issues: vec![FilesystemProjectIssue::UnsupportedEntry {
+                path: path.to_owned(),
+                kind: entry.into(),
+            }],
+        })
     }
-    validate_opened_file(file, path, operation)
 }
 
-fn validate_opened_file(
-    file: File,
-    path: &Path,
-    operation: FilesystemProjectOperation,
-) -> Result<File, FilesystemProjectReadError> {
-    let metadata = file
-        .metadata()
-        .map_err(|error| FilesystemProjectReadError::io(operation, path, error))?;
-    if metadata.file_type().is_symlink() {
-        return Err(alias_error(path));
-    }
-    if !metadata.file_type().is_file() {
-        return Err(FilesystemProjectReadError::Survey(
-            FilesystemProjectSurveyError {
-                issues: vec![FilesystemProjectIssue::UnsupportedEntry {
-                    path: path.to_owned(),
-                    kind: unsupported_kind(&metadata.file_type()),
-                }],
-            },
-        ));
-    }
-    Ok(file)
-}
-
-#[cfg(not(unix))]
-fn first_alias(root: &Path, path: &Path) -> Option<PathBuf> {
-    let relative = path
-        .strip_prefix(root)
-        .expect("a selected path remains beneath its project root");
-    let mut current = root.to_owned();
-    for component in relative.components() {
-        current.push(component.as_os_str());
-        if std::fs::symlink_metadata(&current)
-            .is_ok_and(|metadata| metadata.file_type().is_symlink())
-        {
-            return Some(current);
+impl From<UnsupportedEntry> for FilesystemProjectEntryKind {
+    fn from(entry: UnsupportedEntry) -> Self {
+        match entry {
+            UnsupportedEntry::Socket => Self::Socket,
+            UnsupportedEntry::Fifo => Self::Fifo,
+            UnsupportedEntry::BlockDevice => Self::BlockDevice,
+            UnsupportedEntry::CharacterDevice => Self::CharacterDevice,
+            UnsupportedEntry::Unknown => Self::Unknown,
         }
     }
-    None
 }
 
 fn alias_error(path: &Path) -> FilesystemProjectReadError {
@@ -745,27 +653,6 @@ fn slash_path(path: &Path) -> Option<String> {
         .map(|component| component.as_os_str().to_str())
         .collect::<Option<Vec<_>>>()
         .map(|components| components.join("/"))
-}
-
-fn unsupported_kind(file_type: &std::fs::FileType) -> FilesystemProjectEntryKind {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::FileTypeExt;
-
-        if file_type.is_socket() {
-            return FilesystemProjectEntryKind::Socket;
-        }
-        if file_type.is_fifo() {
-            return FilesystemProjectEntryKind::Fifo;
-        }
-        if file_type.is_block_device() {
-            return FilesystemProjectEntryKind::BlockDevice;
-        }
-        if file_type.is_char_device() {
-            return FilesystemProjectEntryKind::CharacterDevice;
-        }
-    }
-    FilesystemProjectEntryKind::Unknown
 }
 
 fn checked_add(
