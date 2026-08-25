@@ -2526,13 +2526,14 @@ fn commit_windows_file(
 
 #[cfg(windows)]
 fn commit_windows_handle(
-    _parent: &Dir,
+    parent: &Dir,
     staging_handle: std::os::windows::io::RawHandle,
     target_name: &std::ffi::OsStr,
     replace: bool,
 ) -> io::Result<()> {
     use std::mem::{offset_of, size_of};
     use std::os::windows::ffi::OsStrExt;
+    use std::os::windows::io::AsRawHandle;
     use windows_sys::Win32::Storage::FileSystem::{
         FILE_RENAME_INFO, FILE_RENAME_INFO_0, FileRenameInfoEx, SetFileInformationByHandle,
     };
@@ -2546,6 +2547,10 @@ fn commit_windows_handle(
     let words = bytes.div_ceil(size_of::<usize>());
     let mut buffer = vec![0usize; words];
     let info = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    // The commit keeps the captured directory handle rather than an ambient
+    // path, so the rename resolves the simple target name against that
+    // handle. It has to outlive the request.
+    let parent_directory = parent.try_clone()?.into_std_file();
     unsafe {
         (*info).Anonymous = FILE_RENAME_INFO_0 {
             Flags: FILE_RENAME_FLAG_POSIX_SEMANTICS
@@ -2555,8 +2560,10 @@ fn commit_windows_handle(
                     0
                 },
         };
-        // A simple name with no root handle is the documented same-directory form.
-        (*info).RootDirectory = std::ptr::null_mut();
+        // A null root directory would require `FileName` to carry a fully
+        // qualified path; a simple name resolves off-volume and reports
+        // `ERROR_NOT_SAME_DEVICE`.
+        (*info).RootDirectory = parent_directory.as_raw_handle().cast();
         (*info).FileNameLength = u32::try_from(name_bytes)
             .map_err(|_| io::Error::other("destination file name is too long"))?;
         std::ptr::copy_nonoverlapping(
