@@ -2846,10 +2846,11 @@ mod tests {
             core_error,
         );
 
-        assert_eq!(error.phase(), FilesystemWritePhase::Commit);
+        assert_eq!(error.phase(), FilesystemWritePhase::Commit, "{error:?}");
         assert_eq!(
             error.failed_target(),
-            Some(destination.join("b.txt").as_path())
+            Some(destination.join("b.txt").as_path()),
+            "{error:?}"
         );
         assert_eq!(error.commit_certainty(), CommitCertainty::Indeterminate);
         assert_eq!(error.progress().completed()[0].relative_path(), "a.txt");
