@@ -157,7 +157,7 @@ type TypstPack {
   """
   Type-check the cfg(windows) code paths without a Windows runner.
   """
-  checkWindows: String! @check {
+  checkWindows(ws: Workspace!): String! @check {
     let target = "x86_64-pc-windows-gnu"
 
     # Checking never links, but dependency build scripts still run: psm
@@ -177,11 +177,11 @@ type TypstPack {
           ]),
         targets: [target],
       )
-      .container
+      .container(ws)
       .withEnvVariable("CC_x86_64_pc_windows_gnu", "x86_64-w64-mingw32-gcc")
       .withEnvVariable("AR_x86_64_pc_windows_gnu", "x86_64-w64-mingw32-ar")
       .withExec([
-        "cargo", "check", "--locked",
+        "cargo", "check", "--locked", "-j", "2",
         "--package", "typst-pack",
         "--no-default-features",
         "--features", "fs,opendal,package-reading,embedded-fonts",
