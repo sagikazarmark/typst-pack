@@ -6,14 +6,21 @@
 //! and accept nothing that is not a regular file. This module owns that rule
 //! once. Each reader keeps its own vocabulary by implementing
 //! [`TraversalPolicy`], so a shared mechanism never widens a public surface.
+//!
+//! Resolution goes through `cap-primitives`, the same capability-based layer
+//! the filesystem write adapter uses. On Linux that resolves each component
+//! with `openat2` under `RESOLVE_BENEATH` and `RESOLVE_NO_MAGICLINKS`, falling
+//! back to `openat` where the syscall is unavailable, so a component can
+//! neither escape the root nor traverse a magic link. Windows and macOS reach
+//! the same refusals through their own implementations of the same options.
 
 use std::fs::{File, FileType};
+use std::io;
 use std::path::Path;
 
-#[cfg(not(unix))]
-use std::fs::OpenOptions;
-#[cfg(not(unix))]
-use std::path::PathBuf;
+use cap_fs_ext::{OpenOptionsFollowExt, OpenOptionsMaybeDirExt};
+use cap_primitives::fs::{FollowSymlinks, OpenOptions};
+use cap_std::ambient_authority;
 
 /// An eligible entry that cannot become a regular file the reader accepts.
 ///
@@ -72,7 +79,7 @@ pub(crate) trait TraversalPolicy {
     const ALIASED_ROOT_IS_REFUSED: bool = false;
 
     /// Reports an I/O failure reaching `path`.
-    fn io(&self, path: &Path, source: std::io::Error) -> Self::Error;
+    fn io(&self, path: &Path, source: io::Error) -> Self::Error;
 
     /// Reports that `path` is, or lies behind, a symlink.
     fn alias(&self, path: &Path) -> Self::Error;
@@ -83,141 +90,77 @@ pub(crate) trait TraversalPolicy {
 
 /// Opens one selected file beneath `root` without following a symlink.
 ///
-/// On Unix each component is resolved with `openat` under `O_NOFOLLOW`, so no
-/// path string is ever reopened between the check and the use. Elsewhere the
-/// traversal is checked before the open, again on failure, and once more after
-/// a successful open, because those platforms expose no equivalent flag.
-#[cfg(unix)]
+/// Each component is resolved against the descriptor of the directory that
+/// contains it, so no path string is reopened between the check and the use.
 pub(crate) fn open_without_following<P: TraversalPolicy>(
     policy: &P,
     root: &Path,
     path: &Path,
 ) -> Result<File, P::Error> {
-    use std::ffi::CString;
-    use std::os::fd::{AsRawFd, FromRawFd};
-    use std::os::unix::ffi::OsStrExt;
-
     let relative = path.strip_prefix(root).expect(P::ROOT_INVARIANT);
     let mut components = relative.components().peekable();
     let mut current = root.to_owned();
     let mut directory = open_root(policy, root)?;
     while let Some(component) = components.next() {
         current.push(component.as_os_str());
-        let name = CString::new(component.as_os_str().as_bytes())
-            .expect("filesystem path components contain no NUL bytes");
-        let final_component = components.peek().is_none();
-        let flags = libc::O_RDONLY
-            | libc::O_CLOEXEC
-            | libc::O_NONBLOCK
-            | libc::O_NOFOLLOW
-            | if final_component {
-                0
-            } else {
-                libc::O_DIRECTORY
-            };
-        // SAFETY: the directory descriptor and NUL-terminated component remain
-        // valid for the call, and a successful descriptor is immediately owned.
-        let descriptor = unsafe { libc::openat(directory.as_raw_fd(), name.as_ptr(), flags) };
-        if descriptor < 0 {
-            if is_alias(&current) {
-                return Err(policy.alias(&current));
-            }
-            return Err(policy.io(&current, std::io::Error::last_os_error()));
+        let name = Path::new(component.as_os_str());
+        if components.peek().is_none() {
+            let file = cap_primitives::fs::open(&directory, name, &selected_file_options())
+                .map_err(|error| classify(policy, &current, error))?;
+            return validate_opened_file(policy, file, &current);
         }
-        // SAFETY: `openat` returned a new owned descriptor.
-        let opened = unsafe { File::from_raw_fd(descriptor) };
-        if final_component {
-            return validate_opened_file(policy, opened, &current);
-        }
-        directory = opened;
+        directory = cap_primitives::fs::open_dir_nofollow(&directory, name)
+            .map_err(|error| classify(policy, &current, error))?;
     }
     unreachable!("{}", P::ROOT_INVARIANT)
 }
 
 /// Opens the traversal root, refusing an aliased root where the policy does.
-#[cfg(unix)]
 fn open_root<P: TraversalPolicy>(policy: &P, root: &Path) -> Result<File, P::Error> {
-    use std::ffi::CString;
-    use std::os::fd::FromRawFd;
-    use std::os::unix::ffi::OsStrExt;
-
     if !P::ALIASED_ROOT_IS_REFUSED {
-        return File::open(root).map_err(|error| policy.io(root, error));
-    }
-
-    let root_path =
-        CString::new(root.as_os_str().as_bytes()).expect("filesystem paths contain no NUL bytes");
-    // SAFETY: the NUL-terminated path remains valid for the call, and a
-    // successful descriptor is immediately owned.
-    let descriptor = unsafe {
-        libc::open(
-            root_path.as_ptr(),
-            libc::O_RDONLY
-                | libc::O_CLOEXEC
-                | libc::O_NONBLOCK
-                | libc::O_NOFOLLOW
-                | libc::O_DIRECTORY,
-        )
-    };
-    if descriptor < 0 {
-        if is_alias(root) {
-            return Err(policy.alias(root));
-        }
-        return Err(policy.io(root, std::io::Error::last_os_error()));
-    }
-    // SAFETY: `open` returned a new owned descriptor.
-    Ok(unsafe { File::from_raw_fd(descriptor) })
-}
-
-#[cfg(not(unix))]
-pub(crate) fn open_without_following<P: TraversalPolicy>(
-    policy: &P,
-    root: &Path,
-    path: &Path,
-) -> Result<File, P::Error> {
-    if let Some(alias) = first_alias::<P>(root, path) {
-        return Err(policy.alias(&alias));
+        return cap_primitives::fs::open_ambient_dir(root, ambient_authority())
+            .map_err(|error| policy.io(root, error));
     }
 
     let mut options = OpenOptions::new();
-    options.read(true);
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
-
-    let file = match options.open(path) {
-        Ok(file) => file,
-        Err(error) => {
-            if let Some(alias) = first_alias::<P>(root, path) {
-                return Err(policy.alias(&alias));
-            }
-            return Err(policy.io(path, error));
-        }
-    };
-    if let Some(alias) = first_alias::<P>(root, path) {
-        return Err(policy.alias(&alias));
-    }
-    validate_opened_file(policy, file, path)
+    options
+        .read(true)
+        .follow(FollowSymlinks::No)
+        .maybe_dir(true);
+    cap_primitives::fs::open_ambient(root, &options, ambient_authority())
+        .map_err(|error| classify(policy, root, error))
 }
 
-/// Returns the first component of `path` that is a symlink, if any.
-#[cfg(not(unix))]
-fn first_alias<P: TraversalPolicy>(root: &Path, path: &Path) -> Option<PathBuf> {
-    let relative = path.strip_prefix(root).expect(P::ROOT_INVARIANT);
-    let mut current = root.to_owned();
-    if P::ALIASED_ROOT_IS_REFUSED && is_alias(&current) {
-        return Some(current);
+/// The options one selected file is opened under.
+///
+/// `maybe_dir` keeps a directory reaching [`validate_opened_file`], so an
+/// eligible entry of the wrong kind stays a typed survey issue instead of
+/// becoming a bare I/O error on Windows. On Unix `O_NONBLOCK` keeps a FIFO
+/// from blocking the open.
+fn selected_file_options() -> OpenOptions {
+    let mut options = OpenOptions::new();
+    options
+        .read(true)
+        .follow(FollowSymlinks::No)
+        .maybe_dir(true);
+    #[cfg(unix)]
+    {
+        use cap_std::fs::OpenOptionsExt;
+
+        options.custom_flags(libc::O_NONBLOCK);
     }
-    for component in relative.components() {
-        current.push(component.as_os_str());
-        if is_alias(&current) {
-            return Some(current);
-        }
+    options
+}
+
+/// Separates a refused alias from an ordinary I/O failure.
+///
+/// The open already failed, so re-reading the path decides only which typed
+/// failure to report; it never promotes a path to one that gets read.
+fn classify<P: TraversalPolicy>(policy: &P, path: &Path, error: io::Error) -> P::Error {
+    if is_alias(path) {
+        return policy.alias(path);
     }
-    None
+    policy.io(path, error)
 }
 
 /// Accepts an opened entry only when it is still a regular file.
