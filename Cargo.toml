@@ -13,7 +13,7 @@ homepage = "https://github.com/sagikazarmark/typst-pack"
 [workspace.dependencies]
 typst-pack = { path = "crates/typst-pack", version = "0.5.0" }
 
-hayro-syntax = "0.7"
+hayro-syntax = "0.8"
 rayon = "1"
 tempfile = "3"
 typst = "=0.15.1"
