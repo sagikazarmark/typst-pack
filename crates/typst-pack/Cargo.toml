@@ -84,7 +84,7 @@ env_proxy = { version = "0.4", optional = true }
 flate2 = { version = "1", optional = true }
 futures-util = { version = "0.3.31", default-features = false, features = ["alloc", "async-await"], optional = true }
 ignore = { version = "0.4", optional = true }
-opendal = { version = "0.58", default-features = false, optional = true }
+opendal = { version = "0.59", default-features = false, optional = true }
 rayon = { workspace = true, optional = true }
 same-file = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"] }
@@ -126,8 +126,8 @@ tempfile = { workspace = true }
 tiny-skia = "0.12"
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
-opendal-http-transport-reqwest = { version = "0.58", default-features = false }
-opendal-service-s3 = { version = "0.58", default-features = false }
+opendal-http-transport-reqwest = { version = "0.59", default-features = false }
+opendal-service-s3 = { version = "0.59", default-features = false }
 tokio = { version = "1", default-features = false, features = ["macros", "rt-multi-thread"] }
 
 [build-dependencies]
