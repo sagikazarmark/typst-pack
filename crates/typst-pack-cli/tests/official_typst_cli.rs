@@ -37,7 +37,6 @@ fn write_project(root: &Path, source: &str) -> PathBuf {
 fn write_pack(path: &Path, source: &str) -> Pack {
     let pack = Pack::builder("main.typ")
         .file("main.typ", source.as_bytes().to_vec())
-        .unwrap()
         .build()
         .unwrap();
     std::fs::write(path, encode(&pack).unwrap()).unwrap();
@@ -519,11 +518,8 @@ fn official_typst_compile_gates_pack_source_and_data_overrides() {
 
     let pack = Pack::builder("main.typ")
         .file("main.typ", source.as_bytes().to_vec())
-        .unwrap()
         .file("chapter.typ", b"#let source-width = 10".to_vec())
-        .unwrap()
         .file("data.txt", b"10".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("overrides.typk");

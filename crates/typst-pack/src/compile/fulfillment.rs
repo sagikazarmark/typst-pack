@@ -4,7 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use typst::syntax::package::PackageSpec;
 
-use crate::{CanonicalIdentity, FontContainer, Pack, PackageTree};
+use crate::{Digest, FontContainer, Pack, PackageTree};
 
 #[derive(Debug, Clone)]
 pub struct PackageTreeFulfillment {
@@ -45,14 +45,14 @@ impl PackageTreeFulfillment {
 
 #[derive(Debug, Clone)]
 pub struct FontContainerFulfillment {
-    pub(super) expected_identity: CanonicalIdentity,
+    pub(super) expected_identity: Digest,
     pub(super) container: FontContainer,
     pub(super) provenance: Option<String>,
     pub(super) licensing: Option<String>,
 }
 
 impl FontContainerFulfillment {
-    pub fn new(expected_identity: CanonicalIdentity, container: FontContainer) -> Self {
+    pub fn new(expected_identity: Digest, container: FontContainer) -> Self {
         Self {
             expected_identity,
             container,
@@ -61,7 +61,7 @@ impl FontContainerFulfillment {
         }
     }
 
-    pub fn expected_identity(&self) -> CanonicalIdentity {
+    pub fn expected_identity(&self) -> Digest {
         self.expected_identity
     }
 
@@ -96,13 +96,13 @@ where
     let required = pack
         .font_requirements()
         .iter()
-        .filter(|requirement| !requirement.is_embedded())
-        .map(|requirement| requirement.container_identity())
+        .filter(|requirement| !requirement.embedded)
+        .map(|requirement| requirement.digest)
         .collect::<BTreeSet<_>>();
     let mut fulfillments = BTreeMap::new();
     for source in sources {
         let data = source.as_ref();
-        let identity = CanonicalIdentity::for_font_container_bytes(data);
+        let identity = Digest::of(data);
         if required.contains(&identity) && !fulfillments.contains_key(&identity) {
             let container = FontContainer::new(data.to_vec())?;
             fulfillments.insert(identity, FontContainerFulfillment::new(identity, container));
@@ -117,7 +117,7 @@ pub enum CompilationFulfillmentSetIssue {
     #[error("package specification {spec} is fulfilled more than once")]
     DuplicatePackageSpecification { spec: PackageSpec },
     #[error("font container {identity} is fulfilled more than once")]
-    DuplicateFontContainerIdentity { identity: CanonicalIdentity },
+    DuplicateFontContainerIdentity { identity: Digest },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -135,7 +135,7 @@ impl CompilationFulfillmentSetError {
 #[derive(Debug, Clone, Default)]
 pub struct CompilationFulfillmentSet {
     pub(super) packages: BTreeMap<String, PackageTreeFulfillment>,
-    pub(super) fonts: BTreeMap<CanonicalIdentity, FontContainerFulfillment>,
+    pub(super) fonts: BTreeMap<Digest, FontContainerFulfillment>,
 }
 
 impl CompilationFulfillmentSet {
@@ -207,8 +207,8 @@ impl CompilationFulfillmentSet {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PackageFulfillmentReport {
     pub(super) spec: PackageSpec,
-    pub(super) required_tree_identity: Option<CanonicalIdentity>,
-    pub(super) supplied_tree_identity: Option<CanonicalIdentity>,
+    pub(super) required_tree_identity: Option<Digest>,
+    pub(super) supplied_tree_identity: Option<Digest>,
     pub(super) declared: bool,
     pub(super) embedded: bool,
     pub(super) provenance: Option<String>,
@@ -220,11 +220,11 @@ impl PackageFulfillmentReport {
         &self.spec
     }
 
-    pub fn required_tree_identity(&self) -> Option<CanonicalIdentity> {
+    pub fn required_tree_identity(&self) -> Option<Digest> {
         self.required_tree_identity
     }
 
-    pub fn supplied_tree_identity(&self) -> Option<CanonicalIdentity> {
+    pub fn supplied_tree_identity(&self) -> Option<Digest> {
         self.supplied_tree_identity
     }
 
@@ -248,8 +248,8 @@ impl PackageFulfillmentReport {
 /// Operational evidence retained for one exact font fulfillment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FontFulfillmentReport {
-    pub(super) container_identity: CanonicalIdentity,
-    pub(super) supplied_container_identity: Option<CanonicalIdentity>,
+    pub(super) container_identity: Digest,
+    pub(super) supplied_container_identity: Option<Digest>,
     pub(super) declared: bool,
     pub(super) embedded: bool,
     pub(super) provenance: Option<String>,
@@ -257,11 +257,11 @@ pub struct FontFulfillmentReport {
 }
 
 impl FontFulfillmentReport {
-    pub fn container_identity(&self) -> CanonicalIdentity {
+    pub fn container_identity(&self) -> Digest {
         self.container_identity
     }
 
-    pub fn supplied_container_identity(&self) -> Option<CanonicalIdentity> {
+    pub fn supplied_container_identity(&self) -> Option<Digest> {
         self.supplied_container_identity
     }
 
@@ -306,49 +306,26 @@ pub enum CompilationFulfillmentIssue {
     #[error("required package {spec} was not supplied")]
     MissingExternalPackage { spec: PackageSpec },
     #[error("package fulfillment for undeclared specification {spec} supplied {actual}")]
-    UndeclaredPackage {
-        spec: PackageSpec,
-        actual: CanonicalIdentity,
-    },
+    UndeclaredPackage { spec: PackageSpec, actual: Digest },
     #[error("embedded package {spec} was unexpectedly fulfilled externally")]
     UnexpectedEmbeddedPackage { spec: PackageSpec },
-    #[error(
-        "package fulfillment for {spec} supplied {actual} ({actual_file_count} files, \
-         {actual_byte_length} bytes), expected {expected} ({expected_file_count} files, \
-         {expected_byte_length} bytes)"
-    )]
+    #[error("package fulfillment for {spec} supplied tree {actual}, expected {expected}")]
     MismatchedPackageTree {
         spec: PackageSpec,
-        expected: CanonicalIdentity,
-        actual: CanonicalIdentity,
-        expected_file_count: u64,
-        actual_file_count: u64,
-        expected_byte_length: u64,
-        actual_byte_length: u64,
+        expected: Digest,
+        actual: Digest,
     },
-    #[error("required font container {identity} was not supplied")]
-    MissingExternalFont { identity: CanonicalIdentity },
+    #[error("required font container {identity} ({families}) was not supplied")]
+    MissingExternalFont { identity: Digest, families: String },
     #[error("font container fulfillment for undeclared identity {identity} supplied {actual}")]
-    UndeclaredFont {
-        identity: CanonicalIdentity,
-        actual: CanonicalIdentity,
-    },
+    UndeclaredFont { identity: Digest, actual: Digest },
     #[error("embedded font container {identity} was unexpectedly fulfilled externally")]
-    UnexpectedEmbeddedFont { identity: CanonicalIdentity },
-    #[error(
-        "font container fulfillment for {expected} supplied {actual} \
-         ({actual_length} bytes, expected {expected_length} bytes)"
-    )]
+    UnexpectedEmbeddedFont { identity: Digest },
+    #[error("font container fulfillment for {expected} ({families}) supplied {actual}")]
     MismatchedFontContainer {
-        expected: CanonicalIdentity,
-        actual: CanonicalIdentity,
-        expected_length: u64,
-        actual_length: u64,
-    },
-    #[error("font container {identity} has no required face at index {index}")]
-    MissingFontFace {
-        identity: CanonicalIdentity,
-        index: u32,
+        expected: Digest,
+        actual: Digest,
+        families: String,
     },
 }
 
@@ -386,12 +363,12 @@ impl std::error::Error for InvalidCompilationFulfillmentSet {}
 pub(super) fn verify_compilation_fulfillment_set(
     pack: &Pack,
     package_fulfillments: &BTreeMap<String, PackageTreeFulfillment>,
-    font_fulfillments: &BTreeMap<CanonicalIdentity, FontContainerFulfillment>,
+    font_fulfillments: &BTreeMap<Digest, FontContainerFulfillment>,
 ) -> Vec<CompilationFulfillmentIssue> {
     let package_requirements = pack
         .package_requirements()
         .iter()
-        .map(|requirement| (requirement.spec().to_string(), requirement))
+        .map(|requirement| (requirement.spec.to_string(), requirement))
         .collect::<BTreeMap<_, _>>();
     let package_keys = package_requirements
         .keys()
@@ -404,35 +381,28 @@ pub(super) fn verify_compilation_fulfillment_set(
             package_requirements.get(&key),
             package_fulfillments.get(&key),
         ) {
-            (Some(requirement), None) if !requirement.is_embedded() => {
+            (Some(requirement), None) if !requirement.embedded => {
                 issues.push(CompilationFulfillmentIssue::MissingExternalPackage {
-                    spec: requirement.spec().clone(),
+                    spec: requirement.spec.clone(),
                 });
             }
             (None, Some(fulfillment)) => {
                 issues.push(CompilationFulfillmentIssue::UndeclaredPackage {
                     spec: fulfillment.spec.clone(),
-                    actual: fulfillment.tree.identity(),
+                    actual: fulfillment.tree.digest(),
                 });
             }
             (Some(requirement), Some(fulfillment)) => {
-                if requirement.is_embedded() {
+                if requirement.embedded {
                     issues.push(CompilationFulfillmentIssue::UnexpectedEmbeddedPackage {
-                        spec: requirement.spec().clone(),
+                        spec: requirement.spec.clone(),
                     });
                 }
-                if fulfillment.tree.identity() != requirement.tree_identity()
-                    || fulfillment.tree.file_count() != requirement.file_count()
-                    || fulfillment.tree.byte_length() != requirement.byte_length()
-                {
+                if fulfillment.tree.digest() != requirement.digest {
                     issues.push(CompilationFulfillmentIssue::MismatchedPackageTree {
-                        spec: requirement.spec().clone(),
-                        expected: requirement.tree_identity(),
-                        actual: fulfillment.tree.identity(),
-                        expected_file_count: requirement.file_count(),
-                        actual_file_count: fulfillment.tree.file_count(),
-                        expected_byte_length: requirement.byte_length(),
-                        actual_byte_length: fulfillment.tree.byte_length(),
+                        spec: requirement.spec.clone(),
+                        expected: requirement.digest,
+                        actual: fulfillment.tree.digest(),
                     });
                 }
             }
@@ -443,7 +413,7 @@ pub(super) fn verify_compilation_fulfillment_set(
     let font_requirements = pack
         .font_requirements()
         .iter()
-        .map(|requirement| (requirement.container_identity(), requirement))
+        .map(|requirement| (requirement.digest, requirement))
         .collect::<BTreeMap<_, _>>();
     let font_keys = font_requirements
         .keys()
@@ -455,44 +425,29 @@ pub(super) fn verify_compilation_fulfillment_set(
             font_requirements.get(&identity),
             font_fulfillments.get(&identity),
         ) {
-            (Some(requirement), None) if !requirement.is_embedded() => {
-                issues.push(CompilationFulfillmentIssue::MissingExternalFont { identity });
+            (Some(requirement), None) if !requirement.embedded => {
+                issues.push(CompilationFulfillmentIssue::MissingExternalFont {
+                    identity,
+                    families: requirement.families(),
+                });
             }
             (None, Some(fulfillment)) => {
                 issues.push(CompilationFulfillmentIssue::UndeclaredFont {
                     identity,
-                    actual: fulfillment.container.identity(),
+                    actual: fulfillment.container.digest(),
                 });
             }
             (Some(requirement), Some(fulfillment)) => {
-                if requirement.is_embedded() {
+                if requirement.embedded {
                     issues.push(CompilationFulfillmentIssue::UnexpectedEmbeddedFont { identity });
                 }
-                let actual = fulfillment.container.identity();
-                let actual_length = fulfillment.container.data().len() as u64;
-                if actual != identity || actual_length != requirement.container_length() {
+                let actual = fulfillment.container.digest();
+                if actual != identity {
                     issues.push(CompilationFulfillmentIssue::MismatchedFontContainer {
                         expected: identity,
                         actual,
-                        expected_length: requirement.container_length(),
-                        actual_length,
+                        families: requirement.families(),
                     });
-                }
-                for index in requirement
-                    .face_indices()
-                    .iter()
-                    .copied()
-                    .collect::<BTreeSet<_>>()
-                {
-                    if !fulfillment
-                        .container
-                        .faces()
-                        .iter()
-                        .any(|face| face.identity().index() == index)
-                    {
-                        issues
-                            .push(CompilationFulfillmentIssue::MissingFontFace { identity, index });
-                    }
                 }
             }
             _ => {}

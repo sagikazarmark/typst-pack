@@ -277,15 +277,21 @@ fn an_out_of_range_creation_timestamp_is_rejected() {
 
 #[test]
 fn the_request_is_reusable_and_creation_retains_nothing() {
-    let request = TestCreation::new(document("#rect(width: 5pt, height: 5pt)"), 0)
-        .metadata(PackMetadata::new().with_name("Reused"));
+    let request =
+        TestCreation::new(document("#rect(width: 5pt, height: 5pt)"), 0).metadata(PackMetadata {
+            name: Some("Reused".into()),
+            ..PackMetadata::default()
+        });
 
     let first = issue(&request);
     let second = issue(&request);
 
     assert_eq!(first.pack.identity(), second.pack.identity());
     assert_eq!(
-        second.pack.metadata().and_then(PackMetadata::name),
+        second
+            .pack
+            .metadata()
+            .and_then(|metadata| metadata.name.as_deref()),
         Some("Reused")
     );
 }
@@ -365,12 +371,12 @@ fn package_trees_are_supplied_per_specification_with_their_own_disposition() {
     assert_eq!(
         requirements
             .iter()
-            .map(|requirement| requirement.spec().to_string())
+            .map(|requirement| requirement.spec.to_string())
             .collect::<Vec<_>>(),
         [embedded.to_string(), external.to_string()]
     );
-    assert!(requirements[0].is_embedded());
-    assert!(!requirements[1].is_embedded());
+    assert!(requirements[0].embedded);
+    assert!(!requirements[1].embedded);
     assert!(issued.pack.has_package(&embedded));
     assert!(!issued.pack.has_package(&external));
     assert!(!issued.pack.has_package(&unused));
@@ -475,7 +481,7 @@ fn a_project_needing_several_packages_completes_through_repeated_invocation() {
             .pack
             .package_requirements()
             .iter()
-            .map(|requirement| requirement.spec().to_string())
+            .map(|requirement| requirement.spec.to_string())
             .collect::<Vec<_>>(),
         [
             "@local/first:1.0.0",
@@ -692,8 +698,8 @@ fn a_supplied_tree_path_that_cannot_name_a_package_file_is_rejected() {
 #[cfg(feature = "embedded-fonts")]
 mod fonts {
     use typst_pack::{
-        CanonicalIdentity, FontCatalog, FontCatalogEntry, FontContainer, FontDisposition,
-        PackCreationOutcome, create,
+        Digest, FontCatalog, FontCatalogEntry, FontContainer, FontDisposition, PackCreationOutcome,
+        create,
     };
 
     use crate::{
@@ -731,27 +737,19 @@ mod fonts {
         let disposition = |data: &[u8]| {
             requirements
                 .iter()
-                .find(|requirement| {
-                    requirement.container_identity()
-                        == CanonicalIdentity::for_font_container_bytes(data)
-                })
-                .map(|requirement| requirement.is_embedded())
+                .find(|requirement| requirement.digest == Digest::of(data))
+                .map(|requirement| requirement.embedded)
         };
         assert_eq!(requirements.len(), 2);
         assert_eq!(disposition(&serif), Some(true));
         assert_eq!(disposition(&mono), Some(false));
-        // The Pack Font Catalog keeps the supplied catalog's relative order.
+        // Font requirements keep the supplied catalog's relative order.
         assert_eq!(
-            issued
-                .pack
-                .font_catalog()
+            requirements
                 .iter()
-                .map(|face| face.identity().container())
+                .map(|requirement| requirement.digest)
                 .collect::<Vec<_>>(),
-            [
-                CanonicalIdentity::for_font_container_bytes(&serif),
-                CanonicalIdentity::for_font_container_bytes(&mono),
-            ]
+            [Digest::of(&serif), Digest::of(&mono)]
         );
     }
 
@@ -772,10 +770,7 @@ mod fonts {
 
         let requirements = issued.pack.font_requirements();
         assert_eq!(requirements.len(), 1);
-        assert_eq!(
-            requirements[0].container_identity(),
-            CanonicalIdentity::for_font_container_bytes(&serif)
-        );
+        assert_eq!(requirements[0].digest, Digest::of(&serif));
     }
 
     #[test]
@@ -791,9 +786,7 @@ mod fonts {
         );
 
         assert_eq!(issued.pack.font_requirements().len(), 1);
-        assert!(!issued.pack.font_requirements()[0].is_embedded());
-        assert_eq!(issued.pack.font_catalog().len(), 1);
-        assert!(!issued.pack.font_catalog()[0].is_embedded());
+        assert!(!issued.pack.font_requirements()[0].embedded);
     }
 
     /// Face selection is recorded as the representative request asks for a

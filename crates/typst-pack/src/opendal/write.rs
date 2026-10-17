@@ -8,9 +8,7 @@ use futures_util::TryStreamExt;
 use typst::syntax::package::PackageSpec;
 
 use super::{Error, check_key, check_prefix, storage};
-use crate::{
-    CompilationResult, CompilationStatus, PackArchiveBytes, PackExtractionPlan, read_layout,
-};
+use crate::{CompilationResult, CompilationStatus, PackExtractionPlan, read_layout};
 
 /// How a write treats objects that already exist.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -218,10 +216,10 @@ async fn write_one(
 pub async fn write_pack_archive(
     op: &Operator,
     path: &str,
-    archive: &PackArchiveBytes,
+    archive: &[u8],
     policy: WritePolicy,
 ) -> Result<WriteOutcome, WriteError> {
-    write_one(op, policy, path.to_owned(), archive.as_slice()).await
+    write_one(op, policy, path.to_owned(), archive).await
 }
 
 /// Writes raw package archive bytes into a package archive cache at

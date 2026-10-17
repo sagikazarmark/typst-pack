@@ -96,12 +96,13 @@ then replace it with `--override PACK_PATH FILE` at compile time.
 ### Packages and fonts
 
 Observed packages are embedded by default. `--no-vendor-packages` records each
-exact package and complete tree identity instead; compilation then requires the
+exact package and its tree digest instead; compilation then requires the
 application's configured package sources to provide a matching tree. `--offline`
 prevents downloads during both creation and compilation.
 
-Fonts are external by default. `--embed-fonts` stores selected font containers
-except those shipped by Typst; `--include-typst-embedded-fonts` stores those as
+Fonts are external by default and are matched by digest at compile time;
+`typst-pack inspect` names the families a pack expects. `--embed-fonts` stores
+the used font containers except those shipped by Typst; `--include-typst-embedded-fonts` stores those as
 well. Mind font licenses when redistributing embedded files.
 
 ### Output formats
@@ -126,8 +127,8 @@ The `fs` feature links no network client. Add `egress` only when filesystem
 assembly should download missing Typst Universe packages.
 
 The [library contract](docs/library-contract.md) describes identity,
-dependency fulfillment, environment independence, write policies, retry
-material, and partial effects. The [OpenDAL guide](crates/typst-pack/docs/opendal-integration.md)
+dependency fulfillment, environment independence, write policies, and partial
+effects. The [OpenDAL guide](crates/typst-pack/docs/opendal-integration.md)
 documents asynchronous storage integration.
 
 ### Common workflows
@@ -151,12 +152,11 @@ use typst_pack::pack_archive::encode;
 
 let pack = Pack::builder("main.typ")
     .file("main.typ", b"= Report\n".to_vec())
-    .expect("main.typ is a valid project path")
     .build()
     .expect("the entrypoint is contained");
 
-let archive = encode(&pack).expect("the pack fits the reference encode limits");
-assert!(!archive.as_slice().is_empty());
+let archive = encode(&pack).expect("the pack is representable as a ZIP archive");
+assert!(!archive.is_empty());
 ```
 
 `Pack::builder` does not discover dependencies: the pack contains exactly the
@@ -189,47 +189,103 @@ on `wasm32-unknown-unknown`.
 
 ## Pack format
 
-A pack is a Zip archive, conventionally named `*.typk`, with this layout:
+A pack is a ZIP archive, conventionally named `*.typk`, with this layout:
 
 ```text
 typst-pack.toml                         manifest
-project/<path>                          project files, root-relative
-packages/<ns>/<name>/<version>/<path>   embedded package files
-fonts/<file>                            embedded font files
+project/<path>                          every project file, root-relative
+packages/<ns>/<name>/<version>/<path>   files of embedded packages
+fonts/<hex digest>.<ext>                embedded font containers
 ```
 
 Example manifest:
 
 ```toml
-format-version = 1
-
-[project]
+format-version = 2
+typst-version = "0.15.1"
+generator = "typst-pack 0.6.0"
 entrypoint = "main.typ"
 
-[[packages.vendored]]
+[[files]]
+path = "main.typ"
+digest = "sha256:8d5f78795df7052f5d6004f5d268ca4175c86ccdeaaf5a30d1c759c78e34fe60"
+
+[[packages]]
 spec = "@preview/cetz:0.3.4"
-tree-digest = "0123456789abcdef0123456789abcdef"
-tree-identity-kind = "complete-package-tree"
-tree-identity-schema = "typst-pack-complete-package-tree-v1"
-tree-identity-algorithm = "typst-hash128-0.15"
-file-count = 12
-byte-length = 34567
+digest = "sha256:59a7210040a1150688b50619e101f628b72234a06c7568ca5e556283642281fb"
+embedded = true
 
 [[fonts]]
-path = "fonts/ibm-plex-sans.ttf"
-families = ["IBM Plex Sans"]
+digest = "sha256:fcf06307a77367394fcb0ccb241e59eea70dba3d732be309647611224679c733"
+embedded = false
+
+[[fonts.faces]]
+index = 0
+family = "Libertinus Serif"
+style = "normal"
+weight = 400
+stretch = 1000
 
 [metadata]
 name = "Quarterly report"
 authors = ["Jane Doe"]
 ```
 
-The encoder writes Deflate-compressed version-1 archives. Readers accept safe
-interoperable ZIP encodings and member orderings, ignore safe unknown entries,
-and reject unknown format versions, unsafe paths, unsupported entry kinds, and
-inconsistent manifests. Decoding and re-encoding preserves Pack semantics, not
-exact ZIP bytes, compression settings, timestamps, unknown entries, or member
-order. Format version 1 is explicitly unstable.
+`[[files]]` lists every project file. `[[packages]]` lists every package the
+document needs, embedded or to be supplied at compile time. `[[fonts]]` lists
+every font container the document needs, in font book order; every face of a
+listed container is available to the document. Faces are informational: they
+let a recipient see which fonts an external container provides. `typst-version`
+and `generator` are informational, and `[metadata]` is descriptive only.
+
+### Digests
+
+Every digest is SHA-256, written `sha256:` followed by 64 lowercase
+hexadecimal digits.
+
+- **File digest:** SHA-256 of the file's bytes.
+- **Font container digest:** SHA-256 of the font file or collection bytes.
+- **Package tree digest:** SHA-256 of a preimage over every file of the
+  package, in byte-wise path order.
+- **Pack identity:** SHA-256 of a preimage over the entrypoint, the project
+  files, the packages, and the font containers. Metadata, informational fields,
+  member order, compression, and every other ZIP detail are excluded.
+
+Preimages are built from these fields: `str(s)` is the UTF-8 byte length of
+`s` as a big-endian 64-bit integer followed by the bytes; `count(n)` is `n` as a
+big-endian 64-bit integer; `digest(d)` is the 32 raw digest bytes; `bool(b)` is
+one byte, `0` or `1`. Each preimage starts with a domain tag.
+
+```text
+package tree = str("typst-pack/package-tree/v1") count(files)
+               { str(path) digest(file digest) }      per file, by path
+
+pack         = str("typst-pack/pack/v1") str(entrypoint)
+               count(files) { str(path) digest(file digest) }      by path
+               count(packages) { str(spec) digest(tree digest) bool(embedded) }
+                                                                  by spec
+               count(fonts) { digest(container digest) bool(embedded) }
+                                                       in manifest order
+```
+
+### Verification
+
+A reader decodes a pack only if every member matches the manifest: each
+project file and embedded font container matches its digest, each embedded
+package's files match its tree digest, and no member is missing or undeclared.
+Member names must be safe relative paths without duplicates; links and other
+special entries are refused; directory entries are ignored. Declared sizes and
+actual inflated bytes are both bounded by `DecodeLimits`. External packages and
+fonts are matched by digest when the pack is compiled.
+
+The encoder is deterministic for a given build: fixed member order, timestamps,
+permissions, and compression level.
+
+### Compatibility
+
+`format-version` changes with every incompatible format change, and readers
+reject every version they do not implement. Readers ignore unknown manifest
+keys, so a producer can add compatible fields without a new version.
 
 ## Development
 

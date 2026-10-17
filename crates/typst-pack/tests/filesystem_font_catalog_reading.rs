@@ -17,7 +17,7 @@ use typst_pack::{
 #[cfg(feature = "embedded-fonts")]
 use crate::font_bytes::typst_container;
 #[cfg(feature = "embedded-fonts")]
-use typst_pack::{CanonicalIdentity, LimitExceeded};
+use typst_pack::{Digest, LimitExceeded};
 
 fn read_directory(root: &Path, limits: ReadLimits) -> Result<FilesystemFonts, FilesystemReadError> {
     read_filesystem_fonts(
@@ -71,21 +71,12 @@ fn configured_sources_and_paths_compose_in_order_with_explicit_dispositions() {
             .catalog
             .entries()
             .iter()
-            .map(|entry| (entry.container().identity(), entry.disposition()))
+            .map(|entry| (entry.container().digest(), entry.disposition()))
             .collect::<Vec<_>>(),
         [
-            (
-                CanonicalIdentity::for_font_container_bytes(&first),
-                FontDisposition::External,
-            ),
-            (
-                CanonicalIdentity::for_font_container_bytes(&second),
-                FontDisposition::External,
-            ),
-            (
-                CanonicalIdentity::for_font_container_bytes(&first),
-                FontDisposition::Embedded,
-            ),
+            (Digest::of(&first), FontDisposition::External,),
+            (Digest::of(&second), FontDisposition::External,),
+            (Digest::of(&first), FontDisposition::Embedded,),
         ]
     );
     assert!(fonts.skipped.is_empty());
@@ -267,12 +258,12 @@ mod links {
         std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
         fs::set_permissions(root.join("unreadable"), permissions).unwrap();
 
-        let identity = typst_pack::CanonicalIdentity::for_font_container_bytes(&data);
+        let identity = Digest::of(&data);
         let found = fonts
             .catalog
             .entries()
             .iter()
-            .filter(|entry| entry.container().identity() == identity)
+            .filter(|entry| entry.container().digest() == identity)
             .count();
         assert_eq!(found, if unreadable { 2 } else { 3 });
         let mut expected = vec![

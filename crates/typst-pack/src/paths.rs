@@ -8,10 +8,6 @@ use typst::syntax::VirtualPath;
 pub(crate) struct CanonicalPath(String);
 
 impl CanonicalPath {
-    pub(crate) fn from_canonical(path: String) -> Self {
-        Self(path)
-    }
-
     pub(crate) fn as_str(&self) -> &str {
         &self.0
     }

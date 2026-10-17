@@ -9,8 +9,7 @@ use typst_pack::{
 fuzz_target!(|data: &[u8]| {
     let flags = data.first().copied().unwrap_or_default();
     let mut builder = Pack::builder("main.typ")
-        .file("main.typ", data.to_vec())
-        .unwrap();
+        .file("main.typ", data.to_vec());
     for index in 0..3 {
         let payload = data
             .iter()
@@ -18,7 +17,7 @@ fuzz_target!(|data: &[u8]| {
             .step_by(3)
             .copied()
             .collect::<Vec<_>>();
-        builder = builder.file(format!("files/{index}.bin"), payload).unwrap();
+        builder = builder.file(format!("files/{index}.bin"), payload);
     }
     let pack = builder.build().unwrap();
     let plan = plan_pack_extraction(&pack, PackExtractionSelection::default()).unwrap();

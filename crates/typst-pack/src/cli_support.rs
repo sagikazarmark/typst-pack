@@ -98,7 +98,7 @@ pub fn compile_with_timing(
     request: PackCompilationRequest,
     timings: Option<PathBuf>,
 ) -> Result<TimedCliCompilation, CompilationRequestRejection> {
-    compile_with_timing_with_limits(request, CompilationLimits::reference_v1(), timings)
+    compile_with_timing_with_limits(request, CompilationLimits::DEFAULT, timings)
 }
 
 pub fn compile_with_timing_with_limits(

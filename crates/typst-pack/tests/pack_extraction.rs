@@ -18,11 +18,8 @@ fn package_spec() -> PackageSpec {
 fn pack_with_package() -> Pack {
     Pack::builder("main.typ")
         .file("main.typ", b"main".to_vec())
-        .unwrap()
         .file("assets/logo.bin", b"logo".to_vec())
-        .unwrap()
         .package_file(package_spec(), "lib.typ", b"package".to_vec())
-        .unwrap()
         .build()
         .unwrap()
 }
@@ -115,9 +112,7 @@ fn projects_are_unconditional_and_embedded_packages_are_selected_explicitly() {
 fn external_package_trees_are_never_planned() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"main".to_vec())
-        .unwrap()
         .external_package_file(package_spec(), "lib.typ", b"external".to_vec())
-        .unwrap()
         .build()
         .unwrap();
 
@@ -135,15 +130,10 @@ fn planning_aggregates_collisions_in_canonical_path_order() {
     let base = "packages/local/example/1.0.0";
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"main".to_vec())
-        .unwrap()
         .file(format!("{base}/z.typ"), b"project z".to_vec())
-        .unwrap()
         .file(format!("{base}/a.typ"), b"project a".to_vec())
-        .unwrap()
         .package_file(package_spec(), "z.typ", b"package z".to_vec())
-        .unwrap()
         .package_file(package_spec(), "a.typ", b"package a".to_vec())
-        .unwrap()
         .build()
         .unwrap();
 
@@ -172,15 +162,10 @@ fn collision_issue_order_places_roles_before_paths() {
     let base = "packages/local/example/1.0.0";
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"main".to_vec())
-        .unwrap()
         .file(format!("{base}/a/descendant"), b"project a".to_vec())
-        .unwrap()
         .file(format!("{base}/z"), b"project z".to_vec())
-        .unwrap()
         .package_file(package_spec(), "a", b"package a".to_vec())
-        .unwrap()
         .package_file(package_spec(), "z", b"package z".to_vec())
-        .unwrap()
         .build()
         .unwrap();
 
@@ -237,11 +222,10 @@ proptest! {
         let build = |entries: Vec<(String, Vec<u8>)>| {
             let mut builder = Pack::builder("main.typ");
             for (path, bytes) in entries {
-                builder = builder.file(path, bytes).unwrap();
+                builder = builder.file(path, bytes);
             }
             builder
                 .package_file(package_spec(), "lib.typ", b"package".to_vec())
-                .unwrap()
                 .build()
                 .unwrap()
         };
@@ -267,9 +251,9 @@ proptest! {
             _ => format!("{package_path}/descendant"),
         };
         let pack = Pack::builder("main.typ")
-            .file("main.typ", b"main".to_vec()).unwrap()
-            .file(project_path, b"project".to_vec()).unwrap()
-            .package_file(package_spec(), stem, b"package".to_vec()).unwrap()
+            .file("main.typ", b"main".to_vec())
+            .file(project_path, b"project".to_vec())
+            .package_file(package_spec(), stem, b"package".to_vec())
             .build().unwrap();
 
         let error = plan_pack_extraction(
@@ -290,19 +274,19 @@ proptest! {
         reversed.reverse();
         let build = |project_order: &[String], package_order: &[String]| {
             let mut builder = Pack::builder("main.typ")
-                .file("main.typ", b"main".to_vec()).unwrap();
+                .file("main.typ", b"main".to_vec());
             for stem in project_order {
                 builder = builder.file(
                     format!("packages/local/example/1.0.0/{stem}"),
                     format!("project {stem}").into_bytes(),
-                ).unwrap();
+                );
             }
             for stem in package_order {
                 builder = builder.package_file(
                     package_spec(),
                     stem,
                     format!("package {stem}").into_bytes(),
-                ).unwrap();
+                );
             }
             builder.build().unwrap()
         };
@@ -339,9 +323,9 @@ proptest! {
     ) {
         let project_path = format!("packages/local/example/1.0.0/{stem}-sibling");
         let pack = Pack::builder("main.typ")
-            .file("main.typ", b"main".to_vec()).unwrap()
-            .file(project_path, b"project".to_vec()).unwrap()
-            .package_file(package_spec(), stem, b"package".to_vec()).unwrap()
+            .file("main.typ", b"main".to_vec())
+            .file(project_path, b"project".to_vec())
+            .package_file(package_spec(), stem, b"package".to_vec())
             .build().unwrap();
 
         let plan = plan_pack_extraction(
@@ -358,7 +342,7 @@ proptest! {
     ) {
         let source_pointer = bytes.as_ptr();
         let pack = Pack::builder("main.typ")
-            .file("main.typ", bytes).unwrap()
+            .file("main.typ", bytes)
             .build().unwrap();
         let pack_pointer = pack.file("main.typ").unwrap().as_ptr();
         let plan = plan_pack_extraction(
@@ -379,16 +363,12 @@ fn embedded_font_containers_are_selected_explicitly_and_external_fonts_are_exclu
     let font = fonts::typst_container();
     let embedded = Pack::builder("main.typ")
         .file("main.typ", b"main".to_vec())
-        .unwrap()
-        .font(font.clone(), 0)
-        .unwrap()
+        .font(font.clone())
         .build()
         .unwrap();
     let external = Pack::builder("main.typ")
         .file("main.typ", b"main".to_vec())
-        .unwrap()
-        .external_font(font, 0)
-        .unwrap()
+        .external_font(font)
         .build()
         .unwrap();
 
@@ -409,32 +389,27 @@ fn embedded_font_containers_are_selected_explicitly_and_external_fonts_are_exclu
 }
 
 #[cfg(feature = "embedded-fonts")]
-proptest! {
-    #[test]
-    fn repeated_font_container_references_coalesce(
-        reverse_faces in any::<bool>(),
-    ) {
-        let face = fonts::typst_container();
-        let collection = fonts::font_collection(&[face.clone(), face]);
-        let container_pointer = collection.as_ptr();
-        let indices = if reverse_faces { [1, 0] } else { [0, 1] };
-        let mut builder = Pack::builder("main.typ")
-            .file("main.typ", b"main".to_vec()).unwrap();
-        for index in indices {
-            builder = builder.font(collection.clone(), index).unwrap();
-        }
-        let pack = builder.build().unwrap();
-        let plan = plan_pack_extraction(
-            &pack,
-            PackExtractionSelection::new(false, true),
-        ).unwrap();
-        let font_entries = plan.entries().iter()
-            .filter(|entry| entry.role() == PackExtractionEntryRole::FontContainer)
-            .collect::<Vec<_>>();
+#[test]
+fn a_multi_face_container_is_extracted_once_without_copying() {
+    let face = fonts::typst_container();
+    let collection = fonts::font_collection(&[face.clone(), face]);
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"main".to_vec())
+        .font(collection.clone())
+        .build()
+        .unwrap();
+    let plan = plan_pack_extraction(&pack, PackExtractionSelection::new(false, true)).unwrap();
+    let font_entries = plan
+        .entries()
+        .iter()
+        .filter(|entry| entry.role() == PackExtractionEntryRole::FontContainer)
+        .collect::<Vec<_>>();
 
-        prop_assert_eq!(font_entries.len(), 1);
-        prop_assert_eq!(font_entries[0].bytes(), collection.as_slice());
-        prop_assert_eq!(font_entries[0].bytes().as_ptr(), pack.fonts()[0].data().as_ptr());
-        prop_assert_ne!(font_entries[0].bytes().as_ptr(), container_pointer);
-    }
+    let digest = pack.font_requirements()[0].digest;
+    assert_eq!(font_entries.len(), 1);
+    assert_eq!(font_entries[0].bytes(), collection.as_slice());
+    assert_eq!(
+        font_entries[0].bytes().as_ptr(),
+        pack.font_data(&digest).unwrap().as_ptr()
+    );
 }

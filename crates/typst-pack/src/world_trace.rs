@@ -106,17 +106,18 @@ impl<W: World + ?Sized> World for WorldTrace<'_, W> {
     fn font(&self, requested_index: usize) -> Option<Font> {
         let font = self.world.font(requested_index);
         let observation = match &font {
-            Some(font) => CompilationAccessObservation::new(
-                CompilationAccessKind::Font,
-                format!(
-                    "font:{:032x}",
-                    u128::from_be_bytes(
-                        crate::pack::font_container_identity(font.data().as_slice()).digest()
-                    )
-                ),
-                Some(font.index() as usize),
-                read_outcome(font.data().as_slice()),
-            ),
+            Some(font) => {
+                let digest = crate::Digest::of(font.data().as_slice());
+                CompilationAccessObservation::new(
+                    CompilationAccessKind::Font,
+                    format!("font:{digest}"),
+                    Some(font.index() as usize),
+                    CompilationAccessOutcome::Read {
+                        byte_length: font.data().len(),
+                        digest,
+                    },
+                )
+            }
             None => CompilationAccessObservation::new(
                 CompilationAccessKind::Font,
                 format!("font-index:{requested_index}"),
@@ -136,7 +137,7 @@ impl<W: World + ?Sized> World for WorldTrace<'_, W> {
 fn read_outcome(data: &[u8]) -> CompilationAccessOutcome {
     CompilationAccessOutcome::Read {
         byte_length: data.len(),
-        digest: typst::utils::hash128(&data).to_be_bytes(),
+        digest: crate::Digest::of(data),
     }
 }
 
@@ -161,9 +162,7 @@ mod tests {
     fn captures_exact_file_outcomes_and_missing_font_requests() {
         let pack = Pack::builder("main.typ")
             .file("main.typ", b"Hello".to_vec())
-            .unwrap()
             .file("bad.typ", vec![0xff])
-            .unwrap()
             .build()
             .unwrap();
         let dependencies = pack.materialize_compilation_dependency_snapshot(
@@ -207,7 +206,7 @@ mod tests {
                 && observation.outcome()
                     == &CompilationAccessOutcome::Read {
                         byte_length: 5,
-                        digest: typst::utils::hash128(&b"Hello".as_slice()).to_be_bytes(),
+                        digest: crate::Digest::of(b"Hello"),
                     }
         }));
         assert!(observations.iter().any(|observation| {

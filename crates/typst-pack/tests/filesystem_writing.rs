@@ -10,11 +10,9 @@ use typst_pack::{
 };
 
 fn plan_of(files: &[(&str, &[u8])]) -> typst_pack::PackExtractionPlan {
-    let mut builder = Pack::builder("main.typ")
-        .file("main.typ", b"new main".to_vec())
-        .unwrap();
+    let mut builder = Pack::builder("main.typ").file("main.typ", b"new main".to_vec());
     for (path, bytes) in files {
-        builder = builder.file(*path, bytes.to_vec()).unwrap();
+        builder = builder.file(*path, bytes.to_vec());
     }
     plan_pack_extraction(
         &builder.build().unwrap(),
@@ -63,7 +61,6 @@ fn rejected(result: Result<(), FilesystemWriteError>) -> Vec<WriteIssue> {
 fn compilation_result(source: &[u8], svg: bool) -> typst_pack::CompilationResult {
     let pack = Pack::builder("main.typ")
         .file("main.typ", source.to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let output = if svg {
@@ -73,7 +70,7 @@ fn compilation_result(source: &[u8], svg: bool) -> typst_pack::CompilationResult
     };
     let report = compile_with_limits(
         PackCompilationRequest::new(pack, output),
-        CompilationLimits::reference_v1(),
+        CompilationLimits::DEFAULT,
     )
     .unwrap();
     report.result().unwrap().clone()

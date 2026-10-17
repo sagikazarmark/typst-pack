@@ -66,7 +66,7 @@ example per-package dispositions):
 | [`read_fonts`] | A [`FontCatalog`](crate::FontCatalog) of `.ttf`/`.ttc`/`.otf`/`.otc` objects below each [`FontSource`], in source then path order. |
 | [`read_package`] | A [`PackageRead`]: a tree's files, cached or registry archive bytes, or `Unavailable`. Sources are tried in order; only definite absence advances. |
 | [`insert_package`] | Builds or expands the tree, inserts it, and keeps [`PackageReadFailures`](crate::PackageReadFailures) in step. |
-| [`read_pack_archive`] | Exact [`PackArchiveBytes`](crate::PackArchiveBytes); decode with [`pack_archive::decode`](crate::pack_archive::decode). |
+| [`read_pack_archive`] | The exact archive bytes; decode with [`pack_archive::decode`](crate::pack_archive::decode). |
 
 A listing is one observation, not a storage snapshot: objects may change
 between listing and reading. An object that vanishes in between fails the
@@ -78,7 +78,8 @@ Reads take the shared [`ReadLimits`](crate::ReadLimits): every listed entry
 counts toward `max_entries`, and each object's length is checked against
 `max_file_bytes` and the remaining `max_total_bytes` before it is downloaded,
 so an oversized object is never transferred. A raw package archive is bounded
-by `max_file_bytes`; [`read_pack_archive`] takes an explicit byte ceiling.
+by `max_file_bytes` and expanded under the same `ReadLimits`;
+[`read_pack_archive`] takes an explicit byte ceiling.
 Exceeding a limit fails with [`Error::Limit`]. Limits do not bound memory
 inside OpenDAL or its transport.
 
@@ -123,7 +124,7 @@ OpenDAL error, which may carry backend context, is the error's `source`.
 
 There is no OpenDAL compilation API. Read external packages and fonts with
 the same functions, build core fulfillment values, and call
-[`compile`](crate::compile), which verifies every identity before running
+[`compile`](crate::compile), which verifies every digest before running
 Typst:
 
 ```rust,no_run
@@ -147,13 +148,13 @@ async fn compile_with_external_inputs(
         prefix: "packages/".into(),
     }];
     let mut packages = Vec::new();
-    for requirement in pack.package_requirements().iter().filter(|r| !r.is_embedded()) {
-        let PackageRead::Tree(files) = read_package(&sources, requirement.spec(), &limits).await?
+    for requirement in pack.package_requirements().iter().filter(|r| !r.embedded) {
+        let PackageRead::Tree(files) = read_package(&sources, &requirement.spec, &limits).await?
         else {
-            return Err(format!("no tree for {}", requirement.spec()).into());
+            return Err(format!("no tree for {}", requirement.spec).into());
         };
         let tree = PackageTree::from_owned_entries(files)?;
-        packages.push(PackageTreeFulfillment::new(requirement.spec().clone(), tree));
+        packages.push(PackageTreeFulfillment::new(requirement.spec.clone(), tree));
     }
 
     let font_source = FontSource {

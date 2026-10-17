@@ -33,11 +33,11 @@ use std::str::FromStr;
 
 use typst::syntax::package::PackageSpec;
 use typst_pack::{
-    CanonicalIdentity, DependencyDiscoveryRejection, DiscoverySpecification, DocumentTime,
-    FontCatalog, FontCatalogEntry, FontContainer, FontDisposition, Pack, PackCreationError,
-    PackCreationInput, PackCreationOutcome, PackMetadata, PackageCatalog, PackageCatalogIssue,
-    PackageDisposition, PackageReadFailure, PackageReadFailureReason, PackageReadFailures,
-    PackageTree, ProjectSnapshotAssembly, TypstTarget, create,
+    DependencyDiscoveryRejection, Digest, DiscoverySpecification, DocumentTime, FontCatalog,
+    FontCatalogEntry, FontContainer, FontDisposition, Pack, PackCreationError, PackCreationInput,
+    PackCreationOutcome, PackageCatalog, PackageCatalogIssue, PackageDisposition,
+    PackageReadFailure, PackageReadFailureReason, PackageReadFailures, PackageTree,
+    ProjectSnapshotAssembly, TypstTarget, create,
 };
 
 /// 2023-11-14T22:13:20Z, the Document Time every representative request in the
@@ -82,13 +82,13 @@ enum PackageSource {
     #[cfg(feature = "package-reading")]
     CachedArchive {
         bytes: Vec<u8>,
-        limits: typst_pack::PackageExpansionLimits,
+        limits: typst_pack::ReadLimits,
     },
     /// The exact archive bytes returned by an official registry.
     #[cfg(feature = "package-reading")]
     RegistryArchive {
         bytes: Vec<u8>,
-        limits: typst_pack::PackageExpansionLimits,
+        limits: typst_pack::ReadLimits,
     },
 }
 
@@ -103,6 +103,7 @@ struct FontFixture {
 enum FontSource {
     /// Exact container bytes, which the filesystem adapter offers by scanning a
     /// directory holding them and nothing else.
+    #[cfg_attr(not(feature = "embedded-fonts"), allow(dead_code))]
     Scanned(Vec<u8>),
     /// Every container Typst embeds, in Typst's own order, which the filesystem
     /// adapter offers from its own copy rather than from a scanned directory.
@@ -170,7 +171,7 @@ impl Fixture {
         mut self,
         name: &'static str,
         bytes: Vec<u8>,
-        limits: typst_pack::PackageExpansionLimits,
+        limits: typst_pack::ReadLimits,
     ) -> Self {
         self.packages.push(PackageFixture {
             spec: registry_spec(name),
@@ -189,7 +190,7 @@ impl Fixture {
         mut self,
         name: &'static str,
         bytes: Vec<u8>,
-        limits: typst_pack::PackageExpansionLimits,
+        limits: typst_pack::ReadLimits,
     ) -> Self {
         self.packages.push(PackageFixture {
             spec: registry_spec(name),
@@ -201,6 +202,7 @@ impl Fixture {
     }
 
     /// Offers one Font Container at the end of the catalog.
+    #[cfg(feature = "embedded-fonts")]
     fn font(mut self, source: FontSource, disposition: FontDisposition) -> Self {
         self.fonts.push(FontFixture {
             source,
@@ -259,13 +261,11 @@ impl Fixture {
                 typst_pack::expand_package_archive(spec.clone(), bytes, *limits)
                     .map(|tree| (spec.clone(), tree, package.disposition))
                     .map_err(|error| match error {
-                        typst_pack::PackageReadError::ExpansionLimit { .. } => {
-                            Failure::PackageRead {
-                                spec: spec.to_string(),
-                                reason: PackageReadFailureReason::Other { detail: None },
-                                rejection: None,
-                            }
-                        }
+                        typst_pack::PackageReadError::Limit { .. } => Failure::PackageRead {
+                            spec: spec.to_string(),
+                            reason: PackageReadFailureReason::Other { detail: None },
+                            rejection: None,
+                        },
                         error => panic!("the fixture archive failed to expand: {error}"),
                     })
             }
@@ -622,9 +622,7 @@ fn create_on_opendal(
                     }
                     let read = block_on(read_package(&package_sources, &spec, &limits)).unwrap();
                     let expansion_limits = match package.source {
-                        PackageSource::Files(_) => {
-                            typst_pack::PackageExpansionLimits::reference_v1()
-                        }
+                        PackageSource::Files(_) => typst_pack::ReadLimits::DEFAULT,
                         PackageSource::CachedArchive { limits, .. }
                         | PackageSource::RegistryArchive { limits, .. } => limits,
                     };
@@ -933,6 +931,7 @@ fn run(fixture: &Fixture, applicability: ScenarioApplicability) -> Result<Create
     direct
 }
 
+#[cfg(any(feature = "fs", all(feature = "opendal", feature = "package-reading")))]
 fn assert_results_equal(
     expected: &Result<Created, Failure>,
     actual: &Result<Created, Failure>,
@@ -1030,22 +1029,25 @@ fn conform_failure_object_storage(fixture: &Fixture) -> Failure {
 }
 
 /// Everything about a Pack the corpus asserts on, as one comparable value.
+#[cfg(any(feature = "fs", all(feature = "opendal", feature = "package-reading")))]
 type ProjectFiles = Vec<(String, Vec<u8>)>;
+#[cfg(any(feature = "fs", all(feature = "opendal", feature = "package-reading")))]
 type EmbeddedPackages = Vec<(String, ProjectFiles)>;
 
+#[cfg(any(feature = "fs", all(feature = "opendal", feature = "package-reading")))]
 #[derive(Debug, PartialEq)]
 struct Projection {
-    identity: CanonicalIdentity,
+    identity: Digest,
     entrypoint: String,
-    metadata: Option<PackMetadata>,
+    metadata: Option<typst_pack::PackMetadata>,
     project: ProjectFiles,
     embedded_packages: EmbeddedPackages,
-    packages: Vec<(String, CanonicalIdentity, u64, u64, bool)>,
-    embedded_fonts: Vec<(CanonicalIdentity, u32, Vec<u8>)>,
-    font_catalog: Vec<(CanonicalIdentity, u32, bool)>,
-    font_requirements: Vec<(CanonicalIdentity, u64, Vec<u32>, bool)>,
+    packages: Vec<(String, Digest, bool)>,
+    embedded_fonts: Vec<(Digest, Vec<u8>)>,
+    font_requirements: Vec<typst_pack::FontRequirement>,
 }
 
+#[cfg(any(feature = "fs", all(feature = "opendal", feature = "package-reading")))]
 fn projection(pack: &Pack) -> Projection {
     Projection {
         identity: pack.identity(),
@@ -1071,38 +1073,21 @@ fn projection(pack: &Pack) -> Projection {
             .iter()
             .map(|requirement| {
                 (
-                    requirement.spec().to_string(),
-                    requirement.tree_identity(),
-                    requirement.file_count(),
-                    requirement.byte_length(),
-                    requirement.is_embedded(),
+                    requirement.spec.to_string(),
+                    requirement.digest,
+                    requirement.embedded,
                 )
             })
             .collect(),
         embedded_fonts: pack
-            .fonts()
-            .iter()
-            .map(|font| {
-                (
-                    font.identity().container(),
-                    font.identity().index(),
-                    font.data().to_vec(),
-                )
-            })
-            .collect(),
-        font_catalog: font_catalog(pack),
-        font_requirements: pack
             .font_requirements()
             .iter()
-            .map(|requirement| {
-                (
-                    requirement.container_identity(),
-                    requirement.container_length(),
-                    requirement.face_indices().to_vec(),
-                    requirement.is_embedded(),
-                )
+            .filter_map(|requirement| {
+                let data = pack.font_data(&requirement.digest)?;
+                Some((requirement.digest, data.to_vec()))
             })
             .collect(),
+        font_requirements: pack.font_requirements().to_vec(),
     }
 }
 
@@ -1116,30 +1101,31 @@ fn project_paths(pack: &Pack) -> Vec<&str> {
 fn package_dispositions(pack: &Pack) -> Vec<(String, bool)> {
     pack.package_requirements()
         .iter()
-        .map(|requirement| (requirement.spec().to_string(), requirement.is_embedded()))
+        .map(|requirement| (requirement.spec.to_string(), requirement.embedded))
         .collect()
 }
 
-/// The Pack Font Catalog: each face's container, its container-local index, and
-/// whether that container's bytes travel in the Pack, in catalog order.
-fn font_catalog(pack: &Pack) -> Vec<(CanonicalIdentity, u32, bool)> {
-    pack.font_catalog()
+/// Every face available at compile time: its container, its container-local
+/// index, and whether that container's bytes travel in the Pack, in font book
+/// order.
+#[cfg(feature = "embedded-fonts")]
+fn font_faces(pack: &Pack) -> Vec<(Digest, u32, bool)> {
+    pack.font_requirements()
         .iter()
-        .map(|face| {
-            (
-                face.identity().container(),
-                face.identity().index(),
-                face.is_embedded(),
-            )
+        .flat_map(|requirement| {
+            requirement
+                .faces
+                .iter()
+                .map(|face| (requirement.digest, face.index, requirement.embedded))
         })
         .collect()
 }
 
 /// Each Font Requirement's container and whether its bytes travel in the Pack.
-fn font_requirements(pack: &Pack) -> Vec<(CanonicalIdentity, bool)> {
+fn font_requirements(pack: &Pack) -> Vec<(Digest, bool)> {
     pack.font_requirements()
         .iter()
-        .map(|requirement| (requirement.container_identity(), requirement.is_embedded()))
+        .map(|requirement| (requirement.digest, requirement.embedded))
         .collect()
 }
 
@@ -1266,7 +1252,11 @@ fn an_archive_beyond_the_expansion_ceiling_fails_the_resume_loop() {
         .registry_archive(
             "oversized",
             archive(&[("lib.typ", 128 * 1024 * 1024, b"#let value = 1")]),
-            typst_pack::PackageExpansionLimits::new(1 << 20, 10, 1 << 20, 4096, 4096),
+            typst_pack::ReadLimits {
+                max_entries: 10,
+                max_file_bytes: 4096,
+                max_total_bytes: 4096,
+            },
         );
 
     assert_package_reading_failure(
@@ -1287,12 +1277,12 @@ fn cache_and_registry_archives_compose_into_the_same_semantic_pack() {
     .cached_archive(
         "cached",
         valid_archive("cached", "#let cached = 1"),
-        typst_pack::PackageExpansionLimits::reference_v1(),
+        typst_pack::ReadLimits::DEFAULT,
     )
     .registry_archive(
         "registered",
         valid_archive("registered", "#let registered = 2"),
-        typst_pack::PackageExpansionLimits::reference_v1(),
+        typst_pack::ReadLimits::DEFAULT,
     );
 
     let created = conform_object_storage(&fixture);
@@ -1381,10 +1371,10 @@ fn representative_compile_warnings_are_returned_by_every_adapter() {
 /// ships with the `embedded-fonts` feature.
 #[cfg(feature = "embedded-fonts")]
 mod fonts {
-    use typst_pack::{CanonicalIdentity, FontDisposition};
+    use typst_pack::{Digest, FontDisposition};
 
     use crate::font_bytes::{family_of, font_collection, renamed_family, typst_container};
-    use crate::{Fixture, FontSource, conform, font_catalog, font_requirements};
+    use crate::{Fixture, FontSource, conform, font_faces, font_requirements};
 
     /// A container offering the given family and nothing else, renamed out of
     /// one Typst ships so that its bytes are a real font.
@@ -1417,12 +1407,12 @@ mod fonts {
 
         let created = conform(&fixture);
 
-        // Every face of a collection travels in the same container, so two
-        // selected faces are one Font Requirement.
-        let identity = CanonicalIdentity::for_font_container_bytes(&container);
+        // Every face of a collection travels in the same container, so the
+        // selected faces are one Font Requirement offering every face.
+        let identity = Digest::of(&container);
         assert_eq!(font_requirements(&created.pack), [(identity, true)]);
         assert_eq!(
-            font_catalog(&created.pack),
+            font_faces(&created.pack),
             [(identity, 0, true), (identity, 1, true)]
         );
     }
@@ -1448,14 +1438,8 @@ mod fonts {
             font_requirements(&conform(&fixture).pack)
         };
 
-        assert_eq!(
-            selected([&first, &second]),
-            [(CanonicalIdentity::for_font_container_bytes(&first), true)]
-        );
-        assert_eq!(
-            selected([&second, &first]),
-            [(CanonicalIdentity::for_font_container_bytes(&second), true)]
-        );
+        assert_eq!(selected([&first, &second]), [(Digest::of(&first), true)]);
+        assert_eq!(selected([&second, &first]), [(Digest::of(&second), true)]);
     }
 
     #[test]
@@ -1476,10 +1460,10 @@ mod fonts {
 
         // One Pack references a container it may not redistribute and embeds
         // one it may, and the Pack Font Catalog keeps candidate order.
-        let typst_identity = CanonicalIdentity::for_font_container_bytes(&typst_font);
-        let scanned_identity = CanonicalIdentity::for_font_container_bytes(&scanned);
+        let typst_identity = Digest::of(&typst_font);
+        let scanned_identity = Digest::of(&scanned);
         assert_eq!(
-            font_catalog(&created.pack),
+            font_faces(&created.pack),
             [(typst_identity, 0, false), (scanned_identity, 0, true),]
         );
         assert_eq!(

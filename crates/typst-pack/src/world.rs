@@ -14,7 +14,8 @@ use typst_kit::files::{FileLoader, FileStore};
 use typst_kit::fonts::FontStore;
 
 use crate::domain::DocumentTime;
-use crate::pack::{CompilationDependencySnapshot, Pack, PackageFiles};
+use crate::pack::{CompilationDependencySnapshot, Pack};
+use crate::package_catalog::PackageTree;
 
 /// A complete Typst [`World`] backed by a [`Pack`].
 ///
@@ -40,7 +41,7 @@ impl PackWorld {
         features: Vec<Feature>,
         document_time: DocumentTime,
     ) -> Result<Self, PackWorldConstructionError> {
-        if dependencies.pack_identity() != pack.identity() {
+        if dependencies.pack_identity != pack.identity() {
             return Err(PackWorldConstructionError::DependencySnapshotPackMismatch);
         }
         if let Some(path) = project_overrides
@@ -58,7 +59,11 @@ impl PackWorld {
                     .map_err(|_| PackWorldConstructionError::InvalidDocumentTimestamp)?,
             ),
         };
-        let (exact_packages, font_catalog) = dependencies.into_parts();
+        let CompilationDependencySnapshot {
+            packages: exact_packages,
+            fonts: font_catalog,
+            ..
+        } = dependencies;
         let entrypoint = typst::syntax::VirtualPath::new(pack.entrypoint())
             .expect("Pack entrypoint invariant violated");
         let main = RootedPath::new(VirtualRoot::Project, entrypoint).intern();
@@ -156,7 +161,7 @@ enum Clock {
 struct PackLoader {
     pack: Arc<Pack>,
     project_overrides: BTreeMap<String, Bytes>,
-    exact_packages: BTreeMap<String, PackageFiles>,
+    exact_packages: BTreeMap<String, PackageTree>,
 }
 
 /// Pack World construction accepts only a complete Pack-bound input set.
@@ -189,7 +194,7 @@ impl FileLoader for PackLoader {
                         .ok_or_else(|| FileError::NotFound(PathBuf::from(path)))
                 } else if let Some(package) = self.exact_packages.get(&spec.to_string()) {
                     package
-                        .file(path)
+                        .shared_file(path)
                         .map(|data| data.to_typst())
                         .ok_or_else(|| FileError::NotFound(PathBuf::from(path)))
                 } else {

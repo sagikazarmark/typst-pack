@@ -74,7 +74,7 @@ fn ordinary_file_lifecycle_remains_compatible_through_the_cli_process() {
         format!(
             concat!(
                 "pack: project.typk\n",
-                "format version: 1\n",
+                "format version: 2\n",
                 "entrypoint: main.typ\n",
                 "name: Compatibility Fixture\n",
                 "description: Ordinary CLI lifecycle\n",

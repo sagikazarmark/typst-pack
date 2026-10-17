@@ -5,22 +5,26 @@ but too detailed for the README.
 
 ## Pack and identities
 
-A `Pack` is valid only when its entrypoint, project paths, package requirements,
-font requirements, embedded values, and declared identities agree. Construction
-and archive decoding run the same whole-Pack validation.
+A `Pack` is valid only when its entrypoint, project paths, packages, and font
+containers agree. The builder, creation, and archive decoding all construct a
+Pack through the same whole-Pack validation.
 
-Pack Identity covers the entrypoint, project paths and bytes, ordered fonts,
-exact package and font requirements, and whether each requirement is embedded.
-Metadata, archive compression and ordering, storage locations, read/write
-evidence, and host configuration do not contribute. Canonical identities include
-their role, schema, algorithm, and digest; compare the whole value, not a bare
-digest.
+Every identity is a SHA-256 `Digest` over a documented preimage (see the README's
+"Pack format"). Pack Identity covers the entrypoint, project paths and bytes,
+each package's tree digest and whether it is embedded, and each font container's
+digest and whether it is embedded, in font book order. Metadata, informational
+manifest fields, archive compression and member order, storage locations, and
+host configuration do not contribute.
+
+Font requirements are whole containers: compilation exposes every face of every
+required container to Typst, so text the representative compile did not render
+uses the same fonts. External containers are matched by exact digest, and
+fulfillment failures name the families the pack expects.
 
 Compilation and result identities also include the semantic request and exact
-embedded implementation identities. Every enabled typst-pack crate feature is
-part of implementation attestation, even when that feature affects only an
-adapter. Feature-set changes therefore require a different identity-keyed cache
-namespace.
+embedded implementation identities, including the enabled typst-pack crate
+features. Their preimages are not a documented format; use them only as cache
+keys within one build configuration.
 
 ## Creation and fulfillment
 
@@ -35,8 +39,8 @@ again. A Pack Assembler owns the source-specific reading and retry loop.
 
 Compilation accepts external dependencies only through a
 `CompilationFulfillmentSet`. Before Typst runs, the library rejects missing,
-undeclared, unexpectedly external, or identity-mismatched package trees and font
-containers, and verifies required font faces. Fulfillment provenance, cache-hit,
+undeclared, unexpectedly external, or digest-mismatched package trees and font
+containers. Fulfillment provenance, cache-hit,
 and licensing fields are operational report data; they do not change compilation
 or result identity.
 
@@ -54,15 +58,16 @@ font authority.
 
 ## Limits
 
-Operations over caller-controlled semantic values provide first-party limits:
-`compile(request)` and `pack_archive::encode(pack)`. Their `*_with_limits`
-variants accept narrower or larger validated profiles.
-
-Operations that cross a byte trust boundary require explicit limits. These
-include Pack Archive reading and decoding, package archive expansion, filesystem
-source reading, and OpenDAL reads. Limits bound documented retained or
-generated resources, not process RSS, allocator overhead, compiler internals,
-elapsed time, or aggregate concurrency between independent operations.
+Operations over caller-controlled values, `compile(request)` and
+`pack_archive::encode(pack)`, need no limits; `compile_with_limits` accepts a
+`CompilationLimits` value. Operations that cross a byte trust boundary take
+explicit limits: `pack_archive::DecodeLimits` for archive reading and decoding,
+and `ReadLimits` for package archive expansion, filesystem source reading, and
+OpenDAL reads. Every limits type is a plain struct with public fields and a
+`Default`; an exceeded limit is a `LimitExceeded` naming the resource and the
+limit. Limits bound documented retained or generated resources, not process
+RSS, allocator overhead, compiler internals, elapsed time, or aggregate
+concurrency between independent operations.
 
 ## Filesystem adapter
 
@@ -120,8 +125,8 @@ OpenDAL provides `opendal::WritePolicy::CreateOrVerify` and
 atomicity promise. An OpenDAL `WriteError` reports the completed keys and
 whether the failing key's effect is indeterminate.
 
-Write inputs are borrowed or returned on composed-operation failure so callers
-retain exact replay material. A filesystem write failure names the failing path
+Write inputs are borrowed, so callers keep them for a retry. A filesystem write
+failure names the failing path
 and the files already committed; an OpenDAL `WriteError` names the completed
 keys, the failing key, and the native cause.
 
@@ -133,9 +138,12 @@ receipt or error.
 
 ## Archive representation
 
-`PackArchiveBytes` uniquely owns exact encoded or read bytes so retry material is
-unambiguous. Archive decoding borrows those bytes. Composed read/decode and
-encode/write errors preserve exact archive bytes where the operation owns them.
+Archive bytes are plain `Vec<u8>` values: `pack_archive::encode` returns them,
+`pack_archive::decode` borrows them, and `read`, `read_pack`, `write_pack`,
+`open_pack`, and `save_pack` compose them with streams and files.
 
-Pack Archive compatibility is semantic. Re-encoding may change compression,
-timestamps, unknown safe entries, and member ordering without changing the Pack.
+Decoding verifies every member against the digest the manifest declares, so a
+decoded Pack is exactly the content its producer encoded, whatever ZIP writer
+produced the archive. Re-encoding a decoded Pack yields the canonical encoding,
+which may differ from the original archive in compression, timestamps, and
+member order, but never in Pack Identity.

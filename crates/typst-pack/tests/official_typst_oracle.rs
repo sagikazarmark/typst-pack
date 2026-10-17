@@ -30,7 +30,7 @@ use typst_pdf::PdfStandard;
 fn compile(
     request: PackCompilationRequest,
 ) -> Result<CompilationResult, CompilationRequestRejection> {
-    let report = compile_to_report(request, CompilationLimits::reference_v1())?;
+    let report = compile_to_report(request, CompilationLimits::DEFAULT)?;
     Ok(report
         .result()
         .expect("expected a semantic Compilation Result")
@@ -51,15 +51,13 @@ fn output(format: OutputFormat) -> CompilationOutputSpecification {
 fn stabilized_pack(fixture: &Fixture) -> Pack {
     let mut builder = Pack::builder(fixture.entrypoint());
     for &(path, text) in fixture.project() {
-        builder = builder.file(path, text.as_bytes().to_vec()).unwrap();
+        builder = builder.file(path, text.as_bytes().to_vec());
     }
     for &(spec, path, text) in fixture.packages() {
-        builder = builder
-            .package_file(spec.parse().unwrap(), path, text.as_bytes().to_vec())
-            .unwrap();
+        builder = builder.package_file(spec.parse().unwrap(), path, text.as_bytes().to_vec());
     }
-    for (data, index) in fixture.fonts() {
-        builder = builder.font(data.clone(), *index).unwrap();
+    for (data, _) in fixture.fonts() {
+        builder = builder.font(data.clone());
     }
     let pack = builder.build().unwrap();
     decode_reference(encode_reference(&pack).unwrap()).unwrap()
@@ -88,13 +86,11 @@ fn embedded_and_external_complete_package_trees_match_the_independent_oracle() {
 
     let mut builder = Pack::builder(fixture.entrypoint());
     for &(path, text) in fixture.project() {
-        builder = builder.file(path, text.as_bytes().to_vec()).unwrap();
+        builder = builder.file(path, text.as_bytes().to_vec());
     }
     let spec: typst::syntax::package::PackageSpec = fixture.packages()[0].0.parse().unwrap();
     for &(_, path, text) in fixture.packages() {
-        builder = builder
-            .external_package_file(spec.clone(), path, text.as_bytes().to_vec())
-            .unwrap();
+        builder = builder.external_package_file(spec.clone(), path, text.as_bytes().to_vec());
     }
     let external_pack = builder.build().unwrap();
     let external = compile(
@@ -160,8 +156,15 @@ fn exact_pack_font_catalog_matches_the_independent_oracle_and_external_fulfillme
     assert_eq!(expected.font_catalog[0].2, index);
 
     let embedded_pack = stabilized_pack(&fixture);
-    assert_eq!(embedded_pack.fonts()[0].info(), &expected.font_catalog[0].0);
-    assert_eq!(embedded_pack.fonts()[0].data(), expected.font_catalog[0].1);
+    let requirement = &embedded_pack.font_requirements()[0];
+    assert_eq!(
+        requirement.faces[0].family,
+        expected.font_catalog[0].0.family
+    );
+    assert_eq!(
+        embedded_pack.font_data(&requirement.digest),
+        Some(expected.font_catalog[0].1.as_ref())
+    );
     let embedded = compile(PackCompilationRequest::new(
         embedded_pack,
         output(OutputFormat::Svg),
@@ -171,12 +174,10 @@ fn exact_pack_font_catalog_matches_the_independent_oracle_and_external_fulfillme
 
     let external_pack = Pack::builder("main.typ")
         .file("main.typ", fixture.project()[0].1.as_bytes().to_vec())
-        .unwrap()
-        .external_font(data.clone(), index)
-        .unwrap()
+        .external_font(data.clone())
         .build()
         .unwrap();
-    let identity = external_pack.font_requirements()[0].container_identity();
+    let identity = external_pack.font_requirements()[0].digest;
     let external = compile(
         PackCompilationRequest::new(external_pack, output(OutputFormat::Svg)).fulfillments(
             CompilationFulfillmentSet::new(
@@ -243,11 +244,8 @@ fn catalog_order_drives_the_same_official_font_selection_on_every_path() {
 
         let external_pack = Pack::builder("main.typ")
             .file("main.typ", fixture.project()[0].1.as_bytes().to_vec())
-            .unwrap()
-            .external_font(ordered[0].clone(), base.index())
-            .unwrap()
-            .external_font(ordered[1].clone(), base.index())
-            .unwrap()
+            .external_font(ordered[0].clone())
+            .external_font(ordered[1].clone())
             .build()
             .unwrap();
         let fulfillments = external_pack
@@ -256,7 +254,7 @@ fn catalog_order_drives_the_same_official_font_selection_on_every_path() {
             .zip(ordered)
             .map(|(requirement, data)| {
                 typst_pack::FontContainerFulfillment::new(
-                    requirement.container_identity(),
+                    requirement.digest,
                     typst_pack::FontContainer::new(data).unwrap(),
                 )
             })

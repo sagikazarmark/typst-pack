@@ -1,118 +1,175 @@
-//! Shared canonical identity values.
+//! SHA-256 content digests and the documented preimages built from them.
+//!
+//! See the README's "Pack format" section for the exact byte layouts.
 
-use std::hash::{Hash, Hasher};
+use std::fmt;
+use std::str::FromStr;
 
-/// The semantic role of a [`CanonicalIdentity`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub enum CanonicalIdentityRole {
-    Pack,
-    PackageTree,
-    FontContainer,
-    Compilation,
-    CompilationResult,
-}
+use sha2::{Digest as _, Sha256};
 
-impl CanonicalIdentityRole {
-    /// The stable role string used by serialized identity declarations.
-    pub const fn as_str(self) -> &'static str {
-        match self {
-            Self::Pack => "pack",
-            Self::PackageTree => "complete-package-tree",
-            Self::FontContainer => "font-container",
-            Self::Compilation => "compilation",
-            Self::CompilationResult => "compilation-result",
-        }
-    }
-
-    pub(crate) const fn schema(self) -> &'static str {
-        match self {
-            Self::Pack => "typst-pack-identity-v1",
-            Self::PackageTree => "typst-pack-complete-package-tree-v1",
-            Self::FontContainer => "typst-pack-font-container-identity-v1",
-            Self::Compilation => "typst-pack-compilation-v1",
-            Self::CompilationResult => "typst-pack-compilation-result-v1",
-        }
-    }
-}
-
-/// A role-separated canonical semantic identity.
+/// A SHA-256 digest, written as `sha256:<64 lowercase hex digits>`.
 ///
-/// Equality includes the role, schema, algorithm, and digest.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-pub struct CanonicalIdentity {
-    role: CanonicalIdentityRole,
-    digest: u128,
-}
+/// File and font container digests are the SHA-256 of the exact bytes.
+/// Package tree digests and pack identities are SHA-256 of a documented,
+/// domain-separated preimage (see the README's "Pack format" section).
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Digest([u8; 32]);
 
-impl Hash for CanonicalIdentity {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        // Schema-v1 projections hashed the digest-only identity newtypes.
-        self.digest.hash(state);
+impl Digest {
+    /// The SHA-256 digest of exact bytes.
+    pub fn of(bytes: &[u8]) -> Self {
+        Self(Sha256::digest(bytes).into())
+    }
+
+    /// The raw 32 digest bytes.
+    pub const fn as_bytes(&self) -> &[u8; 32] {
+        &self.0
+    }
+
+    /// The 64 lowercase hexadecimal digits, without the `sha256:` prefix.
+    pub fn to_hex(&self) -> String {
+        self.0.iter().map(|byte| format!("{byte:02x}")).collect()
+    }
+
+    /// Parses 64 lowercase hexadecimal digits, without the `sha256:` prefix.
+    pub(crate) fn from_hex(hex: &str) -> Option<Self> {
+        if hex.len() != 64
+            || !hex
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+        {
+            return None;
+        }
+        let mut bytes = [0; 32];
+        for (index, byte) in bytes.iter_mut().enumerate() {
+            *byte = u8::from_str_radix(&hex[index * 2..index * 2 + 2], 16).ok()?;
+        }
+        Some(Self(bytes))
+    }
+
+    /// The SHA-256 of a value's Rust [`Hash`](std::hash::Hash) stream under a
+    /// domain tag.
+    ///
+    /// Only for operational compilation identities, whose preimage is not a
+    /// documented format.
+    pub(crate) fn of_hash(domain: &str, value: &impl std::hash::Hash) -> Self {
+        struct Hasher(Sha256);
+        impl std::hash::Hasher for Hasher {
+            fn finish(&self) -> u64 {
+                unreachable!("only the SHA-256 output is used")
+            }
+            fn write(&mut self, bytes: &[u8]) {
+                self.0.update(bytes);
+            }
+        }
+        let mut hasher = Hasher(Sha256::new());
+        hasher.0.update(domain.as_bytes());
+        value.hash(&mut hasher);
+        Self(hasher.0.finalize().into())
     }
 }
 
-impl CanonicalIdentity {
-    pub(crate) const fn from_digest(role: CanonicalIdentityRole, digest: u128) -> Self {
-        Self { role, digest }
-    }
-
-    /// Derives the Font Container identity of exact container bytes.
-    pub fn for_font_container_bytes(data: &[u8]) -> Self {
-        Self::from_digest(
-            CanonicalIdentityRole::FontContainer,
-            typst::utils::hash128(&data),
-        )
-    }
-
-    /// The semantic role separated by this identity.
-    pub const fn role(self) -> CanonicalIdentityRole {
-        self.role
-    }
-
-    /// The identity schema used by this release.
-    pub const fn schema(self) -> &'static str {
-        self.role.schema()
-    }
-
-    /// The deterministic digest algorithm used by the schema.
-    pub const fn algorithm(self) -> &'static str {
-        "typst-hash128-0.15"
-    }
-
-    /// The deterministic 128-bit digest in big-endian order.
-    pub const fn digest(self) -> [u8; 16] {
-        self.digest.to_be_bytes()
-    }
-
-    pub(crate) const fn digest_value(self) -> u128 {
-        self.digest
-    }
-
-    pub(crate) fn encode(self) -> String {
-        format!("{:032x}", self.digest)
-    }
-
-    pub(crate) fn decode(role: CanonicalIdentityRole, value: &str) -> Option<Self> {
-        (value.len() == 32)
-            .then(|| u128::from_str_radix(value, 16).ok())
-            .flatten()
-            .map(|digest| Self::from_digest(role, digest))
-    }
-}
-
-impl std::fmt::Display for CanonicalIdentityRole {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(self.as_str())
-    }
-}
-
-/// Renders the role-qualified digest, the form used by diagnostics and `inspect`.
+/// Builds a documented digest preimage from length-prefixed fields.
 ///
-/// This is a readable projection, not the equality contract: comparisons must
-/// use the whole [`CanonicalIdentity`], which also separates schema and
-/// algorithm.
-impl std::fmt::Display for CanonicalIdentity {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}:{:032x}", self.role.as_str(), self.digest)
+/// `str` writes the UTF-8 byte length as a big-endian `u64` and then the bytes;
+/// `digest` writes the 32 raw digest bytes; `count` writes a big-endian `u64`;
+/// `bool` writes one byte, `0` or `1`. Every preimage starts with a domain tag
+/// written by `str`.
+pub(crate) struct Preimage(Sha256);
+
+impl Preimage {
+    pub(crate) fn new(domain: &str) -> Self {
+        let mut preimage = Self(Sha256::new());
+        preimage.str(domain);
+        preimage
+    }
+
+    pub(crate) fn str(&mut self, value: &str) -> &mut Self {
+        self.count(value.len());
+        self.0.update(value.as_bytes());
+        self
+    }
+
+    pub(crate) fn digest(&mut self, value: &Digest) -> &mut Self {
+        self.0.update(value.0);
+        self
+    }
+
+    pub(crate) fn count(&mut self, value: usize) -> &mut Self {
+        self.0.update((value as u64).to_be_bytes());
+        self
+    }
+
+    pub(crate) fn bool(&mut self, value: bool) -> &mut Self {
+        self.0.update([u8::from(value)]);
+        self
+    }
+
+    pub(crate) fn finish(&mut self) -> Digest {
+        Digest(std::mem::take(&mut self.0).finalize().into())
+    }
+}
+
+impl fmt::Display for Digest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "sha256:{}", self.to_hex())
+    }
+}
+
+impl fmt::Debug for Digest {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Display::fmt(self, formatter)
+    }
+}
+
+/// A string that is not `sha256:` followed by 64 lowercase hexadecimal digits.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("invalid digest {0:?}: expected `sha256:` and 64 lowercase hexadecimal digits")]
+pub struct InvalidDigest(pub String);
+
+impl FromStr for Digest {
+    type Err = InvalidDigest;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        value
+            .strip_prefix("sha256:")
+            .and_then(Self::from_hex)
+            .ok_or_else(|| InvalidDigest(value.to_owned()))
+    }
+}
+
+impl serde::Serialize for Digest {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(self)
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for Digest {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        value.parse().map_err(serde::de::Error::custom)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn digest_text_round_trips_and_rejects_other_forms() {
+        let digest = Digest::of(b"abc");
+        assert_eq!(
+            digest.to_string(),
+            "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(digest.to_string().parse::<Digest>(), Ok(digest));
+        for invalid in [
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+            "sha256:BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD",
+            "sha256:ba78",
+            "sha1:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+        ] {
+            assert!(invalid.parse::<Digest>().is_err(), "{invalid}");
+        }
     }
 }

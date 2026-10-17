@@ -46,9 +46,7 @@ fn package_manifest(name: &str) -> String {
 fn sample_pack() -> Pack {
     Pack::builder("main.typ")
         .file("main.typ", b"= Sample".to_vec())
-        .unwrap()
         .file("assets/logo.bin", b"logo".to_vec())
-        .unwrap()
         .build()
         .unwrap()
 }
@@ -303,8 +301,8 @@ fn a_failing_source_stops_package_fallback() {
 fn inserting_a_read_package_updates_catalog_and_failures() {
     use typst_pack::opendal::insert_package;
     use typst_pack::{
-        PackageCatalog, PackageDisposition, PackageExpansionLimits, PackageReadFailure,
-        PackageReadFailureReason, PackageReadFailures,
+        PackageCatalog, PackageDisposition, PackageReadFailure, PackageReadFailureReason,
+        PackageReadFailures, ReadLimits,
     };
 
     let mut catalog = PackageCatalog::new();
@@ -317,7 +315,7 @@ fn inserting_a_read_package_updates_catalog_and_failures() {
             spec,
             read,
             PackageDisposition::Embedded,
-            PackageExpansionLimits::reference_v1(),
+            ReadLimits::DEFAULT,
         )
     };
 
@@ -349,7 +347,7 @@ fn inserting_a_read_package_updates_catalog_and_failures() {
             ("lib.typ".into(), b"#let x = 1".to_vec()),
         ]),
         PackageDisposition::External,
-        PackageExpansionLimits::reference_v1(),
+        ReadLimits::DEFAULT,
     )
     .unwrap();
 
@@ -451,7 +449,7 @@ fn pack_archives_round_trip_under_both_policies() {
 
     let read = block_on(read_pack_archive(&op, "out/sample.typk", 1 << 20)).unwrap();
     assert_eq!(read.as_slice(), archive.as_slice());
-    let decoded = decode(&read, DecodeLimits::reference_v1()).unwrap();
+    let decoded = decode(&read, DecodeLimits::DEFAULT).unwrap();
     assert_eq!(decoded.identity(), pack.identity());
 
     let absent = block_on(read_pack_archive(&op, "out/absent.typk", 1 << 20));
@@ -485,7 +483,7 @@ fn create_or_verify_refuses_different_bytes_without_writing() {
 #[test]
 fn empty_objects_are_created_verified_and_read() {
     let op = memory();
-    let empty = typst_pack::PackArchiveBytes::from_vec(Vec::new());
+    let empty = Vec::<u8>::new();
     for expected in [WriteOutcome::Created, WriteOutcome::AlreadyMatching] {
         let outcome = block_on(write_pack_archive(
             &op,
@@ -715,7 +713,6 @@ fn two_page_result() -> CompilationResult {
 fn compilation_result(source: &str) -> CompilationResult {
     let pack = Pack::builder("main.typ")
         .file("main.typ", source.as_bytes().to_vec())
-        .unwrap()
         .build()
         .unwrap();
     compile_with_limits(
@@ -723,7 +720,7 @@ fn compilation_result(source: &str) -> CompilationResult {
             pack,
             CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
         ),
-        CompilationLimits::reference_v1(),
+        CompilationLimits::DEFAULT,
     )
     .unwrap()
     .result()
@@ -812,7 +809,7 @@ mod assembly {
             .pack
             .package_requirements()
             .iter()
-            .map(|requirement| requirement.spec().to_string())
+            .map(|requirement| requirement.spec.to_string())
             .collect::<Vec<_>>();
         assert_eq!(specs, ["@local/greet:1.0.0", "@preview/loud:1.0.0"]);
         assert_eq!(

@@ -2,12 +2,12 @@
 
 #[cfg(feature = "embedded-fonts")]
 use typst::foundations::Bytes;
-use typst::text::{Font, FontBook, FontInfo};
+use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
 use typst_kit::fonts::FontStore;
 
-use crate::CanonicalIdentity;
-use crate::pack::{FontFaceIdentity, font_container_identity};
+use crate::Digest;
+use crate::pack::FontFace;
 use crate::payload::SharedBytes;
 
 /// Whether a Font Container's bytes travel inside the Pack or must be
@@ -55,8 +55,9 @@ pub enum FontContainerError {
 #[derive(Clone, Debug)]
 pub struct FontContainer {
     data: SharedBytes,
-    identity: CanonicalIdentity,
-    faces: Vec<FontContainerFace>,
+    digest: Digest,
+    fonts: Vec<Font>,
+    faces: Vec<FontFace>,
 }
 
 impl FontContainer {
@@ -71,20 +72,15 @@ impl FontContainer {
     }
 
     pub(crate) fn from_shared(data: SharedBytes) -> Result<Self, FontContainerError> {
-        let identity = font_container_identity(data.as_slice());
-        let faces = Font::iter(data.to_typst())
-            .map(|font| FontContainerFace {
-                identity: FontFaceIdentity::new(identity, font.index()),
-                font,
-            })
-            .collect::<Vec<_>>();
-        if faces.is_empty() {
+        let fonts = Font::iter(data.to_typst()).collect::<Vec<_>>();
+        if fonts.is_empty() {
             return Err(FontContainerError::NoReadableFace);
         }
         Ok(Self {
+            digest: Digest::of(&data),
+            faces: fonts.iter().map(FontFace::of).collect(),
             data,
-            identity,
-            faces,
+            fonts,
         })
     }
 
@@ -93,21 +89,22 @@ impl FontContainer {
         self.data.as_slice()
     }
 
-    /// The Canonical Identity of the container bytes.
-    pub fn identity(&self) -> CanonicalIdentity {
-        self.identity
+    /// The SHA-256 of the container bytes.
+    pub fn digest(&self) -> Digest {
+        self.digest
     }
 
     /// The readable faces in container-local index order.
-    pub fn faces(&self) -> &[FontContainerFace] {
+    pub fn faces(&self) -> &[FontFace] {
         &self.faces
     }
 
-    pub(crate) fn font(&self, index: u32) -> Option<Font> {
-        self.faces
-            .iter()
-            .find(|face| face.identity.index() == index)
-            .map(|face| face.font.clone())
+    pub(crate) fn fonts(&self) -> &[Font] {
+        &self.fonts
+    }
+
+    pub(crate) fn shared_data(&self) -> &SharedBytes {
+        &self.data
     }
 }
 
@@ -118,38 +115,6 @@ impl PartialEq for FontContainer {
 }
 
 impl Eq for FontContainer {}
-
-/// One readable face of a validated Font Container.
-#[derive(Clone, Debug)]
-pub struct FontContainerFace {
-    identity: FontFaceIdentity,
-    font: Font,
-}
-
-impl FontContainerFace {
-    /// The exact container and container-local face index.
-    pub fn identity(&self) -> FontFaceIdentity {
-        self.identity
-    }
-
-    /// The shared exact container bytes this face was parsed from.
-    pub fn data(&self) -> &[u8] {
-        self.font.data().as_slice()
-    }
-
-    /// Official selection metadata derived from the verified container bytes.
-    pub fn info(&self) -> &FontInfo {
-        self.font.info()
-    }
-}
-
-impl PartialEq for FontContainerFace {
-    fn eq(&self, other: &Self) -> bool {
-        self.identity == other.identity && self.data() == other.data()
-    }
-}
-
-impl Eq for FontContainerFace {}
 
 /// One position in a Font Catalog.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -178,13 +143,14 @@ impl FontCatalogEntry {
     }
 }
 
-/// Exactly the Font Containers Pack Creation may select faces from, in the
-/// order the caller chose.
+/// Exactly the Font Containers Pack Creation may select from, in the order the
+/// caller chose.
 ///
-/// Face selection is attributable to that order alone. Faces are expanded in
+/// Font selection is attributable to that order alone. Faces are expanded in
 /// container-local index order, and nothing joins a supplied catalog
 /// implicitly, so Pack contents are not a function of which crate features a
-/// build enabled or which font sources a host offers.
+/// build enabled or which font sources a host offers. A Pack records every
+/// container the representative compile used, in catalog order.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct FontCatalog {
     entries: Vec<FontCatalogEntry>,
@@ -206,29 +172,17 @@ impl FontCatalog {
         &self.entries
     }
 
-    /// The faces this catalog offers, in catalog order: every face
-    /// of the first container in container-local index order, then those of
-    /// the second, and so on.
-    pub fn faces(&self) -> Vec<FontCatalogFace> {
-        self.expand().faces
-    }
-
     /// Expands the catalog into the faces creation compiles against.
     pub(crate) fn expand(&self) -> CatalogFonts {
         let mut store = FontStore::new();
-        let mut faces = Vec::new();
-        for entry in &self.entries {
-            for face in entry.container.faces() {
-                let font = face.font.clone();
-                let info = font.info().clone();
-                faces.push(FontCatalogFace {
-                    identity: face.identity(),
-                    disposition: entry.disposition,
-                });
-                store.push((font, info));
+        let mut containers = Vec::new();
+        for (position, entry) in self.entries.iter().enumerate() {
+            for font in entry.container.fonts() {
+                containers.push(position);
+                store.push((font.clone(), font.info().clone()));
             }
         }
-        CatalogFonts { store, faces }
+        CatalogFonts { store, containers }
     }
 }
 
@@ -246,48 +200,28 @@ impl FromIterator<FontCatalogEntry> for FontCatalog {
     }
 }
 
-/// One face a catalog offers to Pack Creation at one explicit position.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FontCatalogFace {
-    identity: FontFaceIdentity,
-    disposition: FontDisposition,
-}
-
-impl FontCatalogFace {
-    /// The exact container and container-local face index.
-    pub fn identity(&self) -> FontFaceIdentity {
-        self.identity
-    }
-
-    /// The disposition the face's container carries.
-    pub fn disposition(&self) -> FontDisposition {
-        self.disposition
-    }
-}
-
-/// The compile-time projection of one Font Catalog, indexed exactly as the
-/// representative compile sees it.
+/// The compile-time projection of one Font Catalog: every face of every
+/// container, in catalog order.
 pub(crate) struct CatalogFonts {
     store: FontStore,
-    faces: Vec<FontCatalogFace>,
+    /// The catalog position of each face's container.
+    containers: Vec<usize>,
 }
 
-// Only creation compiles against catalog faces.
 impl CatalogFonts {
     /// The selection metadata official Typst chooses faces from.
     pub(crate) fn book(&self) -> &LazyHash<FontBook> {
         self.store.book()
     }
 
-    /// The face at the given catalog position.
+    /// The face at the given book index.
     pub(crate) fn font(&self, index: usize) -> Option<Font> {
         self.store.font(index)
     }
 
-    /// The disposition carried by the container of the face at the given
-    /// catalog position.
-    pub(crate) fn disposition(&self, index: usize) -> Option<FontDisposition> {
-        self.faces.get(index).map(FontCatalogFace::disposition)
+    /// The catalog position of the container holding the face at a book index.
+    pub(crate) fn container(&self, index: usize) -> Option<usize> {
+        self.containers.get(index).copied()
     }
 }
 

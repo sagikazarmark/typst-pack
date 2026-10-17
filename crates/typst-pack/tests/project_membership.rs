@@ -3,10 +3,7 @@
 //! Every test here runs on a build with no crate feature enabled.
 
 use proptest::prelude::*;
-use typst_pack::{
-    Pack, PackBuildError, PackInvariantIssue, PackPathRole, ProjectSnapshotAssembly,
-    ProjectSnapshotIssue,
-};
+use typst_pack::{Pack, PackInvariantIssue, ProjectSnapshotAssembly, ProjectSnapshotIssue};
 
 #[test]
 fn a_snapshot_is_assembled_from_path_and_bytes_entries() {
@@ -238,36 +235,22 @@ proptest! {
 fn canonical_project_path_validation_rejects_pack_paths() {
     let error = Pack::builder("main.typ")
         .file("main.typ", b"Hello".to_vec())
-        .unwrap()
         .file("nested/old.typk", b"drop".to_vec())
-        .unwrap()
         .build()
         .unwrap_err();
     assert!(
-        matches!(
-            error,
-            PackBuildError::Invariant(ref error)
-                if matches!(error.issues(), [PackInvariantIssue::InvalidPath {
-                    role: PackPathRole::ProjectFile,
-                    ..
-                }])
-        ),
+        matches!(error.issues(), [PackInvariantIssue::InvalidPath { .. }]),
         "{error}"
     );
 
     let error = Pack::builder("main.typk")
         .file("main.typ", b"Hello".to_vec())
-        .unwrap()
         .build()
         .unwrap_err();
     assert!(
         matches!(
-            error,
-            PackBuildError::Invariant(ref error)
-                if matches!(error.issues(), [PackInvariantIssue::InvalidPath {
-                    role: PackPathRole::Entrypoint,
-                    ..
-                }])
+            error.issues(),
+            [PackInvariantIssue::InvalidEntrypoint { .. }]
         ),
         "{error}"
     );

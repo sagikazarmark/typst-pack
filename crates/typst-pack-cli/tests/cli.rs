@@ -2,18 +2,17 @@ use std::io::Write as _;
 use std::process::{Command, Stdio};
 
 use hayro_syntax::object::{DateTime, Dict, Name};
+use typst_pack::Pack;
 use typst_pack::pack_archive::{DecodeLimits, decode, encode};
-use typst_pack::{Pack, PackArchiveBytes};
 
 #[cfg(all(feature = "_test-package-download-probe", debug_assertions))]
 const PACKAGE_DOWNLOAD_PROBE_ENV: &str = "TYPST_PACK_TEST_PACKAGE_DOWNLOAD_PROBE";
 
-fn decode_reference(bytes: impl Into<PackArchiveBytes>) -> Pack {
-    let archive = bytes.into();
-    decode(&archive, DecodeLimits::reference_v1()).unwrap()
+fn decode_reference(archive: Vec<u8>) -> Pack {
+    decode(&archive, DecodeLimits::DEFAULT).unwrap()
 }
 
-fn encode_reference(pack: &Pack) -> PackArchiveBytes {
+fn encode_reference(pack: &Pack) -> Vec<u8> {
     encode(pack).unwrap()
 }
 
@@ -715,7 +714,6 @@ fn compile_preserves_pack_override_preflight_error_output() {
     let directory = tempfile::tempdir().unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"Hello".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
@@ -751,7 +749,6 @@ fn compile_reports_a_missing_output_directory_natively() {
     let directory = tempfile::tempdir().unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"#rect(width: 1pt, height: 1pt)".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
@@ -860,7 +857,7 @@ fn inspect_treats_a_dash_as_a_pack_file_path() {
 
     assert!(!result.status.success());
     assert!(
-        String::from_utf8_lossy(&result.stderr).contains("cannot open `-`"),
+        String::from_utf8_lossy(&result.stderr).contains("cannot open pack `-`"),
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
@@ -877,7 +874,6 @@ fn write_five_page_pack(directory: &std::path::Path) -> std::path::PathBuf {
         .collect::<String>();
     let pack = Pack::builder("main.typ")
         .file("main.typ", source.into_bytes())
-        .unwrap()
         .build()
         .unwrap();
     let path = directory.join("selection.typk");
@@ -1028,7 +1024,6 @@ fn every_output_format_can_write_one_artifact_to_stdout() {
     let directory = tempfile::tempdir().unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"Hello".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
@@ -1128,7 +1123,6 @@ fn compile_infers_typst_formats_case_insensitively_without_htm_alias() {
     let directory = tempfile::tempdir().unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"#rect(width: 1pt, height: 1pt)".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
@@ -1183,7 +1177,6 @@ fn explicit_format_overrides_a_conflicting_output_extension() {
     let directory = tempfile::tempdir().unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"#rect(width: 1pt, height: 1pt)".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
@@ -1219,7 +1212,6 @@ fn compile_derives_default_output_next_to_the_pack() {
     std::fs::create_dir(&nested).unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"#rect(width: 1pt, height: 1pt)".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = nested.join("project.typk");
@@ -1279,7 +1271,6 @@ fn compile_requires_format_for_an_extensionless_output() {
     let directory = tempfile::tempdir().unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"#rect(width: 1pt, height: 1pt)".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
@@ -1355,7 +1346,6 @@ fn compile_accepts_multiple_features_in_one_comma_delimited_value() {
             b"#pdf.table-summary(summary: \"One cell\", table(columns: 1, [Visible marker]))"
                 .to_vec(),
         )
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("features.typk");
@@ -1397,7 +1387,6 @@ fn compile_parses_typed_comma_delimited_pdf_controls() {
             b"#set document(title: \"Test\", author: \"Tester\")\n#set text(lang: \"en\")\nHello"
                 .to_vec(),
         )
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
@@ -1462,7 +1451,6 @@ fn incompatible_pdf_standards_render_all_validation_hints() {
     let directory = tempfile::tempdir().unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"Hello".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
@@ -1552,7 +1540,6 @@ fn cli_pdf_tags_are_present_by_default_and_absent_when_disabled() {
     let directory = tempfile::tempdir().unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"= Accessible heading\nBody text".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
@@ -1592,7 +1579,6 @@ fn cli_pretty_changes_html_svg_and_pdf_but_not_png() {
     let directory = tempfile::tempdir().unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"Hello".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
@@ -1638,7 +1624,6 @@ fn source_diagnostics_have_no_redundant_compilation_failed_trailer() {
     let directory = tempfile::tempdir().unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"#unknown-function()".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("invalid.typk");
@@ -1697,7 +1682,6 @@ fn compile_short_diagnostics_use_pack_virtual_source_name() {
     let directory = tempfile::tempdir().unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"#unknown-function()".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("invalid.typk");
@@ -1734,7 +1718,6 @@ fn failed_pdf_compilation_retains_the_pages_warning() {
             "main.typ",
             b"#set text(font: \"Definitely Missing\")\nWarning\n#unknown-function()".to_vec(),
         )
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("invalid.typk");
@@ -1775,7 +1758,6 @@ fn input_pairs_trim_values_and_reject_empty_keys() {
             b"#assert(sys.inputs.at(\"key\") == \"value\")\n#rect(width: 1pt, height: 1pt)"
                 .to_vec(),
         )
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("input.typk");
@@ -1849,7 +1831,6 @@ fn valid_source_date_epoch_is_available_to_typst_code() {
             "main.typ",
             b"#assert(datetime.today().year() == 2000)\n#rect(width: 1pt, height: 1pt)".to_vec(),
         )
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("timestamp.typk");
@@ -1908,7 +1889,6 @@ fn creation_timestamp_preserves_typst_year_boundary_metadata_states() {
     let directory = tempfile::tempdir().unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"Hello".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("timestamp.typk");
@@ -1976,7 +1956,6 @@ fn source_date_epoch_produces_deterministic_pdf_creation_metadata() {
     let directory = tempfile::tempdir().unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"Hello".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("timestamp.typk");
@@ -2039,7 +2018,6 @@ fn creation_timestamp_respects_datetime_today_timezone_offsets() {
 #rect(width: 1pt, height: 1pt)"#
                 .to_vec(),
         )
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("timestamp.typk");
@@ -2109,7 +2087,6 @@ fn typst_font_and_package_environment_variables_are_honored() {
             "main.typ",
             b"#set text(font: \"Libertinus Serif\")\nHello".to_vec(),
         )
-        .unwrap()
         .build()
         .unwrap();
     let text_pack_path = directory.path().join("text.typk");
@@ -2148,20 +2125,17 @@ fn typst_font_and_package_environment_variables_are_honored() {
             "main.typ",
             b"#import \"@local/shapes:0.1.0\": mark\n#mark".to_vec(),
         )
-        .unwrap()
         .external_package_file(
             spec.clone(),
             "typst.toml",
             b"[package]\nname = \"shapes\"\nversion = \"0.1.0\"\nentrypoint = \"lib.typ\"\n"
                 .to_vec(),
         )
-        .unwrap()
         .external_package_file(
             spec,
             "lib.typ",
             b"#let mark = rect(width: 1pt, height: 1pt)".to_vec(),
         )
-        .unwrap()
         .build()
         .unwrap();
     let package_pack_path = directory.path().join("package.typk");
@@ -2207,13 +2181,9 @@ fn platform_delimited_typst_font_paths_are_used_by_compile() {
         "#text(font: \"{}\")[First]\n#text(font: \"{}\")[Second]",
         fonts[0].1, fonts[1].1
     );
-    let mut builder = Pack::builder("main.typ")
-        .file("main.typ", source.into_bytes())
-        .unwrap();
+    let mut builder = Pack::builder("main.typ").file("main.typ", source.into_bytes());
     for (path, _) in &fonts {
-        builder = builder
-            .external_font(std::fs::read(path.join("font.ttf")).unwrap(), 0)
-            .unwrap();
+        builder = builder.external_font(std::fs::read(path.join("font.ttf")).unwrap());
     }
     let pack = builder.build().unwrap();
     let pack_path = directory.path().join("fonts.typk");
@@ -2253,20 +2223,17 @@ fn typst_package_cache_path_resolves_unvendored_packages_during_compile() {
             "main.typ",
             b"#import \"@preview/compile-cache:0.1.0\": mark\n#mark".to_vec(),
         )
-        .unwrap()
         .external_package_file(
             spec.clone(),
             "typst.toml",
             b"[package]\nname = \"compile-cache\"\nversion = \"0.1.0\"\nentrypoint = \"lib.typ\"\n"
                 .to_vec(),
         )
-        .unwrap()
         .external_package_file(
             spec,
             "lib.typ",
             b"#let mark = rect(width: 1pt, height: 1pt)".to_vec(),
         )
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("package.typk");
@@ -2343,7 +2310,11 @@ fn create_uses_shared_font_and_package_environment() {
     let pack = decode_reference(std::fs::read(output).unwrap());
     let spec = "@preview/create-cache:0.1.0".parse().unwrap();
     assert!(pack.package_file(&spec, "lib.typ").is_some());
-    assert!(!pack.fonts().is_empty());
+    assert!(
+        pack.font_requirements()
+            .iter()
+            .any(|requirement| requirement.embedded)
+    );
 }
 
 #[test]
@@ -2394,7 +2365,7 @@ fn no_vendor_packages_records_dependency_and_compiles_with_package_path() {
     let pack = decode_reference(std::fs::read(&pack_path).unwrap());
     let spec = "@preview/unvendored:0.1.0".parse().unwrap();
     assert!(!pack.has_package(&spec));
-    assert_eq!(pack.package_requirements()[0].spec(), &spec);
+    assert_eq!(pack.package_requirements()[0].spec, spec);
 
     let output = directory.path().join("project.svg");
     let compiled = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
@@ -2472,9 +2443,7 @@ fn compile_writes_valid_perfetto_timings_json() {
             "main.typ",
             b"#read(\"data/value.txt\")\n#rect(width: 1pt, height: 1pt)".to_vec(),
         )
-        .unwrap()
         .file("data/value.txt", b"provided".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
@@ -2521,7 +2490,6 @@ fn timing_export_errors_are_reported_after_compilation_errors() {
     let directory = tempfile::tempdir().unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"#unknown-function()".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("invalid.typk");
@@ -2585,7 +2553,6 @@ fn successful_export_warnings_precede_dependency_errors_when_timings_succeed() {
             "main.typ",
             b"#set text(font: \"Definitely Missing\")\nWarning".to_vec(),
         )
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("warning.typk");
@@ -2651,7 +2618,6 @@ fn filesystem_export_error_and_warnings_precede_timing_while_saved_errors_are_su
             "main.typ",
             b"#set text(font: \"Definitely Missing\")\nWarning".to_vec(),
         )
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("warning.typk");
@@ -2689,7 +2655,6 @@ fn dependency_formats_and_stdout_follow_typst_transport_rules() {
     let directory = tempfile::tempdir().unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"#rect(width: 1pt, height: 1pt)".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
@@ -2771,7 +2736,6 @@ fn json_dependencies_are_written_when_compilation_fails() {
     let directory = tempfile::tempdir().unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"#unknown-function()".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("invalid.typk");
@@ -2952,7 +2916,6 @@ fn global_color_controls_owned_and_source_diagnostics() {
 
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"#unknown-function()".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("invalid.typk");
@@ -3081,9 +3044,7 @@ fn compile_forwards_argument_and_environment_certificates_to_package_downloader(
             "main.typ",
             b"#import \"@preview/certificate-probe:0.1.0\": value\n#value".to_vec(),
         )
-        .unwrap()
         .external_package_file(spec, "lib.typ", b"#let value = 42".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
@@ -3191,9 +3152,7 @@ fn compile_offline_missing_package_does_not_activate_download_probe() {
             "main.typ",
             b"#import \"@preview/offline-probe:0.1.0\": value\n#value".to_vec(),
         )
-        .unwrap()
         .external_package_file(spec, "lib.typ", b"#let value = 42".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
@@ -3873,7 +3832,6 @@ fn empty_page_format_output_succeeds_and_reports_retained_compilation_warnings()
             "main.typ",
             b"#set text(font: \"Definitely Missing\")\nWarning".to_vec(),
         )
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("warning.typk");
@@ -4059,7 +4017,6 @@ fn omitted_page_output_expands_inherited_templates_but_document_outputs_are_lite
     let directory = tempfile::tempdir().unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"Hello".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("document-{p}-{0p}-{n}.typk");
@@ -4186,7 +4143,6 @@ fn padded_page_placeholders_use_total_source_page_width() {
         .collect::<String>();
     let pack = Pack::builder("main.typ")
         .file("main.typ", source.into_bytes())
-        .unwrap()
         .build()
         .unwrap();
     let pack_path = directory.path().join("padded.typk");

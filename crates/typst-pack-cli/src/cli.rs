@@ -24,8 +24,8 @@ use typst_pack::cli_support::{
     emit_creation_warnings, pdf_standard_requiring_tags, validate_pdf_standards,
 };
 use typst_pack::pack_archive::{
-    DecodeLimits, FORMAT_VERSION, FileReadError, OpenPackError, ReadLimits,
-    open_pack as open_pack_archive, read_pack as read_pack_archive, save_pack, write_pack,
+    DecodeLimits, FORMAT_VERSION, open_pack as open_pack_archive, read_pack as read_pack_archive,
+    save_pack, write_pack,
 };
 use typst_pack::{
     CompilationArtifact, CompilationFulfillmentIssue, CompilationFulfillmentSet, CompilationLimits,
@@ -39,8 +39,9 @@ use typst_pack::{
 use typst_pack::{
     FILE_EXTENSION, FilesystemPackAssembler, FilesystemPackAssemblerConfig,
     FilesystemPackAssemblyError, FilesystemPackAssemblyRequest, FilesystemReadError,
-    FilesystemWriteError, Pack, PackCreationError, PackExtractionSelection, PackMetadata,
-    WriteIssue, WritePolicy, plan_pack_extraction, write_pack_extraction_plan_to_filesystem,
+    FilesystemWriteError, FontRequirement, Pack, PackCreationError, PackExtractionSelection,
+    PackMetadata, WriteIssue, WritePolicy, plan_pack_extraction,
+    write_pack_extraction_plan_to_filesystem,
 };
 
 const ENV_PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
@@ -658,17 +659,11 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
         request = request.feature(feature.into());
     }
     if args.name.is_some() || args.description.is_some() || !args.authors.is_empty() {
-        let mut metadata = PackMetadata::new();
-        if let Some(name) = args.name {
-            metadata = metadata.with_name(name);
-        }
-        if let Some(description) = args.description {
-            metadata = metadata.with_description(description);
-        }
-        for author in args.authors {
-            metadata = metadata.with_author(author);
-        }
-        request = request.metadata(metadata);
+        request = request.metadata(PackMetadata {
+            name: args.name,
+            description: args.description,
+            authors: args.authors,
+        });
     }
 
     let assembler = FilesystemPackAssembler::new(config);
@@ -743,15 +738,15 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
         .pack()
         .package_requirements()
         .iter()
-        .filter(|requirement| requirement.is_embedded())
+        .filter(|requirement| requirement.embedded)
         .count();
     let unvendored_packages = report
         .pack()
         .package_requirements()
         .iter()
-        .filter(|requirement| !requirement.is_embedded())
+        .filter(|requirement| !requirement.embedded)
         .collect::<Vec<_>>();
-    let font_count = report.pack().font_catalog().len();
+    let font_count = report.pack().font_requirements().len();
     println!(
         "packed {} project file(s), {} package(s), {} font(s) into `{}`",
         project_file_count,
@@ -765,7 +760,7 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
             unvendored_packages.len()
         );
         for requirement in unvendored_packages {
-            println!("  {}", requirement.spec());
+            println!("  {}", requirement.spec);
         }
     }
     Ok(())
@@ -778,14 +773,14 @@ fn inspect(args: InspectArgs) -> CliResult {
     println!("format version: {FORMAT_VERSION}");
     println!("entrypoint: {}", pack.entrypoint());
     if let Some(metadata) = pack.metadata() {
-        if let Some(name) = metadata.name() {
+        if let Some(name) = &metadata.name {
             println!("name: {name}");
         }
-        if let Some(description) = metadata.description() {
+        if let Some(description) = &metadata.description {
             println!("description: {description}");
         }
-        if !metadata.authors().is_empty() {
-            println!("authors: {}", metadata.authors().join(", "));
+        if !metadata.authors.is_empty() {
+            println!("authors: {}", metadata.authors.join(", "));
         }
     }
 
@@ -807,51 +802,43 @@ fn inspect(args: InspectArgs) -> CliResult {
     let unvendored = pack
         .package_requirements()
         .iter()
-        .filter(|requirement| !requirement.is_embedded())
+        .filter(|requirement| !requirement.embedded)
         .collect::<Vec<_>>();
     if !unvendored.is_empty() {
         println!("\nunvendored packages:");
         for requirement in unvendored {
-            println!("  {}", requirement.spec());
+            println!("  {}", requirement.spec);
         }
     }
 
-    if !pack.fonts().is_empty() {
-        println!("\nembedded fonts:");
-        for font in pack.fonts() {
-            let identity = font.identity();
-            println!(
-                "  {} face {} ({}) - {}",
-                identity.container(),
-                identity.index(),
-                human_size(font.data().len()),
-                font.info().family,
-            );
-        }
-    }
-
-    // Fonts are external by default, and a Font Requirement carries only content
-    // identity, so this listing is the only place a recipient can learn what a
-    // pack expects them to supply.
-    let required_fonts = pack
+    let font_line = |requirement: &FontRequirement| {
+        let faces = requirement
+            .faces
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join("; ");
+        format!("  {} - {faces}", requirement.digest)
+    };
+    let (embedded_fonts, required_fonts): (Vec<_>, Vec<_>) = pack
         .font_requirements()
         .iter()
-        .filter(|requirement| !requirement.is_embedded())
-        .collect::<Vec<_>>();
+        .partition(|requirement| requirement.embedded);
+    if !embedded_fonts.is_empty() {
+        println!("\nembedded fonts:");
+        for requirement in embedded_fonts {
+            let size = pack.font_data(&requirement.digest).map_or(0, <[u8]>::len);
+            println!("{} ({})", font_line(requirement), human_size(size));
+        }
+    }
+
+    // External fonts are identified by content digest, so this listing is the
+    // only place a recipient can learn which fonts a pack expects them to
+    // supply.
     if !required_fonts.is_empty() {
         println!("\nrequired fonts (supply with --font-path at compile time):");
         for requirement in required_fonts {
-            let faces = requirement
-                .face_indices()
-                .iter()
-                .map(u32::to_string)
-                .collect::<Vec<_>>()
-                .join(", ");
-            println!(
-                "  {} ({}, face {faces})",
-                requirement.container_identity(),
-                human_size(requirement.container_length() as usize),
-            );
+            println!("{}", font_line(requirement));
         }
     }
 
@@ -1019,7 +1006,7 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     if pack
         .font_requirements()
         .iter()
-        .any(|requirement| !requirement.is_embedded())
+        .any(|requirement| !requirement.embedded)
     {
         let mut load = |font: typst::text::Font| {
             supplied_fonts.push(font.data().clone());
@@ -1055,20 +1042,19 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
     for requirement in pack
         .package_requirements()
         .iter()
-        .filter(|requirement| !requirement.is_embedded())
+        .filter(|requirement| !requirement.embedded)
     {
-        let read = packages.read(requirement.spec()).map_err(|error| {
+        let read = packages.read(&requirement.spec).map_err(|error| {
             CliError::Message(format!(
                 "external package fulfillment for {} is unavailable: {}",
-                requirement.spec(),
-                error
+                requirement.spec, error
             ))
         })?;
         let (tree, root) = read.into_parts();
         if let Some(root) = root {
-            package_roots.insert(requirement.spec().to_string(), root);
+            package_roots.insert(requirement.spec.to_string(), root);
         }
-        package_fulfillments.push((requirement.spec().clone(), tree));
+        package_fulfillments.push((requirement.spec.clone(), tree));
     }
     let pdf_creation_timestamp = match creation_timestamp {
         Some(timestamp) => convert_datetime(timestamp)
@@ -1378,27 +1364,13 @@ fn normalize_output_path(path: &Path) -> PathBuf {
 }
 
 fn read_pack(path: &Path) -> Result<Pack, String> {
-    open_pack_archive(
-        path,
-        ReadLimits::reference_v1(),
-        DecodeLimits::reference_v1(),
-    )
-    .map_err(|error| match error {
-        OpenPackError::Read(FileReadError::Io { source, .. }) => {
-            format!("cannot open `{}`: {source}", path.display())
-        }
-        error => error.to_string(),
-    })
+    open_pack_archive(path, DecodeLimits::DEFAULT).map_err(|error| error.to_string())
 }
 
 fn read_pack_input(path: &Path) -> Result<Pack, String> {
     if path == Path::new("-") {
-        return read_pack_archive(
-            std::io::stdin().lock(),
-            ReadLimits::reference_v1(),
-            DecodeLimits::reference_v1(),
-        )
-        .map_err(|error| format!("cannot read Pack from stdin: {error}"));
+        return read_pack_archive(std::io::stdin().lock(), DecodeLimits::DEFAULT)
+            .map_err(|error| format!("cannot read Pack from stdin: {error}"));
     }
     read_pack(path)
 }
@@ -1451,11 +1423,13 @@ fn initialize_jobs(jobs: Option<usize>) {
 }
 
 fn reference_compilation_limits(worker_count: usize) -> CompilationLimits {
-    let limits = CompilationLimits::reference_v1();
-    let worker_count = u64::try_from(worker_count)
-        .unwrap_or(limits.export_workers())
-        .clamp(1, limits.export_workers());
-    limits.with_export_workers(worker_count)
+    let limits = CompilationLimits::DEFAULT;
+    CompilationLimits {
+        export_workers: u64::try_from(worker_count)
+            .unwrap_or(limits.export_workers)
+            .clamp(1, limits.export_workers),
+        ..limits
+    }
 }
 
 fn write_dependencies(
@@ -1756,9 +1730,9 @@ mod parser_tests {
 
     #[test]
     fn reference_compilation_workers_honor_jobs_without_exceeding_the_profile() {
-        assert_eq!(reference_compilation_limits(1).export_workers(), 1);
-        assert_eq!(reference_compilation_limits(4).export_workers(), 4);
-        assert_eq!(reference_compilation_limits(64).export_workers(), 4);
+        assert_eq!(reference_compilation_limits(1).export_workers, 1);
+        assert_eq!(reference_compilation_limits(4).export_workers, 4);
+        assert_eq!(reference_compilation_limits(64).export_workers, 4);
     }
 }
 

@@ -6,8 +6,8 @@ use typst::syntax::package::PackageSpec;
 
 use super::{Error, check_key, check_prefix, storage};
 use crate::{
-    FontCatalog, FontCatalogEntry, FontContainer, FontDisposition, LimitExceeded, PackArchiveBytes,
-    ProjectSnapshot, ProjectSnapshotAssembly, ReadLimits, read_layout,
+    FontCatalog, FontCatalogEntry, FontContainer, FontDisposition, LimitExceeded, ProjectSnapshot,
+    ProjectSnapshotAssembly, ReadLimits, read_layout,
 };
 
 /// Running totals charged against one operation's [`ReadLimits`].
@@ -309,7 +309,7 @@ pub fn insert_package(
     spec: &PackageSpec,
     read: PackageRead,
     disposition: crate::PackageDisposition,
-    expansion_limits: crate::PackageExpansionLimits,
+    limits: ReadLimits,
 ) -> Result<(), Error> {
     use crate::{PackageReadError, PackageReadFailure, PackageReadFailureReason};
 
@@ -318,8 +318,7 @@ pub fn insert_package(
             crate::PackageTree::from_owned_entries(files).map_err(Error::from)
         }
         PackageRead::CachedArchive(bytes) | PackageRead::RegistryArchive(bytes) => {
-            crate::expand_package_archive(spec.clone(), &bytes, expansion_limits)
-                .map_err(Error::from)
+            crate::expand_package_archive(spec.clone(), &bytes, limits).map_err(Error::from)
         }
         PackageRead::Unavailable => {
             failures.insert(PackageReadFailure::new(
@@ -361,7 +360,7 @@ pub async fn read_pack_archive(
     op: &Operator,
     path: &str,
     max_bytes: u64,
-) -> Result<PackArchiveBytes, Error> {
+) -> Result<Vec<u8>, Error> {
     check_key(path)?;
     require_read(op)?;
     let mut budget = Budget::new(&ReadLimits {
@@ -375,5 +374,5 @@ pub async fn read_pack_archive(
             "the Pack Archive object is absent",
         ))
     })?;
-    Ok(PackArchiveBytes::from_vec(bytes))
+    Ok(bytes)
 }

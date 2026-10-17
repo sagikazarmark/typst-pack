@@ -21,7 +21,7 @@ use typst_pack::opendal::{
 use typst_pack::pack_archive::{DecodeLimits, decode, encode};
 use typst_pack::{
     FontDisposition, Pack, PackExtractionSelection, PackageCatalog, PackageDisposition,
-    PackageExpansionLimits, PackageReadFailures, ReadLimits, plan_pack_extraction,
+    PackageReadFailures, ReadLimits, plan_pack_extraction,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -77,7 +77,6 @@ async fn conditional_create_preserves_existing_bytes(admin: &Operator) {
     let archive = encode(
         &Pack::builder("main.typ")
             .file("main.typ", b"= Conflict".to_vec())
-            .unwrap()
             .build()
             .unwrap(),
     )
@@ -190,7 +189,7 @@ async fn package_registry_read_validates_then_populates_cache(admin: &Operator) 
         &spec,
         read,
         PackageDisposition::External,
-        PackageExpansionLimits::reference_v1(),
+        ReadLimits::DEFAULT,
     )
     .unwrap();
     let outcome = write_package_archive(admin, "packages/cache/", &spec, &archive)
@@ -207,7 +206,6 @@ async fn package_registry_read_validates_then_populates_cache(admin: &Operator) 
 async fn pack_archive_write_and_read_preserve_exact_bytes(admin: &Operator) {
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"= Archive".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let archive = encode(&pack).unwrap();
@@ -223,7 +221,7 @@ async fn pack_archive_write_and_read_preserve_exact_bytes(admin: &Operator) {
         .await
         .unwrap();
     assert_eq!(read.as_slice(), archive.as_slice());
-    let decoded = decode(&read, DecodeLimits::reference_v1()).unwrap();
+    let decoded = decode(&read, DecodeLimits::DEFAULT).unwrap();
     assert_eq!(decoded.identity(), pack.identity());
 }
 
@@ -246,9 +244,7 @@ async fn authorization_and_partial_write_evidence(admin: &Operator, partial: &Op
         .unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"main".to_vec())
-        .unwrap()
         .file("assets/logo.bin", b"logo".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let plan = plan_pack_extraction(&pack, PackExtractionSelection::default()).unwrap();

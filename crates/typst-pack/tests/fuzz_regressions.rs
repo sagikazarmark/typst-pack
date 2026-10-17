@@ -5,14 +5,14 @@ use std::num::NonZeroUsize;
 use typst_pack::pack_archive::{DecodeError, DecodeLimits, decode};
 use typst_pack::{
     CompilationLimits, CompilationOutputSpecification, CompilationRequestIssue, FontContainer,
-    FontContainerError, Pack, PackArchiveBytes, PackCompilationRequest, PackageTree,
-    PackageTreeIssue, PageSelection, PngOutputSpecification, ProjectSnapshotAssembly,
-    ProjectSnapshotIssue, compile_with_limits,
+    FontContainerError, Pack, PackCompilationRequest, PackageTree, PackageTreeIssue, PageSelection,
+    PngOutputSpecification, ProjectSnapshotAssembly, ProjectSnapshotIssue, compile_with_limits,
 };
 
 /// Resolves a temporary directory to a destination the write preflight accepts.
 ///
 /// macOS temp paths can start with `/var`, a symlink to `/private/var`.
+#[cfg(feature = "fs")]
 fn temp_path(directory: &tempfile::TempDir) -> std::path::PathBuf {
     std::fs::canonicalize(directory.path()).unwrap()
 }
@@ -26,7 +26,6 @@ fn compilation_artifact_key_regressions_store_exactly_at_the_given_key() {
 
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"#pagebreak()".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let result = compile_with_limits(
@@ -34,7 +33,7 @@ fn compilation_artifact_key_regressions_store_exactly_at_the_given_key() {
             pack,
             CompilationOutputSpecification::Svg(Default::default()),
         ),
-        CompilationLimits::reference_v1(),
+        CompilationLimits::DEFAULT,
     )
     .unwrap()
     .result()
@@ -93,11 +92,10 @@ fn pack_archive_decoding_regressions_replay_through_the_public_decoder() {
     ];
 
     for (name, bytes) in cases {
-        let archive = PackArchiveBytes::from_vec(bytes.to_vec());
         assert!(
             matches!(
-                decode(&archive, DecodeLimits::reference_v1()),
-                Err(DecodeError::Archive(_))
+                decode(bytes, DecodeLimits::DEFAULT),
+                Err(DecodeError::Zip(_) | DecodeError::MissingManifest)
             ),
             "archive regression {name} changed phase"
         );
@@ -120,7 +118,7 @@ fn package_archive_expansion_regressions_replay_through_the_public_expander() {
                 typst_pack::expand_package_archive(
                     spec.clone(),
                     bytes,
-                    typst_pack::PackageExpansionLimits::reference_v1(),
+                    typst_pack::ReadLimits::DEFAULT,
                 ),
                 Err(typst_pack::PackageReadError::MalformedArchive { .. }),
             ),
@@ -196,7 +194,6 @@ fn font_and_semantic_constructor_regressions_replay_without_partial_values() {
 fn compilation_request_regressions_replay_both_acceptance_and_rejection() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"accepted request fuzz regression".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let accepted = compile_with_limits(
@@ -204,7 +201,7 @@ fn compilation_request_regressions_replay_both_acceptance_and_rejection() {
             pack.clone(),
             CompilationOutputSpecification::Svg(Default::default()),
         ),
-        CompilationLimits::reference_v1(),
+        CompilationLimits::DEFAULT,
     )
     .unwrap();
     assert!(accepted.result().is_some());
@@ -219,7 +216,7 @@ fn compilation_request_regressions_replay_both_acceptance_and_rejection() {
                 ..PngOutputSpecification::default()
             }),
         ),
-        CompilationLimits::reference_v1(),
+        CompilationLimits::DEFAULT,
     );
     let rejection = rejected.unwrap_err();
     assert!(matches!(
@@ -248,7 +245,6 @@ fn typkignore_and_write_state_regressions_replay_natively() {
 
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"published".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let plan = plan_pack_extraction(&pack, PackExtractionSelection::default()).unwrap();

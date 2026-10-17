@@ -11,8 +11,7 @@ use super::{
 };
 use crate::{
     DiscoverySpecification, Pack, PackCreationInput, PackCreationOutcome, PackMetadata,
-    PackageCatalog, PackageDisposition, PackageExpansionLimits, PackageReadFailures, ReadLimits,
-    create,
+    PackageCatalog, PackageDisposition, PackageReadFailures, ReadLimits, create,
 };
 
 /// Assembles a Pack from a project, fonts, and packages held in OpenDAL
@@ -44,10 +43,9 @@ pub struct OpenDalPackAssembler {
     pub discovery: DiscoverySpecification,
     /// Optional Pack metadata.
     pub metadata: Option<PackMetadata>,
-    /// Limits for reading the project, the fonts, and each package.
+    /// Limits for reading the project, the fonts, and each package, and for
+    /// expanding each package archive.
     pub limits: ReadLimits,
-    /// Limits for expanding each package archive.
-    pub expansion_limits: PackageExpansionLimits,
 }
 
 /// A Pack produced by [`OpenDalPackAssembler::assemble`].
@@ -77,7 +75,6 @@ impl OpenDalPackAssembler {
             discovery,
             metadata: None,
             limits: ReadLimits::default(),
-            expansion_limits: PackageExpansionLimits::reference_v1(),
         }
     }
 
@@ -123,7 +120,7 @@ impl OpenDalPackAssembler {
                     &spec,
                     read,
                     self.package_disposition,
-                    self.expansion_limits,
+                    self.limits,
                 );
             }
         }

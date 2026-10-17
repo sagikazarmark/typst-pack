@@ -2,13 +2,12 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 
-#[cfg(feature = "package-reading")]
-use typst::foundations::Bytes;
 use typst::syntax::package::{PackageSpec, PackageVersion};
 
+use crate::Digest;
+use crate::identity::Preimage;
 use crate::paths::{canonical_relative_path, path_tree_conflicts};
 use crate::payload::SharedBytes;
-use crate::{CanonicalIdentity, CanonicalIdentityRole};
 
 /// Whether a Package Tree's bytes travel inside the Pack or must be fulfilled
 /// externally when the Pack is compiled.
@@ -27,64 +26,25 @@ impl PackageDisposition {
     }
 }
 
-/// Every addressable regular file beneath one read package root.
+/// Every addressable regular file beneath one package root, with the package
+/// tree digest derived from every path and its bytes.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PackageTree {
     files: BTreeMap<String, SharedBytes>,
-    identity: CanonicalIdentity,
-    file_count: u64,
-    byte_length: u64,
+    digest: Digest,
 }
 
 impl PackageTree {
     /// Constructs a tree by taking ownership of every file's exact bytes.
     pub fn from_owned_entries(
-        entries: impl IntoIterator<Item = (impl AsRef<str>, Vec<u8>)>,
+        entries: impl IntoIterator<Item = (impl Into<String>, Vec<u8>)>,
     ) -> Result<Self, PackageTreeError> {
         Self::from_shared_entries(
             entries
                 .into_iter()
-                .map(|(path, data)| (path.as_ref().to_owned(), SharedBytes::new(data)))
+                .map(|(path, data)| (path.into(), SharedBytes::new(data)))
                 .collect(),
         )
-    }
-
-    #[cfg(feature = "package-reading")]
-    pub(crate) fn from_typst_entries(
-        entries: Vec<(String, Bytes)>,
-    ) -> Result<Self, PackageTreeError> {
-        Self::from_shared_entries(
-            entries
-                .into_iter()
-                .map(|(path, data)| (path, SharedBytes::from_typst(data)))
-                .collect(),
-        )
-    }
-
-    fn from_shared_entries(entries: Vec<(String, SharedBytes)>) -> Result<Self, PackageTreeError> {
-        let canonical_paths =
-            preflight_package_tree_paths(entries.iter().map(|(path, _)| path), |_| true).map_err(
-                |error| match error {
-                    PackageTreePathPreflightError::Invalid(source) => source,
-                    PackageTreePathPreflightError::RetentionLimit => {
-                        unreachable!("unlimited Package Tree construction preflight cannot exhaust")
-                    }
-                },
-            )?;
-        let canonical_entries = canonical_paths
-            .into_iter()
-            .zip(entries.into_iter().map(|(_, data)| data))
-            .collect::<Vec<_>>();
-
-        let files = canonical_entries.into_iter().collect::<BTreeMap<_, _>>();
-        let (identity, file_count, byte_length) =
-            derive_package_tree_identity(files.iter().map(|(path, data)| (path.as_str(), data)));
-        Ok(Self {
-            files,
-            identity,
-            file_count,
-            byte_length,
-        })
     }
 
     /// Constructs a tree by copying every file from caller-owned bytes.
@@ -96,6 +56,54 @@ impl PackageTree {
                 .into_iter()
                 .map(|(path, data)| (path.as_ref().to_owned(), data.as_ref().to_vec())),
         )
+    }
+
+    pub(crate) fn from_shared_entries(
+        entries: Vec<(String, SharedBytes)>,
+    ) -> Result<Self, PackageTreeError> {
+        let mut issues = Vec::new();
+        let mut files = BTreeMap::new();
+        let mut duplicates = BTreeSet::new();
+        for (path, data) in entries {
+            match canonical_relative_path(&path) {
+                Ok(canonical) => {
+                    if files.insert(canonical.clone(), data).is_some() {
+                        duplicates.insert(canonical.into_string());
+                    }
+                }
+                Err(message) => issues.push(PackageTreeIssue::InvalidPath {
+                    path,
+                    message: message.to_string(),
+                }),
+            }
+        }
+        issues.extend(
+            duplicates
+                .into_iter()
+                .map(|path| PackageTreeIssue::DuplicatePath { path }),
+        );
+        issues.extend(
+            path_tree_conflicts(files.keys().map(|path| (path, ())))
+                .into_iter()
+                .map(|conflict| PackageTreeIssue::PathTreeConflict {
+                    ancestor: conflict.ancestor.to_string(),
+                    descendant: conflict.descendant.to_string(),
+                }),
+        );
+        if !issues.is_empty() {
+            issues.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
+            return Err(PackageTreeError { issues });
+        }
+        let files = files
+            .into_iter()
+            .map(|(path, data)| (path.into_string(), data))
+            .collect::<BTreeMap<_, _>>();
+        let digest = package_tree_digest(
+            files
+                .iter()
+                .map(|(path, data)| (path.as_str(), Digest::of(data))),
+        );
+        Ok(Self { files, digest })
     }
 
     /// The files in canonical package-relative path order.
@@ -110,19 +118,9 @@ impl PackageTree {
         self.files.get(path).map(SharedBytes::as_slice)
     }
 
-    /// The Canonical Identity derived from every path and exact byte value.
-    pub fn identity(&self) -> CanonicalIdentity {
-        self.identity
-    }
-
-    /// The number of files in the tree.
-    pub fn file_count(&self) -> u64 {
-        self.file_count
-    }
-
-    /// The total exact byte length of every file in the tree.
-    pub fn byte_length(&self) -> u64 {
-        self.byte_length
+    /// The package tree digest.
+    pub fn digest(&self) -> Digest {
+        self.digest
     }
 
     pub(crate) fn shared_files(&self) -> impl Iterator<Item = (&str, &SharedBytes)> {
@@ -132,34 +130,19 @@ impl PackageTree {
     pub(crate) fn shared_file(&self, path: &str) -> Option<&SharedBytes> {
         self.files.get(path)
     }
-
-    pub(crate) fn into_shared_files(self) -> BTreeMap<String, SharedBytes> {
-        self.files
-    }
 }
 
-pub(crate) fn derive_package_tree_identity<'a>(
-    files: impl IntoIterator<Item = (&'a str, &'a SharedBytes)>,
-) -> (CanonicalIdentity, u64, u64) {
-    let projection = files
-        .into_iter()
-        .map(|(path, data)| (path, data.len() as u64, typst::utils::hash128(data)))
-        .collect::<Vec<_>>();
-    let file_count = projection.len() as u64;
-    let byte_length = projection.iter().map(|(_, length, _)| length).sum();
-    (
-        CanonicalIdentity::from_digest(
-            CanonicalIdentityRole::PackageTree,
-            typst::utils::hash128(&(
-                "typst-pack-complete-package-tree-v1",
-                file_count,
-                byte_length,
-                projection,
-            )),
-        ),
-        file_count,
-        byte_length,
-    )
+/// The documented package tree digest preimage over `(path, file digest)`
+/// records in path order; see the README's "Pack format".
+pub(crate) fn package_tree_digest<'a>(
+    files: impl ExactSizeIterator<Item = (&'a str, Digest)>,
+) -> Digest {
+    let mut preimage = Preimage::new("typst-pack/package-tree/v1");
+    preimage.count(files.len());
+    for (path, digest) in files {
+        preimage.str(path).digest(&digest);
+    }
+    preimage.finish()
 }
 
 /// One independently detectable issue in a supplied Package Tree.
@@ -167,7 +150,7 @@ pub(crate) fn derive_package_tree_identity<'a>(
 #[non_exhaustive]
 pub enum PackageTreeIssue {
     /// A supplied path cannot name a package-relative file.
-    #[error("package path {path:?} cannot be represented: {message:?}")]
+    #[error("package path {path:?} cannot be represented: {message}")]
     InvalidPath { path: String, message: String },
     /// Two supplied entries name one canonical package file.
     #[error("package path {path:?} is supplied more than once")]
@@ -195,7 +178,7 @@ impl PackageTreeIssue {
 
 /// A failure while constructing a [`PackageTree`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("package tree construction failed with {} issue(s)", .issues.len())]
+#[error("invalid package tree: {}", .issues.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))]
 pub struct PackageTreeError {
     issues: Vec<PackageTreeIssue>,
 }
@@ -204,172 +187,6 @@ impl PackageTreeError {
     /// Every independently detectable issue in canonical path and kind order.
     pub fn issues(&self) -> &[PackageTreeIssue] {
         &self.issues
-    }
-}
-
-pub(crate) enum PackageTreePathPreflightError {
-    Invalid(PackageTreeError),
-    RetentionLimit,
-}
-
-impl PackageTreePathPreflightError {
-    #[cfg(test)]
-    fn issues(&self) -> &[PackageTreeIssue] {
-        match self {
-            Self::Invalid(source) => source.issues(),
-            Self::RetentionLimit => &[],
-        }
-    }
-
-    #[cfg(test)]
-    fn is_retention_limit(&self) -> bool {
-        matches!(self, Self::RetentionLimit)
-    }
-}
-
-/// Validates Package Tree paths before payloads are read.
-///
-/// `retain` is called with the byte lengths of every path copy that would be
-/// kept by the plan or its error evidence. Returning `false` stops before those
-/// copies are retained.
-pub(crate) fn preflight_package_tree_paths(
-    paths: impl IntoIterator<Item = impl AsRef<str>>,
-    mut retain: impl FnMut(&[usize]) -> bool,
-) -> Result<Vec<String>, PackageTreePathPreflightError> {
-    let mut canonical_paths = Vec::new();
-    let mut issues = Vec::new();
-    for path in paths {
-        let path = path.as_ref();
-        match canonical_relative_path(path) {
-            Ok(canonical) => {
-                if !retain(&[canonical.as_str().len()]) {
-                    return Err(PackageTreePathPreflightError::RetentionLimit);
-                }
-                canonical_paths.push(canonical);
-            }
-            Err(message) => {
-                if !retain(&[path.len()]) {
-                    return Err(PackageTreePathPreflightError::RetentionLimit);
-                }
-                issues.push(PackageTreeIssue::InvalidPath {
-                    path: path.to_owned(),
-                    message: message.to_string(),
-                });
-            }
-        }
-    }
-
-    let mut ordered = canonical_paths
-        .iter()
-        .map(|path| path.as_str())
-        .collect::<Vec<_>>();
-    ordered.sort_unstable();
-    let mut last_duplicate = None;
-    for path in ordered
-        .windows(2)
-        .filter(|pair| pair[0] == pair[1])
-        .map(|pair| pair[0])
-    {
-        if last_duplicate == Some(path) {
-            continue;
-        }
-        last_duplicate = Some(path);
-        if !retain(&[path.len()]) {
-            return Err(PackageTreePathPreflightError::RetentionLimit);
-        }
-        issues.push(PackageTreeIssue::DuplicatePath {
-            path: path.to_owned(),
-        });
-    }
-
-    ordered.dedup();
-    for ancestor in &ordered {
-        if !retain(&[ancestor.len() + 1]) {
-            return Err(PackageTreePathPreflightError::RetentionLimit);
-        }
-    }
-    let conflicts = path_tree_conflicts(ordered.iter().map(|path| {
-        let canonical = canonical_paths
-            .iter()
-            .find(|canonical| canonical.as_str() == *path)
-            .expect("an ordered canonical path came from the preflight input");
-        (canonical, ())
-    }));
-    for conflict in conflicts {
-        if !retain(&[
-            conflict.ancestor.as_str().len(),
-            conflict.descendant.as_str().len(),
-        ]) {
-            return Err(PackageTreePathPreflightError::RetentionLimit);
-        }
-        issues.push(PackageTreeIssue::PathTreeConflict {
-            ancestor: conflict.ancestor.to_string(),
-            descendant: conflict.descendant.to_string(),
-        });
-    }
-
-    if issues.is_empty() {
-        Ok(canonical_paths
-            .into_iter()
-            .map(|path| path.into_string())
-            .collect())
-    } else {
-        issues.sort_by(|left, right| left.sort_key().cmp(&right.sort_key()));
-        Err(PackageTreePathPreflightError::Invalid(PackageTreeError {
-            issues,
-        }))
-    }
-}
-
-#[cfg(test)]
-mod path_preflight_tests {
-    use super::{PackageTreeIssue, preflight_package_tree_paths};
-
-    #[test]
-    fn path_preflight_is_the_authority_for_canonical_package_tree_shape() {
-        let paths = [
-            "dir/second.typ",
-            "same.typ",
-            "../escape.typ",
-            "./same.typ",
-            "dir",
-        ];
-        let error = preflight_package_tree_paths(paths, |_| true).unwrap_err();
-
-        assert_eq!(error.issues().len(), 3);
-        assert!(matches!(
-            &error.issues()[0],
-            PackageTreeIssue::InvalidPath { path, .. } if path == "../escape.typ"
-        ));
-        assert_eq!(
-            &error.issues()[1..],
-            &[
-                PackageTreeIssue::PathTreeConflict {
-                    ancestor: "dir".to_owned(),
-                    descendant: "dir/second.typ".to_owned(),
-                },
-                PackageTreeIssue::DuplicatePath {
-                    path: "same.typ".to_owned(),
-                },
-            ]
-        );
-    }
-
-    #[test]
-    fn path_preflight_stops_before_retaining_unbudgeted_evidence() {
-        let mut retained = 0usize;
-        let error = preflight_package_tree_paths(["dir", "dir/file.typ"], |lengths| {
-            let requested = lengths.iter().sum::<usize>();
-            if retained + requested > 20 {
-                return false;
-            }
-            retained += requested;
-            true
-        })
-        .unwrap_err();
-
-        assert!(error.is_retention_limit());
-        assert_eq!(retained, 19);
     }
 }
 
@@ -597,7 +414,7 @@ impl PackageCatalogIssue {
 
 /// A failure while constructing a [`PackageCatalog`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("package catalog construction failed with {} issue(s)", .issues.len())]
+#[error("invalid package catalog: {}", .issues.iter().map(ToString::to_string).collect::<Vec<_>>().join("; "))]
 pub struct PackageCatalogError {
     issues: Vec<PackageCatalogIssue>,
 }

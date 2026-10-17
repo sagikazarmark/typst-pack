@@ -21,20 +21,14 @@ fuzz_target!(|data: &[u8]| {
     let invalid_document_time = flags & 4 != 0;
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"request fuzz".to_vec())
-        .unwrap()
         .file("a.txt", b"a".to_vec())
-        .unwrap()
         .file("b.txt", b"b".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let other_pack = Pack::builder("main.typ")
         .file("main.typ", b"other request fuzz".to_vec())
-        .unwrap()
         .file("a.txt", b"other a".to_vec())
-        .unwrap()
         .file("b.txt", b"other b".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let build_overrides = |owner: &Pack, reverse: bool| {
@@ -67,7 +61,7 @@ fuzz_target!(|data: &[u8]| {
                 }),
             )
             .inputs(caller_inputs.clone()),
-            typst_pack::CompilationLimits::reference_v1(),
+            typst_pack::CompilationLimits::DEFAULT,
         )
         .unwrap();
         assert!(report.result().is_some());
@@ -139,12 +133,12 @@ fuzz_target!(|data: &[u8]| {
 
     let first_rejection = compile_with_limits(
         build_request(reverse, reverse),
-        typst_pack::CompilationLimits::reference_v1(),
+        typst_pack::CompilationLimits::DEFAULT,
     )
     .unwrap_err();
     let second_rejection = compile_with_limits(
         build_request(!reverse, !reverse),
-        typst_pack::CompilationLimits::reference_v1(),
+        typst_pack::CompilationLimits::DEFAULT,
     )
     .unwrap_err();
     for rejection in [&first_rejection, &second_rejection] {

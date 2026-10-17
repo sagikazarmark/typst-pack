@@ -19,124 +19,49 @@ use super::fulfillment::{
     InvalidCompilationFulfillmentSet, PackageFulfillmentReport, verify_compilation_fulfillment_set,
 };
 use super::identity::{DiagnosticProducer, ImplementationIdentity};
+use crate::LimitExceeded;
 use crate::domain::{DocumentTime, TypstTarget};
 use crate::embedded::EmbeddedTypst;
-use crate::limits::{LimitError, Limits, ResourceKind};
 use crate::payload::SharedBytes;
 use crate::world::PackWorld;
 use crate::world_trace::{WorldTrace, logical_path};
-use crate::{CanonicalIdentity, CanonicalIdentityRole, Pack};
+use crate::{Digest, Pack};
 
-/// A resource bounded during compilation artifact export.
-pub type CompilationResource = ResourceKind<3>;
-
-#[allow(non_upper_case_globals)]
-impl ResourceKind<3> {
-    pub const SourcePages: Self = Self::new(0);
-    pub const Artifacts: Self = Self::new(1);
-    pub const PixelsPerArtifact: Self = Self::new(2);
-    pub const TotalPixels: Self = Self::new(3);
-    pub const ArtifactBytes: Self = Self::new(4);
-    pub const RetainedArtifactBytes: Self = Self::new(5);
-    pub const ExportWorkers: Self = Self::new(6);
+/// Resource ceilings for compilation artifact export.
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub struct CompilationLimits {
+    /// Maximum number of pages in the compiled document.
+    pub max_pages: u64,
+    /// Maximum number of exported artifacts.
+    pub max_artifacts: u64,
+    /// Maximum number of pixels in one PNG artifact.
+    pub max_pixels_per_artifact: u64,
+    /// Maximum number of pixels across all PNG artifacts.
+    pub max_total_pixels: u64,
+    /// Maximum size of one artifact.
+    pub max_artifact_bytes: u64,
+    /// Maximum combined size of all retained artifacts.
+    pub max_total_artifact_bytes: u64,
+    /// Number of pages exported concurrently; zero is treated as one.
+    pub export_workers: u64,
 }
 
-/// A mandatory compilation export ceiling was exceeded or could not be accounted.
-pub type CompilationLimitError = LimitError<CompilationResource>;
+impl CompilationLimits {
+    /// Ceilings suitable for ordinary documents.
+    pub const DEFAULT: Self = Self {
+        max_pages: 10_000,
+        max_artifacts: 10_000,
+        max_pixels_per_artifact: 100_000_000,
+        max_total_pixels: 1_000_000_000,
+        max_artifact_bytes: 512 * 1024 * 1024,
+        max_total_artifact_bytes: 2 * 1024 * 1024 * 1024,
+        export_workers: 4,
+    };
+}
 
-/// Mandatory finite resource ceilings for compilation artifact export.
-pub type CompilationLimits = Limits<CompilationResource>;
-
-impl Limits<CompilationResource> {
-    /// Constructs validated mandatory finite compilation ceilings.
-    #[track_caller]
-    pub fn new(
-        source_pages: u64,
-        artifacts: u64,
-        pixels_per_artifact: u64,
-        total_pixels: u64,
-        artifact_bytes: u64,
-        retained_artifact_bytes: u64,
-        export_workers: u64,
-    ) -> Self {
-        let limits = Self::from_ceilings([
-            source_pages,
-            artifacts,
-            pixels_per_artifact,
-            total_pixels,
-            artifact_bytes,
-            retained_artifact_bytes,
-            export_workers,
-        ])
-        .assert_probe_resources([
-            CompilationResource::SourcePages,
-            CompilationResource::Artifacts,
-            CompilationResource::PixelsPerArtifact,
-            CompilationResource::TotalPixels,
-            CompilationResource::ArtifactBytes,
-            CompilationResource::RetainedArtifactBytes,
-            CompilationResource::ExportWorkers,
-        ]);
-        assert!(
-            export_workers > 0,
-            "the ExportWorkers ceiling must be greater than zero"
-        );
-        limits
-    }
-
-    /// The first-party bounded compilation export profile.
-    pub const fn reference_v1() -> Self {
-        Self::from_ceilings([
-            10_000,
-            10_000,
-            100_000_000,
-            1_000_000_000,
-            512 * 1024 * 1024,
-            2 * 1024 * 1024 * 1024,
-            4,
-        ])
-    }
-
-    /// Replaces the export-worker ceiling while preserving every other limit.
-    #[track_caller]
-    pub fn with_export_workers(self, export_workers: u64) -> Self {
-        Self::new(
-            self.source_pages(),
-            self.artifacts(),
-            self.pixels_per_artifact(),
-            self.total_pixels(),
-            self.artifact_bytes(),
-            self.retained_artifact_bytes(),
-            export_workers,
-        )
-    }
-
-    pub const fn source_pages(&self) -> u64 {
-        self.ceilings[0]
-    }
-
-    pub const fn artifacts(&self) -> u64 {
-        self.ceilings[1]
-    }
-
-    pub const fn pixels_per_artifact(&self) -> u64 {
-        self.ceilings[2]
-    }
-
-    pub const fn total_pixels(&self) -> u64 {
-        self.ceilings[3]
-    }
-
-    pub const fn artifact_bytes(&self) -> u64 {
-        self.ceilings[4]
-    }
-
-    pub const fn retained_artifact_bytes(&self) -> u64 {
-        self.ceilings[5]
-    }
-
-    pub const fn export_workers(&self) -> u64 {
-        self.ceilings[6]
+impl Default for CompilationLimits {
+    fn default() -> Self {
+        Self::DEFAULT
     }
 }
 
@@ -286,7 +211,7 @@ impl CompilationOutputSpecification {
 /// ```
 #[derive(Debug, Clone)]
 pub struct PackOverrideSet {
-    pack_identity: CanonicalIdentity,
+    pack_identity: Digest,
     project_paths: BTreeSet<String>,
     replacements: BTreeMap<String, Bytes>,
 }
@@ -699,10 +624,7 @@ pub enum CompilationAccessKind {
 /// The stable outcome of one dependency request.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum CompilationAccessOutcome {
-    Read {
-        byte_length: usize,
-        digest: [u8; 16],
-    },
+    Read { byte_length: usize, digest: Digest },
     Missing,
     Failed,
 }
@@ -776,7 +698,7 @@ pub enum CompilationReportOutcome {
     Result(Box<CompilationResult>),
     Operation {
         outcome: CompilationOperationOutcome,
-        compilation_identity: CanonicalIdentity,
+        compilation_identity: Digest,
     },
 }
 
@@ -805,8 +727,8 @@ pub struct CompilationResult {
     pack_warnings: Vec<PackCompilationWarning>,
     document: CompilationDocumentSummary,
     access_trace: CompilationAccessTrace,
-    result_identity: CanonicalIdentity,
-    compilation_identity: CanonicalIdentity,
+    result_identity: Digest,
+    compilation_identity: Digest,
     engine_identity: ImplementationIdentity,
     exporter_identity: ImplementationIdentity,
 }
@@ -841,12 +763,12 @@ impl CompilationResult {
         &self.access_trace
     }
 
-    pub fn result_identity(&self) -> CanonicalIdentity {
+    pub fn result_identity(&self) -> Digest {
         self.result_identity
     }
 
     /// The identity of the complete prepared request and implementation.
-    pub fn compilation_identity(&self) -> CanonicalIdentity {
+    pub fn compilation_identity(&self) -> Digest {
         self.compilation_identity
     }
 
@@ -916,7 +838,7 @@ pub(crate) struct CompilationOutput {
 pub(crate) enum CompileError {
     /// Compilation artifact export exceeded a mandatory operational ceiling.
     #[error(transparent)]
-    Limit(#[from] CompilationLimitError),
+    Limit(#[from] LimitExceeded),
     /// The official PDF standards validator rejected the requested set.
     #[error(transparent)]
     InvalidPdfStandards(#[from] PdfStandardsValidationError),
@@ -1031,7 +953,7 @@ pub enum CompilationOperationOutcome {
     #[error(transparent)]
     InvalidFulfillmentSet(InvalidCompilationFulfillmentSet),
     #[error(transparent)]
-    ResourceLimit(CompilationLimitError),
+    ResourceLimit(LimitExceeded),
 }
 
 pub(crate) enum PackCompilationPreparation {
@@ -1049,7 +971,7 @@ pub(crate) fn compile_world(
     world: &dyn World,
     output: &CompilationOutputSpecification,
 ) -> Result<CompilationOutput, CompileError> {
-    compile_with_default_pdf_timestamp(world, output, CompilationLimits::reference_v1(), || {
+    compile_with_default_pdf_timestamp(world, output, CompilationLimits::DEFAULT, || {
         world.today(None).map(Timestamp::new_utc)
     })
 }
@@ -1059,7 +981,7 @@ pub(crate) fn compile_world(
 pub fn compile(
     request: PackCompilationRequest,
 ) -> Result<CompilationReport, CompilationRequestRejection> {
-    compile_with_limits(request, CompilationLimits::reference_v1())
+    compile_with_limits(request, CompilationLimits::DEFAULT)
 }
 
 /// Compiles a validated Pack under explicit resource ceilings.
@@ -1087,7 +1009,7 @@ pub fn compile_with_limits(
 
 pub(crate) struct PreparedPackCompilationKernel {
     request: PreparedCompilationRequest,
-    compilation_identity: CanonicalIdentity,
+    compilation_identity: Digest,
     engine_identity: ImplementationIdentity,
     exporter_identity: ImplementationIdentity,
     page_selection_implies_untagged_pdf: bool,
@@ -1098,8 +1020,8 @@ pub(crate) struct PreparedPackCompilationKernel {
 #[derive(Debug, Clone)]
 struct PreparedCompilationRequest {
     output_specification: CompilationOutputSpecification,
-    inputs_commitment: u128,
-    override_commitments: Vec<(String, usize, u128)>,
+    inputs_commitment: Digest,
+    override_commitments: Vec<(String, usize, Digest)>,
     features: Vec<Feature>,
     document_time: DocumentTime,
 }
@@ -1214,12 +1136,10 @@ pub(crate) fn prepare_pack_compilation_with_limits(
     let total_key_bytes: usize = raw_inputs.iter().map(|(key, _)| key.len()).sum();
     let total_value_repr_bytes: usize =
         raw_inputs.iter().map(|(_, value)| value.repr().len()).sum();
-    let inputs_commitment = typst::utils::hash128(&(
-        "typst-pack-inputs-v1",
-        total_key_bytes,
-        total_value_repr_bytes,
-        &raw_inputs,
-    ));
+    let inputs_commitment = Digest::of_hash(
+        "typst-pack-inputs",
+        &(total_key_bytes, total_value_repr_bytes, &raw_inputs),
+    );
     let override_commitments = overrides
         .replacements
         .iter()
@@ -1227,14 +1147,10 @@ pub(crate) fn prepare_pack_compilation_with_limits(
             (
                 path.clone(),
                 data.len(),
-                typst::utils::hash128(&(
-                    "typst-pack-override-v1+typst-0.15",
-                    "project-file",
-                    overrides.pack_identity.digest_value(),
-                    path,
-                    data.len(),
-                    data,
-                )),
+                Digest::of_hash(
+                    "typst-pack-override",
+                    &(overrides.pack_identity, path, data.len(), data),
+                ),
             )
         })
         .collect();
@@ -1264,7 +1180,7 @@ pub(crate) fn prepare_pack_compilation_with_limits(
     let package_requirements = pack
         .package_requirements()
         .iter()
-        .map(|requirement| (requirement.spec().to_string(), requirement))
+        .map(|requirement| (requirement.spec.to_string(), requirement))
         .collect::<BTreeMap<_, _>>();
     let package_report_keys = package_requirements
         .keys()
@@ -1274,7 +1190,7 @@ pub(crate) fn prepare_pack_compilation_with_limits(
     let font_requirements = pack
         .font_requirements()
         .iter()
-        .map(|requirement| (requirement.container_identity(), requirement))
+        .map(|requirement| (requirement.digest, requirement))
         .collect::<BTreeMap<_, _>>();
     let font_report_keys = font_requirements
         .keys()
@@ -1289,17 +1205,17 @@ pub(crate) fn prepare_pack_compilation_with_limits(
                 let supplied = package_fulfillments.get(&key);
                 PackageFulfillmentReport {
                     spec: requirement
-                        .map(|value| value.spec().clone())
+                        .map(|value| value.spec.clone())
                         .unwrap_or_else(|| {
                             supplied
                                 .expect("report key came from a requirement or fulfillment")
                                 .spec
                                 .clone()
                         }),
-                    required_tree_identity: requirement.map(|value| value.tree_identity()),
-                    supplied_tree_identity: supplied.map(|value| value.tree.identity()),
+                    required_tree_identity: requirement.map(|value| value.digest),
+                    supplied_tree_identity: supplied.map(|value| value.tree.digest()),
                     declared: requirement.is_some(),
-                    embedded: requirement.is_some_and(|value| value.is_embedded()),
+                    embedded: requirement.is_some_and(|value| value.embedded),
                     provenance: supplied.and_then(|value| value.provenance.clone()),
                     cache_hit: supplied.is_some_and(|value| value.cache_hit),
                 }
@@ -1312,9 +1228,9 @@ pub(crate) fn prepare_pack_compilation_with_limits(
                 let supplied = font_fulfillments.get(&identity);
                 FontFulfillmentReport {
                     container_identity: identity,
-                    supplied_container_identity: supplied.map(|value| value.container.identity()),
+                    supplied_container_identity: supplied.map(|value| value.container.digest()),
                     declared: requirement.is_some(),
-                    embedded: requirement.is_some_and(|value| value.is_embedded()),
+                    embedded: requirement.is_some_and(|value| value.embedded),
                     provenance: supplied.and_then(|value| value.provenance.clone()),
                     licensing: supplied.and_then(|value| value.licensing.clone()),
                 }
@@ -1556,10 +1472,7 @@ fn assemble_compilation_result(
         pack_warnings,
         document: document_summary(&kernel.request.output_specification, source_page_count),
         access_trace,
-        result_identity: CanonicalIdentity::from_digest(
-            CanonicalIdentityRole::CompilationResult,
-            0,
-        ),
+        result_identity: Digest::of(&[]),
         compilation_identity: kernel.compilation_identity,
         engine_identity: kernel.engine_identity,
         exporter_identity: kernel.exporter_identity,
@@ -1585,14 +1498,13 @@ fn finalize_result(mut result: CompilationResult) -> CompilationResult {
                 artifact.format,
                 artifact.source_page_number,
                 artifact.bytes.len(),
-                typst::utils::hash128(artifact.bytes.as_slice()),
+                Digest::of(artifact.bytes.as_slice()),
             )
         })
         .collect::<Vec<_>>();
-    result.result_identity = CanonicalIdentity::from_digest(
-        CanonicalIdentityRole::CompilationResult,
-        typst::utils::hash128(&(
-            "typst-pack-compilation-result-v1",
+    result.result_identity = Digest::of_hash(
+        "typst-pack-compilation-result",
+        &(
             result.compilation_identity,
             result.status,
             result.document,
@@ -1600,7 +1512,7 @@ fn finalize_result(mut result: CompilationResult) -> CompilationResult {
             &result.pack_warnings,
             &result.access_trace,
             artifacts,
-        )),
+        ),
     );
     result
 }
@@ -1610,7 +1522,7 @@ fn compilation_identity(
     request: &PreparedCompilationRequest,
     engine_identity: ImplementationIdentity,
     exporter_identity: ImplementationIdentity,
-) -> CanonicalIdentity {
+) -> Digest {
     let output_digest = match &request.output_specification {
         CompilationOutputSpecification::Pdf(specification) => {
             let page_selection = canonical_page_selection(&specification.page_selection);
@@ -1620,37 +1532,43 @@ fn compilation_identity(
                 .map(pdf_standard_identity)
                 .collect::<Vec<_>>();
             standards.sort_unstable();
-            typst::utils::hash128(&(
+            Digest::of_hash(
                 "pdf",
-                &page_selection,
-                &specification.identifier,
-                &specification.creator,
-                specification.tags,
-                specification.creation_timestamp,
-                standards,
-                specification.pretty,
-            ))
+                &(
+                    &page_selection,
+                    &specification.identifier,
+                    &specification.creator,
+                    specification.tags,
+                    specification.creation_timestamp,
+                    standards,
+                    specification.pretty,
+                ),
+            )
         }
         CompilationOutputSpecification::Png(specification) => {
             let page_selection = canonical_page_selection(&specification.page_selection);
-            typst::utils::hash128(&(
+            Digest::of_hash(
                 "png",
-                &page_selection,
-                specification.pixels_per_inch.map(f64::to_bits),
-                specification.render_bleed,
-            ))
+                &(
+                    &page_selection,
+                    specification.pixels_per_inch.map(f64::to_bits),
+                    specification.render_bleed,
+                ),
+            )
         }
         CompilationOutputSpecification::Svg(specification) => {
             let page_selection = canonical_page_selection(&specification.page_selection);
-            typst::utils::hash128(&(
+            Digest::of_hash(
                 "svg",
-                &page_selection,
-                specification.render_bleed,
-                specification.pretty,
-            ))
+                &(
+                    &page_selection,
+                    specification.render_bleed,
+                    specification.pretty,
+                ),
+            )
         }
         CompilationOutputSpecification::Html(specification) => {
-            typst::utils::hash128(&("html", specification.pretty))
+            Digest::of_hash("html", &specification.pretty)
         }
     };
     let (document_time, document_timestamp) = request.document_time.identity_projection();
@@ -1660,7 +1578,6 @@ fn compilation_identity(
         .map(|(path, byte_len, commitment)| (path, *byte_len, *commitment))
         .collect::<Vec<_>>();
     let projection = (
-        "typst-pack-compilation-v1",
         pack.identity(),
         request.output_specification.format(),
         output_digest,
@@ -1672,10 +1589,7 @@ fn compilation_identity(
         engine_identity,
         exporter_identity,
     );
-    CanonicalIdentity::from_digest(
-        CanonicalIdentityRole::Compilation,
-        typst::utils::hash128(&projection),
-    )
+    Digest::of_hash("typst-pack-compilation", &projection)
 }
 
 fn canonical_page_selection(selection: &PageSelection) -> (bool, Vec<(usize, usize)>) {
@@ -1842,15 +1756,7 @@ pub(crate) fn compile_with_default_pdf_timestamp(
         source_page_count: None,
     })?;
     let source_page_count = document.pages().len();
-    check_compilation_limit(
-        CompilationResource::SourcePages,
-        limits.source_pages(),
-        u64::try_from(source_page_count).map_err(|_| {
-            CompilationLimitError::AccountingOverflow {
-                resource: CompilationResource::SourcePages,
-            }
-        })?,
-    )?;
+    LimitExceeded::check(source_page_count as u64, limits.max_pages, "pages")?;
     let artifacts = {
         let _export_timing = typst_timing::TimingScope::new("export");
         match specification {
@@ -1953,33 +1859,15 @@ pub(crate) fn compile_with_default_pdf_timestamp(
     })
 }
 
-fn check_compilation_limit(
-    resource: CompilationResource,
-    ceiling: u64,
-    observed: u64,
-) -> Result<(), CompilationLimitError> {
-    if observed > ceiling {
-        Err(CompilationLimitError::exceeded(resource, ceiling))
-    } else {
-        Ok(())
-    }
-}
-
-fn check_artifact_count(
-    limits: CompilationLimits,
-    count: usize,
-) -> Result<(), CompilationLimitError> {
-    let observed = u64::try_from(count).map_err(|_| CompilationLimitError::AccountingOverflow {
-        resource: CompilationResource::Artifacts,
-    })?;
-    check_compilation_limit(CompilationResource::Artifacts, limits.artifacts(), observed)
+fn check_artifact_count(limits: CompilationLimits, count: usize) -> Result<(), LimitExceeded> {
+    LimitExceeded::check(count as u64, limits.max_artifacts, "artifacts")
 }
 
 fn check_png_pixels(
     limits: CompilationLimits,
     pages: &[(NonZeroUsize, &typst_layout::Page)],
     options: &typst_render::RenderOptions,
-) -> Result<(), CompilationLimitError> {
+) -> Result<(), LimitExceeded> {
     let mut total = 0u64;
     for (_, page) in pages {
         let size = if options.render_bleed {
@@ -1990,33 +1878,21 @@ fn check_png_pixels(
         let pixel_per_pt = options.pixel_per_pt.get() as f32;
         let width = (pixel_per_pt * size.x.to_pt() as f32).round().max(1.0) as u32;
         let height = (pixel_per_pt * size.y.to_pt() as f32).round().max(1.0) as u32;
-        let pixels = u64::from(width).checked_mul(u64::from(height)).ok_or(
-            CompilationLimitError::AccountingOverflow {
-                resource: CompilationResource::PixelsPerArtifact,
-            },
-        )?;
-        check_compilation_limit(
-            CompilationResource::PixelsPerArtifact,
-            limits.pixels_per_artifact(),
+        let pixels = u64::from(width) * u64::from(height);
+        LimitExceeded::check(
             pixels,
+            limits.max_pixels_per_artifact,
+            "pixels per artifact",
         )?;
-        total = total
-            .checked_add(pixels)
-            .ok_or(CompilationLimitError::AccountingOverflow {
-                resource: CompilationResource::TotalPixels,
-            })?;
+        LimitExceeded::add(&mut total, pixels, limits.max_total_pixels, "total pixels")?;
     }
-    check_compilation_limit(
-        CompilationResource::TotalPixels,
-        limits.total_pixels(),
-        total,
-    )
+    Ok(())
 }
 
 fn check_artifact_bytes(
     limits: CompilationLimits,
     artifacts: &[CompilationArtifact],
-) -> Result<(), CompilationLimitError> {
+) -> Result<(), LimitExceeded> {
     let mut retained = 0u64;
     for artifact in artifacts {
         retain_artifact_bytes(limits, &mut retained, artifact)?;
@@ -2028,26 +1904,14 @@ fn retain_artifact_bytes(
     limits: CompilationLimits,
     retained: &mut u64,
     artifact: &CompilationArtifact,
-) -> Result<(), CompilationLimitError> {
-    let bytes = u64::try_from(artifact.bytes.len()).map_err(|_| {
-        CompilationLimitError::AccountingOverflow {
-            resource: CompilationResource::ArtifactBytes,
-        }
-    })?;
-    check_compilation_limit(
-        CompilationResource::ArtifactBytes,
-        limits.artifact_bytes(),
+) -> Result<(), LimitExceeded> {
+    let bytes = artifact.bytes.len() as u64;
+    LimitExceeded::check(bytes, limits.max_artifact_bytes, "artifact bytes")?;
+    LimitExceeded::add(
+        retained,
         bytes,
-    )?;
-    *retained = retained
-        .checked_add(bytes)
-        .ok_or(CompilationLimitError::AccountingOverflow {
-            resource: CompilationResource::RetainedArtifactBytes,
-        })?;
-    check_compilation_limit(
-        CompilationResource::RetainedArtifactBytes,
-        limits.retained_artifact_bytes(),
-        *retained,
+        limits.max_total_artifact_bytes,
+        "total artifact bytes",
     )
 }
 
@@ -2100,7 +1964,7 @@ where
     if items.is_empty() {
         return Ok(vec![]);
     }
-    let workers = usize::try_from(limits.export_workers())
+    let workers = usize::try_from(limits.export_workers.max(1))
         .unwrap_or(usize::MAX)
         .min(items.len());
     let pool = rayon::ThreadPoolBuilder::new()
@@ -2228,7 +2092,7 @@ fn logical_span(world: &dyn World, span: DiagSpan) -> LogicalSpan {
 }
 
 #[cfg(test)]
-mod result_identity_tests {
+mod tests {
     use super::*;
 
     #[test]
@@ -2249,385 +2113,6 @@ mod result_identity_tests {
         assert_eq!(observation.outcome(), &CompilationAccessOutcome::Missing);
     }
 
-    #[test]
-    fn result_identity_binds_each_post_execution_projection() {
-        let pack = Pack::builder("main.typ")
-            .file(
-                "main.typ",
-                b"#set page(width: 20pt, height: 10pt, margin: 0pt)\n#rect(width: 1pt, height: 1pt)".to_vec(),
-            )
-            .unwrap()
-            .build()
-            .unwrap();
-        let report = compile_with_limits(
-            PackCompilationRequest::new(
-                pack,
-                CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
-            ),
-            CompilationLimits::reference_v1(),
-        )
-        .unwrap();
-        let base = report.result().unwrap().clone();
-        let identity = base.result_identity;
-
-        let mut compilation = base.clone();
-        compilation.compilation_identity = CanonicalIdentity::from_digest(
-            CanonicalIdentityRole::Compilation,
-            base.compilation_identity.digest_value() ^ 1,
-        );
-        assert_ne!(finalize_result(compilation).result_identity, identity);
-
-        let mut status = base.clone();
-        status.status = CompilationStatus::Rejected;
-        assert_ne!(finalize_result(status).result_identity, identity);
-
-        let mut target = base.clone();
-        target.document.target = TypstTarget::Html;
-        assert_ne!(finalize_result(target).result_identity, identity);
-
-        let mut document = base.clone();
-        document.document.source_page_count = Some(2);
-        assert_ne!(finalize_result(document).result_identity, identity);
-
-        let diagnostic = CompilationDiagnostic {
-            severity: DiagnosticSeverity::Warning,
-            message: "identity warning".to_owned(),
-            span: LogicalSpan {
-                logical_path: Some("project:main.typ".to_owned()),
-                byte_range: Some(1..2),
-            },
-            hints: vec![DiagnosticHint {
-                message: "identity hint".to_owned(),
-                span: LogicalSpan {
-                    logical_path: Some("project:hint.typ".to_owned()),
-                    byte_range: Some(2..3),
-                },
-            }],
-            trace: vec![DiagnosticTracepoint {
-                kind: TracepointKind::Call,
-                value: Some("identity trace".to_owned()),
-                span: LogicalSpan {
-                    logical_path: Some("project:trace.typ".to_owned()),
-                    byte_range: Some(3..4),
-                },
-            }],
-            phase: DiagnosticPhase::Compilation,
-            producer: DiagnosticProducer::new(base.engine_identity),
-            source_page_number: NonZeroUsize::new(1),
-        };
-        let mut diagnostics = base.clone();
-        diagnostics.diagnostics.push(diagnostic.clone());
-        let diagnostic_identity = finalize_result(diagnostics).result_identity;
-        assert_ne!(diagnostic_identity, identity);
-        let diagnostic_mutations = [
-            CompilationDiagnostic {
-                severity: DiagnosticSeverity::Error,
-                ..diagnostic.clone()
-            },
-            CompilationDiagnostic {
-                message: "changed warning".to_owned(),
-                ..diagnostic.clone()
-            },
-            CompilationDiagnostic {
-                span: LogicalSpan {
-                    logical_path: Some("project:changed.typ".to_owned()),
-                    ..diagnostic.span.clone()
-                },
-                ..diagnostic.clone()
-            },
-            CompilationDiagnostic {
-                span: LogicalSpan {
-                    byte_range: Some(4..5),
-                    ..diagnostic.span.clone()
-                },
-                ..diagnostic.clone()
-            },
-            CompilationDiagnostic {
-                hints: vec![DiagnosticHint {
-                    message: "changed hint".to_owned(),
-                    ..diagnostic.hints[0].clone()
-                }],
-                ..diagnostic.clone()
-            },
-            CompilationDiagnostic {
-                hints: vec![DiagnosticHint {
-                    span: LogicalSpan {
-                        logical_path: Some("project:changed-hint.typ".to_owned()),
-                        ..diagnostic.hints[0].span.clone()
-                    },
-                    ..diagnostic.hints[0].clone()
-                }],
-                ..diagnostic.clone()
-            },
-            CompilationDiagnostic {
-                hints: vec![DiagnosticHint {
-                    span: LogicalSpan {
-                        byte_range: Some(5..6),
-                        ..diagnostic.hints[0].span.clone()
-                    },
-                    ..diagnostic.hints[0].clone()
-                }],
-                ..diagnostic.clone()
-            },
-            CompilationDiagnostic {
-                trace: vec![DiagnosticTracepoint {
-                    kind: TracepointKind::Include,
-                    ..diagnostic.trace[0].clone()
-                }],
-                ..diagnostic.clone()
-            },
-            CompilationDiagnostic {
-                trace: vec![DiagnosticTracepoint {
-                    value: Some("changed trace".to_owned()),
-                    ..diagnostic.trace[0].clone()
-                }],
-                ..diagnostic.clone()
-            },
-            CompilationDiagnostic {
-                trace: vec![DiagnosticTracepoint {
-                    span: LogicalSpan {
-                        logical_path: Some("project:changed-trace.typ".to_owned()),
-                        ..diagnostic.trace[0].span.clone()
-                    },
-                    ..diagnostic.trace[0].clone()
-                }],
-                ..diagnostic.clone()
-            },
-            CompilationDiagnostic {
-                trace: vec![DiagnosticTracepoint {
-                    span: LogicalSpan {
-                        byte_range: Some(6..7),
-                        ..diagnostic.trace[0].span.clone()
-                    },
-                    ..diagnostic.trace[0].clone()
-                }],
-                ..diagnostic.clone()
-            },
-            CompilationDiagnostic {
-                phase: DiagnosticPhase::Export,
-                ..diagnostic.clone()
-            },
-            CompilationDiagnostic {
-                producer: DiagnosticProducer::new(base.exporter_identity),
-                ..diagnostic.clone()
-            },
-            CompilationDiagnostic {
-                source_page_number: NonZeroUsize::new(2),
-                ..diagnostic
-            },
-        ];
-        for diagnostic in &diagnostic_mutations {
-            let mut result = base.clone();
-            result.diagnostics.push(diagnostic.clone());
-            assert_ne!(finalize_result(result).result_identity, diagnostic_identity);
-        }
-
-        let mut warning = base.clone();
-        warning.pack_warnings.push(PackCompilationWarning {
-            message: "identity warning".to_owned(),
-            hints: vec!["identity hint".to_owned()],
-        });
-        let warning_identity = finalize_result(warning).result_identity;
-        assert_ne!(warning_identity, identity);
-        for warning in [
-            PackCompilationWarning {
-                message: "changed warning".to_owned(),
-                hints: vec!["identity hint".to_owned()],
-            },
-            PackCompilationWarning {
-                message: "identity warning".to_owned(),
-                hints: vec!["changed hint".to_owned()],
-            },
-        ] {
-            let mut result = base.clone();
-            result.pack_warnings.push(warning);
-            assert_ne!(finalize_result(result).result_identity, warning_identity);
-        }
-
-        let observation = CompilationAccessObservation {
-            kind: CompilationAccessKind::File,
-            logical_path: "project:identity.txt".to_owned(),
-            font_index: Some(1),
-            outcome: CompilationAccessOutcome::Read {
-                byte_length: 8,
-                digest: [1; 16],
-            },
-        };
-        let mut access = base.clone();
-        access.access_trace.observations.insert(observation.clone());
-        let access_identity = finalize_result(access).result_identity;
-        assert_ne!(access_identity, identity);
-        let observation_mutations = [
-            CompilationAccessObservation {
-                kind: CompilationAccessKind::Source,
-                ..observation.clone()
-            },
-            CompilationAccessObservation {
-                logical_path: "project:changed.txt".to_owned(),
-                ..observation.clone()
-            },
-            CompilationAccessObservation {
-                font_index: Some(2),
-                ..observation.clone()
-            },
-            CompilationAccessObservation {
-                outcome: CompilationAccessOutcome::Read {
-                    byte_length: 9,
-                    digest: [1; 16],
-                },
-                ..observation.clone()
-            },
-            CompilationAccessObservation {
-                outcome: CompilationAccessOutcome::Read {
-                    byte_length: 8,
-                    digest: [2; 16],
-                },
-                ..observation.clone()
-            },
-            CompilationAccessObservation {
-                outcome: CompilationAccessOutcome::Missing,
-                ..observation.clone()
-            },
-            CompilationAccessObservation {
-                outcome: CompilationAccessOutcome::Failed,
-                ..observation
-            },
-        ];
-        for observation in observation_mutations {
-            let mut result = base.clone();
-            result.access_trace.observations.insert(observation);
-            assert_ne!(finalize_result(result).result_identity, access_identity);
-        }
-
-        let mut artifact_format = base.clone();
-        artifact_format.artifacts[0].format = OutputFormat::Png;
-        assert_ne!(finalize_result(artifact_format).result_identity, identity);
-
-        let mut artifact_page = base.clone();
-        artifact_page.artifacts[0].source_page_number = NonZeroUsize::new(2);
-        assert_ne!(finalize_result(artifact_page).result_identity, identity);
-
-        let mut artifact = base.clone();
-        let mut artifact_bytes = artifact.artifacts[0].bytes.as_slice().to_vec();
-        artifact_bytes.push(0);
-        artifact.artifacts[0].bytes = SharedBytes::new(artifact_bytes);
-        assert_ne!(finalize_result(artifact).result_identity, identity);
-
-        let mut ordered = base.clone();
-        let mut second = ordered.artifacts[0].clone();
-        let mut second_bytes = second.bytes.as_slice().to_vec();
-        second_bytes.push(0);
-        second.bytes = SharedBytes::new(second_bytes);
-        ordered.artifacts.push(second);
-        let ordered_identity = finalize_result(ordered.clone()).result_identity;
-        ordered.artifacts.reverse();
-        assert_ne!(finalize_result(ordered).result_identity, ordered_identity);
-
-        let mut ordered_diagnostics = base.clone();
-        let mut first_diagnostic = diagnostic_mutations[0].clone();
-        first_diagnostic.message = "first diagnostic".to_owned();
-        let mut second_diagnostic = diagnostic_mutations[1].clone();
-        second_diagnostic.message = "second diagnostic".to_owned();
-        ordered_diagnostics.diagnostics = vec![first_diagnostic, second_diagnostic];
-        let ordered_diagnostics_identity =
-            finalize_result(ordered_diagnostics.clone()).result_identity;
-        ordered_diagnostics.diagnostics.reverse();
-        assert_ne!(
-            finalize_result(ordered_diagnostics).result_identity,
-            ordered_diagnostics_identity
-        );
-
-        let mut ordered_warnings = base;
-        ordered_warnings.pack_warnings = vec![
-            PackCompilationWarning {
-                message: "first warning".to_owned(),
-                hints: vec![],
-            },
-            PackCompilationWarning {
-                message: "second warning".to_owned(),
-                hints: vec![],
-            },
-        ];
-        let ordered_warnings_identity = finalize_result(ordered_warnings.clone()).result_identity;
-        ordered_warnings.pack_warnings.reverse();
-        assert_ne!(
-            finalize_result(ordered_warnings).result_identity,
-            ordered_warnings_identity
-        );
-    }
-
-    #[test]
-    fn compilation_identity_binds_every_implementation_identity_field() {
-        fn mutations(
-            identity: ImplementationIdentity,
-            implementation: &'static str,
-        ) -> [ImplementationIdentity; 7] {
-            [
-                ImplementationIdentity {
-                    implementation,
-                    ..identity
-                },
-                ImplementationIdentity {
-                    version: "changed-version",
-                    ..identity
-                },
-                ImplementationIdentity {
-                    source_checksum: "changed-checksum",
-                    ..identity
-                },
-                ImplementationIdentity {
-                    target: "changed-target",
-                    ..identity
-                },
-                ImplementationIdentity {
-                    target_features: "changed-target-features",
-                    ..identity
-                },
-                ImplementationIdentity {
-                    feature_set: "changed-feature-set",
-                    ..identity
-                },
-                ImplementationIdentity {
-                    debug_assertions: !identity.debug_assertions,
-                    ..identity
-                },
-            ]
-        }
-
-        let pack = Pack::builder("main.typ")
-            .file("main.typ", b"implementation identity".to_vec())
-            .unwrap()
-            .build()
-            .unwrap();
-        let PackCompilationPreparation::Execute { kernel, .. } =
-            prepare_pack_compilation_with_limits(
-                PackCompilationRequest::new(
-                    pack.clone(),
-                    CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
-                ),
-                CompilationLimits::reference_v1(),
-            )
-        else {
-            panic!("valid request must be prepared for execution");
-        };
-        let engine = kernel.engine_identity;
-        let exporter = kernel.exporter_identity;
-        let baseline = kernel.compilation_identity;
-        for engine in mutations(engine, "changed-engine") {
-            assert_ne!(
-                compilation_identity(&pack, &kernel.request, engine, exporter),
-                baseline
-            );
-        }
-
-        for exporter in mutations(exporter, "changed-exporter") {
-            assert_ne!(
-                compilation_identity(&pack, &kernel.request, engine, exporter),
-                baseline
-            );
-        }
-    }
-
     #[cfg(feature = "parallel")]
     #[test]
     fn parallel_export_scheduler_obeys_worker_limit_and_preserves_input_order() {
@@ -2639,10 +2124,8 @@ mod result_identity_tests {
             let active = Arc::new(AtomicUsize::new(0));
             let peak = Arc::new(AtomicUsize::new(0));
             let barrier = Arc::new(Barrier::new(expected_peak));
-            let output = export_artifacts_bounded(
-                (0u8..demand).collect(),
-                CompilationLimits::reference_v1(),
-                {
+            let output =
+                export_artifacts_bounded((0u8..demand).collect(), CompilationLimits::DEFAULT, {
                     let active = Arc::clone(&active);
                     let peak = Arc::clone(&peak);
                     let barrier = Arc::clone(&barrier);
@@ -2660,9 +2143,8 @@ mod result_identity_tests {
                             source_page_number: None,
                         })
                     }
-                },
-            )
-            .unwrap();
+                })
+                .unwrap();
 
             assert_eq!(peak.load(Ordering::SeqCst), expected_peak);
             assert_eq!(
@@ -2683,7 +2165,11 @@ mod result_identity_tests {
         let execute = |workers| {
             export_artifacts_bounded(
                 vec![0u8, 1],
-                CompilationLimits::new(2, 2, 1, 1, 0, 2, workers),
+                CompilationLimits {
+                    max_artifact_bytes: 0,
+                    export_workers: workers,
+                    ..CompilationLimits::DEFAULT
+                },
                 |item| {
                     if item == 1 {
                         Err(CompileError::PngExport {
@@ -2708,10 +2194,9 @@ mod result_identity_tests {
         for error in [execute(1), execute(2)] {
             assert!(matches!(
                 error,
-                CompileError::Limit(CompilationLimitError::Exceeded {
-                    resource: CompilationResource::ArtifactBytes,
-                    ceiling: 0,
-                    observed_at_least: 1,
+                CompileError::Limit(LimitExceeded {
+                    resource: "artifact bytes",
+                    limit: 0,
                 })
             ));
         }

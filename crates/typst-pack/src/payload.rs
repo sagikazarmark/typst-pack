@@ -14,6 +14,7 @@ impl SharedBytes {
         Self(Bytes::new(data))
     }
 
+    #[cfg(feature = "embedded-fonts")]
     pub(crate) fn from_typst(data: Bytes) -> Self {
         Self(data)
     }
@@ -49,76 +50,6 @@ impl fmt::Debug for SharedBytes {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_tuple("SharedBytes")
-            .field(&self.0.len())
-            .finish()
-    }
-}
-
-/// Exact uniquely owned bytes of one Pack Archive.
-///
-/// This value is intentionally not cloneable: retries transfer the same exact
-/// archive bytes rather than silently duplicating potentially large buffers.
-///
-/// ```compile_fail
-/// use typst_pack::PackArchiveBytes;
-///
-/// let archive = PackArchiveBytes::from(Vec::new());
-/// let duplicate = archive.clone();
-/// ```
-#[derive(PartialEq, Eq)]
-pub struct PackArchiveBytes(Vec<u8>);
-
-impl PackArchiveBytes {
-    /// Takes unique ownership of exact archive bytes without copying them.
-    pub fn from_vec(bytes: Vec<u8>) -> Self {
-        Self(bytes)
-    }
-
-    /// The exact archive byte length.
-    pub fn len(&self) -> u64 {
-        u64::try_from(self.0.len()).unwrap_or(u64::MAX)
-    }
-
-    /// Whether the archive contains no bytes.
-    pub fn is_empty(&self) -> bool {
-        self.0.is_empty()
-    }
-
-    /// Borrows the exact archive bytes.
-    pub fn as_slice(&self) -> &[u8] {
-        &self.0
-    }
-
-    /// Transfers the exact archive bytes back into their vector.
-    pub fn into_vec(self) -> Vec<u8> {
-        self.0
-    }
-}
-
-impl From<Vec<u8>> for PackArchiveBytes {
-    fn from(bytes: Vec<u8>) -> Self {
-        Self::from_vec(bytes)
-    }
-}
-
-impl AsRef<[u8]> for PackArchiveBytes {
-    fn as_ref(&self) -> &[u8] {
-        self.as_slice()
-    }
-}
-
-impl Deref for PackArchiveBytes {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        self.as_slice()
-    }
-}
-
-impl fmt::Debug for PackArchiveBytes {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_tuple("PackArchiveBytes")
             .field(&self.0.len())
             .finish()
     }

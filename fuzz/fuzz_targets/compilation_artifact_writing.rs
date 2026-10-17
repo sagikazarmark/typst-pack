@@ -71,7 +71,6 @@ fn two_page_result() -> &'static CompilationResult {
                   #rect(width: 2pt, height: 2pt)"
                     .to_vec(),
             )
-            .unwrap()
             .build()
             .unwrap();
         compile_with_limits(
@@ -79,7 +78,7 @@ fn two_page_result() -> &'static CompilationResult {
                 pack,
                 CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
             ),
-            CompilationLimits::reference_v1(),
+            CompilationLimits::DEFAULT,
         )
         .unwrap()
         .result()

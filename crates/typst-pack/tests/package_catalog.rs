@@ -139,7 +139,7 @@ fn package_tree_construction_explicitly_moves_or_copies_payloads() {
 }
 
 #[test]
-fn package_tree_exposes_canonical_identity_order_and_totals() {
+fn package_tree_exposes_canonical_order_and_digest() {
     let tree = PackageTree::from_owned_entries([
         ("./src/lib.typ", b"library".to_vec()),
         ("README.md", b"read me".to_vec()),
@@ -150,23 +150,14 @@ fn package_tree_exposes_canonical_identity_order_and_totals() {
         tree.files().map(|(path, _)| path).collect::<Vec<_>>(),
         ["README.md", "src/lib.typ"]
     );
-    assert_eq!(tree.file_count(), 2);
-    assert_eq!(tree.byte_length(), 14);
     assert_eq!(
-        tree.identity().role(),
-        typst_pack::CanonicalIdentityRole::PackageTree
-    );
-    assert_eq!(
-        tree.identity().schema(),
-        "typst-pack-complete-package-tree-v1"
-    );
-    assert_eq!(tree.identity().algorithm(), "typst-hash128-0.15");
-    assert_eq!(
-        tree.identity().digest(),
-        [
-            0xb3, 0x7d, 0xc1, 0xe5, 0x59, 0x5c, 0x2a, 0xd4, 0x60, 0x3a, 0x17, 0xc7, 0xac, 0x1b,
-            0x0f, 0x44,
-        ]
+        tree.digest(),
+        PackageTree::from_owned_entries([
+            ("README.md", b"read me".to_vec()),
+            ("src/lib.typ", b"library".to_vec()),
+        ])
+        .unwrap()
+        .digest()
     );
 }
 
@@ -189,7 +180,7 @@ proptest! {
         let forward = PackageTree::from_owned_entries(entries).unwrap();
         let backward = PackageTree::from_owned_entries(reversed).unwrap();
 
-        prop_assert_eq!(forward.identity(), backward.identity());
+        prop_assert_eq!(forward.digest(), backward.digest());
         prop_assert_eq!(forward.files().collect::<Vec<_>>(), backward.files().collect::<Vec<_>>());
         let paths = forward.files().map(|(path, _)| path).collect::<Vec<_>>();
         prop_assert!(paths.windows(2).all(|pair| pair[0] < pair[1]));
@@ -212,8 +203,8 @@ proptest! {
         .unwrap();
         let changed_path = PackageTree::from_owned_entries([(renamed, bytes)]).unwrap();
 
-        prop_assert_ne!(baseline.identity(), changed_bytes.identity());
-        prop_assert_ne!(baseline.identity(), changed_path.identity());
+        prop_assert_ne!(baseline.digest(), changed_bytes.digest());
+        prop_assert_ne!(baseline.digest(), changed_path.digest());
     }
 
     #[test]

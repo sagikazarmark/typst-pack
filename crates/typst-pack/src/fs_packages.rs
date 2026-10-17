@@ -275,7 +275,7 @@ mod egress {
     use crate::package_catalog::PackageTree;
     use crate::package_failure::{PackageReadFailure, PackageReadFailureReason};
     use crate::{
-        PackageArchiveReadError, PackageExpansionLimits, PackageReadError, expand_package_archive,
+        PackageArchiveReadError, PackageReadError, ReadLimits, expand_package_archive,
         package_archive_url, read_package_archive,
     };
 
@@ -313,7 +313,7 @@ mod egress {
             spec,
             reader,
             known_size.map(|size| size as u64),
-            PackageExpansionLimits::reference_v1(),
+            authority.limits,
         )?;
 
         // typst-kit stages the tree in a temporary sibling directory and
@@ -340,27 +340,28 @@ mod egress {
         spec: &PackageSpec,
         reader: impl Read,
         known_size: Option<u64>,
-        limits: PackageExpansionLimits,
+        limits: ReadLimits,
     ) -> Result<PackageTree, FilesystemPackageAuthorityReadError> {
         let failed = |failure, source: Box<dyn std::error::Error + Send + Sync>| {
             FilesystemPackageAuthorityReadError::Download { failure, source }
         };
-        let archive = read_package_archive(reader, known_size, limits).map_err(|source| {
-            let failure = match &source {
-                PackageArchiveReadError::Read(error) => PackageReadFailure::new(
-                    spec.clone(),
-                    PackageReadFailureReason::NetworkFailed {
-                        detail: Some(error.to_string()),
-                    },
-                ),
-                PackageArchiveReadError::Limit(error) => other_failure(spec, error.to_string()),
-            };
-            failed(failure, Box::new(source))
-        })?;
+        let archive =
+            read_package_archive(reader, known_size, limits.max_file_bytes).map_err(|source| {
+                let failure = match &source {
+                    PackageArchiveReadError::Read(error) => PackageReadFailure::new(
+                        spec.clone(),
+                        PackageReadFailureReason::NetworkFailed {
+                            detail: Some(error.to_string()),
+                        },
+                    ),
+                    PackageArchiveReadError::Limit(error) => other_failure(spec, error.to_string()),
+                };
+                failed(failure, Box::new(source))
+            })?;
         expand_package_archive(spec.clone(), &archive, limits).map_err(|source| {
             let failure = match &source {
                 PackageReadError::UnservedNamespace { .. } => not_found(spec),
-                PackageReadError::ExpansionLimit { .. } => other_failure(spec, source.to_string()),
+                PackageReadError::Limit { .. } => other_failure(spec, source.to_string()),
                 PackageReadError::MalformedArchive { .. }
                 | PackageReadError::InvalidPackageTree { .. } => PackageReadFailure::new(
                     spec.clone(),
@@ -598,7 +599,7 @@ D/11HiutermQt0RJByBT1FPDdLyRtRPwY1PoAi2/OlAb\n\
                 &spec,
                 std::io::Cursor::new(&archive),
                 Some(archive.len() as u64),
-                PackageExpansionLimits::reference_v1(),
+                ReadLimits::default(),
             )
             .unwrap();
 
@@ -609,7 +610,10 @@ D/11HiutermQt0RJByBT1FPDdLyRtRPwY1PoAi2/OlAb\n\
         fn registry_expansion_limits_are_not_reported_as_malformed_bytes() {
             let spec = "@preview/example:1.0.0".parse().unwrap();
             let archive = package_archive(&[("lib.typ", b"12345")]);
-            let limits = PackageExpansionLimits::new(1024 * 1024, 10, 100, 4, 100);
+            let limits = ReadLimits {
+                max_total_bytes: 4,
+                ..ReadLimits::default()
+            };
 
             let error = read_registry_tree(
                 &spec,
@@ -628,7 +632,7 @@ D/11HiutermQt0RJByBT1FPDdLyRtRPwY1PoAi2/OlAb\n\
             };
             assert!(matches!(
                 source.downcast_ref::<PackageReadError>(),
-                Some(PackageReadError::ExpansionLimit { .. })
+                Some(PackageReadError::Limit { .. })
             ));
         }
     }

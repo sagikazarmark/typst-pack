@@ -3983,6 +3983,7 @@ dependencies = [
  "proptest",
  "rayon",
  "serde",
+ "sha2",
  "tar",
  "tempfile",
  "thiserror",

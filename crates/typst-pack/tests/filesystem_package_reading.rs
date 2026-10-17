@@ -36,7 +36,6 @@ fn reading_returns_one_validated_complete_package_tree_in_canonical_order() {
             ("typst.toml", &b"declaration"[..]),
         ]
     );
-    assert_eq!(tree.byte_length(), 24);
 }
 
 #[test]

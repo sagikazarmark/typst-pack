@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use typst_pack::{CanonicalIdentity, FontCatalog, FontCatalogEntry, FontContainer, FontDisposition};
+use typst_pack::{Digest, FontContainer, Pack};
 
 fuzz_target!(|data: &[u8]| {
     let Ok(container) = FontContainer::new(data.to_vec()) else {
@@ -10,34 +10,14 @@ fuzz_target!(|data: &[u8]| {
 
     let faces = container.faces();
     assert!(!faces.is_empty());
-    assert_eq!(
-        container.identity(),
-        CanonicalIdentity::for_font_container_bytes(data)
-    );
-    assert!(faces.iter().all(|face| {
-        face.identity().container() == container.identity() && face.data() == data
-    }));
-    assert!(
-        faces
-            .windows(2)
-            .all(|pair| pair[0].identity().index() < pair[1].identity().index())
-    );
-    let face_count = faces.len();
+    assert_eq!(container.digest(), Digest::of(data));
+    assert!(faces.windows(2).all(|pair| pair[0].index < pair[1].index));
 
-    let catalog = FontCatalog::from_iter([
-        FontCatalogEntry::new(container.clone(), FontDisposition::External),
-        FontCatalogEntry::new(container, FontDisposition::Embedded),
-    ]);
-    let catalog_faces = catalog.faces();
-    assert_eq!(catalog_faces.len(), face_count * 2);
-    assert!(
-        catalog_faces[..face_count]
-            .iter()
-            .all(|face| face.disposition() == FontDisposition::External)
-    );
-    assert!(
-        catalog_faces[face_count..]
-            .iter()
-            .all(|face| face.disposition() == FontDisposition::Embedded)
-    );
+    // A readable container is accepted by a Pack with every face listed.
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", Vec::new())
+        .font(data.to_vec())
+        .build()
+        .expect("a readable container is a valid embedded font");
+    assert_eq!(pack.font_requirements()[0].faces, faces);
 });

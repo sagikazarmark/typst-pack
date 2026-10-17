@@ -108,10 +108,10 @@ fn structural_creation_packs_all_project_files_and_complete_packages() {
     }
     assert_eq!(report.pack().package_requirements().len(), 1);
     let requirement = &report.pack().package_requirements()[0];
-    assert!(requirement.is_embedded());
-    assert_eq!(requirement.spec().to_string(), "@local/greet:0.1.0");
+    assert!(requirement.embedded);
+    assert_eq!(requirement.spec.to_string(), "@local/greet:0.1.0");
 
-    let spec = requirement.spec();
+    let spec = &requirement.spec;
     assert!(report.pack().has_package(spec));
     assert!(report.pack().package_file(spec, "lib.typ").is_some());
     assert!(report.pack().package_file(spec, "typst.toml").is_some());
@@ -441,7 +441,7 @@ fn package_cache_resolves_during_online_and_offline_creation() {
         );
         let report = assembler.assemble(request(&project)).unwrap();
 
-        let spec = report.pack().package_requirements()[0].spec();
+        let spec = &report.pack().package_requirements()[0].spec;
         assert_eq!(spec.to_string(), "@preview/cached:0.1.0");
         assert!(report.pack().package_file(spec, "lib.typ").is_some());
     }
@@ -484,7 +484,7 @@ fn a_project_needing_chained_packages_is_resolved_to_completion() {
             .pack()
             .package_requirements()
             .iter()
-            .map(|requirement| requirement.spec().to_string())
+            .map(|requirement| requirement.spec.to_string())
             .collect::<Vec<_>>(),
         ["@local/inner:0.1.0", "@local/outer:0.1.0"]
     );
@@ -674,6 +674,7 @@ fn creation_retains_representative_compile_warnings() {
 #[cfg(feature = "embedded-fonts")]
 mod fonts {
     use super::*;
+    use typst_pack::Digest;
 
     #[test]
     fn font_embedding_skips_typst_embedded_fonts_unless_asked() {
@@ -689,7 +690,11 @@ mod fonts {
             .assemble(request(&project).embed_fonts(true))
             .unwrap();
         assert!(
-            slim.pack().fonts().is_empty(),
+            !slim
+                .pack()
+                .font_requirements()
+                .iter()
+                .any(|requirement| requirement.embedded),
             "only Typst embedded fonts are used, so nothing should be embedded"
         );
 
@@ -700,7 +705,12 @@ mod fonts {
                     .include_typst_embedded_fonts(true),
             )
             .unwrap();
-        assert!(!full.pack().fonts().is_empty());
+        assert!(
+            full.pack()
+                .font_requirements()
+                .iter()
+                .any(|requirement| requirement.embedded)
+        );
         // The embedded containers must load again from the pack.
         decode_reference(encode_reference(full.pack()).unwrap()).unwrap();
     }
@@ -722,7 +732,13 @@ mod fonts {
             )
             .unwrap();
 
-        assert!(!report.pack().fonts().is_empty());
+        assert!(
+            report
+                .pack()
+                .font_requirements()
+                .iter()
+                .any(|requirement| requirement.embedded)
+        );
     }
 
     #[test]
@@ -747,13 +763,10 @@ mod fonts {
         let mut font_fulfillments = Vec::new();
         // The fonts the adapter offered were Typst's own, declared externally.
         for requirement in pack.font_requirements() {
-            let identity = requirement.container_identity();
+            let identity = requirement.digest;
             let data = typst_kit::fonts::embedded()
                 .map(|(font, _)| font.data().to_vec())
-                .find(|data| {
-                    typst_pack::CanonicalIdentity::for_font_container_bytes(data.as_slice())
-                        == identity
-                })
+                .find(|data| Digest::of(data.as_slice()) == identity)
                 .expect("a Typst embedded container fulfills the requirement");
             font_fulfillments.push(FontContainerFulfillment::new(
                 identity,
@@ -766,8 +779,7 @@ mod fonts {
         )
         .fulfillments(CompilationFulfillmentSet::new([], font_fulfillments).unwrap());
 
-        let report =
-            compile_with_limits(request, typst_pack::CompilationLimits::reference_v1()).unwrap();
+        let report = compile_with_limits(request, typst_pack::CompilationLimits::DEFAULT).unwrap();
         let result = report.result().expect("semantic Compilation Result");
         assert!(result.artifacts()[0].bytes().starts_with(b"%PDF"));
     }

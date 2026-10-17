@@ -3,8 +3,9 @@
 use std::collections::{BTreeMap, btree_map::Entry};
 use std::fmt;
 
-use crate::CanonicalIdentity;
-use crate::pack::{Pack, font_container_path};
+use crate::Digest;
+use crate::pack::Pack;
+use crate::pack_archive::font_member_name;
 use crate::payload::SharedBytes;
 
 /// The embedded dependency content selected for one Pack Extraction Plan.
@@ -96,14 +97,14 @@ impl PackExtractionEntry {
 /// plan contains no destination, platform path, conflict policy, or write state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PackExtractionPlan {
-    pack_identity: CanonicalIdentity,
+    pack_identity: Digest,
     selection: PackExtractionSelection,
     entries: Vec<PackExtractionEntry>,
 }
 
 impl PackExtractionPlan {
     /// The identity of the Pack projected by this plan.
-    pub fn pack_identity(&self) -> &CanonicalIdentity {
+    pub fn pack_identity(&self) -> &Digest {
         &self.pack_identity
     }
 
@@ -221,14 +222,16 @@ pub fn plan_pack_extraction(
     }
 
     if selection.fonts() {
-        for font in pack.fonts() {
-            add_entry(
-                &mut entries,
-                font_container_path(font.identity().container(), Some(font.data())),
-                PackExtractionEntryRole::FontContainer,
-                font.shared_data().clone(),
-                &mut issues,
-            );
+        for requirement in pack.font_requirements() {
+            if let Some(data) = pack.shared_font_data(&requirement.digest) {
+                add_entry(
+                    &mut entries,
+                    font_member_name(&requirement.digest, data),
+                    PackExtractionEntryRole::FontContainer,
+                    data.clone(),
+                    &mut issues,
+                );
+            }
         }
     }
 

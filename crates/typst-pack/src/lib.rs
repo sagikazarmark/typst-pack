@@ -45,7 +45,6 @@ mod project_snapshot;
 mod read_layout;
 mod world;
 mod world_trace;
-mod write;
 
 #[cfg(all(feature = "diagnostics", feature = "fs"))]
 #[doc(hidden)]
@@ -55,18 +54,17 @@ pub use compile::{
     CompilationAccessKind, CompilationAccessObservation, CompilationAccessOutcome,
     CompilationAccessTrace, CompilationArtifact, CompilationDiagnostic, CompilationDocumentSummary,
     CompilationFulfillmentIssue, CompilationFulfillmentReport, CompilationFulfillmentSet,
-    CompilationFulfillmentSetError, CompilationFulfillmentSetIssue, CompilationLimitError,
-    CompilationLimits, CompilationOperationOutcome, CompilationOutputSpecification,
-    CompilationReport, CompilationReportOutcome, CompilationRequestIssue,
-    CompilationRequestRejection, CompilationResource, CompilationResult, CompilationStatus,
-    CreationTimestamp, DiagnosticHint, DiagnosticPhase, DiagnosticProducer, DiagnosticSeverity,
-    DiagnosticTracepoint, FontContainerFulfillment, FontFulfillmentReport, HtmlOutputSpecification,
-    ImplementationIdentity, ImplementationRole, InvalidCompilationFulfillmentSet, LogicalSpan,
-    OutputFormat, PackCompilationRequest, PackCompilationWarning, PackOverrideSet,
-    PackOverrideSetError, PackageFulfillmentReport, PackageTreeFulfillment, PageRange,
-    PageSelection, PdfOutputSpecification, PdfStandardsValidationError, PngOutputSpecification,
-    SvgOutputSpecification, TracepointKind, compile, compile_with_limits, parse_page_selection,
-    resolve_external_font_requirements,
+    CompilationFulfillmentSetError, CompilationFulfillmentSetIssue, CompilationLimits,
+    CompilationOperationOutcome, CompilationOutputSpecification, CompilationReport,
+    CompilationReportOutcome, CompilationRequestIssue, CompilationRequestRejection,
+    CompilationResult, CompilationStatus, CreationTimestamp, DiagnosticHint, DiagnosticPhase,
+    DiagnosticProducer, DiagnosticSeverity, DiagnosticTracepoint, FontContainerFulfillment,
+    FontFulfillmentReport, HtmlOutputSpecification, ImplementationIdentity, ImplementationRole,
+    InvalidCompilationFulfillmentSet, LogicalSpan, OutputFormat, PackCompilationRequest,
+    PackCompilationWarning, PackOverrideSet, PackOverrideSetError, PackageFulfillmentReport,
+    PackageTreeFulfillment, PageRange, PageSelection, PdfOutputSpecification,
+    PdfStandardsValidationError, PngOutputSpecification, SvgOutputSpecification, TracepointKind,
+    compile, compile_with_limits, parse_page_selection, resolve_external_font_requirements,
 };
 pub use creation::{
     DependencyDiscoveryRejection, DiscoverySpecification, DiscoverySpecificationError,
@@ -81,8 +79,7 @@ pub use filesystem_write::{
 #[cfg(feature = "embedded-fonts")]
 pub use font_catalog::typst_embedded_font_containers;
 pub use font_catalog::{
-    FontCatalog, FontCatalogEntry, FontCatalogFace, FontContainer, FontContainerError,
-    FontContainerFace, FontDisposition,
+    FontCatalog, FontCatalogEntry, FontContainer, FontContainerError, FontDisposition,
 };
 #[cfg(feature = "fs")]
 pub use fs_assembly::{
@@ -102,12 +99,12 @@ pub use fs_packages::{
 pub use fs_project::{IGNORE_FILE, read_filesystem_project};
 #[cfg(feature = "fs")]
 pub use fs_read::FilesystemReadError;
-pub use identity::{CanonicalIdentity, CanonicalIdentityRole};
-pub use limits::{LimitError, LimitExceeded, Limits, ReadLimits, Resource, ResourceKind};
+pub use identity::{Digest, InvalidDigest};
+pub use limits::{LimitExceeded, ReadLimits};
 pub use manifest::PackMetadata;
 pub use pack::{
-    FILE_EXTENSION, FontFaceIdentity, FontRequirement, Pack, PackBuildError, PackBuilder, PackFont,
-    PackFontCatalogFace, PackInvariantError, PackInvariantIssue, PackPathRole, PackageRequirement,
+    FILE_EXTENSION, FontFace, FontRequirement, Pack, PackBuilder, PackInvariantError,
+    PackInvariantIssue, PackageRequirement,
 };
 pub use pack_extraction::{
     PackExtractionEntry, PackExtractionEntryRole, PackExtractionPlan, PackExtractionPlanError,
@@ -120,15 +117,12 @@ pub use package_catalog::{
 pub use package_failure::{PackageReadFailure, PackageReadFailureReason, PackageReadFailures};
 #[cfg(feature = "package-reading")]
 pub use package_reading::{
-    PACKAGE_REGISTRY_NAMESPACE, PACKAGE_REGISTRY_URL, PackageArchiveReadError,
-    PackageExpansionLimitError, PackageExpansionLimits, PackageExpansionResource, PackageReadError,
+    PACKAGE_REGISTRY_NAMESPACE, PACKAGE_REGISTRY_URL, PackageArchiveReadError, PackageReadError,
     expand_package_archive, package_archive_url, read_package_archive,
 };
-pub use payload::PackArchiveBytes;
 pub use project_snapshot::{
     ProjectSnapshot, ProjectSnapshotAssembly, ProjectSnapshotError, ProjectSnapshotIssue,
 };
-pub use write::CommitCertainty;
 
 #[cfg(test)]
 mod tests;

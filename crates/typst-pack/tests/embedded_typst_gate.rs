@@ -92,7 +92,6 @@ fn public_compilation_attests_the_approved_engine_and_exporters() {
     ] {
         let pack = Pack::builder("main.typ")
             .file("main.typ", source.as_bytes().to_vec())
-            .unwrap()
             .build()
             .unwrap();
         let specification = match format {
@@ -111,7 +110,7 @@ fn public_compilation_attests_the_approved_engine_and_exporters() {
         };
         let report = compile_with_limits(
             PackCompilationRequest::new(pack, specification),
-            typst_pack::CompilationLimits::reference_v1(),
+            typst_pack::CompilationLimits::DEFAULT,
         )
         .unwrap();
         let result = report

@@ -22,9 +22,9 @@ use typst_kit::files::{FileLoader, FileStore};
 
 use crate::domain::{DocumentTime, TypstTarget};
 use crate::embedded::EmbeddedTypst;
-use crate::font_catalog::{CatalogFonts, FontCatalog, FontDisposition};
+use crate::font_catalog::{CatalogFonts, FontCatalog};
 use crate::manifest::PackMetadata;
-use crate::pack::{Pack, PackBuildError, PackInvariantError};
+use crate::pack::{FontInput, Pack, PackInput, PackInvariantError, PackageContent, PackageInput};
 use crate::package_catalog::PackageCatalog;
 use crate::package_failure::{PackageReadFailure, PackageReadFailureReason, PackageReadFailures};
 use crate::payload::SharedBytes;
@@ -271,59 +271,57 @@ pub fn create(input: PackCreationInput<'_>) -> Result<PackCreationOutcome, PackC
         ));
     }
 
-    let mut builder = Pack::builder(input.project.entrypoint());
-    for (path, data) in input.project.shared_files() {
-        builder = map_build(builder.shared_file(path, data.clone()))?;
-    }
-
     // Packages, in canonical specification order. The whole Package
     // Tree travels, not only the files the representative request read.
     let loader = world.files.loader();
-    for spec in observed.supplied {
-        let entry = loader
-            .packages
-            .get(&spec)
-            .expect("observed package was partitioned as supplied");
-        for (path, data) in entry.tree().shared_files() {
-            builder = if entry.disposition().is_embedded() {
-                map_build(builder.shared_package_file(spec.clone(), path, data.clone()))?
-            } else {
-                map_build(builder.shared_external_package_file(spec.clone(), path, data.clone()))?
-            };
-        }
-    }
+    let packages = observed
+        .supplied
+        .into_iter()
+        .map(|spec| {
+            let entry = loader
+                .packages
+                .get(&spec)
+                .expect("observed package was partitioned as supplied");
+            PackageInput {
+                embedded: entry.disposition().is_embedded(),
+                content: PackageContent::Files(
+                    entry
+                        .tree()
+                        .shared_files()
+                        .map(|(path, data)| (path.to_owned(), data.clone()))
+                        .collect(),
+                ),
+                spec,
+            }
+        })
+        .collect();
 
-    // Selected faces in Font Catalog order, each under the disposition
-    // its container carries.
-    for (font, disposition) in world.used_fonts() {
-        builder =
-            if disposition.is_embedded() {
-                map_build(
-                    builder.shared_font(SharedBytes::from_typst(font.data().clone()), font.index()),
-                )?
-            } else {
-                map_build(builder.shared_external_font(
-                    SharedBytes::from_typst(font.data().clone()),
-                    font.index(),
-                ))?
-            };
-    }
+    // Every container a selected face came from, in Font Catalog order,
+    // under the disposition its catalog entry carries.
+    let fonts = world
+        .used_containers()
+        .into_iter()
+        .map(|position| {
+            let entry = &input.fonts.entries()[position];
+            FontInput::Bytes {
+                data: entry.container().shared_data().clone(),
+                embedded: entry.disposition().is_embedded(),
+            }
+        })
+        .collect();
 
-    if let Some(metadata) = input.metadata {
-        builder = builder.metadata(metadata.clone());
-    }
-
-    Ok(PackCreationOutcome::Created {
-        pack: map_build(builder.build())?,
-        warnings,
-    })
-}
-
-fn map_build<T>(result: Result<T, PackBuildError>) -> Result<T, PackCreationError> {
-    match result {
-        Ok(value) => Ok(value),
-        Err(PackBuildError::Invariant(error)) => Err(PackCreationError::InvalidPack(error)),
-    }
+    let pack = Pack::construct(PackInput {
+        entrypoint: input.project.entrypoint().to_owned(),
+        metadata: input.metadata.cloned(),
+        files: input
+            .project
+            .shared_files()
+            .map(|(path, data)| (path.to_owned(), data.clone()))
+            .collect(),
+        packages,
+        fonts,
+    })?;
+    Ok(PackCreationOutcome::Created { pack, warnings })
 }
 
 /// The package specifications one representative request asked for, split by
@@ -380,14 +378,14 @@ impl SuppliedWorld<'_> {
         observed
     }
 
-    /// The selected faces in Font Catalog order, each with the
-    /// disposition its container carries.
-    fn used_fonts(&self) -> Vec<(Font, FontDisposition)> {
+    /// The catalog positions of the containers whose faces the request
+    /// loaded, in catalog order.
+    fn used_containers(&self) -> BTreeSet<usize> {
         self.used_font_indices
             .lock()
             .expect("used font index lock poisoned")
             .iter()
-            .filter_map(|index| Some((self.fonts.font(*index)?, self.fonts.disposition(*index)?)))
+            .filter_map(|index| self.fonts.container(*index))
             .collect()
     }
 }

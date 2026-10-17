@@ -2,13 +2,13 @@ use proptest::prelude::*;
 use std::num::NonZeroUsize;
 use typst_pack::{
     CompilationAccessKind, CompilationFulfillmentIssue, CompilationFulfillmentSet,
-    CompilationFulfillmentSetIssue, CompilationLimitError, CompilationLimits,
-    CompilationOperationOutcome, CompilationOutputSpecification, CompilationReport,
-    CompilationReportOutcome, CompilationRequestIssue, CompilationRequestRejection,
-    CompilationResource, CompilationResult, CompilationStatus, DiagnosticPhase, DiagnosticProducer,
-    DocumentTime, HtmlOutputSpecification, OutputFormat, Pack, PackCompilationRequest,
-    PackMetadata, PackOverrideSet, PackOverrideSetError, PackageTree, PackageTreeFulfillment,
-    PdfOutputSpecification, PngOutputSpecification, SvgOutputSpecification, compile_with_limits,
+    CompilationFulfillmentSetIssue, CompilationLimits, CompilationOperationOutcome,
+    CompilationOutputSpecification, CompilationReport, CompilationReportOutcome,
+    CompilationRequestIssue, CompilationRequestRejection, CompilationResult, CompilationStatus,
+    DiagnosticPhase, DiagnosticProducer, DocumentTime, HtmlOutputSpecification, LimitExceeded,
+    OutputFormat, Pack, PackCompilationRequest, PackMetadata, PackOverrideSet,
+    PackOverrideSetError, PackageTree, PackageTreeFulfillment, PdfOutputSpecification,
+    PngOutputSpecification, SvgOutputSpecification, compile_with_limits,
 };
 #[cfg(feature = "embedded-fonts")]
 use typst_pack::{FontContainer, FontContainerFulfillment, resolve_external_font_requirements};
@@ -26,7 +26,7 @@ fn compile(
 fn compile_to_report(
     request: PackCompilationRequest,
 ) -> Result<CompilationReport, CompilationRequestRejection> {
-    compile_with_limits(request, CompilationLimits::reference_v1())
+    compile_with_limits(request, CompilationLimits::DEFAULT)
 }
 
 fn output(format: OutputFormat) -> CompilationOutputSpecification {
@@ -72,7 +72,6 @@ fn five_page_pack() -> Pack {
         .collect::<String>();
     Pack::builder("main.typ")
         .file("main.typ", source.into_bytes())
-        .unwrap()
         .build()
         .unwrap()
 }
@@ -92,58 +91,28 @@ fn fixed_size_page_pack(page_count: usize) -> Pack {
         .collect::<String>();
     Pack::builder("main.typ")
         .file("main.typ", source.into_bytes())
-        .unwrap()
         .build()
         .unwrap()
 }
 
-#[test]
-fn compilation_limits_reference_v1_is_finite_and_bounded() {
-    let limits = CompilationLimits::reference_v1();
-
-    assert_eq!(limits.source_pages(), 10_000);
-    assert_eq!(limits.artifacts(), 10_000);
-    assert_eq!(limits.pixels_per_artifact(), 100_000_000);
-    assert_eq!(limits.total_pixels(), 1_000_000_000);
-    assert_eq!(limits.artifact_bytes(), 512 * 1024 * 1024);
-    assert_eq!(limits.retained_artifact_bytes(), 2 * 1024 * 1024 * 1024);
-    assert_eq!(limits.export_workers(), 4);
-}
-
-#[test]
-fn compilation_limits_reject_unbounded_ceilings_and_zero_workers() {
-    let fields = [
-        CompilationResource::SourcePages,
-        CompilationResource::Artifacts,
-        CompilationResource::PixelsPerArtifact,
-        CompilationResource::TotalPixels,
-        CompilationResource::ArtifactBytes,
-        CompilationResource::RetainedArtifactBytes,
-        CompilationResource::ExportWorkers,
-    ];
-
-    for (index, _resource) in fields.into_iter().enumerate() {
-        let mut values = [1; 7];
-        values[index] = u64::MAX;
-        assert!(
-            std::panic::catch_unwind(|| CompilationLimits::new(
-                values[0], values[1], values[2], values[3], values[4], values[5], values[6],
-            ))
-            .is_err()
-        );
+fn compilation_limits(
+    max_pages: u64,
+    max_artifacts: u64,
+    max_pixels_per_artifact: u64,
+    max_total_pixels: u64,
+    max_artifact_bytes: u64,
+    max_total_artifact_bytes: u64,
+    export_workers: u64,
+) -> CompilationLimits {
+    CompilationLimits {
+        max_pages,
+        max_artifacts,
+        max_pixels_per_artifact,
+        max_total_pixels,
+        max_artifact_bytes,
+        max_total_artifact_bytes,
+        export_workers,
     }
-
-    assert!(std::panic::catch_unwind(|| CompilationLimits::new(1, 1, 1, 1, 1, 1, 0)).is_err());
-}
-
-#[test]
-fn compilation_limits_can_reduce_the_reference_worker_ceiling() {
-    let limits = CompilationLimits::reference_v1().with_export_workers(1);
-
-    assert_eq!(limits.source_pages(), 10_000);
-    assert_eq!(limits.artifacts(), 10_000);
-    assert_eq!(limits.export_workers(), 1);
-    assert!(std::panic::catch_unwind(|| limits.with_export_workers(0)).is_err());
 }
 
 #[test]
@@ -160,7 +129,7 @@ fn source_page_limit_is_an_accepted_operation_outcome() {
     for ceiling in [6, 5] {
         let report = compile_with_limits(
             request(),
-            CompilationLimits::new(
+            compilation_limits(
                 ceiling,
                 10,
                 1_000_000,
@@ -176,7 +145,7 @@ fn source_page_limit_is_an_accepted_operation_outcome() {
 
     let report = compile_with_limits(
         request(),
-        CompilationLimits::new(
+        compilation_limits(
             4,
             10,
             1_000_000,
@@ -191,15 +160,12 @@ fn source_page_limit_is_an_accepted_operation_outcome() {
     assert!(matches!(
         report.outcome(),
         CompilationReportOutcome::Operation {
-            outcome: CompilationOperationOutcome::ResourceLimit(
-                CompilationLimitError::Exceeded {
-                    resource: CompilationResource::SourcePages,
-                    ceiling: 4,
-                    observed_at_least: 5,
-                }
-            ),
-            compilation_identity,
-        } if compilation_identity.digest() != [0; 16]
+            outcome: CompilationOperationOutcome::ResourceLimit(LimitExceeded {
+                resource: "pages",
+                limit: 4,
+            }),
+            ..
+        }
     ));
     assert!(report.result().is_none());
     assert!(report.fulfillments().packages().is_empty());
@@ -211,7 +177,7 @@ fn selected_artifact_count_is_bounded_before_export() {
     for ceiling in [6, 5] {
         let report = compile_with_limits(
             PackCompilationRequest::new(five_page_pack(), output(OutputFormat::Svg)),
-            CompilationLimits::new(
+            compilation_limits(
                 10,
                 ceiling,
                 1_000_000,
@@ -227,7 +193,7 @@ fn selected_artifact_count_is_bounded_before_export() {
 
     let report = compile_with_limits(
         PackCompilationRequest::new(five_page_pack(), output(OutputFormat::Svg)),
-        CompilationLimits::new(
+        compilation_limits(
             10,
             4,
             1_000_000,
@@ -242,10 +208,9 @@ fn selected_artifact_count_is_bounded_before_export() {
     assert!(matches!(
         report.outcome(),
         CompilationReportOutcome::Operation {
-            outcome: CompilationOperationOutcome::ResourceLimit(CompilationLimitError::Exceeded {
-                resource: CompilationResource::Artifacts,
-                ceiling: 4,
-                observed_at_least: 5,
+            outcome: CompilationOperationOutcome::ResourceLimit(LimitExceeded {
+                resource: "artifacts",
+                limit: 4,
             }),
             ..
         }
@@ -263,7 +228,7 @@ fn png_pixels_per_artifact_are_bounded_before_rendering() {
     for ceiling in [101, 100] {
         let report = compile_with_limits(
             PackCompilationRequest::new(fixed_size_page_pack(1), specification.clone()),
-            CompilationLimits::new(1, 1, ceiling, 1_000, 1024 * 1024, 1024 * 1024, 1),
+            compilation_limits(1, 1, ceiling, 1_000, 1024 * 1024, 1024 * 1024, 1),
         )
         .unwrap();
         assert!(report.result().is_some());
@@ -271,17 +236,16 @@ fn png_pixels_per_artifact_are_bounded_before_rendering() {
 
     let report = compile_with_limits(
         PackCompilationRequest::new(fixed_size_page_pack(1), specification),
-        CompilationLimits::new(1, 1, 99, 1_000, 1024 * 1024, 1024 * 1024, 1),
+        compilation_limits(1, 1, 99, 1_000, 1024 * 1024, 1024 * 1024, 1),
     )
     .unwrap();
 
     assert!(matches!(
         report.outcome(),
         CompilationReportOutcome::Operation {
-            outcome: CompilationOperationOutcome::ResourceLimit(CompilationLimitError::Exceeded {
-                resource: CompilationResource::PixelsPerArtifact,
-                ceiling: 99,
-                observed_at_least: 100,
+            outcome: CompilationOperationOutcome::ResourceLimit(LimitExceeded {
+                resource: "pixels per artifact",
+                limit: 99,
             }),
             ..
         }
@@ -290,7 +254,7 @@ fn png_pixels_per_artifact_are_bounded_before_rendering() {
 
 #[test]
 fn total_png_pixels_use_checked_canonical_accounting() {
-    let limits = CompilationLimits::new(2, 2, 100, 199, 1024 * 1024, 2 * 1024 * 1024, 2);
+    let limits = compilation_limits(2, 2, 100, 199, 1024 * 1024, 2 * 1024 * 1024, 2);
     let specification = CompilationOutputSpecification::Png(PngOutputSpecification {
         pixels_per_inch: Some(72.0),
         ..PngOutputSpecification::default()
@@ -300,7 +264,7 @@ fn total_png_pixels_use_checked_canonical_accounting() {
         assert!(
             compile_with_limits(
                 PackCompilationRequest::new(fixed_size_page_pack(2), specification.clone()),
-                CompilationLimits::new(2, 2, 100, ceiling, 1024 * 1024, 2 * 1024 * 1024, 2,),
+                compilation_limits(2, 2, 100, ceiling, 1024 * 1024, 2 * 1024 * 1024, 2,),
             )
             .unwrap()
             .result()
@@ -317,10 +281,9 @@ fn total_png_pixels_use_checked_canonical_accounting() {
     assert!(matches!(
         report.outcome(),
         CompilationReportOutcome::Operation {
-            outcome: CompilationOperationOutcome::ResourceLimit(CompilationLimitError::Exceeded {
-                resource: CompilationResource::TotalPixels,
-                ceiling: 199,
-                observed_at_least: 200,
+            outcome: CompilationOperationOutcome::ResourceLimit(LimitExceeded {
+                resource: "total pixels",
+                limit: 199,
             }),
             ..
         }
@@ -336,14 +299,13 @@ fn artifact_bytes_are_bounded_after_generation_without_a_partial_result() {
     ))
     .unwrap();
     let byte_length = u64::try_from(baseline.artifacts()[0].bytes().len()).unwrap();
-    let limits =
-        CompilationLimits::new(1, 1, 1_000_000, 1_000_000, byte_length - 1, byte_length, 1);
+    let limits = compilation_limits(1, 1, 1_000_000, 1_000_000, byte_length - 1, byte_length, 1);
 
     for ceiling in [byte_length + 1, byte_length] {
         assert!(
             compile_with_limits(
                 PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)),
-                CompilationLimits::new(1, 1, 1_000_000, 1_000_000, ceiling, byte_length, 1,),
+                compilation_limits(1, 1, 1_000_000, 1_000_000, ceiling, byte_length, 1,),
             )
             .unwrap()
             .result()
@@ -361,14 +323,13 @@ fn artifact_bytes_are_bounded_after_generation_without_a_partial_result() {
         report.outcome(),
         CompilationReportOutcome::Operation {
             outcome: CompilationOperationOutcome::ResourceLimit(
-                CompilationLimitError::Exceeded {
-                    resource: CompilationResource::ArtifactBytes,
-                    ceiling,
-                    observed_at_least,
+                LimitExceeded {
+                    resource: "artifact bytes",
+                    limit,
                 }
             ),
             ..
-        } if *ceiling == byte_length - 1 && *observed_at_least == byte_length
+        } if *limit == byte_length - 1
     ));
     assert!(report.result().is_none());
 }
@@ -387,7 +348,7 @@ fn retained_artifact_bytes_use_checked_canonical_accounting() {
         .map(|artifact| u64::try_from(artifact.bytes().len()).unwrap())
         .collect::<Vec<_>>();
     let retained = byte_lengths.iter().sum::<u64>();
-    let limits = CompilationLimits::new(
+    let limits = compilation_limits(
         2,
         2,
         1_000_000,
@@ -401,7 +362,7 @@ fn retained_artifact_bytes_use_checked_canonical_accounting() {
         assert!(
             compile_with_limits(
                 PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)),
-                CompilationLimits::new(
+                compilation_limits(
                     2,
                     2,
                     1_000_000,
@@ -427,14 +388,13 @@ fn retained_artifact_bytes_use_checked_canonical_accounting() {
         report.outcome(),
         CompilationReportOutcome::Operation {
             outcome: CompilationOperationOutcome::ResourceLimit(
-                CompilationLimitError::Exceeded {
-                    resource: CompilationResource::RetainedArtifactBytes,
-                    ceiling,
-                    observed_at_least,
+                LimitExceeded {
+                    resource: "total artifact bytes",
+                    limit,
                 }
             ),
             ..
-        } if *ceiling == retained - 1 && *observed_at_least == retained
+        } if *limit == retained - 1
     ));
     assert!(report.result().is_none());
 }
@@ -454,7 +414,7 @@ fn compilation_limits_and_worker_scheduling_do_not_change_canonical_results() {
         .clone()
     };
 
-    let sequential = compile_under_limits(CompilationLimits::new(
+    let sequential = compile_under_limits(compilation_limits(
         6,
         6,
         2_000_000,
@@ -463,7 +423,7 @@ fn compilation_limits_and_worker_scheduling_do_not_change_canonical_results() {
         6 * 1024 * 1024,
         1,
     ));
-    let parallel = compile_under_limits(CompilationLimits::new(
+    let parallel = compile_under_limits(compilation_limits(
         5,
         5,
         1_000_000,
@@ -505,7 +465,7 @@ proptest! {
         let compile_with_workers = |workers| {
             compile_with_limits(
                 PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg)),
-                CompilationLimits::new(
+                compilation_limits(
                     page_count as u64,
                     page_count as u64,
                     1_000_000,
@@ -568,13 +528,9 @@ fn package_fulfillment_verification_aggregates_every_exact_set_deviation() {
             "main.typ",
             b"#panic(\"fulfillment verification reached Typst\")".to_vec(),
         )
-        .unwrap()
         .external_package_file(missing.clone(), "lib.typ", b"missing".to_vec())
-        .unwrap()
         .package_file(embedded.clone(), "lib.typ", b"embedded".to_vec())
-        .unwrap()
         .external_package_file(mismatched.clone(), "lib.typ", b"expected".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let fulfillments = CompilationFulfillmentSet::new(
@@ -604,13 +560,12 @@ fn package_fulfillment_verification_aggregates_every_exact_set_deviation() {
     .unwrap();
     let CompilationReportOutcome::Operation {
         outcome: CompilationOperationOutcome::InvalidFulfillmentSet(invalid),
-        compilation_identity,
+        ..
     } = report.outcome()
     else {
         panic!("expected an invalid Compilation Fulfillment Set outcome");
     };
 
-    assert_ne!(compilation_identity.digest(), [0; 16]);
     assert!(matches!(
         invalid.issues(),
         [
@@ -646,15 +601,13 @@ fn cli_timing_path_preserves_accepted_fulfillment_outcomes() {
             "main.typ",
             b"#panic(\"fulfillment verification reached Typst\")".to_vec(),
         )
-        .unwrap()
         .external_package_file(spec.clone(), "lib.typ", b"expected".to_vec())
-        .unwrap()
         .build()
         .unwrap();
 
     let timed = typst_pack::cli_support::compile_with_timing_with_limits(
         PackCompilationRequest::new(pack, output(OutputFormat::Svg)),
-        CompilationLimits::reference_v1(),
+        CompilationLimits::DEFAULT,
         None,
     )
     .unwrap();
@@ -688,7 +641,7 @@ fn compilation_fulfillment_set_rejects_duplicate_font_container_identities() {
         .data()
         .to_vec();
     let container = FontContainer::new(data).unwrap();
-    let identity = container.identity();
+    let identity = container.digest();
     let first = FontContainerFulfillment::new(identity, container.clone());
     let second = FontContainerFulfillment::new(identity, container);
 
@@ -715,11 +668,8 @@ fn external_font_requirements_are_resolved_from_matching_source_containers() {
     let unrelated = variant(3);
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"unreached".to_vec())
-        .unwrap()
-        .external_font(external.clone(), base.index())
-        .unwrap()
-        .font(embedded.clone(), base.index())
-        .unwrap()
+        .external_font(external.clone())
+        .font(embedded.clone())
         .build()
         .unwrap();
 
@@ -737,7 +687,7 @@ fn external_font_requirements_are_resolved_from_matching_source_containers() {
     assert_eq!(fulfillments.len(), 1);
     assert_eq!(
         fulfillments[0].expected_identity(),
-        typst_pack::CanonicalIdentity::for_font_container_bytes(&external)
+        typst_pack::Digest::of(&external)
     );
     assert_eq!(fulfillments[0].container().data(), external);
 }
@@ -755,33 +705,28 @@ fn font_fulfillment_issues_follow_packages_and_canonical_identity_kind_order() {
     let missing = variant(1);
     let embedded = variant(2);
     let mismatched = variant(3);
-    let mismatched_identity = typst_pack::CanonicalIdentity::for_font_container_bytes(&mismatched);
+    let mismatched_identity = typst_pack::Digest::of(&mismatched);
     let embedded_actual = FontContainer::new(variant(4)).unwrap();
     let mismatched_actual = FontContainer::new(variant(5)).unwrap();
     let undeclared = FontContainer::new(variant(6)).unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"unreached".to_vec())
-        .unwrap()
         .external_package_file(package.clone(), "lib.typ", b"missing".to_vec())
-        .unwrap()
-        .external_font(missing, base.index())
-        .unwrap()
-        .font(embedded, base.index())
-        .unwrap()
-        .external_font(mismatched, base.index())
-        .unwrap()
+        .external_font(missing)
+        .font(embedded)
+        .external_font(mismatched)
         .build()
         .unwrap();
     let embedded_identity = pack
         .font_requirements()
         .iter()
-        .find(|requirement| requirement.is_embedded())
+        .find(|requirement| requirement.embedded)
         .unwrap()
-        .container_identity();
+        .digest;
     let fulfillments = CompilationFulfillmentSet::new(
         [],
         [
-            FontContainerFulfillment::new(undeclared.identity(), undeclared)
+            FontContainerFulfillment::new(undeclared.digest(), undeclared)
                 .provenance("undeclared:font")
                 .licensing("advisory:undeclared"),
             FontContainerFulfillment::new(embedded_identity, embedded_actual),
@@ -810,7 +755,7 @@ fn font_fulfillment_issues_follow_packages_and_canonical_identity_kind_order() {
     let font_order = issues[1..]
         .iter()
         .map(|issue| match issue {
-            CompilationFulfillmentIssue::MissingExternalFont { identity } => (*identity, 0),
+            CompilationFulfillmentIssue::MissingExternalFont { identity, .. } => (*identity, 0),
             CompilationFulfillmentIssue::UndeclaredFont { identity, .. } => (*identity, 1),
             CompilationFulfillmentIssue::UnexpectedEmbeddedFont { identity } => (*identity, 2),
             CompilationFulfillmentIssue::MismatchedFontContainer { expected, .. } => (*expected, 3),
@@ -867,66 +812,62 @@ fn font_fulfillment_issues_follow_packages_and_canonical_identity_kind_order() {
 
 #[cfg(feature = "embedded-fonts")]
 #[test]
-fn missing_declared_font_face_is_reported_before_world_materialization() {
-    use std::io::Write;
-
-    let data = typst_kit::fonts::embedded()
+fn external_font_fulfillment_failures_name_the_font_family() {
+    let data = typst_pack::typst_embedded_font_containers()
         .next()
         .unwrap()
-        .0
         .data()
         .to_vec();
-    let container = FontContainer::new(data).unwrap();
-    let identity = container.identity();
-    let digest = identity
-        .digest()
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    let missing_index = u32::MAX;
-    let manifest = format!(
-        "format-version = 1\n[project]\nentrypoint = \"main.typ\"\n\
-         [[fonts]]\npath = \"fonts/external.ttf\"\nexternal = true\nindex = {missing_index}\n\
-         container-digest = \"{digest}\"\n\
-         container-identity-kind = \"font-container\"\n\
-         container-identity-schema = \"typst-pack-font-container-identity-v1\"\n\
-         container-identity-algorithm = \"typst-hash128-0.15\"\n\
-         container-length = {}\n",
-        container.data().len()
-    );
-    let mut archive = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
-    let options =
-        zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
-    archive.start_file("typst-pack.toml", options).unwrap();
-    archive.write_all(manifest.as_bytes()).unwrap();
-    archive.start_file("project/main.typ", options).unwrap();
-    archive.write_all(b"unreached").unwrap();
-    let archive = typst_pack::PackArchiveBytes::from(archive.finish().unwrap().into_inner());
-    let pack = typst_pack::pack_archive::decode(
-        &archive,
-        typst_pack::pack_archive::DecodeLimits::reference_v1(),
-    )
-    .unwrap();
-    let fulfillments =
-        CompilationFulfillmentSet::new([], [FontContainerFulfillment::new(identity, container)])
-            .unwrap();
+    let family = typst::text::FontInfo::new(&data, 0).unwrap().family;
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"unreached".to_vec())
+        .external_font(data.clone())
+        .build()
+        .unwrap();
+    let expected = typst_pack::Digest::of(&data);
+    let mut other = data;
+    other.push(0);
 
-    let report = compile_to_report(
-        PackCompilationRequest::new(pack, output(OutputFormat::Svg)).fulfillments(fulfillments),
-    )
-    .unwrap();
-
-    assert!(matches!(
-        report.outcome(),
-        CompilationReportOutcome::Operation {
+    let issue = |fulfillments| {
+        let report = compile_to_report(
+            PackCompilationRequest::new(pack.clone(), output(OutputFormat::Svg))
+                .fulfillments(fulfillments),
+        )
+        .unwrap();
+        let CompilationReportOutcome::Operation {
             outcome: CompilationOperationOutcome::InvalidFulfillmentSet(invalid),
             ..
-        } if matches!(
-            invalid.issues(),
-            [CompilationFulfillmentIssue::MissingFontFace { identity: issue_identity, index }]
-                if *issue_identity == identity && *index == missing_index
-        )
+        } = report.outcome()
+        else {
+            panic!("expected an invalid Compilation Fulfillment Set outcome");
+        };
+        assert_eq!(invalid.issues().len(), 1);
+        invalid.issues()[0].clone()
+    };
+
+    let missing = issue(CompilationFulfillmentSet::empty());
+    assert!(matches!(
+        &missing,
+        CompilationFulfillmentIssue::MissingExternalFont { identity, .. } if *identity == expected
     ));
+    assert!(missing.to_string().contains(&family), "{missing}");
+
+    let mismatched = issue(
+        CompilationFulfillmentSet::new(
+            [],
+            [FontContainerFulfillment::new(
+                expected,
+                FontContainer::new(other).unwrap(),
+            )],
+        )
+        .unwrap(),
+    );
+    assert!(matches!(
+        &mismatched,
+        CompilationFulfillmentIssue::MismatchedFontContainer { expected: found, .. }
+            if *found == expected
+    ));
+    assert!(mismatched.to_string().contains(&family), "{mismatched}");
 }
 
 proptest! {
@@ -938,9 +879,9 @@ proptest! {
         let embedded: typst::syntax::package::PackageSpec = "@local/b:1.0.0".parse().unwrap();
         let undeclared: typst::syntax::package::PackageSpec = "@local/c:1.0.0".parse().unwrap();
         let pack = Pack::builder("main.typ")
-            .file("main.typ", b"unreached".to_vec()).unwrap()
-            .external_package_file(external.clone(), "lib.typ", b"expected".to_vec()).unwrap()
-            .package_file(embedded.clone(), "lib.typ", b"embedded".to_vec()).unwrap()
+            .file("main.typ", b"unreached".to_vec())
+            .external_package_file(external.clone(), "lib.typ", b"expected".to_vec())
+            .package_file(embedded.clone(), "lib.typ", b"embedded".to_vec())
             .build().unwrap();
         let entries = vec![
             PackageTreeFulfillment::new(
@@ -967,7 +908,7 @@ proptest! {
             set.packages()
                 .map(|fulfillment| (
                     fulfillment.spec().to_string(),
-                    fulfillment.tree().identity(),
+                    fulfillment.tree().digest(),
                 ))
                 .collect::<Vec<_>>()
         };
@@ -1004,7 +945,7 @@ proptest! {
                 let mut data = base.data().to_vec();
                 data.push(tag);
                 let container = FontContainer::new(data).unwrap();
-                FontContainerFulfillment::new(container.identity(), container)
+                FontContainerFulfillment::new(container.digest(), container)
                     .provenance(format!("font:{tag}"))
                     .licensing(format!("license:{tag}"))
             })
@@ -1020,14 +961,14 @@ proptest! {
             set.fonts()
                 .map(|fulfillment| (
                     fulfillment.expected_identity(),
-                    fulfillment.container().identity(),
+                    fulfillment.container().digest(),
                 ))
                 .collect::<Vec<_>>()
         };
         prop_assert_eq!(inventory(&baseline), inventory(&permuted));
 
         let pack = Pack::builder("main.typ")
-            .file("main.typ", b"unreached".to_vec()).unwrap()
+            .file("main.typ", b"unreached".to_vec())
             .build().unwrap();
         let observe = |set| {
             let report = compile_to_report(
@@ -1052,7 +993,6 @@ fn pack_bound_compilation_does_not_read_ambient_project_files() {
     assert!(std::path::Path::new(ambient).is_file());
     let pack = Pack::builder("main.typ")
         .file("main.typ", format!("#include \"{ambient}\"").into_bytes())
-        .unwrap()
         .build()
         .unwrap();
 
@@ -1068,7 +1008,6 @@ fn pack_bound_compilation_does_not_read_ambient_project_files() {
 fn pack_bound_compilation_does_not_read_an_ambient_clock() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"#datetime.today()".to_vec())
-        .unwrap()
         .build()
         .unwrap();
 
@@ -1084,9 +1023,7 @@ fn source_access_trace_retains_exact_bom_prefixed_pack_bytes() {
             "main.typ",
             b"#include \"chapter.typ\"\n#read(\"chapter.typ\")".to_vec(),
         )
-        .unwrap()
         .file("chapter.typ", b"\xef\xbb\xbfChapter".to_vec())
-        .unwrap()
         .build()
         .unwrap();
 
@@ -1115,13 +1052,11 @@ fn source_access_trace_retains_exact_bom_prefixed_pack_bytes() {
 fn pack_override_preflight_rejects_paths_outside_the_bound_pack() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"baseline".to_vec())
-        .unwrap()
         .package_file(
             "@local/example:1.0.0".parse().unwrap(),
             "lib.typ",
             b"package".to_vec(),
         )
-        .unwrap()
         .build()
         .unwrap();
 
@@ -1154,9 +1089,7 @@ fn pack_override_preflight_rejects_paths_outside_the_bound_pack() {
 fn pack_override_paths_can_be_validated_before_replacement_bytes_are_available() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"baseline".to_vec())
-        .unwrap()
         .file("chapter.typ", b"chapter".to_vec())
-        .unwrap()
         .build()
         .unwrap();
 
@@ -1175,9 +1108,7 @@ fn pack_overrides_replace_contained_bytes_without_mutating_the_pack() {
     let replacement = b"#set page(width: 40pt, height: 10pt, margin: 0pt)\nreplacement".to_vec();
     let pack = Pack::builder("main.typ")
         .file("main.typ", baseline.clone())
-        .unwrap()
         .file("unused.txt", b"unused baseline".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let pack_identity = pack.identity();
@@ -1236,9 +1167,9 @@ proptest! {
         ]),
     ) {
         let pack = Pack::builder("main.typ")
-            .file("main.typ", b"override commitments".to_vec()).unwrap()
-            .file("a.txt", b"a".to_vec()).unwrap()
-            .file("b.txt", b"b".to_vec()).unwrap()
+            .file("main.typ", b"override commitments".to_vec())
+            .file("a.txt", b"a".to_vec())
+            .file("b.txt", b"b".to_vec())
             .build().unwrap();
         let entries = [
             ("main.typ", b"main replacement".as_slice()),
@@ -1265,12 +1196,10 @@ proptest! {
 fn pack_override_set_cannot_be_applied_to_a_different_pack() {
     let first = Pack::builder("main.typ")
         .file("main.typ", b"first".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let second = Pack::builder("main.typ")
         .file("main.typ", b"second".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let overrides = PackOverrideSet::new(&first)
@@ -1293,7 +1222,6 @@ fn pack_override_set_cannot_be_applied_to_a_different_pack() {
 fn pack_compilation_normalizes_exporter_defaults_before_identity() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"defaults".to_vec())
-        .unwrap()
         .build()
         .unwrap();
 
@@ -1325,11 +1253,13 @@ fn pack_compilation_normalizes_exporter_defaults_before_identity() {
 
 #[test]
 fn compilation_identity_ignores_pack_metadata() {
-    let build = |name| {
+    let build = |name: &str| {
         Pack::builder("main.typ")
             .file("main.typ", b"same semantics".to_vec())
-            .unwrap()
-            .metadata(PackMetadata::new().with_name(name))
+            .metadata(PackMetadata {
+                name: Some(name.to_owned()),
+                ..PackMetadata::default()
+            })
             .build()
             .unwrap()
     };
@@ -1346,21 +1276,12 @@ fn compilation_identity_ignores_pack_metadata() {
 
     assert_eq!(first.compilation_identity(), second.compilation_identity());
     assert_eq!(first.artifacts()[0].bytes(), second.artifacts()[0].bytes());
-    assert_eq!(
-        first.compilation_identity().role(),
-        typst_pack::CanonicalIdentityRole::Compilation
-    );
-    assert_eq!(
-        first.compilation_identity().algorithm(),
-        "typst-hash128-0.15"
-    );
 }
 
 #[test]
 fn compilation_identity_canonicalizes_page_ranges_and_pdf_standard_order() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"canonical request".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let first_ranges = SvgOutputSpecification {
@@ -1430,10 +1351,10 @@ proptest! {
         include_document_time in any::<bool>(),
     ) {
         let pack = Pack::builder("main.typ")
-            .file("main.typ", b"rejection ordering".to_vec()).unwrap()
+            .file("main.typ", b"rejection ordering".to_vec())
             .build().unwrap();
         let other_pack = Pack::builder("main.typ")
-            .file("main.typ", b"other rejection ordering".to_vec()).unwrap()
+            .file("main.typ", b"other rejection ordering".to_vec())
             .build().unwrap();
         let mismatched = PackOverrideSet::new(&other_pack)
             .replace("main.typ", b"replacement".to_vec()).unwrap();
@@ -1484,7 +1405,6 @@ fn offset_aware_document_timestamps_on_the_same_utc_date_have_distinct_identitie
             b"#set page(width: datetime.today(offset: 2).day() * 1pt, height: 10pt, margin: 0pt)"
                 .to_vec(),
         )
-        .unwrap()
         .build()
         .unwrap();
     let early = 1_704_069_000; // 2024-01-01 00:30:00 UTC.
@@ -1517,7 +1437,6 @@ fn offset_aware_document_timestamps_on_the_same_utc_date_have_distinct_identitie
 fn invalid_document_timestamp_is_rejected() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"invalid time".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let request = PackCompilationRequest::new(pack, output(OutputFormat::Svg))
@@ -1531,34 +1450,6 @@ fn invalid_document_timestamp_is_rejected() {
     ));
 }
 
-#[cfg(not(any(
-    feature = "_test-package-download-probe",
-    feature = "default",
-    feature = "diagnostics",
-    feature = "embedded-fonts",
-    feature = "fs",
-    feature = "opendal",
-    feature = "parallel"
-)))]
-#[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
-#[test]
-fn document_time_refactor_preserves_the_existing_compilation_identity() {
-    let pack = Pack::builder("main.typ")
-        .file("main.typ", b"identity baseline".to_vec())
-        .unwrap()
-        .build()
-        .unwrap();
-    let result = compile(PackCompilationRequest::new(pack, output(OutputFormat::Svg))).unwrap();
-
-    assert_eq!(
-        result.compilation_identity().digest(),
-        [
-            0xa5, 0x94, 0x68, 0x70, 0x1d, 0x20, 0x4c, 0xf9, 0xaf, 0xca, 0x50, 0x39, 0x7b, 0x0a,
-            0x0a, 0x67,
-        ]
-    );
-}
-
 #[test]
 fn pack_bound_compilation_does_not_use_package_caches_or_network() {
     let package = "@preview/example:1.0.0".parse().unwrap();
@@ -1567,9 +1458,7 @@ fn pack_bound_compilation_does_not_use_package_caches_or_network() {
             "main.typ",
             b"#import \"@preview/example:1.0.0\": *".to_vec(),
         )
-        .unwrap()
         .external_package_file(package, "lib.typ", b"#let value = 1".to_vec())
-        .unwrap()
         .build()
         .unwrap();
 
@@ -1613,11 +1502,8 @@ fn external_package_fulfillment_is_verified_before_official_compilation() {
             "main.typ",
             b"#import \"@local/example:1.0.0\": value\n#value".to_vec(),
         )
-        .unwrap()
         .external_package_file(package.clone(), "lib.typ", source.clone())
-        .unwrap()
         .external_package_file(package.clone(), "typst.toml", manifest.clone())
-        .unwrap()
         .build()
         .unwrap();
 
@@ -1723,9 +1609,7 @@ fn external_font_fulfillment_is_verified_before_official_compilation() {
     let data = font.data().to_vec();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"Exact font".to_vec())
-        .unwrap()
-        .external_font(data.clone(), font.index())
-        .unwrap()
+        .external_font(data.clone())
         .build()
         .unwrap();
     let requirement = pack.font_requirements()[0].clone();
@@ -1742,8 +1626,8 @@ fn external_font_fulfillment_is_verified_before_official_compilation() {
             ..
         } if matches!(
             invalid.issues(),
-            [CompilationFulfillmentIssue::MissingExternalFont { identity }]
-                if *identity == requirement.container_identity()
+            [CompilationFulfillmentIssue::MissingExternalFont { identity, .. }]
+                if *identity == requirement.digest
         )
     ));
 
@@ -1754,7 +1638,7 @@ fn external_font_fulfillment_is_verified_before_official_compilation() {
             CompilationFulfillmentSet::new(
                 [],
                 [FontContainerFulfillment::new(
-                    requirement.container_identity(),
+                    requirement.digest,
                     FontContainer::new(wrong).unwrap(),
                 )],
             )
@@ -1769,7 +1653,7 @@ fn external_font_fulfillment_is_verified_before_official_compilation() {
         } if matches!(
             invalid.issues(),
             [CompilationFulfillmentIssue::MismatchedFontContainer { expected, .. }]
-                if *expected == requirement.container_identity()
+                if *expected == requirement.digest
         )
     ));
 
@@ -1778,7 +1662,7 @@ fn external_font_fulfillment_is_verified_before_official_compilation() {
             CompilationFulfillmentSet::new(
                 [],
                 [FontContainerFulfillment::new(
-                    requirement.container_identity(),
+                    requirement.digest,
                     FontContainer::new(data.clone()).unwrap(),
                 )],
             )
@@ -1791,7 +1675,7 @@ fn external_font_fulfillment_is_verified_before_official_compilation() {
             CompilationFulfillmentSet::new(
                 [],
                 [FontContainerFulfillment::new(
-                    requirement.container_identity(),
+                    requirement.digest,
                     FontContainer::new(data).unwrap(),
                 )
                 .provenance("memory:test")
@@ -1828,7 +1712,6 @@ fn external_font_fulfillment_is_verified_before_official_compilation() {
 fn pack_bound_compilation_rejects_the_bundle_feature() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", Vec::new())
-        .unwrap()
         .build()
         .unwrap();
     let request = PackCompilationRequest::new(pack, output(OutputFormat::Svg))
@@ -1845,7 +1728,6 @@ fn pack_bound_compilation_rejects_the_bundle_feature() {
 fn pack_bound_compilation_rejects_invalid_png_resolution() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"invalid resolution".to_vec())
-        .unwrap()
         .build()
         .unwrap();
 
@@ -1871,7 +1753,6 @@ fn pack_bound_compilation_does_not_use_unpacked_embedded_fonts() {
             "main.typ",
             b"#set text(font: \"Libertinus Serif\")\nHello".to_vec(),
         )
-        .unwrap()
         .build()
         .unwrap();
 
@@ -1894,7 +1775,6 @@ fn official_exporter_rejection_is_a_scoped_compilation_result() {
               #pdf.attach(\"duplicate.txt\", bytes(\"second\"))"
                 .to_vec(),
         )
-        .unwrap()
         .build()
         .unwrap();
 
@@ -1918,7 +1798,6 @@ fn pdf_is_one_document_format_artifact() {
             b"#set page(width: 10pt, height: 10pt, margin: 0pt)\n#rect(width: 1pt, height: 1pt)"
                 .to_vec(),
         )
-        .unwrap()
         .build()
         .unwrap();
     let output = compile(PackCompilationRequest::new(pack, output(OutputFormat::Pdf))).unwrap();
@@ -1939,7 +1818,6 @@ fn page_format_selection_matching_no_source_page_produces_no_artifacts() {
             b"#page(width: 10pt, height: 10pt, margin: 0pt)[#rect(width: 1pt, height: 1pt)]"
                 .to_vec(),
         )
-        .unwrap()
         .build()
         .unwrap();
     for expression in ["9", "9-"] {
@@ -2152,7 +2030,6 @@ fn pdf_page_selection_warns_that_accessibility_tags_are_disabled() {
 fn pack_owned_pdf_warning_is_not_attributed_to_the_engine() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"Pack warning".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let specification = PdfOutputSpecification {
@@ -2179,7 +2056,6 @@ fn pack_owned_pdf_warning_is_not_attributed_to_the_engine() {
 fn explicit_pdf_tags_with_page_selection_preserve_the_exporter_rejection() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"One page".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let specification = PdfOutputSpecification {
@@ -2207,7 +2083,6 @@ fn explicit_pdf_tags_with_page_selection_preserve_the_exporter_rejection() {
 fn tag_required_pdf_standard_without_tags_preserves_the_exporter_rejection() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"One page".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let specification = PdfOutputSpecification {
@@ -2235,7 +2110,6 @@ fn tag_required_pdf_standard_without_tags_preserves_the_exporter_rejection() {
 fn pack_request_rejection_collects_independent_pdf_issues_in_stable_order() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"#panic(\"must not compile\")".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let specification = PdfOutputSpecification {
@@ -2252,7 +2126,6 @@ fn pack_request_rejection_collects_independent_pdf_issues_in_stable_order() {
     };
     let other_pack = Pack::builder("main.typ")
         .file("main.typ", b"other".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let overrides = PackOverrideSet::new(&other_pack)
@@ -2313,7 +2186,6 @@ fn pack_request_rejection_collects_independent_pdf_issues_in_stable_order() {
 fn html_is_one_document_format_artifact() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"Hello from HTML".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let output = compile(PackCompilationRequest::new(
@@ -2338,7 +2210,6 @@ fn html_is_one_document_format_artifact() {
 fn pretty_affects_html_svg_and_pdf() {
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"Hello".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     for format in [OutputFormat::Html, OutputFormat::Svg, OutputFormat::Pdf] {
@@ -2374,7 +2245,6 @@ fn compilation_result_identity_binds_status_document_trace_and_artifacts() {
     let compile_source = |source: &[u8]| {
         let pack = Pack::builder("main.typ")
             .file("main.typ", source.to_vec())
-            .unwrap()
             .build()
             .unwrap();
         compile(PackCompilationRequest::new(pack, output(OutputFormat::Svg))).unwrap()
@@ -2410,7 +2280,6 @@ fn empty_page_format_output_retains_compilation_warnings() {
             "main.typ",
             b"#set text(font: \"Definitely Missing\")\nWarning".to_vec(),
         )
-        .unwrap()
         .build()
         .unwrap();
     let specification = SvgOutputSpecification {

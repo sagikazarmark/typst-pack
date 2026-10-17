@@ -1,12 +1,16 @@
-//! Frozen Pack, Compilation, and Compilation Result identity contracts.
+//! Pack identity vectors over the documented preimages, and the invariance
+//! contracts of Pack, Compilation, and Compilation Result identities.
 
 use proptest::prelude::*;
+use sha2::{Digest as _, Sha256};
 use typst::foundations::{Datetime, Dict, Smart, Value};
+use typst::syntax::package::PackageSpec;
+use typst_pack::pack_archive::{DecodeLimits, decode, encode};
 use typst_pack::{
-    CanonicalIdentityRole, CompilationLimits, CompilationOutputSpecification,
-    CompilationRequestRejection, CompilationResult, CreationTimestamp, DocumentTime,
-    HtmlOutputSpecification, Pack, PackCompilationRequest, PackMetadata, PackOverrideSet,
-    PackageDisposition, PdfOutputSpecification, PngOutputSpecification, SvgOutputSpecification,
+    CompilationLimits, CompilationOutputSpecification, CompilationRequestRejection,
+    CompilationResult, CreationTimestamp, Digest, DocumentTime, HtmlOutputSpecification, Pack,
+    PackCompilationRequest, PackMetadata, PackOverrideSet, PackageDisposition, PackageTree,
+    PdfOutputSpecification, PngOutputSpecification, SvgOutputSpecification,
     compile_with_limits as compile_to_report, parse_page_selection,
 };
 
@@ -17,7 +21,7 @@ fn svg_output() -> CompilationOutputSpecification {
 fn compile(
     request: PackCompilationRequest,
 ) -> Result<CompilationResult, CompilationRequestRejection> {
-    let report = compile_to_report(request, CompilationLimits::reference_v1())?;
+    let report = compile_to_report(request, CompilationLimits::DEFAULT)?;
     Ok(report
         .result()
         .expect("expected a semantic Compilation Result")
@@ -31,9 +35,7 @@ fn identity_pack() -> Pack {
             b"#set page(width: 20pt, height: 10pt, margin: 0pt)\n#rect(width: 1pt, height: 1pt)"
                 .to_vec(),
         )
-        .unwrap()
         .file("unused.txt", b"baseline".to_vec())
-        .unwrap()
         .build()
         .unwrap()
 }
@@ -47,21 +49,21 @@ proptest! {
         metadata_author in "[a-zA-Z0-9 ]{0,32}",
     ) {
         let plain = Pack::builder("main.typ")
-            .file("main.typ", project_bytes.clone()).unwrap()
+            .file("main.typ", project_bytes.clone())
             .build().unwrap();
         let described = Pack::builder("main.typ")
-            .file("main.typ", project_bytes.clone()).unwrap()
-            .metadata(
-                PackMetadata::new()
-                    .with_name(metadata_name)
-                    .with_author(metadata_author),
-            )
+            .file("main.typ", project_bytes.clone())
+            .metadata(PackMetadata {
+                name: Some(metadata_name),
+                description: None,
+                authors: vec![metadata_author],
+            })
             .build().unwrap();
         let mut changed_bytes = project_bytes;
         let mutation_index = mutation_index % changed_bytes.len();
         changed_bytes[mutation_index] ^= u8::MAX;
         let changed = Pack::builder("main.typ")
-            .file("main.typ", changed_bytes).unwrap()
+            .file("main.typ", changed_bytes)
             .build().unwrap();
 
         prop_assert_eq!(plain.identity(), described.identity());
@@ -69,133 +71,191 @@ proptest! {
     }
 }
 
-#[test]
-fn frozen_pack_identity_vector() {
-    let identity = identity_pack().identity();
+/// The documented preimage encoding, built independently of the crate.
+#[derive(Default)]
+struct Preimage(Sha256);
 
-    assert_eq!(identity.role(), CanonicalIdentityRole::Pack);
-    assert_eq!(identity.schema(), "typst-pack-identity-v1");
-    assert_eq!(identity.algorithm(), "typst-hash128-0.15");
+impl Preimage {
+    fn new(domain: &str) -> Self {
+        let mut preimage = Self::default();
+        preimage.str(domain);
+        preimage
+    }
+
+    fn str(&mut self, value: &str) -> &mut Self {
+        self.count(value.len());
+        self.0.update(value.as_bytes());
+        self
+    }
+
+    fn count(&mut self, value: usize) -> &mut Self {
+        self.0.update((value as u64).to_be_bytes());
+        self
+    }
+
+    fn digest(&mut self, value: [u8; 32]) -> &mut Self {
+        self.0.update(value);
+        self
+    }
+
+    fn bool(&mut self, value: bool) -> &mut Self {
+        self.0.update([u8::from(value)]);
+        self
+    }
+
+    fn finish(&mut self) -> String {
+        hex(std::mem::take(&mut self.0).finalize().into())
+    }
+}
+
+fn sha256(bytes: &[u8]) -> [u8; 32] {
+    Sha256::digest(bytes).into()
+}
+
+fn hex(digest: [u8; 32]) -> String {
+    let hex = digest
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("sha256:{hex}")
+}
+
+#[test]
+fn file_digests_are_plain_sha256() {
+    let pack = identity_pack();
+    let manifest = manifest_of(&pack);
+    assert!(manifest.contains(&format!("digest = \"{}\"", hex(sha256(b"baseline")))));
     assert_eq!(
-        identity.digest(),
-        [
-            0x50, 0x36, 0x3e, 0xc2, 0x23, 0x73, 0x08, 0x44, 0x57, 0xc2, 0x81, 0x9c, 0x12, 0x8e,
-            0xd6, 0xe7,
-        ]
+        Digest::of(b"abc").to_string(),
+        "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
     );
 }
 
-#[cfg(not(any(
-    feature = "_test-package-download-probe",
-    feature = "default",
-    feature = "diagnostics",
-    feature = "embedded-fonts",
-    feature = "egress",
-    feature = "fs",
-    feature = "opendal",
-    feature = "package-reading",
-    feature = "parallel"
-)))]
-#[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
 #[test]
-fn frozen_featureless_compilation_and_result_identity_vectors() {
-    let result = compile(PackCompilationRequest::new(identity_pack(), svg_output())).unwrap();
-    let compilation = result.compilation_identity();
-    let result_identity = result.result_identity();
+fn frozen_package_tree_and_pack_identity_vectors() {
+    let spec: PackageSpec = "@local/example:1.0.0".parse().unwrap();
+    let tree =
+        PackageTree::copy_from_entries([("lib.typ", b"lib".as_slice()), ("a.typ", b"a")]).unwrap();
+    let tree_digest = Preimage::new("typst-pack/package-tree/v1")
+        .count(2)
+        .str("a.typ")
+        .digest(sha256(b"a"))
+        .str("lib.typ")
+        .digest(sha256(b"lib"))
+        .finish();
+    assert_eq!(tree.digest().to_string(), tree_digest);
 
-    assert_eq!(compilation.role(), CanonicalIdentityRole::Compilation);
-    assert_eq!(compilation.schema(), "typst-pack-compilation-v1");
-    assert_eq!(compilation.algorithm(), "typst-hash128-0.15");
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"main".to_vec())
+        .file("data/x.csv", b"x".to_vec())
+        .package_file(spec.clone(), "lib.typ", b"lib".to_vec())
+        .package_file(spec.clone(), "a.typ", b"a".to_vec())
+        .build()
+        .unwrap();
+    let mut preimage = Preimage::new("typst-pack/pack/v1");
+    preimage
+        .str("main.typ")
+        .count(2)
+        .str("data/x.csv")
+        .digest(sha256(b"x"))
+        .str("main.typ")
+        .digest(sha256(b"main"))
+        .count(1)
+        .str("@local/example:1.0.0")
+        .digest(tree.digest().as_bytes().to_owned())
+        .bool(true)
+        .count(0);
+    assert_eq!(pack.identity().to_string(), preimage.finish());
     assert_eq!(
-        compilation.digest(),
-        [
-            0x04, 0x67, 0x5e, 0xcb, 0xc5, 0x89, 0x68, 0xd7, 0x63, 0xa8, 0xfe, 0xd3, 0x4c, 0xce,
-            0xde, 0x67,
-        ]
-    );
-    assert_eq!(
-        result_identity.role(),
-        CanonicalIdentityRole::CompilationResult
-    );
-    assert_eq!(result_identity.schema(), "typst-pack-compilation-result-v1");
-    assert_eq!(result_identity.algorithm(), "typst-hash128-0.15");
-    assert_eq!(
-        result_identity.digest(),
-        [
-            0x4b, 0xce, 0xae, 0x83, 0x78, 0xcd, 0x40, 0x90, 0x72, 0x28, 0x91, 0x7b, 0x9e, 0x0a,
-            0x74, 0xf6,
-        ]
+        pack.identity().to_string(),
+        "sha256:56729a615dfa1de63c64cd6e1c36e33f2029aae27812394b5f51ed47f11ee9fc"
     );
 }
 
-#[cfg(all(
-    feature = "opendal",
-    not(any(
-        feature = "_test-package-download-probe",
-        feature = "default",
-        feature = "diagnostics",
-        feature = "embedded-fonts",
-        feature = "egress",
-        feature = "fs",
-        feature = "package-reading",
-        feature = "parallel"
-    ))
-))]
-#[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
+#[cfg(feature = "embedded-fonts")]
 #[test]
-fn frozen_opendal_compilation_and_result_identity_vectors() {
-    assert_implementation_attestation_vectors(
-        "opendal",
-        [
-            0xc8, 0xcb, 0x29, 0x92, 0xf4, 0xcf, 0x8a, 0x1b, 0xdd, 0x5d, 0x4b, 0x92, 0xa7, 0xf6,
-            0xcf, 0x6f,
-        ],
-        [
-            0x37, 0xd3, 0x7c, 0x48, 0xdc, 0xa6, 0xab, 0xb3, 0x66, 0x0e, 0xa6, 0xe9, 0x13, 0x48,
-            0x56, 0xf4,
-        ],
-    );
+fn font_containers_bind_their_digest_and_disposition_into_pack_identity() {
+    let data = typst_pack::typst_embedded_font_containers()
+        .next()
+        .unwrap()
+        .data()
+        .to_vec();
+    let container = typst_pack::FontContainer::new(data.clone()).unwrap();
+    assert_eq!(container.digest().to_string(), hex(sha256(&data)));
+
+    for embedded in [true, false] {
+        let builder = Pack::builder("main.typ").file("main.typ", b"main".to_vec());
+        let builder = if embedded {
+            builder.font(data.clone())
+        } else {
+            builder.external_font(data.clone())
+        };
+        let pack = builder.build().unwrap();
+        let expected = Preimage::new("typst-pack/pack/v1")
+            .str("main.typ")
+            .count(1)
+            .str("main.typ")
+            .digest(sha256(b"main"))
+            .count(0)
+            .count(1)
+            .digest(sha256(&data))
+            .bool(embedded)
+            .finish();
+        assert_eq!(pack.identity().to_string(), expected);
+    }
 }
 
-#[cfg(all(
-    feature = "_test-package-download-probe",
-    feature = "default",
-    feature = "diagnostics",
-    feature = "embedded-fonts",
-    feature = "egress",
-    feature = "fs",
-    feature = "opendal",
-    feature = "package-reading",
-    feature = "parallel"
-))]
-#[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
 #[test]
-fn frozen_all_feature_compilation_and_result_identity_vectors() {
-    assert_implementation_attestation_vectors(
-        "_test-package-download-probe,default,diagnostics,egress,embedded-fonts,fs,opendal,package-reading,parallel",
-        [
-            0xd0, 0x98, 0xec, 0x8b, 0xfb, 0x80, 0xf9, 0xdb, 0x26, 0xc8, 0x98, 0x71, 0x98, 0xe5,
-            0x8d, 0xd1,
-        ],
-        [
-            0x46, 0x75, 0xb7, 0x37, 0x63, 0x18, 0xe7, 0xfb, 0x71, 0xaa, 0x39, 0x7c, 0xe8, 0x9d,
-            0xf3, 0x53,
-        ],
-    );
+fn pack_identity_ignores_archive_order_and_compression() {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"main".to_vec())
+        .file("b.txt", b"b".to_vec())
+        .file("a.txt", b"a".to_vec())
+        .metadata(PackMetadata {
+            name: Some("ordered".to_owned()),
+            ..PackMetadata::default()
+        })
+        .build()
+        .unwrap();
+    let archive = encode(&pack).unwrap();
+
+    // Rewrite every member in reverse order, stored rather than deflated.
+    let mut source = zip::ZipArchive::new(std::io::Cursor::new(&archive)).unwrap();
+    let mut members = (0..source.len())
+        .map(|index| {
+            let mut entry = source.by_index(index).unwrap();
+            let mut data = Vec::new();
+            std::io::Read::read_to_end(&mut entry, &mut data).unwrap();
+            (entry.name().to_owned(), data)
+        })
+        .collect::<Vec<_>>();
+    members.reverse();
+    let mut writer = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for (name, data) in members {
+        writer
+            .start_file(
+                name,
+                zip::write::SimpleFileOptions::default()
+                    .compression_method(zip::CompressionMethod::Stored),
+            )
+            .unwrap();
+        std::io::Write::write_all(&mut writer, &data).unwrap();
+    }
+    let rewritten = writer.finish().unwrap().into_inner();
+
+    assert_ne!(rewritten, archive);
+    let decoded = decode(&rewritten, DecodeLimits::DEFAULT).unwrap();
+    assert_eq!(decoded.identity(), pack.identity());
+    assert_eq!(encode(&decoded).unwrap(), archive);
 }
 
-#[cfg(all(target_arch = "x86_64", target_os = "linux", target_env = "gnu"))]
-fn assert_implementation_attestation_vectors(
-    expected_features: &str,
-    expected_compilation: [u8; 16],
-    expected_result: [u8; 16],
-) {
-    let result = compile(PackCompilationRequest::new(identity_pack(), svg_output())).unwrap();
-
-    assert_eq!(result.engine_identity().feature_set(), expected_features);
-    assert_eq!(result.exporter_identity().feature_set(), expected_features);
-    assert_eq!(result.compilation_identity().digest(), expected_compilation);
-    assert_eq!(result.result_identity().digest(), expected_result);
+fn manifest_of(pack: &Pack) -> String {
+    let archive = encode(pack).unwrap();
+    let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive)).unwrap();
+    let mut manifest = String::new();
+    std::io::Read::read_to_string(&mut zip.by_name("typst-pack.toml").unwrap(), &mut manifest)
+        .unwrap();
+    manifest
 }
 
 #[test]
@@ -227,35 +287,25 @@ fn pack_identity_binds_every_project_and_package_semantic() {
     let build = |case: PackCase<'_>| {
         let mut builder = Pack::builder(case.entrypoint)
             .file("main.typ", b"main".to_vec())
-            .unwrap()
-            .file(case.project_path, case.project_bytes.to_vec())
-            .unwrap();
+            .file(case.project_path, case.project_bytes.to_vec());
         builder = if case.disposition.is_embedded() {
-            builder
-                .package_file(
-                    case.package.clone(),
-                    case.package_path,
-                    case.package_bytes.to_vec(),
-                )
-                .unwrap()
+            builder.package_file(
+                case.package.clone(),
+                case.package_path,
+                case.package_bytes.to_vec(),
+            )
         } else {
-            builder
-                .external_package_file(
-                    case.package.clone(),
-                    case.package_path,
-                    case.package_bytes.to_vec(),
-                )
-                .unwrap()
+            builder.external_package_file(
+                case.package.clone(),
+                case.package_path,
+                case.package_bytes.to_vec(),
+            )
         };
         if case.extra_package_file {
             builder = if case.disposition.is_embedded() {
-                builder
-                    .package_file(case.package, "extra.typ", b"extra".to_vec())
-                    .unwrap()
+                builder.package_file(case.package, "extra.typ", b"extra".to_vec())
             } else {
-                builder
-                    .external_package_file(case.package, "extra.typ", b"extra".to_vec())
-                    .unwrap()
+                builder.external_package_file(case.package, "extra.typ", b"extra".to_vec())
             };
         }
         builder.build().unwrap()
@@ -433,7 +483,6 @@ fn compilation_identity_binds_pack_inputs_overrides_features_and_document_time()
         .unwrap();
     let changed_pack = Pack::builder("main.typ")
         .file("main.typ", b"changed pack".to_vec())
-        .unwrap()
         .build()
         .unwrap();
     let main_override = compile(
@@ -481,10 +530,11 @@ fn compilation_identity_binds_pack_inputs_overrides_features_and_document_time()
 
 #[test]
 fn identities_exclude_metadata_and_normalize_equivalent_request_values() {
-    let metadata = PackMetadata::new()
-        .with_name("Named Pack")
-        .with_description("Operational description")
-        .with_author("Pack Author");
+    let metadata = PackMetadata {
+        name: Some("Named Pack".to_owned()),
+        description: Some("Operational description".to_owned()),
+        authors: vec!["Pack Author".to_owned()],
+    };
     let plain_pack = identity_pack();
     let metadata_pack = Pack::builder("main.typ")
         .file(
@@ -492,9 +542,7 @@ fn identities_exclude_metadata_and_normalize_equivalent_request_values() {
             b"#set page(width: 20pt, height: 10pt, margin: 0pt)\n#rect(width: 1pt, height: 1pt)"
                 .to_vec(),
         )
-        .unwrap()
         .file("unused.txt", b"baseline".to_vec())
-        .unwrap()
         .metadata(metadata)
         .build()
         .unwrap();
