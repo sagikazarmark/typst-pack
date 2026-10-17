@@ -14,6 +14,6 @@ This is a single-context repository: its glossary is `CONTEXT.md`, and its archi
 
 ## Vocabulary
 
-Use the glossary's terms in issue titles, designs, tests, and code. Reconsider a new synonym before adding it; a genuinely missing concept should be resolved through domain modeling.
+Use the glossary's terms in issue titles, designs, tests, and code. The glossary holds domain terms only; naming conventions for code live in ADR-0021.
 
-Flag any conflict with an existing ADR explicitly instead of silently overriding it.
+Flag any conflict with an existing ADR explicitly instead of silently overriding it. When a decision changes, rewrite the ADR that holds it so it stays self-contained (ADR-0021); do not add an amending or superseding ADR. Files in `docs/research/` are historical records, not current guidance.

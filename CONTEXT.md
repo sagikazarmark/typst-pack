@@ -1,149 +1,81 @@
 # Typst Pack
 
-This glossary names the domain concepts exposed by typst-pack. Operational and
-implementation details belong in API documentation and architectural decisions.
-
-## Packs
+Domain terms used across typst-pack. Decisions live in `docs/adr/`; exact
+formats and guarantees live in the README and `docs/library-contract.md`.
 
 **Pack**:
-A validated, portable Typst project with one entrypoint and a fixed set of
-project files, package requirements, and font requirements. A Pack is
-self-contained when every requirement is embedded. Its accessors and `inspect`
-show its static contents without resolving dependencies or compiling it.
+A validated, portable Typst project: one entrypoint, its project files, and the
+packages and font containers it requires. A pack is self-contained when every
+requirement is embedded.
 
-**Pack Creation**:
-The adapter-neutral operation that combines a Project Snapshot, Package Catalog,
-Font Catalog, and Dependency Discovery into a Pack. It may report package
-specifications that the caller must add before trying creation again.
+**Pack archive (`.typk`)**:
+The ZIP representation of a pack. Its layout and encoding do not affect the
+pack's identity; decoded bytes become a pack only after verification.
 
-**Dependency Discovery**:
-The representative Typst compilation that selects package and font requirements
-for Pack Creation. Its Discovery Specification fixes the Typst Target, inputs,
-Document Time, and engine features for that run; those values do not become Pack
-state. Project membership always comes from the Project Snapshot.
-_Avoid_: Creation Discovery, Precompilation
+**Manifest**:
+`typst-pack.toml` inside the archive. Declares the format version, entrypoint,
+every file with its digest, the packages, and the font containers with their
+faces. Readers verify it against the archive's members.
 
-**Pack Assembly and Pack Assembler**:
-Pack Assembly obtains a Project Snapshot, fonts, and requested Package Trees,
-then repeats Pack Creation until it produces a Pack or fails. A Pack Assembler
-performs that workflow for configured sources and policies.
-_Avoid_: acquire, acquisition, gather, gathering, gatherer, Creation Preparation, Creation Adapter
+**Project files and entrypoint**:
+Every regular file beneath the project root that the ignore file does not
+exclude, with the root-relative path of the main Typst file. Membership is
+structural; compilation never selects project files.
 
-**Project Snapshot**:
-One source-selected set of canonical root-relative project paths and exact bytes,
-including its entrypoint. Snapshot assembly rejects invalid or duplicate paths
-and every path containing a `.typk` component.
+**Ignore file (`.typkignore`)**:
+Gitignore-style rules at the project root that exclude files from the pack.
+Nested `.typkignore` files are ordinary project files.
 
-**Project Ignore Policy**:
-The filesystem reader's root `.typkignore` rules for selecting project files.
-Rules use Gitignore-style ordering, negation, and last-match precedence. The root
-policy file is included; nested `.typkignore` files are ordinary project files.
+**Package**:
+A Typst package identified by its spec (`@namespace/name:version`). A pack
+stores its complete file tree (the package tree) or requires it externally.
 
-**Pack Identity**:
-The content identity of a Pack's entrypoint, project files, ordered fonts, exact
-dependency requirements, and each requirement's embedded or external state.
-Request values, metadata, archive encoding, and host facts do not contribute.
+**Font container and face**:
+A container is one font file or collection, identified by its digest; a face is
+one font inside it (family, style, weight). Requirements are whole containers:
+every face of a required container is available at compile time.
 
-**Canonical Identity**:
-The shared identity convention for Packs, package trees, font containers,
-compilations, and results. Equality includes role, schema, algorithm, and digest;
-a bare digest is insufficient.
-_Avoid_: bare hash, checksum
+**Embedded and external**:
+An embedded package or font is stored in the pack. An external one is recorded
+by digest and supplied by the caller at compile time.
 
-**Pack Manifest**:
-The versioned declaration inside a Pack Archive. It records the entrypoint,
-requirements, and optional metadata; Pack validation verifies those declarations
-against the contained bytes instead of trusting the manifest alone.
+**Fulfilment**:
+Supplying the external packages and fonts a pack requires. Only a supplied tree
+or container with the required digest is used; anything missing is reported by
+package spec or font family.
 
-**Pack Extraction**:
-The planned projection of selected Pack project files, packages, and fonts into
-an editable tree. Planning checks paths and collisions before a destination
-adapter writes the plan. Extraction is not archive decoding and does not preserve
-the original Pack Identity.
+**Discovery compile**:
+The compile that pack creation runs to learn which packages and fonts the
+document uses. Its target, inputs, document time, and features do not become
+pack state. Creation may stop with the missing package specs, to be resumed
+once the caller supplies them.
 
-**Pack Archive**:
-The interoperable byte representation of a Pack, conventionally stored as a
-`.typk` file. Archive layout and encoding do not contribute to Pack Identity; a
-decoded archive becomes a Pack only after whole-Pack validation.
+**Variant**:
+An extra set of inputs for discovery. Creation compiles each variant too and
+requires the union of what any compile used.
 
-**Pack Archive Reading**:
-The bounded operation that reads exact Pack Archive bytes from a stream, file, or
-storage service. Reading does not itself decode or validate those bytes; composed
-helpers such as `read_pack` and `open_pack` do both operations.
-_Avoid_: Pack Archive Acquisition, acquire
+**Input**:
+A `sys.inputs` value supplied per compilation: a string, or bytes read from a
+file. Inputs never change a pack's files or requirements.
 
-**Pack Archive Writing**:
-The operation that writes exact Pack Archive bytes to a stream, file, or storage
-service under an explicit policy. Writing does not define archive encoding;
-composed helpers such as `write_pack` and `save_pack` do both operations.
-_Avoid_: Pack Archive Publication, publish
+**Target**:
+Typst's document model, paged or HTML. Discovery uses one target; each output
+format implies the target it needs.
 
-## Packages And Fonts
+**Output**:
+A compiled artifact. PDF and HTML produce one document; PNG and SVG produce one
+artifact per selected page, numbered by its page in the source document.
 
-**Package Catalog, Package Tree, and Package Requirement**:
-A Package Catalog maps exact package specifications to complete Package Trees and
-their embedded or external state. Pack Creation selects Package Requirements that
-bind a specification, tree identity, and state. A Package Tree contains every
-addressable regular file beneath one package root.
+**Document time**:
+The explicit value used for Typst's `datetime.today()`: absent, a fixed date or
+datetime, or a Unix timestamp. Compilation never reads the wall clock.
 
-**Package Registry**:
-The remote source addressed by one URL per exact package specification. The core
-constructs URLs for the official Typst Universe namespace; adapters choose and
-perform any transport.
+**Digest, pack identity, compilation identity**:
+A digest is SHA-256 written `sha256:<hex>`. The pack identity digests the
+entrypoint, project files, and requirements (not metadata or archive layout);
+the compilation identity adds the typst-pack and Typst versions, the request,
+and the external dependencies used.
 
-**Package Archive Expansion**:
-The bounded transformation from package archive bytes into a complete Package
-Tree. It rejects unsafe or malformed members and requires explicit limits because
-the input crosses a trust boundary.
-
-**Fulfillment**:
-Supplying exact Package Trees and Font Containers for a Pack's external
-requirements. Compilation verifies complete identities and declared font faces
-before exposing fulfilled values to Typst.
-
-**Font Container, Font Catalog, and Font Requirement**:
-A Font Container is one exact font file or multi-face collection. A Font Catalog
-is an ordered sequence of containers and their embedded or external state. Pack
-Creation selects Font Requirements that bind container identity and used faces.
-
-## Compilation
-
-**Pack Override**:
-A compilation-scoped replacement for one project file already contained in a
-Pack. Overrides cannot add or delete paths or replace package or font content.
-
-**Typst Target**:
-The Typst document model, Paged or HTML. Dependency Discovery selects one target;
-each compilation output request implies the target it needs.
-
-**Output Formats**:
-PDF and HTML produce one document artifact. PNG and SVG produce one artifact per
-selected source page, ordered by its one-based Source Page Number. Page numbers
-identify positions in the source document, not output collection indexes.
-
-**Document Time**:
-The explicit value used for Typst document-time requests: absent, a fixed Typst
-date or datetime, or a Unix timestamp interpreted for requested timezone offsets.
-It contributes to Compilation Identity even when document code does not read it.
-
-**Implementation Identity**:
-The exact embedded Typst engine or exporter implementation attested by typst-pack,
-including its role, version, source checksum, target, crate features, and build
-mode. Engine and exporter roles are distinct identities.
-
-**Compilation Result and Output Artifact**:
-A Compilation Result records accepted compilation status, diagnostics, warnings,
-identities, and ordered artifacts. Each output artifact owns exact bytes and a
-format role; page-format artifacts also carry their Source Page Number.
-
-**Environment-Independent Compilation**:
-Once the Pack, compilation request, implementation identities, and fulfilled
-dependency bytes are fixed, compilation does not consult ambient files, package
-paths, fonts, environment variables, wall-clock time, or the network.
-
-## Conventions
-
-Public failures use three suffixes: **Error** for a terminal typed failure,
-**Rejection** for a complete deterministic refusal before semantic acceptance,
-and **Issue** for one independently detectable fact in an ordered aggregate.
-These are API naming conventions, not domain concepts.
+**Extraction**:
+Writing a pack's project files, and optionally its embedded packages and fonts,
+back into an editable directory tree.

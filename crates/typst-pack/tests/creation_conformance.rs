@@ -4,13 +4,13 @@
 //! Trees or raw archives, and ordered Font Containers. Concrete runners drive
 //! those records through direct core composition, OpenDAL Memory, and, where
 //! the source model is intentionally equivalent, the reference filesystem Pack
-//! Assembler. This is the operation-specific conformance shape required by
-//! ADR-0014; it introduces no production conformance trait or storage policy.
+//! Assembler. The runners are test-only; there is no production conformance
+//! trait (ADR-0021).
 //!
-//! Project membership is already selected in shared scenarios. ADR-0011 leaves
+//! Project membership is already selected in shared scenarios. ADR-0019 leaves
 //! that selection to each reader, so filesystem-only `.typkignore` behavior
 //! belongs in `fs_creation.rs` and is deliberately absent here. Equivalent
-//! selected bytes must issue the same semantic Pack promised by ADR-0008.
+//! selected bytes must produce the same Pack (ADR-0019).
 //!
 //! Every assertion stays on the public library surface: contained project
 //! bytes, requirements, Pack Font Catalog order, Pack Identity,

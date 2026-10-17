@@ -1,5 +1,10 @@
 # Architecture review — August 2026
 
+> **Historical (2026-08).** Superseded by ADR-0018 to ADR-0021 and the
+> [2026-10 simplification](2026-10-simplification.md); describes code that no
+> longer exists, and the ADR numbers below refer to records now only in git
+> history.
+
 Reviewed at commit 3e58ca6 (v0.4.0, 0.5.0 in preparation). Line counts are
 measured; estimates are accurate to ±10–15%. This document records findings
 and intent only — it is deliberately not a normative spec, contains no type

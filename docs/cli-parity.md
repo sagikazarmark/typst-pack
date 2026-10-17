@@ -1,10 +1,10 @@
 # Embedded Typst CLI parity inventory
 
 This inventory is tied to Typst 0.15.1. It supplements
-[ADR-0005](adr/0005-align-cli-with-embedded-typst.md) and must be reviewed before
+[ADR-0020](adr/0020-library-cli-and-adapters.md) and must be reviewed before
 the embedded Typst release changes. Follow the complete
-[embedded Typst upgrade procedure](embedded-typst-upgrade.md); the approved
-crate set and classified differential matrix live in
+[embedded Typst upgrade procedure](embedded-typst-upgrade.md); the pinned Typst
+release and the official CLI artifact live in
 `crates/typst-pack/embedded-typst.toml`.
 
 The process differential gate is `crates/typst-pack-cli/tests/official_typst_cli.rs`. Dagger downloads
