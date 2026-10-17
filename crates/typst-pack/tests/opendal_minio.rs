@@ -13,25 +13,15 @@ use std::io::Write as _;
 
 use futures_util::StreamExt as _;
 use opendal::{ErrorKind, Operator};
-use typst_pack::opendal::pack_archive::{
-    PackArchiveReadErrorCause, PackArchiveReadRequest, read_pack_archive,
+use typst_pack::opendal::{
+    Error, FontSource, PackageRead, PackageSource, WriteOutcome, WritePolicy, insert_package,
+    read_fonts, read_pack_archive, read_package, read_project, write_pack_archive,
+    write_pack_extraction_plan, write_package_archive,
 };
-use typst_pack::opendal::pack_assembly::{
-    FontReadLimits, FontReadRequest, FontSource, PackageRead, PackageReadLimits,
-    PackageReadRequest, ProjectReadEntry, ProjectReadLimits, ProjectReadRequest,
-    insert_read_package, read_fonts, read_package, read_project,
-};
-use typst_pack::opendal::write::{
-    OpenDalWritePhase, PackArchiveWriteRequest, PackExtractionWriteErrorCause,
-    PackExtractionWriteProgress, PackExtractionWriteRequest, PackageCacheArchiveWriteRequest,
-    WritePolicy, write_pack_archive, write_pack_extraction_plan, write_package_cache_archive,
-};
-use typst_pack::opendal::{Location, OperatorBinding, OperatorBindings};
-use typst_pack::pack_archive::{DecodeLimits, ReadLimits, decode, encode};
+use typst_pack::pack_archive::{DecodeLimits, decode, encode};
 use typst_pack::{
-    FontCatalog, FontCatalogEntry, FontContainer, FontDisposition, Pack, PackExtractionSelection,
-    PackageCatalog, PackageDisposition, PackageExpansionLimits, PackageReadFailures,
-    ProjectSnapshotAssembly, WriteKeyOutcome, plan_pack_extraction,
+    FontDisposition, Pack, PackExtractionSelection, PackageCatalog, PackageDisposition,
+    PackageExpansionLimits, PackageReadFailures, ReadLimits, plan_pack_extraction,
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -56,21 +46,19 @@ async fn minio_validates_surviving_storage_contracts() {
         return;
     }
     let partial = config.operator(&config.partial_access_key, &config.partial_secret_key);
-    let admin_bindings = bindings("minio", &admin);
-    let partial_bindings = bindings("restricted", &partial);
 
     eprintln!("MinIO scenario: conditional create");
     conditional_create_preserves_existing_bytes(&admin).await;
     eprintln!("MinIO scenario: project read");
-    project_read_hands_off_exact_bytes(&admin, &admin_bindings).await;
+    project_read_hands_off_exact_bytes(&admin).await;
     eprintln!("MinIO scenario: paginated recursive font read");
-    paginated_font_read_reaches_the_second_page(&admin, &admin_bindings).await;
+    paginated_font_read_reaches_the_second_page(&admin).await;
     eprintln!("MinIO scenario: package registry and cache");
-    package_registry_read_validates_then_populates_cache(&admin, &admin_bindings).await;
+    package_registry_read_validates_then_populates_cache(&admin).await;
     eprintln!("MinIO scenario: Pack Archive write and read");
-    pack_archive_write_and_read_preserve_exact_bytes(&admin_bindings).await;
+    pack_archive_write_and_read_preserve_exact_bytes(&admin).await;
     eprintln!("MinIO scenario: authorization and partial write");
-    authorization_and_partial_write_evidence(&admin, &partial_bindings).await;
+    authorization_and_partial_write_evidence(&admin, &partial).await;
 }
 
 async fn conditional_create_preserves_existing_bytes(admin: &Operator) {
@@ -85,9 +73,23 @@ async fn conditional_create_preserves_existing_bytes(admin: &Operator) {
 
     assert_eq!(error.kind(), ErrorKind::ConditionNotMatch);
     assert_eq!(admin.read(path).await.unwrap().to_vec(), b"first");
+
+    let archive = encode(
+        &Pack::builder("main.typ")
+            .file("main.typ", b"= Conflict".to_vec())
+            .unwrap()
+            .build()
+            .unwrap(),
+    )
+    .unwrap();
+    let error = write_pack_archive(admin, path, &archive, WritePolicy::CreateOrVerify)
+        .await
+        .unwrap_err();
+    assert!(matches!(error.error, Error::Conflict { .. }));
+    assert_eq!(admin.read(path).await.unwrap().to_vec(), b"first");
 }
 
-async fn project_read_hands_off_exact_bytes(admin: &Operator, bindings: &OperatorBindings) {
+async fn project_read_hands_off_exact_bytes(admin: &Operator) {
     admin
         .write("project/main.typ", b"= MinIO".to_vec())
         .await
@@ -97,18 +99,16 @@ async fn project_read_hands_off_exact_bytes(admin: &Operator, bindings: &Operato
         .await
         .unwrap();
     admin
+        .write("project/empty.txt", Vec::<u8>::new())
+        .await
+        .unwrap();
+    admin
         .write("project-sibling/untouched", b"sibling".to_vec())
         .await
         .unwrap();
-    let request = ProjectReadRequest::new(
-        "minio:/project/".parse().unwrap(),
-        ProjectReadLimits::reference_v1(),
-    )
-    .unwrap();
 
-    let (_, entries) = read_project(bindings, &request).await.unwrap().into_parts();
-    let snapshot = ProjectSnapshotAssembly::new("main.typ")
-        .assemble(entries.into_iter().map(ProjectReadEntry::into_parts))
+    let snapshot = read_project(admin, "project/", "main.typ", &ReadLimits::default())
+        .await
         .unwrap();
 
     assert_eq!(snapshot.file("main.typ"), Some(b"= MinIO".as_slice()));
@@ -116,6 +116,8 @@ async fn project_read_hands_off_exact_bytes(admin: &Operator, bindings: &Operato
         snapshot.file(".typkignore"),
         Some(b"ignored.typ".as_slice())
     );
+    assert_eq!(snapshot.file("empty.txt"), Some(b"".as_slice()));
+    assert_eq!(snapshot.files().count(), 3);
     assert_eq!(
         admin
             .read("project-sibling/untouched")
@@ -126,10 +128,7 @@ async fn project_read_hands_off_exact_bytes(admin: &Operator, bindings: &Operato
     );
 }
 
-async fn paginated_font_read_reaches_the_second_page(
-    admin: &Operator,
-    bindings: &OperatorBindings,
-) {
+async fn paginated_font_read_reaches_the_second_page(admin: &Operator) {
     futures_util::stream::iter(0..1_000)
         .for_each_concurrent(Some(32), |index| {
             let admin = admin.clone();
@@ -146,32 +145,20 @@ async fn paginated_font_read_reaches_the_second_page(
         .write("fonts/paged/nested/zz-container.TTF", font.clone())
         .await
         .unwrap();
-    let request = FontReadRequest::new(
-        [FontSource::new(
-            "minio:/fonts/paged/".parse().unwrap(),
-            FontDisposition::External,
-        )],
-        FontReadLimits::reference_v1(),
-    )
-    .unwrap();
+    let sources = [FontSource {
+        prefix: "fonts/paged/".into(),
+        disposition: FontDisposition::External,
+    }];
 
-    let (_, entries) = read_fonts(bindings, &request).await.unwrap().into_parts();
-    assert_eq!(entries.len(), 1);
-    let (_, _, path, disposition, bytes) = entries.into_iter().next().unwrap().into_parts();
-    assert_eq!(path, "nested/zz-container.TTF");
-    assert_eq!(bytes, font);
-    let mut catalog = FontCatalog::new();
-    catalog.push(FontCatalogEntry::new(
-        FontContainer::new(bytes).unwrap(),
-        disposition,
-    ));
+    let catalog = read_fonts(admin, &sources, &ReadLimits::default())
+        .await
+        .unwrap();
+
     assert_eq!(catalog.entries().len(), 1);
+    assert_eq!(catalog.entries()[0].container().data(), font);
 }
 
-async fn package_registry_read_validates_then_populates_cache(
-    admin: &Operator,
-    bindings: &OperatorBindings,
-) {
+async fn package_registry_read_validates_then_populates_cache(admin: &Operator) {
     let archive = package_archive();
     admin
         .write(
@@ -180,82 +167,78 @@ async fn package_registry_read_validates_then_populates_cache(
         )
         .await
         .unwrap();
-    let request = PackageReadRequest::new(
-        "@preview/example:1.2.3".parse().unwrap(),
-        [],
-        Some("minio:/packages/cache/".parse().unwrap()),
-        Some("minio:/packages/registry/".parse().unwrap()),
-        PackageReadLimits::reference_v1(),
-    )
-    .unwrap();
-    let read = read_package(bindings, &request).await.unwrap();
-    assert!(matches!(read, PackageRead::RegistryArchive(_)));
+    let spec = "@preview/example:1.2.3".parse().unwrap();
+    let sources = [
+        PackageSource::ArchiveCache {
+            operator: admin.clone(),
+            prefix: "packages/cache/".into(),
+        },
+        PackageSource::Registry {
+            operator: admin.clone(),
+            prefix: "packages/registry/".into(),
+        },
+    ];
+    let read = read_package(&sources, &spec, &ReadLimits::default())
+        .await
+        .unwrap();
+    assert_eq!(read, PackageRead::RegistryArchive(archive.clone()));
     let mut catalog = PackageCatalog::new();
     let mut failures = PackageReadFailures::new();
-    let residue = insert_read_package(
+    insert_package(
         &mut catalog,
         &mut failures,
+        &spec,
         read,
         PackageDisposition::External,
         PackageExpansionLimits::reference_v1(),
     )
-    .unwrap()
     .unwrap();
-    let write = PackageCacheArchiveWriteRequest::new(residue.destination().clone()).unwrap();
-    let receipt = write_package_cache_archive(bindings, &write, residue.bytes())
+    let outcome = write_package_archive(admin, "packages/cache/", &spec, &archive)
         .await
         .unwrap();
-    assert_eq!(receipt.outcome(), WriteKeyOutcome::Created);
+    assert_eq!(outcome, WriteOutcome::Created);
 
-    let cached = read_package(bindings, &request).await.unwrap();
-    let PackageRead::CachedArchive(cached) = cached else {
-        panic!("expected the validated registry archive to become a cache hit");
-    };
-    assert_eq!(cached.bytes(), archive);
+    let cached = read_package(&sources, &spec, &ReadLimits::default())
+        .await
+        .unwrap();
+    assert_eq!(cached, PackageRead::CachedArchive(archive));
 }
 
-async fn pack_archive_write_and_read_preserve_exact_bytes(bindings: &OperatorBindings) {
+async fn pack_archive_write_and_read_preserve_exact_bytes(admin: &Operator) {
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"= Archive".to_vec())
         .unwrap()
         .build()
         .unwrap();
     let archive = encode(&pack).unwrap();
-    let destination: Location = "minio:/archives/document.typk".parse().unwrap();
-    let write =
-        PackArchiveWriteRequest::new(destination.clone(), WritePolicy::CreateOrVerify).unwrap();
-    let receipt = write_pack_archive(bindings, &write, &archive)
+    let path = "archives/document.typk";
+    for expected in [WriteOutcome::Created, WriteOutcome::AlreadyMatching] {
+        let outcome = write_pack_archive(admin, path, &archive, WritePolicy::CreateOrVerify)
+            .await
+            .unwrap();
+        assert_eq!(outcome, expected);
+    }
+
+    let read = read_pack_archive(admin, path, 512 * 1024 * 1024)
         .await
         .unwrap();
-    assert_eq!(receipt.outcome(), WriteKeyOutcome::Created);
-
-    let read = PackArchiveReadRequest::new(destination, ReadLimits::reference_v1()).unwrap();
-    let read = read_pack_archive(bindings, &read).await.unwrap();
     assert_eq!(read.as_slice(), archive.as_slice());
     let decoded = decode(&read, DecodeLimits::reference_v1()).unwrap();
     assert_eq!(decoded.identity(), pack.identity());
 }
 
-async fn authorization_and_partial_write_evidence(
-    admin: &Operator,
-    partial_bindings: &OperatorBindings,
-) {
+async fn authorization_and_partial_write_evidence(admin: &Operator, partial: &Operator) {
     admin
         .write("authorization/secret.typk", b"secret".to_vec())
         .await
         .unwrap();
-    let read = PackArchiveReadRequest::new(
-        "restricted:/authorization/secret.typk".parse().unwrap(),
-        ReadLimits::reference_v1(),
-    )
-    .unwrap();
-    let error = read_pack_archive(partial_bindings, &read)
+    let error = read_pack_archive(partial, "authorization/secret.typk", 1024)
         .await
         .unwrap_err();
-    assert!(matches!(
-        error.cause(),
-        PackArchiveReadErrorCause::Read(source) if source.kind() == ErrorKind::PermissionDenied
-    ));
+    assert!(
+        matches!(&error, Error::Storage { source, .. } if source.kind() == ErrorKind::PermissionDenied),
+        "{error:?}"
+    );
 
     admin
         .write("publication/partial/unrelated.bin", b"untouched".to_vec())
@@ -269,26 +252,28 @@ async fn authorization_and_partial_write_evidence(
         .build()
         .unwrap();
     let plan = plan_pack_extraction(&pack, PackExtractionSelection::default()).unwrap();
-    let request = PackExtractionWriteRequest::new(
-        "restricted:/publication/partial/".parse().unwrap(),
-        WritePolicy::OverwriteExactKeys,
+    let error = write_pack_extraction_plan(
+        partial,
+        "publication/partial/",
+        &plan,
+        WritePolicy::Overwrite,
     )
-    .unwrap();
-    let mut progress = PackExtractionWriteProgress::new();
-    let error = write_pack_extraction_plan(partial_bindings, &request, &plan, &mut progress)
-        .await
-        .unwrap_err();
+    .await
+    .unwrap_err();
 
-    assert_eq!(error.phase(), OpenDalWritePhase::DirectWrite);
-    assert_eq!(error.failed_relative_path(), Some("main.typ"));
+    assert!(error.indeterminate);
     assert!(matches!(
-        error.cause(),
-        PackExtractionWriteErrorCause::DirectWrite(source)
-            if source.kind() == ErrorKind::PermissionDenied
+        &error.error,
+        Error::Storage { path, source, .. }
+            if path == "publication/partial/main.typ" && source.kind() == ErrorKind::PermissionDenied
     ));
-    assert_eq!(progress.completed().len(), 1);
-    assert_eq!(progress.completed()[0].relative_path(), "assets/logo.bin");
-    assert_eq!(progress.completed()[0].outcome(), WriteKeyOutcome::Written);
+    assert_eq!(
+        error.completed,
+        [(
+            "publication/partial/assets/logo.bin".to_owned(),
+            WriteOutcome::Written
+        )]
+    );
     assert_eq!(
         admin
             .read("publication/partial/assets/logo.bin")
@@ -306,10 +291,6 @@ async fn authorization_and_partial_write_evidence(
             .to_vec(),
         b"untouched"
     );
-}
-
-fn bindings(name: &str, operator: &Operator) -> OperatorBindings {
-    OperatorBindings::new([(OperatorBinding::new(name).unwrap(), operator.clone())]).unwrap()
 }
 
 fn package_archive() -> Vec<u8> {

@@ -168,9 +168,8 @@ Pack creation is stateless and resumable. If the representative compile reaches
 a package that is not in the supplied catalog, creation reports that exact
 specification instead of failing; add its tree and call `create` again. The
 `package-reading` feature provides official registry URL construction and
-bounded `.tar.gz` expansion without choosing an HTTP client, and OpenDAL
-provides `read_package` and `insert_read_package` for the same lifecycle over
-configured operators.
+bounded `.tar.gz` expansion without choosing an HTTP client, and
+`opendal::OpenDalPackAssembler` runs the same lifecycle over OpenDAL storage.
 
 A Pack Override can replace only a project path already contained in the pack.
 It cannot add a path or change package or font requirements.
@@ -180,149 +179,13 @@ It cannot add a path or change package or font requirements.
 - `fs`: Read projects, local packages, caches, and system fonts from the filesystem; unavailable on wasm targets.
 - `egress`: Download missing packages during filesystem assembly; implies `fs` and `package-reading` and links HTTP/TLS dependencies.
 - `package-reading`: Construct registry URLs, read bounded package archives, and expand them without choosing a transport.
-- `opendal`: Use caller-polled OpenDAL reads and writes with caller-supplied operators and runtime support.
+- `opendal`: Read, assemble, and write packs through caller-supplied OpenDAL operators, with caller-polled futures and no bundled runtime.
 - `embedded-fonts`: Make Typst's bundled fonts available to assembly and external fulfillment.
 - `diagnostics`: Retain source context for first-party diagnostic presentation adapters.
 - `parallel`: Export independent page artifacts in parallel.
 
 All features are opt-in. Featureless creation and compilation remain available
 on `wasm32-unknown-unknown`.
-
-## Migrating
-
-### Migrating to 0.6
-
-Version 0.6 standardizes storage vocabulary on **read** and **write**. The
-rename was generated from `git diff fb610cb..HEAD`; there are no compatibility
-aliases.
-
-| Before 0.6 | 0.6 |
-| --- | --- |
-| Feature `package-acquisition` | `package-reading` |
-| Module `typst_pack::opendal::publication` | `typst_pack::opendal::write` |
-| `gather_filesystem_project` | `read_filesystem_project` |
-| `gather_filesystem_font_catalog` | `read_filesystem_fonts` |
-| `gather_filesystem_package` | `read_filesystem_package` |
-| `FilesystemPackageAuthority::acquire` | `FilesystemPackageAuthority::read` |
-| `acquire_package_archive` | `read_package_archive` |
-| `opendal::pack_assembly::acquire_project` | `read_project` |
-| `opendal::pack_assembly::acquire_fonts` | `read_fonts` |
-| `opendal::pack_assembly::acquire_package` | `read_package` |
-| `opendal::pack_archive::acquire_pack_archive` | `read_pack_archive` |
-| `opendal::publication::publish_pack_archive` | `opendal::write::write_pack_archive` |
-| `publish_package_cache_archive` | `write_package_cache_archive` |
-| `publish_pack_extraction_plan` | `write_pack_extraction_plan` |
-| `publish_compilation_artifacts` | `write_compilation_artifacts` |
-| `publish_pack_extraction_plan_to_filesystem` | `write_pack_extraction_plan_to_filesystem` |
-| `publish_compilation_artifacts_to_filesystem_paths` | `write_compilation_artifacts_to_filesystem_paths` |
-| `insert_acquired_package` | `insert_read_package` |
-| `pack_archive::acquire` / `acquire_file` | `pack_archive::read` / `read_file` |
-| `pack_archive::publish` / `publish_file` | `pack_archive::write` / `write_file` |
-
-Type families follow the same mechanical rules:
-
-| Before 0.6 | 0.6 |
-| --- | --- |
-| `*Acquisition*` | `*Read*` |
-| `*Publication*` | `*Write*` |
-| `*GatherError` | `*ReadError` |
-| `Acquired*` | `Read*` |
-| `PublicationPolicy` | `WritePolicy` |
-| `PublicationKeyOutcome` | `WriteKeyOutcome` |
-| `PackArchiveAcquisitionError` | `PackArchiveReadError` |
-| `ProjectAcquisitionRequest` | `ProjectReadRequest` |
-| `PackageAcquisitionLimits` | `PackageReadLimits` |
-| `AcquiredPackageInsertionError` | `ReadPackageInsertionError` |
-| `FilesystemPackageAcquisitionError` | `FilesystemPackageAuthorityReadError` |
-| `PackExtractionPublicationProgress` | `PackExtractionWriteProgress` |
-| `CompilationArtifactPublicationReceipt` | `CompilationArtifactWriteReceipt` |
-
-OpenDAL operation errors are no longer generic over an `OperatorResolver` error
-type. Resolver failures are retained as boxed sources. Match the operation's
-typed cause, then downcast the source to the concrete error supplied by your
-resolver:
-
-```rust,ignore
-use typst_pack::opendal::pack_assembly::ProjectReadErrorCause;
-
-if let ProjectReadErrorCause::ResolveOperator(source) = error.cause() {
-    if let Some(resolver_error) = source.downcast_ref::<MyResolverError>() {
-        handle_resolver_error(resolver_error);
-    }
-}
-```
-
-Compilation and encoding now have convenient reference limits. Use
-`compile(request)` and `pack_archive::encode(pack)` for the built-in profiles;
-use `compile_with_limits`, `encode_with_limits`, `write_pack_with_limits`, or
-`save_pack_with_limits` to narrow them. Limits remain required at trust
-boundaries, including archive decoding, package expansion, stream/file reads,
-and filesystem or OpenDAL read requests. Invalid custom limit configurations
-are programmer errors and panic during construction.
-
-Filesystem writes take one `WritePolicy` (`CreateNew` or `Overwrite`) and
-report failures through one `FilesystemWriteError`; filesystem reads report
-`FilesystemReadError` and take `ReadLimits`. OpenDAL Pack Extraction and
-Compilation Output Artifact writes share the crate-root `*WriteEntry`,
-`*WriteProgress`, and `*WriteReceipt` types. OpenDAL write errors retain
-progress where relevant and expose `CommitCertainty`; successful receipts do not
-make an atomicity claim.
-
-The request-origin and inventory wrappers were removed:
-`CompilationRequestInventory`, `TypstInputsInventory`, `PackOverridesInventory`,
-`PackOverrideInventoryEntry`, `EffectiveRequestValue`, `RequestValueOrigin`, and
-`CompilationOutputOrigins`. Configure values directly on
-`PackCompilationRequest`. Fulfillment provenance remains available through
-`PackageTreeFulfillment`, `FontContainerFulfillment`, and the fulfillment report;
-`CompilationAccessTrace` also remains available on a result.
-
-`CanonicalIdentity` and `CanonicalIdentityRole` now implement `Display`,
-rendering as `role:digest`. Equality is unchanged and still covers role, schema,
-and algorithm, so compare whole identity values rather than the rendered string.
-
-Dependency-fulfillment failures report what is missing. Every
-`CompilationFulfillmentIssue` message names the package or font container
-involved instead of dumping a `Debug` projection, and
-`InvalidCompilationFulfillmentSet` no longer summarizes a single issue as a
-count. Present these failures through `issues()`: the aggregate `Display` is a
-summary, not the detail.
-
-`typst-pack inspect` gained a `required fonts` section listing the external Font
-Requirements a recipient must supply, and its `embedded fonts` lines now use the
-shorter `role:digest` identity form. `typst-pack compile` reports each
-unfulfilled dependency as a hint with the recovery to try.
-
-The `egress` feature no longer links `rustls-pemfile`. Custom `--cert` PEM
-parsing moved to `rustls-pki-types`, which absorbed it; behavior is unchanged,
-including that a file with no PEM section adds no trust anchor.
-
-### Migrating to 0.5
-
-Version 0.5 added the optional OpenDAL adapter. Existing builds that do not
-enable `opendal` are unaffected. Applications that enable it must select their
-own backend, transport, runtime, credentials, and retry behavior. See
-[Migrating to 0.5](crates/typst-pack/docs/opendal-integration.md#migrating-to-05) for dependency,
-composition, target, identity, and cache guidance.
-
-### Migrating to 0.4
-
-Version 0.4 made clean breaks without compatibility aliases:
-
-- Remove Resource Slot and Resource Provider APIs; pack placeholders and replace them with Pack Overrides.
-- Rename Dagger arguments: `source` -> `project`, `entrypoint` -> `input`, `inputs` -> `sysInputs`, `noPackages` -> `noVendorPackages`, `sourceDateEpoch` -> `creationTimestamp`, and `CreationTarget` -> `TypstTarget`.
-- Change creation from a directory plus `--entrypoint`/`--output` to `create <INPUT> [OUTPUT]`.
-- Replace `compile_pack(request)` with `compile(request)`; the arbitrary-`World` overload and public `PackWorld` builder are removed.
-- Read accepted compilation results from `CompilationReport::outcome()` or `result()`; `compile_report`, `PackCompileError`, `CompilationAttempt`, and `CompilationExecutionControls` are removed.
-- Replace `CreationTarget` and `CompilationTarget` with `TypstTarget`, and configure time with one `DocumentTime`.
-- Replace `Packer` with `FilesystemPackAssemblerConfig`, `FilesystemPackAssembler`, and `FilesystemPackAssemblyRequest`.
-- Read representative-compile warnings from `PackAssemblyReport::warnings`; `PackReport` is removed.
-- Inspect domain values through `Pack` accessors rather than Pack Manifest records.
-- Handle shared Pack consistency failures through `PackInvariantError::issues()`.
-- Replace `OutputFormat` plus `CompileOptions` request construction with a `CompilationOutputSpecification` variant.
-- Replace `extract` with `plan_pack_extraction` followed by `write_pack_extraction_plan_to_filesystem` and an explicit `FilesystemMergePolicy`.
-
-The unstable Pack format remains version 1, but discovery and Resource Slot
-fields were removed in place. Old fields and aliases are not accepted.
 
 ## Pack format
 

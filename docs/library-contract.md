@@ -60,7 +60,7 @@ variants accept narrower or larger validated profiles.
 
 Operations that cross a byte trust boundary require explicit limits. These
 include Pack Archive reading and decoding, package archive expansion, filesystem
-source reading, and OpenDAL read requests. Limits bound documented retained or
+source reading, and OpenDAL reads. Limits bound documented retained or
 generated resources, not process RSS, allocator overhead, compiler internals,
 elapsed time, or aggregate concurrency between independent operations.
 
@@ -115,15 +115,15 @@ beneath the destination are created without following links, so a linked or
 non-directory ancestor beneath the destination is refused; the destination
 path itself may contain links.
 
-OpenDAL provides `WritePolicy::CreateOrVerify` and
-`WritePolicy::OverwriteExactKeys`; it makes no transactional or multi-key
-atomicity promise.
+OpenDAL provides `opendal::WritePolicy::CreateOrVerify` and
+`opendal::WritePolicy::Overwrite`; it makes no transactional or multi-key
+atomicity promise. An OpenDAL `WriteError` reports the completed keys and
+whether the failing key's effect is indeterminate.
 
 Write inputs are borrowed or returned on composed-operation failure so callers
 retain exact replay material. A filesystem write failure names the failing path
-and the files already committed; OpenDAL errors retain progress, the failed
-phase or path, the native cause, and `CommitCertainty` when a destination
-effect may be uncertain.
+and the files already committed; an OpenDAL `WriteError` names the completed
+keys, the failing key, and the native cause.
 
 Multi-entry writes may leave a completed prefix. There is no general rollback.
 Inspect what was committed, reconcile destination state where needed, then

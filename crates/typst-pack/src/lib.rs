@@ -43,8 +43,6 @@ mod paths;
 mod payload;
 mod project_snapshot;
 mod read_layout;
-#[cfg(feature = "opendal")]
-mod redacted_error;
 mod world;
 mod world_trace;
 mod write;
@@ -130,11 +128,7 @@ pub use payload::PackArchiveBytes;
 pub use project_snapshot::{
     ProjectSnapshot, ProjectSnapshotAssembly, ProjectSnapshotError, ProjectSnapshotIssue,
 };
-pub use write::{
-    CommitCertainty, CompilationArtifactWriteEntry, CompilationArtifactWriteProgress,
-    CompilationArtifactWriteReceipt, PackExtractionWriteEntry, PackExtractionWriteProgress,
-    PackExtractionWriteReceipt, WriteKeyOutcome,
-};
+pub use write::CommitCertainty;
 
 #[cfg(test)]
 mod tests;

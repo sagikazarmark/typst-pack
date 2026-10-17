@@ -26,9 +26,8 @@
 mod font_bytes;
 
 #[cfg(all(feature = "opendal", feature = "package-reading"))]
-#[allow(dead_code, clippy::collapsible_if)]
 #[path = "support/opendal.rs"]
-mod scripted_opendal;
+mod opendal_faults;
 
 use std::str::FromStr;
 
@@ -474,19 +473,13 @@ fn create_on_opendal(
     fixture: &Fixture,
     reverse_declaration_order: bool,
 ) -> Result<Created, Failure> {
-    use std::pin::pin;
-
-    use typst_pack::opendal::pack_assembly::{
-        FontReadEntry, FontReadLimits, FontReadRequest, FontSource as OpenDalFontSource,
-        PackageReadLimits, PackageReadRequest, PackageTreeSource, ProjectReadEntry,
-        ProjectReadLimits, ProjectReadRequest, insert_read_package, read_fonts, read_package,
-        read_project,
+    use opendal_faults::block_on;
+    use typst_pack::ReadLimits;
+    use typst_pack::opendal::{
+        FontSource as OpenDalFontSource, insert_package, read_fonts, read_package, read_project,
     };
-    use typst_pack::opendal::{OperatorBinding, OperatorBindings};
 
     let operator = opendal::Operator::new(opendal::services::Memory::default()).unwrap();
-    let binding = OperatorBinding::new("assembly").unwrap();
-    let bindings = OperatorBindings::new([(binding.clone(), operator.clone())]).unwrap();
     let mut objects = fixture
         .project
         .iter()
@@ -496,10 +489,10 @@ fn create_on_opendal(
 
     for (source_index, font) in fixture.fonts.iter().enumerate() {
         let prefix = format!("fonts/{source_index:06}/");
-        font_sources.push(OpenDalFontSource::new(
-            typst_pack::opendal::Location::from_operation_path(binding.clone(), &prefix).unwrap(),
-            font.disposition,
-        ));
+        font_sources.push(OpenDalFontSource {
+            prefix: prefix.clone(),
+            disposition: font.disposition,
+        });
         match &font.source {
             FontSource::Scanned(bytes) => {
                 objects.push((format!("{prefix}000000.ttf"), bytes.clone()));
@@ -551,37 +544,32 @@ fn create_on_opendal(
         objects.reverse();
     }
     for (path, bytes) in objects {
-        expect_memory_ready(pin!(operator.write(&path, bytes))).unwrap();
+        block_on(operator.write(&path, bytes)).unwrap();
     }
 
-    let project_request = ProjectReadRequest::new(
-        "assembly:/project/".parse().unwrap(),
-        ProjectReadLimits::reference_v1(),
-    )
+    let limits = ReadLimits::default();
+    let snapshot = block_on(read_project(
+        &operator,
+        "project/",
+        fixture.entrypoint,
+        &limits,
+    ))
     .unwrap();
-    let (_, project_entries) = expect_memory_ready(pin!(read_project(&bindings, &project_request)))
-        .unwrap()
-        .into_parts();
-    let snapshot = ProjectSnapshotAssembly::new(fixture.entrypoint)
-        .assemble(
-            project_entries
-                .into_iter()
-                .map(ProjectReadEntry::into_parts),
-        )
-        .unwrap();
-
-    let font_request = FontReadRequest::new(font_sources, FontReadLimits::reference_v1()).unwrap();
-    let (_, font_entries) = expect_memory_ready(pin!(read_fonts(&bindings, &font_request)))
-        .unwrap()
-        .into_parts();
-    let mut fonts = FontCatalog::new();
-    for entry in font_entries {
-        let (_, _, _, disposition, bytes) = FontReadEntry::into_parts(entry);
-        fonts.push(FontCatalogEntry::new(
-            FontContainer::new(bytes).unwrap(),
-            disposition,
-        ));
-    }
+    let fonts = block_on(read_fonts(&operator, &font_sources, &limits)).unwrap();
+    let package_sources = [
+        typst_pack::opendal::PackageSource::Trees {
+            operator: operator.clone(),
+            prefix: "trees/".into(),
+        },
+        typst_pack::opendal::PackageSource::ArchiveCache {
+            operator: operator.clone(),
+            prefix: "cache/".into(),
+        },
+        typst_pack::opendal::PackageSource::Registry {
+            operator: operator.clone(),
+            prefix: "registry/".into(),
+        },
+    ];
 
     let discovery = DiscoverySpecification::new(
         TypstTarget::Paged,
@@ -632,16 +620,7 @@ fn create_on_opendal(
                         ));
                         failure_states.push(project_failures(&package_failures));
                     }
-                    let request = PackageReadRequest::new(
-                        spec,
-                        [PackageTreeSource::new("assembly:/trees/".parse().unwrap())],
-                        Some("assembly:/cache/".parse().unwrap()),
-                        Some("assembly:/registry/".parse().unwrap()),
-                        PackageReadLimits::reference_v1(),
-                    )
-                    .unwrap();
-                    let read =
-                        expect_memory_ready(pin!(read_package(&bindings, &request))).unwrap();
+                    let read = block_on(read_package(&package_sources, &spec, &limits)).unwrap();
                     let expansion_limits = match package.source {
                         PackageSource::Files(_) => {
                             typst_pack::PackageExpansionLimits::reference_v1()
@@ -649,16 +628,19 @@ fn create_on_opendal(
                         PackageSource::CachedArchive { limits, .. }
                         | PackageSource::RegistryArchive { limits, .. } => limits,
                     };
-                    if let Err(error) = insert_read_package(
+                    if insert_package(
                         &mut packages,
                         &mut package_failures,
+                        &spec,
                         read,
                         package.disposition,
                         expansion_limits,
-                    ) {
+                    )
+                    .is_err()
+                    {
                         failure_states.push(project_failures(&package_failures));
-                        terminal_package_failure =
-                            Some((error.spec().to_string(), error.reason().clone()));
+                        let reason = package_failures.get(&spec).unwrap().reason().clone();
+                        terminal_package_failure = Some((spec.to_string(), reason));
                     }
                     if package.corrects_failure {
                         failure_states.push(project_failures(&package_failures));
@@ -679,25 +661,6 @@ fn create_on_opendal(
         }
     }
     panic!("OpenDAL creation issued no Pack within {RESUME_BOUND} resume rounds");
-}
-
-#[cfg(all(feature = "opendal", feature = "package-reading"))]
-fn expect_memory_ready<F: std::future::Future>(mut future: std::pin::Pin<&mut F>) -> F::Output {
-    use std::task::Poll;
-
-    match poll_memory_once(future.as_mut()) {
-        Poll::Ready(output) => output,
-        Poll::Pending => panic!("OpenDAL Memory future unexpectedly pending"),
-    }
-}
-
-#[cfg(all(feature = "opendal", feature = "package-reading"))]
-fn poll_memory_once<F: std::future::Future>(
-    future: std::pin::Pin<&mut F>,
-) -> std::task::Poll<F::Output> {
-    use std::task::{Context, Waker};
-
-    future.poll(&mut Context::from_waker(Waker::noop()))
 }
 
 // ---------------------------------------------------------------------------
@@ -1181,90 +1144,6 @@ fn font_requirements(pack: &Pack) -> Vec<(CanonicalIdentity, bool)> {
 }
 
 // ---------------------------------------------------------------------------
-// Project membership
-// ---------------------------------------------------------------------------
-
-#[cfg(all(feature = "opendal", feature = "package-reading"))]
-#[test]
-fn pagination_and_hash_order_preserve_pack_observations() {
-    use std::collections::HashMap;
-    use std::pin::pin;
-
-    use scripted_opendal::{
-        Capabilities, ListEntry, ListScript, ListStep, ReadScript, ReadStep, ScriptedService,
-    };
-    use typst_pack::opendal::pack_assembly::{
-        ProjectReadEntry, ProjectReadLimits, ProjectReadRequest, read_project,
-    };
-    use typst_pack::opendal::{OperatorBinding, OperatorBindings};
-
-    let fixture = Fixture::document("#rect(width: 10pt, height: 10pt)")
-        .file("data/first.txt", b"first".to_vec())
-        .file("data/second.txt", b"second".to_vec());
-    let direct = create_directly(&fixture).unwrap();
-    // Build the backend listing from hash iteration, with one object per page.
-    // Neither iteration nor page order may reach the semantic projection.
-    let hash_objects = HashMap::from([
-        ("project/data/second.txt", b"second".as_slice()),
-        (
-            "project/main.typ",
-            b"#rect(width: 10pt, height: 10pt)".as_slice(),
-        ),
-        ("project/data/first.txt", b"first".as_slice()),
-    ]);
-    let list = ListScript::new(
-        "project/",
-        hash_objects.len(),
-        hash_objects
-            .keys()
-            .map(|path| ListStep::page([ListEntry::file(*path)])),
-    )
-    .unwrap();
-    let reads = hash_objects
-        .iter()
-        .map(|(path, bytes)| ReadScript::new(*path, 1, [ReadStep::chunk(bytes)]).unwrap());
-    let service = ScriptedService::new(Capabilities::all(), [list], reads, 16);
-    let bindings =
-        OperatorBindings::new([(OperatorBinding::new("project").unwrap(), service.operator())])
-            .unwrap();
-    let request = ProjectReadRequest::new(
-        "project:/project/".parse().unwrap(),
-        ProjectReadLimits::reference_v1(),
-    )
-    .unwrap();
-    let (_, entries) = expect_memory_ready(pin!(read_project(&bindings, &request)))
-        .unwrap()
-        .into_parts();
-    let project = ProjectSnapshotAssembly::new("main.typ")
-        .assemble(entries.into_iter().map(ProjectReadEntry::into_parts))
-        .unwrap();
-    let packages = PackageCatalog::new();
-    let fonts = FontCatalog::new();
-    let failures = PackageReadFailures::new();
-    let discovery = DiscoverySpecification::new(
-        TypstTarget::Paged,
-        typst::foundations::Dict::new(),
-        DocumentTime::UnixTimestamp(CREATION_TIMESTAMP),
-        [],
-    )
-    .unwrap();
-    let PackCreationOutcome::Created { pack, warnings } = create(PackCreationInput {
-        project: &project,
-        packages: &packages,
-        fonts: &fonts,
-        package_failures: &failures,
-        discovery: &discovery,
-        metadata: None,
-    })
-    .unwrap() else {
-        panic!("the package-free fixture must complete in one invocation");
-    };
-
-    assert_eq!(projection(&pack), projection(&direct.pack));
-    assert_eq!(warnings.to_vec(), direct.warnings);
-}
-
-// ---------------------------------------------------------------------------
 // Packages
 // ---------------------------------------------------------------------------
 
@@ -1502,9 +1381,6 @@ fn representative_compile_warnings_are_returned_by_every_adapter() {
 /// ships with the `embedded-fonts` feature.
 #[cfg(feature = "embedded-fonts")]
 mod fonts {
-    #[cfg(all(feature = "opendal", feature = "package-reading"))]
-    use std::pin::pin;
-
     use typst_pack::{CanonicalIdentity, FontDisposition};
 
     use crate::font_bytes::{family_of, font_collection, renamed_family, typst_container};
@@ -1523,153 +1399,6 @@ mod fonts {
     fn alternate_family(prefix: char) -> String {
         let original = family_of(&typst_container());
         format!("{prefix}{}", &original[1..])
-    }
-
-    #[cfg(all(feature = "opendal", feature = "package-reading"))]
-    #[test]
-    fn project_and_font_completion_order_preserves_pack_observations() {
-        use crate::scripted_opendal::{
-            Capabilities, ListEntry, ListScript, ListStep, PendingPoint, ReadScript, ReadStep,
-            ScriptedService,
-        };
-        use crate::{
-            CREATION_TIMESTAMP, PackageCatalog, PackageReadFailures, ProjectSnapshotAssembly,
-            create_directly, expect_memory_ready, poll_memory_once, projection,
-        };
-        use typst_pack::opendal::pack_assembly::{
-            FontReadEntry, FontReadLimits, FontReadRequest, FontSource as OpenDalFontSource,
-            ProjectReadEntry, ProjectReadLimits, ProjectReadRequest, read_fonts, read_project,
-        };
-        use typst_pack::opendal::{OperatorBinding, OperatorBindings};
-        use typst_pack::{
-            DiscoverySpecification, DocumentTime, FontCatalog, FontCatalogEntry, FontContainer,
-            PackCreationInput, PackCreationOutcome, TypstTarget, create,
-        };
-
-        let font = typst_container();
-        let family = family_of(&font);
-        let source = format!("#set text(font: \"{family}\")\nCompletion order");
-        let fixture = Fixture::document(&source)
-            .font(FontSource::Scanned(font.clone()), FontDisposition::Embedded);
-        let direct = create_directly(&fixture).unwrap();
-
-        for project_finishes_first in [true, false] {
-            let project_pending = PendingPoint::new();
-            let font_pending = PendingPoint::new();
-            let service = ScriptedService::new(
-                Capabilities::all(),
-                [
-                    ListScript::new(
-                        "project/",
-                        1,
-                        [ListStep::page([ListEntry::file("project/main.typ")])],
-                    )
-                    .unwrap(),
-                    ListScript::new(
-                        "fonts/",
-                        1,
-                        [ListStep::page([ListEntry::file("fonts/font.ttf")])],
-                    )
-                    .unwrap(),
-                ],
-                [
-                    ReadScript::new(
-                        "project/main.typ",
-                        1,
-                        [
-                            ReadStep::pending(project_pending.clone()),
-                            ReadStep::chunk(source.as_bytes()),
-                        ],
-                    )
-                    .unwrap(),
-                    ReadScript::new(
-                        "fonts/font.ttf",
-                        1,
-                        [
-                            ReadStep::pending(font_pending.clone()),
-                            ReadStep::chunk(&font),
-                        ],
-                    )
-                    .unwrap(),
-                ],
-                16,
-            );
-            let binding = OperatorBinding::new("storage").unwrap();
-            let bindings = OperatorBindings::new([(binding.clone(), service.operator())]).unwrap();
-            let project_request = ProjectReadRequest::new(
-                "storage:/project/".parse().unwrap(),
-                ProjectReadLimits::reference_v1(),
-            )
-            .unwrap();
-            let font_request = FontReadRequest::new(
-                [OpenDalFontSource::new(
-                    "storage:/fonts/".parse().unwrap(),
-                    FontDisposition::Embedded,
-                )],
-                FontReadLimits::reference_v1(),
-            )
-            .unwrap();
-            let mut project_read = pin!(read_project(&bindings, &project_request));
-            let mut font_read = pin!(read_fonts(&bindings, &font_request));
-            assert!(poll_memory_once(project_read.as_mut()).is_pending());
-            assert!(poll_memory_once(font_read.as_mut()).is_pending());
-
-            let (project_read, font_read) = if project_finishes_first {
-                project_pending.release();
-                let project = expect_memory_ready(project_read.as_mut()).unwrap();
-                assert!(poll_memory_once(font_read.as_mut()).is_pending());
-                font_pending.release();
-                let fonts = expect_memory_ready(font_read.as_mut()).unwrap();
-                (project, fonts)
-            } else {
-                font_pending.release();
-                let fonts = expect_memory_ready(font_read.as_mut()).unwrap();
-                assert!(poll_memory_once(project_read.as_mut()).is_pending());
-                project_pending.release();
-                let project = expect_memory_ready(project_read.as_mut()).unwrap();
-                (project, fonts)
-            };
-            let (_, project_entries) = project_read.into_parts();
-            let project = ProjectSnapshotAssembly::new("main.typ")
-                .assemble(
-                    project_entries
-                        .into_iter()
-                        .map(ProjectReadEntry::into_parts),
-                )
-                .unwrap();
-            let (_, font_entries) = font_read.into_parts();
-            let mut fonts = FontCatalog::new();
-            for entry in font_entries {
-                let (_, _, _, disposition, bytes) = FontReadEntry::into_parts(entry);
-                fonts.push(FontCatalogEntry::new(
-                    FontContainer::new(bytes).unwrap(),
-                    disposition,
-                ));
-            }
-            let packages = PackageCatalog::new();
-            let failures = PackageReadFailures::new();
-            let discovery = DiscoverySpecification::new(
-                TypstTarget::Paged,
-                typst::foundations::Dict::new(),
-                DocumentTime::UnixTimestamp(CREATION_TIMESTAMP),
-                [],
-            )
-            .unwrap();
-            let PackCreationOutcome::Created { pack, warnings } = create(PackCreationInput {
-                project: &project,
-                packages: &packages,
-                fonts: &fonts,
-                package_failures: &failures,
-                discovery: &discovery,
-                metadata: None,
-            })
-            .unwrap() else {
-                panic!("the package-free fixture must complete in one invocation");
-            };
-
-            assert_eq!(projection(&pack), projection(&direct.pack));
-            assert_eq!(warnings.to_vec(), direct.warnings);
-        }
     }
 
     #[test]

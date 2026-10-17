@@ -19,36 +19,10 @@ fn temp_path(directory: &tempfile::TempDir) -> std::path::PathBuf {
 
 #[cfg(feature = "opendal")]
 #[test]
-fn opendal_location_regressions_preserve_canonical_objects_and_alias_rejections() {
-    use typst_pack::opendal::{Location, LocationError, OperatorBinding};
+fn compilation_artifact_key_regressions_store_exactly_at_the_given_key() {
+    use std::future::Future;
 
-    let binding = OperatorBinding::new("fuzz").unwrap();
-    for path in ["", "/", "a/./b", "a\u{feff}", "a\u{200b}", "café/%"] {
-        let result = Location::from_operation_path(binding.clone(), path);
-        if path == "a/./b" {
-            assert_eq!(result, Err(LocationError::DotSegment { index: 2 }));
-        } else {
-            let location = result.unwrap();
-            assert_eq!(Location::parse(location.to_string()).unwrap(), location);
-        }
-    }
-
-    for (path, index) in [(" a", 0), ("a ", 1), ("a\u{00a0}", 1)] {
-        assert_eq!(
-            Location::from_operation_path(binding.clone(), path),
-            Err(LocationError::NormalizationAlias { index })
-        );
-    }
-}
-
-#[cfg(feature = "opendal")]
-#[test]
-fn compilation_artifact_key_regressions_replay_through_request_construction() {
-    use typst_pack::opendal::Location;
-    use typst_pack::opendal::write::{
-        CompilationArtifactKeyIssue, CompilationArtifactWriteRequest,
-        CompilationArtifactWriteRequestIssue, WritePolicy,
-    };
+    use typst_pack::opendal::{Error, Operator, WritePolicy, write_compilation_artifacts};
 
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"#pagebreak()".to_vec())
@@ -66,45 +40,43 @@ fn compilation_artifact_key_regressions_replay_through_request_construction() {
     .result()
     .unwrap()
     .clone();
-    let destination: Location = "fuzz:/artifacts/".parse().unwrap();
-
-    for keys in [["tree%", "tree%/page%2F.svg"], ["a\u{feff}", "a\u{200b}"]] {
-        let request = CompilationArtifactWriteRequest::new(
+    let write = |op: &Operator, keys: &[&str]| {
+        let mut future = std::pin::pin!(write_compilation_artifacts(
+            op,
+            "artifacts/",
             &result,
-            destination.clone(),
             keys,
             WritePolicy::CreateOrVerify,
-        )
-        .unwrap();
-        assert_eq!(request.artifact_keys(), keys);
+        ));
+        let waker = std::task::Waker::noop();
+        match future
+            .as_mut()
+            .poll(&mut std::task::Context::from_waker(waker))
+        {
+            std::task::Poll::Ready(result) => result,
+            std::task::Poll::Pending => panic!("the Memory service never pends"),
+        }
+    };
+
+    // Percent signs and invisible characters are literal key bytes.
+    for keys in [["tree%", "tree%/page%2F.svg"], ["a\u{feff}", "a\u{200b}"]] {
+        let op = Operator::new(opendal::services::Memory::default()).unwrap();
+        write(&op, &keys).unwrap();
+        for key in keys {
+            let path = format!("artifacts/{key}");
+            let mut stat = std::pin::pin!(op.stat(&path));
+            let ready = stat
+                .as_mut()
+                .poll(&mut std::task::Context::from_waker(std::task::Waker::noop()));
+            assert!(matches!(ready, std::task::Poll::Ready(Ok(_))), "{key:?}");
+        }
     }
 
-    for (key, reason) in [
-        ("", CompilationArtifactKeyIssue::Empty),
-        (
-            " a",
-            CompilationArtifactKeyIssue::NormalizationAlias { index: 0 },
-        ),
-        (
-            "a\u{00a0}",
-            CompilationArtifactKeyIssue::NormalizationAlias { index: 1 },
-        ),
-    ] {
-        let rejection = CompilationArtifactWriteRequest::new(
-            &result,
-            destination.clone(),
-            [key, "valid.svg"],
-            WritePolicy::CreateOrVerify,
-        )
-        .unwrap_err();
-        assert!(matches!(
-            rejection.issues(),
-            [CompilationArtifactWriteRequestIssue::InvalidArtifactKey {
-                artifact_index: 0,
-                reason: actual,
-                ..
-            }] if *actual == reason
-        ));
+    // Keys OpenDAL would normalize into another key are refused.
+    let op = Operator::new(opendal::services::Memory::default()).unwrap();
+    for key in ["", " a", "a ", "a\u{00a0}", "a/./b", "a//b"] {
+        let error = write(&op, &[key, "valid.svg"]).unwrap_err();
+        assert!(matches!(error.error, Error::InvalidPath { .. }), "{key:?}");
     }
 }
 

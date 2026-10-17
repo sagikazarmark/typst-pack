@@ -39,33 +39,12 @@ opendal = { version = "0.58", default-features = false }
 typst-pack = { path = "${packaged[0]}", default-features = false, features = ["opendal"] }
 EOF
 cat >"$audit/enabled/src/main.rs" <<'EOF'
-use typst_pack::opendal::{OperatorBinding, OperatorBindings, OperatorResolver};
-
-fn resolve_for_consumer<R: OperatorResolver>(
-    resolver: &R,
-    binding: &OperatorBinding,
-) -> Result<opendal::Operator, R::Error> {
-    resolver.resolve(binding)
-}
-
+// The consumer's own `opendal::Operator` must be the type typst-pack takes.
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let operator = opendal::Operator::new(opendal::services::Memory::default())?;
-    let archive = OperatorBinding::new("archive")?;
-    let project = OperatorBinding::new("project")?;
-    let bindings = OperatorBindings::new([
-        (project, operator.clone()),
-        (archive.clone(), operator),
-    ])?;
-
-    assert_eq!(
-        bindings
-            .bindings()
-            .map(OperatorBinding::as_str)
-            .collect::<Vec<_>>(),
-        ["archive", "project"]
-    );
-    let _direct_operator = bindings.operator(&archive).expect("archive is configured");
-    let _resolved_operator = resolve_for_consumer(&bindings, &archive)?;
+    let operator: opendal::Operator =
+        opendal::Operator::new(opendal::services::Memory::default())?;
+    let _future = typst_pack::opendal::read_pack_archive(&operator, "pack.typk", 1024);
+    let _same_type: typst_pack::opendal::Operator = operator;
 
     Ok(())
 }

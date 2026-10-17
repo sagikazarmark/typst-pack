@@ -1,64 +1,62 @@
 #![no_main]
 
+use std::future::{Future, IntoFuture};
 use std::sync::OnceLock;
+use std::task::{Context, Poll, Waker};
 
 use libfuzzer_sys::fuzz_target;
-use typst_pack::opendal::write::{
-    CompilationArtifactWriteRequest, WritePolicy,
-};
-use typst_pack::opendal::{Location, OperatorBinding};
+use typst_pack::opendal::{Error, Operator, WritePolicy, write_compilation_artifacts};
 use typst_pack::{
     CompilationLimits, CompilationOutputSpecification, CompilationResult, Pack,
     PackCompilationRequest, SvgOutputSpecification, compile_with_limits,
 };
 
+/// Polls a Memory-service future, which never pends.
+fn ready<F: IntoFuture>(future: F) -> F::Output {
+    let mut future = std::pin::pin!(future.into_future());
+    match future.as_mut().poll(&mut Context::from_waker(Waker::noop())) {
+        Poll::Ready(output) => output,
+        Poll::Pending => panic!("the Memory service never pends"),
+    }
+}
+
+// Accepted artifact keys must land at exactly `prefix + key`: OpenDAL's path
+// normalization must never alias two accepted keys or move one elsewhere.
 fuzz_target!(|data: &[u8]| {
     let Ok(input) = std::str::from_utf8(data) else {
         return;
     };
     let result = two_page_result();
-    let keys = input
-        .split('\0')
-        .take(4)
-        .map(str::to_owned)
-        .collect::<Vec<_>>();
-    let destination = if data.first().is_some_and(|byte| byte & 1 == 0) {
-        Location::parse("fuzz:/artifacts/").unwrap()
-    } else {
-        Location::parse("fuzz:/artifacts").unwrap()
-    };
-    let policy = if data.get(1).is_some_and(|byte| byte & 1 == 0) {
+    let keys = input.split('\0').take(2).collect::<Vec<_>>();
+    if keys.len() != result.artifacts().len() {
+        return;
+    }
+    let policy = if data.first().is_some_and(|byte| byte & 1 == 0) {
         WritePolicy::CreateOrVerify
     } else {
-        WritePolicy::OverwriteExactKeys
+        WritePolicy::Overwrite
     };
+    let op = Operator::new(opendal::services::Memory::default()).unwrap();
 
-    if let Ok(request) =
-        CompilationArtifactWriteRequest::new(result, destination, keys.clone(), policy)
-    {
-        assert_eq!(request.compilation_result_identity(), result.result_identity());
-        assert_eq!(request.artifact_keys(), keys);
-        assert_eq!(request.policy(), policy);
-        for key in request.artifact_keys() {
-            let composed = format!("{}{}", request.destination().operation_path(), key);
-            assert!(
-                Location::from_operation_path(OperatorBinding::new("fuzz").unwrap(), composed)
-                    .is_ok()
-            );
+    match ready(write_compilation_artifacts(&op, "artifacts/", result, &keys, policy)) {
+        Ok(written) => {
+            assert_eq!(written.len(), keys.len());
+            for (key, artifact) in keys.iter().zip(result.artifacts()) {
+                let stored = ready(op.read(&format!("artifacts/{key}"))).unwrap();
+                assert_eq!(stored.to_vec(), artifact.bytes());
+            }
+            let listed = ready(op.list_with("").recursive(true))
+                .unwrap()
+                .into_iter()
+                .filter(|entry| entry.metadata().is_file())
+                .count();
+            assert_eq!(listed, keys.len());
         }
+        Err(error) => assert!(
+            matches!(error.error, Error::InvalidPath { .. }),
+            "unexpected {error:?}"
+        ),
     }
-
-    let literal_percent = CompilationArtifactWriteRequest::new(
-        result,
-        Location::parse("fuzz:/artifacts/").unwrap(),
-        ["tree%", "tree%/page%2F.svg"],
-        policy,
-    )
-    .unwrap();
-    assert_eq!(
-        literal_percent.artifact_keys(),
-        ["tree%", "tree%/page%2F.svg"]
-    );
 });
 
 fn two_page_result() -> &'static CompilationResult {

@@ -55,12 +55,8 @@ jobs:
       # The Dagger `test` check runs these with every feature enabled. Running
       # them again with only `opendal` active keeps the feature gates honest.
       - if: ${{ !cancelled() }}
-        run: cargo test --locked -p typst-pack --no-default-features --features opendal --lib opendal::read::tests
+        run: cargo test --locked -p typst-pack --no-default-features --features opendal --lib opendal::tests
       - if: ${{ !cancelled() }}
-        run: cargo test --locked -p typst-pack --no-default-features --features opendal --lib opendal::pack_assembly::package::tests
+        run: cargo test --locked -p typst-pack --no-default-features --features opendal --test opendal_adapter
       - if: ${{ !cancelled() }}
-        run: cargo test --locked -p typst-pack --no-default-features --features opendal --lib opendal::write::tests
-      - if: ${{ !cancelled() }}
-        run: cargo test --locked -p typst-pack --no-default-features --features opendal --test opendal_location --test opendal_bindings --test opendal_font_reading --test opendal_package_reading --test opendal_pack_archive_writing --test opendal_package_cache_archive_writing --test opendal_compilation_artifact_writing --test opendal_pack_extraction_writing
-      - if: ${{ !cancelled() }}
-        run: cargo test --locked -p typst-pack --no-default-features --features opendal,package-reading --test opendal_package_reading --test opendal_package_cache_archive_writing
+        run: cargo test --locked -p typst-pack --no-default-features --features opendal,package-reading --test opendal_adapter
