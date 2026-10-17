@@ -3834,7 +3834,6 @@ dependencies = [
  "ecow",
  "fastrand",
  "flate2",
- "fontdb",
  "once_cell",
  "parking_lot",
  "rustc-hash",
@@ -3966,11 +3965,11 @@ dependencies = [
 
 [[package]]
 name = "typst-pack"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "cap-fs-ext",
- "cap-primitives",
  "cap-std",
+ "chrono",
  "ecow",
  "env_proxy",
  "flate2",
@@ -3978,14 +3977,13 @@ dependencies = [
  "futures-util",
  "hayro-syntax",
  "ignore",
- "libc",
  "opendal",
  "opendal-http-transport-reqwest",
  "opendal-service-s3",
  "proptest",
  "rayon",
- "same-file",
  "serde",
+ "sha2",
  "tar",
  "tempfile",
  "thiserror",
@@ -4002,15 +4000,13 @@ dependencies = [
  "typst-timing",
  "unicode-normalization",
  "ureq",
- "walkdir",
  "webpki-roots 1.0.9",
- "windows-sys 0.61.2",
  "zip",
 ]
 
 [[package]]
 name = "typst-pack-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "clap",
@@ -4024,6 +4020,8 @@ dependencies = [
  "typst-kit",
  "typst-pack",
  "typst-pdf",
+ "typst-timing",
+ "zip",
 ]
 
 [[package]]

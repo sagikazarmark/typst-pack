@@ -1,16 +1,12 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use typst_pack::{
-    FilesystemMergePolicy, FilesystemWriteFaultProbe, Pack, PackExtractionSelection,
-    plan_pack_extraction, write_pack_extraction_plan_to_filesystem_with_fault_probe,
-};
+use typst_pack::{Pack, extract, fs};
 
 fuzz_target!(|data: &[u8]| {
     let flags = data.first().copied().unwrap_or_default();
     let mut builder = Pack::builder("main.typ")
-        .file("main.typ", data.to_vec())
-        .unwrap();
+        .file("main.typ", data.to_vec());
     for index in 0..3 {
         let payload = data
             .iter()
@@ -18,10 +14,10 @@ fuzz_target!(|data: &[u8]| {
             .step_by(3)
             .copied()
             .collect::<Vec<_>>();
-        builder = builder.file(format!("files/{index}.bin"), payload).unwrap();
+        builder = builder.file(format!("files/{index}.bin"), payload);
     }
     let pack = builder.build().unwrap();
-    let plan = plan_pack_extraction(&pack, PackExtractionSelection::default()).unwrap();
+    let plan = extract::plan(&pack, extract::Selection::default()).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let destination = std::fs::canonicalize(directory.path())
         .unwrap()
@@ -31,83 +27,60 @@ fuzz_target!(|data: &[u8]| {
     if flags & 1 != 0 {
         std::fs::write(destination.join("main.typ"), b"existing").unwrap();
     }
-    let planned = plan
-        .entries()
-        .iter()
-        .map(|entry| std::path::PathBuf::from(entry.relative_path()))
-        .collect::<Vec<_>>();
-    for (step, byte) in data.iter().copied().skip(1).take(16).enumerate() {
-        let policy = match byte % 3 {
-            0 => FilesystemMergePolicy::WriteNewTree,
-            1 => FilesystemMergePolicy::MergeCreateOnly,
-            _ => FilesystemMergePolicy::MergeReplaceExactFiles,
-        };
-        let write_destination = if policy == FilesystemMergePolicy::WriteNewTree {
-            destination.with_file_name(format!("new-tree-{step}"))
-        } else {
-            destination.clone()
-        };
-        let fault_file =
-            usize::from(data.get(step + 2).copied().unwrap_or_default()) % plan.entries().len();
-        let fault_after = usize::from(data.get(step + 3).copied().unwrap_or_default());
-        let fault_kind = if policy == FilesystemMergePolicy::WriteNewTree {
-            byte / 3 % 8
-        } else {
-            byte / 3 % 6
-        };
-        let probe = FilesystemWriteFaultProbe {
-            maximum_write: if fault_kind == 1 {
-                fault_after % 4 + 1
-            } else {
-                usize::MAX
-            },
-            write_fault_file: (fault_kind == 2).then_some(fault_file),
-            write_fault_after: fault_after,
-            flush_fault_file: (fault_kind == 3).then_some(fault_file),
-            commit_fault_file: (policy != FilesystemMergePolicy::WriteNewTree && fault_kind == 4)
-                .then_some(fault_file),
-            ancestor_symlink_race_file: (policy != FilesystemMergePolicy::WriteNewTree
-                && fault_kind == 5)
-                .then_some(fault_file),
-            new_tree_commit_unsupported: policy == FilesystemMergePolicy::WriteNewTree
-                && fault_kind == 4,
-            new_tree_policy_unsupported: policy == FilesystemMergePolicy::WriteNewTree
-                && fault_kind == 7,
-            tree_staging_open_fault: policy == FilesystemMergePolicy::WriteNewTree
-                && matches!(fault_kind, 5 | 6),
-            tree_staging_cleanup_fault: policy == FilesystemMergePolicy::WriteNewTree
-                && fault_kind == 6,
-        };
+    if flags & 2 != 0 {
+        std::fs::write(destination.join("files"), b"a file, not a directory").unwrap();
+    }
 
-        let result = write_pack_extraction_plan_to_filesystem_with_fault_probe(
-            &plan,
-            &write_destination,
-            policy,
-            probe,
-        );
-        let committed = match &result {
-            Ok(receipt) => receipt.completed(),
-            Err(error) => error.progress().completed(),
-        }
-        .iter()
-        .map(|entry| std::path::PathBuf::from(entry.relative_path()))
-        .collect::<Vec<_>>();
-        assert_eq!(committed, planned[..committed.len()]);
-        for relative_path in &committed {
-            let entry = plan
-                .entries()
-                .iter()
-                .find(|entry| std::path::Path::new(entry.relative_path()) == relative_path)
-                .unwrap();
-            match std::fs::read(write_destination.join(relative_path)) {
-                Ok(bytes) => assert_eq!(bytes, entry.bytes()),
-                Err(error) if fault_kind == 5 && error.kind() == std::io::ErrorKind::NotFound => {}
-                Err(error) => panic!("committed file cannot be observed: {error}"),
+    for byte in data.iter().copied().skip(1).take(8) {
+        let policy = if byte & 1 == 0 {
+            fs::WritePolicy::CreateNew
+        } else {
+            fs::WritePolicy::Overwrite
+        };
+        let before = snapshot(&destination);
+        match fs::write_extraction(&destination, &plan, policy) {
+            Ok(()) => {
+                for entry in plan.entries() {
+                    assert_eq!(
+                        std::fs::read(destination.join(entry.path())).unwrap(),
+                        entry.bytes()
+                    );
+                }
             }
+            // A refused write changes nothing.
+            Err(fs::WriteError::Rejected { .. }) => {
+                assert_eq!(snapshot(&destination), before);
+            }
+            Err(error) => panic!("unexpected write failure: {error}"),
         }
+        // No temporary file survives any outcome.
+        assert!(
+            snapshot(&destination)
+                .iter()
+                .all(|(name, _)| !name.contains(".typst-pack-"))
+        );
     }
     assert_eq!(
         std::fs::read(destination.join("unrelated.txt")).unwrap(),
         b"unrelated"
     );
 });
+
+/// Every file beneath `root` with its bytes, sorted by path.
+fn snapshot(root: &std::path::Path) -> Vec<(String, Vec<u8>)> {
+    let mut files = Vec::new();
+    let mut pending = vec![root.to_owned()];
+    while let Some(directory) = pending.pop() {
+        for entry in std::fs::read_dir(directory).unwrap() {
+            let path = entry.unwrap().path();
+            if path.is_dir() {
+                pending.push(path);
+            } else {
+                let name = path.strip_prefix(root).unwrap().to_string_lossy().into_owned();
+                files.push((name, std::fs::read(&path).unwrap()));
+            }
+        }
+    }
+    files.sort();
+    files
+}

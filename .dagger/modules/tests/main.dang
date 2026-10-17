@@ -78,10 +78,10 @@ type Tests {
       .currentModule
       .source
       .directory("fixtures/adapter-lifecycle")
-    let overrides = Dagger
+    let inputs = Dagger
       .currentModule
       .source
-      .directory("fixtures/adapter-lifecycle-overrides")
+      .directory("fixtures/adapter-lifecycle-inputs")
     let pack = self.typstPack.create(
       ws,
       project: source,
@@ -101,8 +101,8 @@ type Tests {
         pack: pack,
         features: [TypstPackFeature.A11Y_EXTRAS],
         sysInputs: ["mode=compilation"],
-        overrideDir: overrides,
-        overridePaths: ["main.typ"],
+        inputDir: inputs,
+        inputFiles: ["width=width.txt"],
         creationTimestamp: 1700000000,
         packageDir: self.packages,
         offline: true,
@@ -116,8 +116,8 @@ type Tests {
       pages: "2,1",
       ppi: "72.5",
       sysInputs: ["mode=compilation"],
-      overrideDir: overrides,
-      overridePaths: ["main.typ"],
+      inputDir: inputs,
+      inputFiles: ["width=width.txt"],
       creationTimestamp: 1700000000,
       packageDir: self.packages,
       offline: true,
@@ -179,15 +179,15 @@ type Tests {
           ws,
           pack: pack,
           sysInputs: ["mode=compilation"],
-          overrideDir: invalid,
-          overridePaths: ["main.typ"],
+          inputDir: invalid,
+          inputFiles: ["width=width.txt"],
         )
         .entries
         .length
       count < 0
     } catch {
       error: Error => {
-        assert { error.message.contains("error: expected expression") }
+        assert { error.message.contains("invalid float") }
         true
       }
     }
@@ -313,7 +313,6 @@ type Tests {
       project: source,
       input: "main.typ",
       target: TypstPackTypstTarget.HTML,
-      features: [TypstPackFeature.HTML],
     )
     let output = self.typstPack.inspect(ws, pack)
 

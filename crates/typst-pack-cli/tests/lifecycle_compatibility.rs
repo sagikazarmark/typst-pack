@@ -59,7 +59,7 @@ fn ordinary_file_lifecycle_remains_compatible_through_the_cli_process() {
     assert_eq!(created.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(created.stdout).unwrap(),
-        "packed 2 project file(s), 0 package(s), 0 font(s) into `project.typk`\n"
+        "packed 2 project file(s), 0 package(s), 0 font(s) (0 embedded) into `project.typk`\n"
     );
     assert!(created.stderr.is_empty(), "{:?}", created.stderr);
     assert!(directory.path().join("project.typk").is_file());
@@ -68,13 +68,18 @@ fn ordinary_file_lifecycle_remains_compatible_through_the_cli_process() {
         .args(["inspect", "project.typk"])
         .output()
         .unwrap();
+    let pack = std::fs::read(directory.path().join("project.typk")).unwrap();
+    let pack = typst_pack::archive::decode(&pack, Default::default()).unwrap();
     assert_eq!(inspected.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(inspected.stdout).unwrap(),
         format!(
             concat!(
                 "pack: project.typk\n",
-                "format version: 1\n",
+                "format version: 2\n",
+                "typst version: {}\n",
+                "generator: typst-pack {}\n",
+                "identity: {}\n",
                 "entrypoint: main.typ\n",
                 "name: Compatibility Fixture\n",
                 "description: Ordinary CLI lifecycle\n",
@@ -84,6 +89,9 @@ fn ordinary_file_lifecycle_remains_compatible_through_the_cli_process() {
                 "  data.txt (7 B)\n",
                 "  main.typ ({} B)\n",
             ),
+            typst_pack::TYPST_VERSION,
+            env!("CARGO_PKG_VERSION"),
+            pack.identity(),
             MAIN_SOURCE.len()
         )
     );
@@ -154,7 +162,11 @@ fn extract_preflights_collisions_and_force_replaces_only_planned_files() {
     assert!(collided.stdout.is_empty(), "{:?}", collided.stdout);
     assert_eq!(
         String::from_utf8(collided.stderr).unwrap(),
-        "error: `extracted/main.typ` already exists (pass force to overwrite)\n"
+        format!(
+            "error: `{}` already exists\n\
+             hint: pass --force to overwrite existing files\n",
+            Path::new("extracted").join("main.typ").display()
+        )
     );
     assert_eq!(
         std::fs::read_to_string(destination.join("main.typ")).unwrap(),
@@ -189,18 +201,51 @@ fn extract_preflights_collisions_and_force_replaces_only_planned_files() {
 }
 
 #[test]
+fn create_replaces_an_existing_pack_without_leaving_temporary_files() {
+    let directory = tempfile::tempdir().unwrap();
+    write_project(directory.path());
+    std::fs::write(directory.path().join("project.typk"), "stale").unwrap();
+
+    for _ in 0..2 {
+        let created = create_pack(directory.path());
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+    }
+
+    assert_ne!(
+        std::fs::read(directory.path().join("project.typk")).unwrap(),
+        b"stale"
+    );
+    let mut names = std::fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["project", "project.typk"]);
+}
+
+#[test]
 fn inspect_and_extract_help_remain_successful_process_outputs() {
     let directory = tempfile::tempdir().unwrap();
+    // Clap names the binary as invoked: `typst-pack.exe` on Windows.
+    let binary = Path::new(env!("CARGO_BIN_EXE_typst-pack"))
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
 
     for (subcommand, usage, expected) in [
         (
             "inspect",
-            "Usage: typst-pack inspect <PACK>",
+            "inspect <PACK>",
             ["Shows what is inside a pack", "The pack file to inspect"].as_slice(),
         ),
         (
             "extract",
-            "Usage: typst-pack extract [OPTIONS] <PACK>",
+            "extract [OPTIONS] <PACK>",
             [
                 "Extracts a pack into a directory",
                 "--output <OUTPUT>",
@@ -223,7 +268,8 @@ fn inspect_and_extract_help_remain_successful_process_outputs() {
             result.stderr
         );
         let stdout = String::from_utf8(result.stdout).unwrap();
-        assert!(stdout.contains(usage), "{subcommand}:\n{stdout}");
+        let usage = format!("Usage: {binary} {usage}");
+        assert!(stdout.contains(&usage), "{subcommand}:\n{stdout}");
         for text in expected {
             assert!(
                 stdout.contains(text),

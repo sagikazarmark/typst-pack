@@ -1,5 +1,11 @@
 # Platform Confinement Guarantees by Deployment Target
 
+> **Historical (2026-07).** Superseded by ADR-0020 and the
+> [2026-10 simplification](2026-10-simplification.md); describes code and
+> concepts (trust profiles, control records, isolated workers) that no longer
+> exist. The filesystem adapter provides validation, not confinement; isolation
+> from hostile input is the deployment's responsibility.
+
 Research for [issue 53](https://github.com/sagikazarmark/typst-pack/issues/53), 2026-07-18.
 
 ## Decision

@@ -1,352 +1,206 @@
 # OpenDAL integration
 
-The optional `opendal` feature lets an application read Pack Assembly inputs,
-read and write Pack Archives, and write extraction or compilation results
-through caller-supplied OpenDAL `Operator` values. The application chooses the
-backend, credentials, transport, TLS, layers, retry policy, executor, and
-runtime. typst-pack owns no runtime and provides no blocking facade.
+The optional `opendal` feature reads projects, fonts, and packages, reads and
+writes pack archives, and writes extraction plans and compiled artifacts
+through caller-supplied OpenDAL [`Operator`]s. The application chooses the backend,
+credentials, transport, layers, retry policy, and async runtime; every
+function returns a caller-polled future and typst-pack owns no runtime.
 
 ```toml
 [dependencies]
 typst-pack = { version = "0.6", features = ["opendal", "package-reading"] }
 opendal = { version = "0.58", default-features = false, features = ["services-s3"] }
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-The `opendal` feature selects no backend or runtime feature. OpenDAL's Memory
-service is available without enabling a `services-memory` feature.
+OpenDAL's Memory service needs no extra feature, which makes it convenient
+for tests.
 
-## Locations and operators
+## Paths
 
-`Location` addresses a caller-defined `OperatorBinding` as
-`binding:/root-relative/path`. Exact objects are non-root paths without a
-trailing slash; prefixes are the root or paths with a trailing slash. Parsing
-rejects aliases, dot segments, repeated separators, authorities, query strings,
-fragments, backslashes, and noncanonical escaping.
+Functions take an `&Operator` plus plain string paths relative to the
+operator's root. A *prefix* is `""` (the root) or a key ending in `/`; an
+*object key* is nonempty, has no leading or trailing slash or whitespace, no
+empty or `.`/`..` segments, and no backslashes or control characters. These rules keep a key
+from aliasing another one after OpenDAL's path normalization. A bad prefix,
+archive path, or listed key fails with [`Error::InvalidPath`]. Writes of many
+keys ([`write_extraction`], [`write_artifacts`]) check every key first and
+fail with [`Error::InvalidKeys`], listing each invalid or repeated key, before
+anything is written; pack paths may end in whitespace, which OpenDAL would
+trim into another key.
 
-Use `OperatorBindings` for an immutable map, or implement `OperatorResolver` to
-resolve bindings dynamically:
+## Reading and assembling
 
-```rust
-use typst_pack::opendal::{OperatorBinding, OperatorBindings};
+[`Assembler`] (with `package-reading`) runs the whole creation loop: it reads
+the project and fonts, calls [`create()`](crate::create()), reads each missing
+package from the configured [`PackageSource`]s, inserts it, and resumes until a
+pack is created. Its public `target`, `options`, and `variants` fields are the
+discovery controls of [`create::Request`](crate::create::Request). A package
+that is unavailable, over a read limit, or fails to expand or validate becomes
+a package failure that creation reports at its import; storage failures end
+assembly.
 
-let operator = opendal::Operator::new(opendal::services::Memory::default())?;
-let binding = OperatorBinding::new("documents")?;
-let bindings = OperatorBindings::new([(binding, operator)])?;
-# Ok::<(), Box<dyn std::error::Error>>(())
+`create()` compiles the document synchronously, so polling `assemble()`
+blocks the polling thread while it runs. On a shared async executor, poll it
+from a blocking-capable task (for example Tokio's `spawn_blocking` with
+`Handle::block_on`), or use the building blocks below and run `create()` on a
+blocking thread yourself.
+
+```rust,no_run
+# #[cfg(feature = "package-reading")]
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+use typst_pack::opendal::{Assembler, FontSource, Operator, PackageSource};
+
+let operator = Operator::new(opendal::services::Memory::default())?;
+let mut assembler = Assembler::new(operator.clone(), "projects/report/", "main.typ");
+assembler.fonts.push(FontSource {
+    prefix: "fonts/".into(),
+    embedded: true,
+});
+assembler.packages = vec![
+    PackageSource::Trees { operator: operator.clone(), prefix: "packages/".into() },
+    PackageSource::ArchiveCache { operator, prefix: "cache/".into() },
+];
+let created = assembler.assemble().await?;
+println!("{} warning(s)", created.warnings.len());
+# Ok(())
+# }
 ```
 
-Each operation resolves and appraises every reached binding once. Resolver
-errors cross the public boundary as `Box<dyn Error + Send + Sync>` and remain in
-the error source chain. Operation `Display` and `Debug` output omit native
-resolver and OpenDAL messages; rendering the complete source chain may expose
-backend paths, endpoints, or other untrusted context.
+The building blocks are public for callers that need their own loop (for
+example to embed only some packages):
 
-## Current API
+| Function | Result |
+| --- | --- |
+| [`read_project`] | A [`ProjectSnapshot`](crate::ProjectSnapshot) of every file below a prefix except `.typk` paths. `.typkignore` is an ordinary file here; ignore rules belong to filesystem reading. |
+| [`read_fonts`] | The [`font::Entry`](crate::font::Entry) values of `.ttf`/`.ttc`/`.otf`/`.otc` objects below each [`FontSource`], in source then path order. An object that is not a readable font fails the read with [`Error::Font`]: font prefixes are curated inputs here, unlike the filesystem adapter's font directories, which are host configuration and whose unreadable fonts are skipped and reported. |
+| [`read_package`] | A [`PackageRead`]: a tree's files, cached or registry archive bytes, or `Unavailable`. Sources are tried in order; only definite absence advances. |
+| [`insert_package`] | Builds or expands the tree, adds it to a [`create::Request`](crate::create::Request), and keeps its package failures (with their reasons) in step. |
+| [`read_archive`] | The decoded [`Pack`](crate::Pack) of one archive object, as `fs::read_archive` reads a file; bytes that are not a valid pack fail with [`Error::Decode`]. |
 
-The crate root exports `opendal::Operator`, locations, bindings, and the resolver.
-Workflow APIs stay in operation-specific modules.
+[`write_archive`] encodes the pack it is given, so copying a decoded pack
+writes this build's encoding, which may differ in bytes (never in identity)
+from the original. To mirror archive objects byte for byte, copy them with
+the `Operator` directly.
 
-### Reads
-
-| Purpose | Request and operation | Result | Required limits | Synchronous handoff |
-| --- | --- | --- | --- | --- |
-| Project prefix | `ProjectReadRequest`, `read_project` | `ProjectRead` | `ProjectReadLimits` | `ProjectSnapshotAssembly::assemble` |
-| Font prefixes | `FontReadRequest`, `read_fonts` | `FontRead` | `FontReadLimits` | `FontContainer::new`, then `FontCatalogEntry` |
-| Package fallback | `PackageReadRequest`, `read_package` | `PackageRead` | `PackageReadLimits` | `insert_read_package`, then resume `create` |
-| Pack Archive object | `PackArchiveReadRequest`, `read_pack_archive` | `PackArchiveBytes` | `pack_archive::ReadLimits` | `pack_archive::decode` |
-
-Project, font, and package APIs are in `typst_pack::opendal::pack_assembly`.
-Pack Archive reading is in `typst_pack::opendal::pack_archive`.
-
-`read_package` checks caller-ordered Package Tree prefixes, then an optional raw
-archive cache, then an optional official registry prefix. Only definite absence
-advances to the next candidate. It returns raw values and does not expand an
-archive or write a cache. With `package-reading`, `insert_read_package` builds or
-expands the tree, validates and inserts it, updates `PackageReadFailures`, and
-returns `RegistryArchiveResidue` only when registry bytes are safe to cache.
-
-### Writes
-
-All write APIs are in `typst_pack::opendal::write`.
-
-| Purpose | Request and operation | Success evidence |
-| --- | --- | --- |
-| Pack Archive object | `PackArchiveWriteRequest`, `write_pack_archive` | `PackArchiveWriteReceipt` |
-| Package cache object | `PackageCacheArchiveWriteRequest`, `write_package_cache_archive` | `PackageCacheArchiveWriteReceipt` |
-| Pack Extraction Plan | `PackExtractionWriteRequest`, `write_pack_extraction_plan` | shared `PackExtractionWriteReceipt` |
-| Compilation artifacts | `CompilationArtifactWriteRequest`, `write_compilation_artifacts` | shared `CompilationArtifactWriteReceipt` |
-
-`WritePolicy::CreateOrVerify` creates an absent object or accepts an existing
-byte-identical object. `WritePolicy::OverwriteExactKeys` writes every key without
-distinguishing creation from replacement. Package-cache writes always use
-`CreateOrVerify`.
-
-`WriteKeyOutcome` reports `Created`, `AlreadyMatching`, or `Written`. Pack
-Extraction and Compilation Output Artifact progress, entries, and receipts are
-shared with the filesystem adapter and exported from the crate root. Single-key
-OpenDAL operations use their module-specific progress and receipt types.
-
-### Supporting types and errors
-
-Each read operation exposes its exact values rather than a common storage
-result. Project and font reads provide `*ReadEntry`, `*ReadIssue`,
-`*ReadSurveyError`, `*ReadError`, and `*ReadErrorCause` types. Package reading
-adds `PackageTreeRead`, `CachedPackageArchiveRead`,
-`RegistryPackageArchiveRead`, `UnavailablePackageRead`, and the
-`ReadPackageInsertion*` family. Request construction reports either a singular
-`*RequestError` or an aggregated `*RequestRejection`, according to whether the
-request has one or several independently invalid locations.
-
-Each limits preset has matching `*Ceilings`, `*Resource`, `*Limits`, and
-`*LimitError` names. These are operation-specific aliases of the shared generic
-limits implementation, not interchangeable resource profiles. Invalid limit
-construction is a programmer error and panics.
-
-Writes expose `OpenDalWritePhase`, operation-specific `*WriteError` and
-`*WriteErrorCause` types, and request validation errors. Compilation artifact
-request validation uses `CompilationArtifactWriteRequestRejection`,
-`CompilationArtifactWriteRequestIssue`, and `CompilationArtifactKeyIssue`.
-Single-key operations expose `PackArchiveWriteEntry/Progress/Receipt` and
-`PackageCacheArchiveWriteEntry/Progress/Receipt`; multi-key operations use the
-shared crate-root evidence types named above.
-
-## Capability appraisal
-
-Appraisal uses `Operator::info().capability()` before storage work. It rejects
-only incompatibilities visible in advertised capabilities. A backend can still
-fail an operation after appraisal, and a service that advertises a capability
-but implements it incorrectly can violate the advertised behavior.
-
-| Operation | Location role | Required advertised capabilities |
-| --- | --- | --- |
-| Project, font, or Package Tree read | Prefix | `list`, `list_with_recursive`, `read` |
-| Pack Archive or raw package archive read | Exact object | `read` |
-| `CreateOrVerify` write | Exact object(s) | `read`, `write`, `write_with_if_not_exists`; `write_can_empty` for empty values; advertised size support |
-| `OverwriteExactKeys` write | Exact object(s) | `write`; `write_can_empty` for empty values; advertised size support |
-
-OpenDAL advertises `write_with_if_not_exists` statically for S3-compatible
-services. Appraisal cannot detect an endpoint that ignores
-`If-None-Match: *`; such an endpoint may overwrite instead of rejecting the
-conditional create. Choose and test backends according to the guarantees your
-application needs.
-
-Listing is one completed observation, not a snapshot. A successful read covers
-the entries yielded by that observation; it does not prove that all existing
-objects were listed, that an object did not change between listing and reading,
-or that all returned values coexisted.
+A listing is one observation, not a storage snapshot: objects may change
+between listing and reading. An object that vanishes in between fails the
+read. Each object is read whole in one request after its stat, and the bytes
+must agree with that stat: where the operator supports conditional reads the
+read is conditional on the stat's ETag, and a read whose length differs from
+the stat's fails. A replaced, grown, or shrunk object therefore fails with a
+temporary [`Error::Storage`] whose source has kind `ConditionNotMatch` (a
+failed `If-Match` is marked temporary too); it is never returned as a
+prefix, and retrying the operation is safe. Without ETag support, a same-length replacement
+between stat and read cannot be detected.
 
 ## Limits
 
-Read limits are aliases of the shared `Limits<ResourceKind>` family with an
-operation-specific `reference_v1()` preset. Constructors validate finite
-ceilings. Narrow a profile by copying its named ceilings and changing only the
-application-specific values:
+Reads take the shared [`ReadLimits`](crate::ReadLimits): every listed entry
+counts toward `max_entries`, and each object's length is checked against
+`max_file_bytes` and the remaining `max_total_bytes` before it is downloaded,
+so an oversized object is never transferred. A raw package archive is bounded
+by `max_file_bytes` and expanded under the same `ReadLimits`;
+[`ReadLimits::PACKAGE`](crate::ReadLimits::PACKAGE) (256 MiB in total) is the
+suggested limit for packages, and the [`Assembler`] uses it as its
+`package_limits` default. [`read_archive`] bounds the object by
+[`DecodeLimits::max_archive_bytes`](crate::archive::DecodeLimits::max_archive_bytes)
+and decodes it under the same [`DecodeLimits`](crate::archive::DecodeLimits).
+Exceeding a limit fails with [`Error::Limit`]; the [`Assembler`] records a
+package over a limit as a package failure instead. An object that grows
+after its stat is abandoned as soon as the read passes the stat's length.
+Limits do not bound memory inside OpenDAL or its transport.
 
-```rust
-use typst_pack::opendal::pack_assembly::{ProjectReadCeilings, ProjectReadLimits};
+## Writing
 
-let _limits = ProjectReadLimits::new(ProjectReadCeilings {
-    object_bytes: 16 * 1024 * 1024,
-    total_bytes: 64 * 1024 * 1024,
-    ..ProjectReadCeilings::reference_v1()
-});
-```
-
-| Operation | `reference_v1()` ceilings |
+| Function | Writes |
 | --- | --- |
-| Project read | 1,000,000 listed entries; 64 KiB one path; 256 MiB retained paths; 100,000 files; 256 MiB one object; 2 GiB total bytes |
-| Font read | 100,000 listed entries; 64 KiB one path; 64 MiB retained paths; 16,384 containers; 256 MiB one container; 2 GiB total bytes |
-| Package Tree read | 100,000 listed entries; 64 KiB one path; 64 MiB retained paths; 50,000 files; 64 MiB one object; 512 MiB total bytes |
-| Raw package archive read | 128 MiB archive bytes per cache or registry candidate |
-| Composite package read | Package Tree profile shared across tree candidates, plus the raw archive profile applied independently to cache and registry candidates |
-| Pack Archive read | 512 MiB archive bytes |
+| [`write_archive`] | One [`Pack`](crate::Pack), encoded as an archive object, as `fs::write_archive` writes a file. |
+| [`write_package_archive`] | Validated registry archive bytes into an archive cache (always `CreateOrVerify`). |
+| [`write_extraction`] | Every extraction entry below a prefix. |
+| [`write_artifacts`] | Each compiled artifact at `prefix + key`. |
 
-For object families, one-object bytes cannot exceed total bytes. Count and path
-limits are charged before payload limits; per-object limits are charged before
-aggregate payload limits. Limit failures expose the operation-specific resource,
-ceiling, and at least the first value beyond it.
+[`WritePolicy::CreateOrVerify`] checks every key first: an existing object
+with a different length is a conflict without being downloaded, and an
+object of equal length is compared in chunks. A conflict anywhere fails with
+[`Error::Conflict`] before anything is written. Absent keys are then created
+with a conditional write (`if_not_exists`); if another writer wins the race,
+its bytes must match. A conditional create refused although the object is
+then absent (S3 answers `409 ConditionalRequestConflict` while another upload
+of the key is in flight) is retried once; a second refusal is a temporary
+[`Error::Storage`], not a conflict. Verification reads the whole object, so
+an object that grew past the expected bytes never matches on its prefix.
+[`WritePolicy::Overwrite`] writes every key
+unconditionally. Required capabilities are checked up front and reported as
+[`Error::Unsupported`].
 
-These are typst-pack retention and observation limits. They do not bound memory
-inside an OpenDAL backend, transport buffering, one yielded buffer, allocator
-overhead, compiler memory, process RSS, elapsed time, or concurrent operations.
-For example, the Memory service may yield an entire object as one buffer even
-though typst-pack retains only the permitted prefix plus its overage probe.
+Some S3-compatible endpoints ignore `If-None-Match: *`; on those a
+conditional create may overwrite instead of failing. Choose and test backends
+for the guarantees you need.
 
-Writes take caller-owned, already-materialized bytes and have no write limits.
-The caller remains responsible for bounding those bytes before constructing the
-semantic input.
+### Recovery
 
-## Lifecycle composition
+Writes are sequential and not atomic across keys. A [`WriteError`] carries
+the failing key's `path` (`None` when the write was refused before any key
+was tried), the `completed` keys and their outcomes, the underlying
+[`Error`] as its `source`, and whether the failing key's effect is
+`indeterminate` (the write was issued but its outcome is unknown). Every write borrows its input, so the recovery
+path is to replay the whole write: with `CreateOrVerify`, keys that were
+already written complete as [`WriteOutcome::AlreadyMatching`].
 
-OpenDAL performs storage I/O; synchronous core types remain authoritative for
-paths, fonts, package trees, Pack Creation, archive encoding/decoding,
-extraction planning, and compilation.
+## Errors
 
-For Pack Assembly:
+[`Error`] is the one adapter error. Its `Display` names the path and the
+storage operation but not the operator's endpoint or credentials; the native
+OpenDAL error, which may carry backend context, is the error's `source`, as
+is the [`LimitExceeded`](crate::LimitExceeded) of [`Error::Limit`]. As
+everywhere in the crate, a cause is exposed through `source()` and not
+repeated in `Display`; print the whole chain to show it.
 
-1. `read_project`, then assemble its entries with `ProjectSnapshotAssembly`.
-2. `read_fonts`, validate each `FontContainer`, and build a `FontCatalog`.
-3. Call `create` with those values and an initially empty `PackageCatalog`.
-4. On `PackCreationOutcome::MissingPackageSpecifications`, call `read_package` for each exact specification.
-5. Call `insert_read_package`; if it returns registry residue, optionally write those bytes with `write_package_cache_archive`.
-6. Call `create` again until it returns `Created` or fails.
+Every function takes its target (operator and path or prefix) first, then
+the data, then the policy, as the filesystem adapter does; limits are passed
+by value.
 
-Cache writing is deliberately after expansion, validation, and catalog
-insertion. Writing registry bytes earlier can make a malformed archive a
-terminal cache hit. A cache-write failure does not invalidate a successfully
-inserted Package Tree; retain the residue and report or replay it separately.
+## External compilation dependencies
 
-## External compilation fulfillments
-
-There is no OpenDAL compilation-read API. Read external package files or
-archives and font objects directly with the application's `Operator` values,
-enforce application limits, construct core fulfillment values, and then call
-`compile`. This example reads Package Tree files from known object keys; an
-application using package archives can instead expand each bounded archive into
-a `PackageTree` before constructing its fulfillment.
+There is no OpenDAL compilation API. Read external packages and fonts with
+the same functions, put them in a [`compile::Request`](crate::compile::Request),
+and call [`compile()`](crate::compile()), which matches every external
+requirement by digest before running Typst:
 
 ```rust,no_run
-use std::io;
-
-use opendal::Operator;
-use typst_pack::{
-    CompilationFulfillmentSet, CompilationOutputSpecification, CompilationReport, Pack,
-    PackCompilationRequest, PackageTree, PackageTreeFulfillment,
-    resolve_external_font_requirements,
+use typst_pack::compile::{Compiled, Output, Request};
+use typst_pack::opendal::{
+    FontSource, Operator, PackageRead, PackageSource, read_fonts, read_package,
 };
-
-struct PackageSource<'a> {
-    specification: &'a str,
-    files: &'a [(&'a str, &'a str)], // Package path and object key.
-}
-
-async fn read_bounded(
-    operator: &Operator,
-    key: &str,
-    object_limit: u64,
-    remaining_total: &mut u64,
-) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
-    let ceiling = object_limit.min(*remaining_total);
-    let probe_end = ceiling
-        .checked_add(1)
-        .ok_or_else(|| io::Error::other("download limit overflow"))?;
-    let bytes = operator.reader(key).await?.read(0..probe_end).await?;
-    let observed = u64::try_from(bytes.len())?;
-    if observed > ceiling {
-        return Err(io::Error::other("download limit exceeded").into());
-    }
-    *remaining_total -= observed;
-    Ok(bytes.to_vec())
-}
+use typst_pack::{Pack, ReadLimits, package};
 
 async fn compile_with_external_inputs(
-    package_operator: &Operator,
-    package_sources: &[PackageSource<'_>],
-    font_operator: &Operator,
-    font_keys: &[&str],
+    operator: &Operator,
     pack: &Pack,
-    output: CompilationOutputSpecification,
-) -> Result<CompilationReport, Box<dyn std::error::Error>> {
-    let mut package_bytes_remaining = 512 * 1024 * 1024;
-    let mut packages = Vec::new();
-    for requirement in pack
-        .package_requirements()
-        .iter()
-        .filter(|requirement| !requirement.is_embedded())
-    {
-        let specification = requirement.spec().to_string();
-        let source = package_sources
-            .iter()
-            .find(|source| source.specification == specification.as_str())
-            .ok_or_else(|| io::Error::other(format!("no source for {specification}")))?;
-        let mut entries = Vec::with_capacity(source.files.len());
-        for &(path, key) in source.files {
-            let bytes = read_bounded(
-                package_operator,
-                key,
-                64 * 1024 * 1024,
-                &mut package_bytes_remaining,
-            )
-            .await?;
-            entries.push((path, bytes));
-        }
-        let tree = PackageTree::from_owned_entries(entries)?;
-        packages.push(PackageTreeFulfillment::new(requirement.spec().clone(), tree));
+    output: Output,
+) -> Result<Compiled, Box<dyn std::error::Error>> {
+    let sources = [PackageSource::Trees {
+        operator: operator.clone(),
+        prefix: "packages/".into(),
+    }];
+    let mut request = Request::new(pack.clone(), output);
+    for requirement in pack.package_requirements().iter().filter(|r| !r.embedded) {
+        let read = read_package(&sources, &requirement.spec, ReadLimits::PACKAGE).await?;
+        let PackageRead::Tree(files) = read
+        else {
+            return Err(format!("no tree for {}", requirement.spec).into());
+        };
+        let tree = package::Tree::new(files)?;
+        request.packages.push((requirement.spec.clone(), tree));
     }
 
-    let mut font_bytes_remaining = 2 * 1024 * 1024 * 1024;
-    let mut font_sources = Vec::with_capacity(font_keys.len());
-    for &key in font_keys {
-        font_sources.push(
-            read_bounded(
-                font_operator,
-                key,
-                256 * 1024 * 1024,
-                &mut font_bytes_remaining,
-            )
-            .await?,
-        );
-    }
-    let fonts = resolve_external_font_requirements(pack, font_sources)?;
-    let fulfillments = CompilationFulfillmentSet::new(packages, fonts)?;
-    let request = PackCompilationRequest::new(pack.clone(), output).fulfillments(fulfillments);
-
-    Ok(typst_pack::compile(request)?)
+    // Containers the pack does not require are ignored.
+    let font_source = FontSource {
+        prefix: "fonts/".into(),
+        embedded: false,
+    };
+    let fonts = read_fonts(operator, &[font_source], ReadLimits::default()).await?;
+    request.fonts = fonts.into_iter().map(|entry| entry.container).collect();
+    Ok(typst_pack::compile(&request)?)
 }
 ```
-
-The core verifies complete package-tree identities, font-container identities,
-and required font faces before invoking Typst. Direct reads are not implicitly
-bounded by typst-pack; enforce transport and retained-byte ceilings at that
-trust boundary. See [#241](https://github.com/sagikazarmark/typst-pack/issues/241)
-for the use case and design record behind a possible first-party facade.
-
-## Recovery and partial effects
-
-Every write borrows its input, so the caller retains exact replay material
-without an extra copy. Full replay is the recovery contract. There is no
-transaction, rollback, staging protocol, resume token, sub-plan API, portable
-multipart guarantee, or multi-key atomicity.
-
-`CreateOrVerify` makes replay useful: already matching objects complete as
-`AlreadyMatching` without another destination effect. `OverwriteExactKeys`
-replays writes but can replace values changed by another actor.
-
-Multi-key operations are sequential. Their caller-owned progress is cleared
-synchronously before the future is returned and then records the contiguous
-completed prefix. If a polled future is cancelled or dropped, already-issued
-effects may remain and the progress value is the surviving evidence. A returned
-error contains the same progress plus `CommitCertainty` for the failed effect:
-`NotCommitted`, `Committed`, or `Indeterminate`. A dropped future returns no
-error or receipt, so commit certainty for its in-flight effect is unknown.
-
-Successful progress and receipts describe observed outcomes, not a linearization
-point or durable atomic commit. Mutable destinations can change immediately
-after any observation. Read back and compare exact bytes when the application
-needs post-write verification.
-
-Filesystem and OpenDAL policies are related but not equivalent:
-
-| Filesystem policy | Closest OpenDAL policy | Important difference |
-| --- | --- | --- |
-| `WriteNewTree` | None | OpenDAL does not commit a whole new prefix atomically. |
-| `MergeCreateOnly` | `CreateOrVerify` | Filesystem writing rejects every existing target; OpenDAL accepts byte-identical targets. |
-| `MergeReplaceExactFiles` | `OverwriteExactKeys` | Filesystem replacement is atomic per file where promised; OpenDAL makes no atomicity claim. |
-
-## Migrating to 0.5
-
-Version 0.5 introduced the optional OpenDAL integration.
-
-- Builds that do not enable `opendal` keep their existing feature graph and behavior.
-- Enable `opendal` only for operation-level asynchronous reads and writes; there is no universal storage abstraction or end-to-end OpenDAL workflow object.
-- Add a compatible direct `opendal = "0.58"` dependency and select backend/runtime features there. typst-pack uses a caret requirement because `Operator` is a public parameter type.
-- Compose storage operations manually with synchronous core construction, validation, creation, planning, encoding, decoding, and compilation.
-- Use direct `Operator` reads for external compilation fulfillments; no compilation-read facade is provided.
-- Linux, Windows, and macOS are supported native targets. The first OpenDAL release makes no OpenDAL-on-wasm promise and provides no blocking API.
-- Enabling `opendal` changes implementation-attested compilation and result identities, just as enabling `fs`, `parallel`, or `diagnostics` does. Include the enabled feature set in any identity-keyed cache namespace.
-- Backend configuration, credentials, retries, and exact service guarantees remain application policy; typst-pack neither installs nor weakens them.
-
-Version 0.6 renamed the original acquisition/publication surface to read/write. See the complete
-[0.6 rename table](https://github.com/sagikazarmark/typst-pack#migrating-to-06); no old names remain as
-compatibility aliases.

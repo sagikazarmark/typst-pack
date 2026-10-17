@@ -1,45 +1,23 @@
-use std::collections::{BTreeMap, BTreeSet};
-
 fn main() {
-    println!("cargo:rustc-check-cfg=cfg(fuzzing)");
-    for path in ["Cargo.toml", "embedded-typst.toml"] {
-        println!("cargo:rerun-if-changed={path}");
-    }
-
-    verify_embedded_typst_baseline();
+    emit_engine_version();
     stage_readme();
-
-    for variable in ["TARGET", "CARGO_CFG_TARGET_FEATURE"] {
-        println!(
-            "cargo:rustc-env=TYPST_PACK_{variable}={}",
-            std::env::var(variable).unwrap_or_default()
-        );
-    }
-
-    let features = enabled_feature_set();
-    let feature_set = if features.is_empty() {
-        "none".to_owned()
-    } else {
-        features.join(",")
-    };
-    println!("cargo:rustc-env=TYPST_PACK_FEATURE_SET={feature_set}");
-
-    // Identity schema v1 predates the public feature rename and must stay stable.
-    let identity_features = features
-        .iter()
-        .map(|feature| match feature.as_str() {
-            "package-reading" => "package-acquisition",
-            feature => feature,
-        })
-        .collect::<Vec<_>>();
-    let identity_feature_set = if identity_features.is_empty() {
-        "none".to_owned()
-    } else {
-        identity_features.join(",")
-    };
-    println!("cargo:rustc-env=TYPST_PACK_IDENTITY_FEATURE_SET={identity_feature_set}");
 }
 
+/// Reports the embedded Typst release for `typst_pack::VERSION` and the pack
+/// manifest. Pinning policy is enforced by `tests/embedded_typst_gate.rs`, not
+/// here, so downstream builds never read workspace files.
+fn emit_engine_version() {
+    println!("cargo:rerun-if-changed=embedded-typst.toml");
+    let baseline: toml::Value = toml::from_str(include_str!("embedded-typst.toml"))
+        .unwrap_or_else(|error| panic!("failed to parse embedded-typst.toml: {error}"));
+    let version = baseline["typst"]["version"]
+        .as_str()
+        .expect("embedded-typst.toml must declare [typst] version");
+    println!("cargo:rustc-env=TYPST_PACK_ENGINE_VERSION={version}");
+}
+
+/// Copies the README into `OUT_DIR` so the crate docs can include it both in
+/// the workspace and in the published package.
 fn stage_readme() {
     let readme_path = if std::path::Path::new("README.md").is_file() {
         "README.md"
@@ -53,205 +31,4 @@ fn stage_readme() {
     .join("README.md");
     std::fs::copy(readme_path, output)
         .unwrap_or_else(|error| panic!("failed to stage {readme_path}: {error}"));
-}
-
-fn enabled_feature_set() -> Vec<String> {
-    let manifest = parse("Cargo.toml", include_str!("Cargo.toml"));
-    let features = manifest["features"]
-        .as_table()
-        .expect("Cargo.toml must contain features");
-    let mut encoded = BTreeSet::new();
-    let mut enabled = Vec::new();
-    for feature in features.keys() {
-        let environment = format!(
-            "CARGO_FEATURE_{}",
-            feature.to_ascii_uppercase().replace('-', "_")
-        );
-        assert!(
-            encoded.insert(environment.clone()),
-            "Cargo features must have distinct environment encodings"
-        );
-        if std::env::var_os(environment).is_some() {
-            enabled.push(feature.clone());
-        }
-    }
-    enabled.sort();
-    enabled
-}
-
-fn verify_embedded_typst_baseline() {
-    let manifest = parse("Cargo.toml", include_str!("Cargo.toml"));
-    let workspace_manifest = std::path::Path::new("../../Cargo.toml").is_file().then(|| {
-        println!("cargo:rerun-if-changed=../../Cargo.toml");
-        let source = std::fs::read_to_string("../../Cargo.toml")
-            .expect("failed to read workspace Cargo.toml");
-        parse("../../Cargo.toml", &source)
-    });
-    let lock_path = if std::path::Path::new("Cargo.lock").is_file() {
-        "Cargo.lock"
-    } else {
-        "../../Cargo.lock"
-    };
-    println!("cargo:rerun-if-changed={lock_path}");
-    let lock_source = std::fs::read_to_string(lock_path)
-        .unwrap_or_else(|error| panic!("failed to read {lock_path}: {error}"));
-    let lockfile = parse(lock_path, &lock_source);
-    let baseline = parse("embedded-typst.toml", include_str!("embedded-typst.toml"));
-    let declarations = baseline["crate"]
-        .as_array()
-        .expect("embedded-typst.toml must contain [[crate]] entries");
-    let mut approved = BTreeMap::new();
-    let mut identities = BTreeMap::new();
-
-    for declaration in declarations {
-        let name = string(declaration, "name");
-        assert!(
-            approved.insert(name, declaration).is_none(),
-            "duplicate approved Typst crate `{name}`"
-        );
-        if let Some(identity) = declaration.get("identity").and_then(toml::Value::as_str) {
-            assert!(
-                identities.insert(identity, declaration).is_none(),
-                "duplicate embedded Typst identity `{identity}`"
-            );
-        }
-    }
-
-    assert_eq!(
-        identities.keys().copied().collect::<BTreeSet<_>>(),
-        BTreeSet::from(["engine", "html", "pdf", "png", "svg"]),
-        "embedded-typst.toml must classify the engine and every exporter identity"
-    );
-    assert_eq!(
-        baseline["baseline"]["engine"].as_str(),
-        Some(string(identities["engine"], "version")),
-        "the Engine baseline must match the built typst crate"
-    );
-    assert_eq!(
-        baseline["official-cli"]["version"].as_str(),
-        baseline["baseline"]["engine"].as_str(),
-        "the official CLI oracle must match the Engine baseline"
-    );
-
-    let packages = lockfile["package"]
-        .as_array()
-        .expect("Cargo.lock must contain packages");
-    let resolved_typst = packages
-        .iter()
-        .filter_map(|package| package["name"].as_str())
-        .filter(|name| {
-            (*name == "typst" || name.starts_with("typst-"))
-                && !matches!(*name, "typst-pack" | "typst-pack-cli")
-        })
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        approved.keys().copied().collect::<BTreeSet<_>>(),
-        resolved_typst,
-        "every resolved Typst crate must be explicitly approved"
-    );
-
-    for (&name, declaration) in &approved {
-        let version = string(declaration, "version");
-        let checksum = string(declaration, "checksum");
-        assert_eq!(checksum.len(), 64, "invalid approved checksum for `{name}`");
-        let matches = packages
-            .iter()
-            .filter(|package| package["name"].as_str() == Some(name))
-            .collect::<Vec<_>>();
-        assert_eq!(
-            matches.len(),
-            1,
-            "`{name}` must resolve exactly once; incompatible duplicate releases are forbidden"
-        );
-        assert_eq!(matches[0]["version"].as_str(), Some(version));
-        assert_eq!(matches[0]["checksum"].as_str(), Some(checksum));
-    }
-
-    let dependencies = manifest["dependencies"]
-        .as_table()
-        .expect("Cargo.toml must contain dependencies");
-    for (name, specification) in dependencies
-        .iter()
-        .filter(|(name, _)| *name == "typst" || name.starts_with("typst-"))
-    {
-        let declaration = approved
-            .get(name.as_str())
-            .unwrap_or_else(|| panic!("direct Typst dependency `{name}` is not approved"));
-        assert_eq!(declaration["direct"].as_bool(), Some(true));
-        let requirement = specification
-            .as_str()
-            .or_else(|| {
-                specification
-                    .get("version")
-                    .and_then(toml::Value::as_str)
-                    .or_else(|| {
-                        (specification
-                            .get("workspace")
-                            .and_then(toml::Value::as_bool)
-                            == Some(true))
-                        .then(|| {
-                            workspace_manifest
-                                .as_ref()
-                                .and_then(|manifest| {
-                                    manifest
-                                        .get("workspace")?
-                                        .get("dependencies")?
-                                        .get(name)
-                                        .and_then(|specification| {
-                                            specification.as_str().or_else(|| {
-                                                specification
-                                                    .get("version")
-                                                    .and_then(toml::Value::as_str)
-                                            })
-                                        })
-                                })
-                                .unwrap_or_else(|| {
-                                    panic!("workspace dependency `{name}` has no version")
-                                })
-                        })
-                    })
-            })
-            .unwrap_or_else(|| panic!("direct Typst dependency `{name}` has no version"));
-        assert_eq!(
-            requirement,
-            format!("={}", string(declaration, "version")),
-            "direct Typst dependency `{name}` must use its approved exact pin"
-        );
-    }
-    for declaration in declarations
-        .iter()
-        .filter(|entry| entry["direct"].as_bool() == Some(true))
-    {
-        let name = string(declaration, "name");
-        assert!(
-            dependencies.contains_key(name),
-            "approved direct Typst dependency `{name}` is missing"
-        );
-    }
-
-    for (identity, declaration) in identities {
-        let prefix = format!("TYPST_PACK_{}", identity.to_ascii_uppercase());
-        println!(
-            "cargo:rustc-env={prefix}_CRATE={}",
-            string(declaration, "name")
-        );
-        println!(
-            "cargo:rustc-env={prefix}_VERSION={}",
-            string(declaration, "version")
-        );
-        println!(
-            "cargo:rustc-env={prefix}_CHECKSUM={}",
-            string(declaration, "checksum")
-        );
-    }
-}
-
-fn parse(name: &str, source: &str) -> toml::Value {
-    toml::from_str(source).unwrap_or_else(|error| panic!("failed to parse {name}: {error}"))
-}
-
-fn string<'a>(value: &'a toml::Value, key: &str) -> &'a str {
-    value[key]
-        .as_str()
-        .unwrap_or_else(|| panic!("missing string `{key}` in {value}"))
 }

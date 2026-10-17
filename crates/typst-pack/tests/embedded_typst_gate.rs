@@ -1,164 +1,141 @@
-use std::collections::BTreeSet;
+//! The embedded Typst pinning policy. Typst crates share internal types, so
+//! every `typst` and `typst-*` crate must resolve to the one release declared
+//! in `embedded-typst.toml`. This runs in the repository only; downstream
+//! builds of the published crate never read workspace files, and the
+//! workspace checks skip themselves outside the repository.
 
-#[path = "support/differential.rs"]
-mod differential;
+use std::path::{Path, PathBuf};
 
-use differential::DIFFERENTIAL_COVERAGE;
-use typst_pack::{
-    ImplementationRole, OutputFormat, Pack, PackCompilationRequest, compile_with_limits,
-};
+/// The workspace root, or `None` outside the repository (for example when
+/// testing the published package).
+fn workspace_root() -> Option<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
+    let is_workspace = manifest.contains("[workspace]") && root.join("Cargo.lock").is_file();
+    if !is_workspace {
+        eprintln!("skipping: the typst-pack workspace is not available");
+    }
+    is_workspace.then_some(root)
+}
+
+fn read_toml(path: &Path) -> toml::Value {
+    let source = std::fs::read_to_string(path)
+        .unwrap_or_else(|error| panic!("failed to read {}: {error}", path.display()));
+    toml::from_str(&source)
+        .unwrap_or_else(|error| panic!("failed to parse {}: {error}", path.display()))
+}
+
+fn is_typst_crate(name: &str) -> bool {
+    (name == "typst" || name.starts_with("typst-"))
+        && !matches!(name, "typst-pack" | "typst-pack-cli")
+}
 
 fn baseline() -> toml::Value {
     toml::from_str(include_str!("../embedded-typst.toml")).unwrap()
 }
 
-#[test]
-fn approved_baseline_covers_the_complete_differential_matrix() {
-    let baseline = baseline();
-    let categories = baseline["matrix"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .map(|entry| entry["category"].as_str().unwrap())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        categories.len(),
-        baseline["matrix"].as_array().unwrap().len(),
-        "differential matrix categories must be unique"
-    );
+fn engine_version(baseline: &toml::Value) -> &str {
+    baseline["typst"]["version"].as_str().unwrap()
+}
 
-    let classifications = [
-        "adapter-concern",
-        "intentional-pack-difference",
-        "pack-invariant",
-        "unavoidable-mirror",
-        "upstream-behavior",
-    ];
-    for entry in baseline["matrix"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .chain(baseline["semantic"].as_array().unwrap())
+fn requirement<'a>(
+    specification: &'a toml::Value,
+    workspace: &'a toml::Value,
+    name: &str,
+) -> Option<&'a str> {
+    if specification
+        .get("workspace")
+        .and_then(toml::Value::as_bool)
+        == Some(true)
     {
-        let classification = entry["classification"].as_str().unwrap();
-        assert!(
-            classifications.contains(&classification),
-            "unclassified embedded Typst behavior: {entry}"
+        return requirement(
+            &workspace["workspace"]["dependencies"][name],
+            workspace,
+            name,
         );
-        if let Some(coverage) = entry.get("coverage") {
-            assert!(!coverage.as_array().unwrap().is_empty());
+    }
+    specification
+        .as_str()
+        .or_else(|| specification.get("version")?.as_str())
+}
+
+#[test]
+fn every_direct_typst_dependency_is_pinned_exactly() {
+    let baseline = baseline();
+    let expected = format!("={}", engine_version(&baseline));
+    let Some(root) = workspace_root() else {
+        return;
+    };
+    let workspace = read_toml(&root.join("Cargo.toml"));
+
+    let mut problems = Vec::new();
+    for manifest in [
+        "crates/typst-pack/Cargo.toml",
+        "crates/typst-pack-cli/Cargo.toml",
+    ] {
+        let manifest_toml = read_toml(&root.join(manifest));
+        let dependencies = manifest_toml["dependencies"].as_table().unwrap();
+        for (name, specification) in dependencies.iter().filter(|(name, _)| is_typst_crate(name)) {
+            let found = requirement(specification, &workspace, name);
+            if found != Some(expected.as_str()) {
+                problems.push(format!(
+                    "{manifest}: `{name}` is {found:?}, expected {expected}"
+                ));
+            }
         }
     }
-    let typed_categories = DIFFERENTIAL_COVERAGE
-        .iter()
-        .map(|coverage| coverage.category.as_str())
-        .collect::<BTreeSet<_>>();
-    assert_eq!(
-        typed_categories.len(),
-        DIFFERENTIAL_COVERAGE.len(),
-        "typed differential categories must be unique"
-    );
-    assert_eq!(typed_categories, categories);
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+#[test]
+fn the_lockfile_resolves_each_typst_crate_once_at_the_embedded_release() {
+    let baseline = baseline();
+    let expected = engine_version(&baseline);
+    let Some(root) = workspace_root() else {
+        return;
+    };
+    let lockfile = read_toml(&root.join("Cargo.lock"));
+
+    let mut problems = Vec::new();
+    let mut seen = std::collections::BTreeMap::<&str, Vec<&str>>::new();
+    for package in lockfile["package"].as_array().unwrap() {
+        let name = package["name"].as_str().unwrap();
+        if is_typst_crate(name) {
+            seen.entry(name)
+                .or_default()
+                .push(package["version"].as_str().unwrap());
+        }
+    }
     assert!(
-        DIFFERENTIAL_COVERAGE
-            .iter()
-            .all(|coverage| !coverage.suites.is_empty()),
-        "every differential category must name an executable suite"
+        seen.contains_key("typst"),
+        "Cargo.lock does not resolve `typst`"
+    );
+    for (name, versions) in seen {
+        if versions != [expected] {
+            problems.push(format!(
+                "`{name}` resolves to {versions:?}, expected [{expected:?}]"
+            ));
+        }
+    }
+    assert!(problems.is_empty(), "{}", problems.join("\n"));
+}
+
+#[test]
+fn the_official_cli_oracle_matches_the_embedded_release() {
+    let baseline = baseline();
+    assert_eq!(
+        baseline["official-cli"]["version"].as_str(),
+        Some(engine_version(&baseline))
     );
 }
 
 #[test]
-fn public_compilation_attests_the_approved_engine_and_exporters() {
+fn the_reported_version_names_the_embedded_release() {
     let baseline = baseline();
-    let crates = baseline["crate"].as_array().unwrap();
-    let expected = |name: &str| {
-        crates
-            .iter()
-            .find(|entry| entry["name"].as_str() == Some(name))
-            .map(|entry| {
-                (
-                    entry["version"].as_str().unwrap(),
-                    entry["checksum"].as_str().unwrap(),
-                )
-            })
-            .unwrap()
-    };
-
-    for (format, source, exporter) in [
-        (OutputFormat::Pdf, "Hello", "typst-pdf"),
-        (OutputFormat::Png, "Hello", "typst-render"),
-        (OutputFormat::Svg, "Hello", "typst-svg"),
-        (OutputFormat::Html, "#html.div[Hello]", "typst-html"),
-    ] {
-        let pack = Pack::builder("main.typ")
-            .file("main.typ", source.as_bytes().to_vec())
-            .unwrap()
-            .build()
-            .unwrap();
-        let specification = match format {
-            OutputFormat::Pdf => typst_pack::CompilationOutputSpecification::Pdf(
-                typst_pack::PdfOutputSpecification::default(),
-            ),
-            OutputFormat::Png => typst_pack::CompilationOutputSpecification::Png(
-                typst_pack::PngOutputSpecification::default(),
-            ),
-            OutputFormat::Svg => typst_pack::CompilationOutputSpecification::Svg(
-                typst_pack::SvgOutputSpecification::default(),
-            ),
-            OutputFormat::Html => typst_pack::CompilationOutputSpecification::Html(
-                typst_pack::HtmlOutputSpecification::default(),
-            ),
-        };
-        let report = compile_with_limits(
-            PackCompilationRequest::new(pack, specification),
-            typst_pack::CompilationLimits::reference_v1(),
-        )
-        .unwrap();
-        let result = report
-            .result()
-            .expect("differential fixture must produce a result");
-        let (engine_version, engine_checksum) = expected("typst");
-        let (exporter_version, exporter_checksum) = expected(exporter);
-
-        assert_eq!(result.engine_identity().implementation(), "typst");
-        assert_eq!(result.engine_identity().role(), ImplementationRole::Engine);
-        assert_eq!(result.engine_identity().version(), engine_version);
-        assert_eq!(result.engine_identity().source_checksum(), engine_checksum);
-        let mut features = Vec::new();
-        for (enabled, name) in [
-            (
-                cfg!(feature = "_test-package-download-probe"),
-                "_test-package-download-probe",
-            ),
-            (cfg!(feature = "default"), "default"),
-            (cfg!(feature = "diagnostics"), "diagnostics"),
-            (cfg!(feature = "egress"), "egress"),
-            (cfg!(feature = "embedded-fonts"), "embedded-fonts"),
-            (cfg!(feature = "fs"), "fs"),
-            (cfg!(feature = "opendal"), "opendal"),
-            (cfg!(feature = "package-reading"), "package-reading"),
-            (cfg!(feature = "parallel"), "parallel"),
-        ] {
-            if enabled {
-                features.push(name);
-            }
-        }
-        let expected_features = if features.is_empty() {
-            "none".to_owned()
-        } else {
-            features.join(",")
-        };
-        assert_eq!(result.engine_identity().feature_set(), expected_features);
-        assert_eq!(result.exporter_identity().implementation(), exporter);
-        assert_eq!(
-            result.exporter_identity().role(),
-            ImplementationRole::Exporter
-        );
-        assert_eq!(result.exporter_identity().feature_set(), expected_features);
-        assert_eq!(result.exporter_identity().version(), exporter_version);
-        assert_eq!(
-            result.exporter_identity().source_checksum(),
-            exporter_checksum
-        );
-    }
+    // `VERSION` is also the implementation string of compilation identities.
+    assert!(
+        typst_pack::VERSION.ends_with(&format!("(Typst {})", engine_version(&baseline))),
+        "{}",
+        typst_pack::VERSION
+    );
 }

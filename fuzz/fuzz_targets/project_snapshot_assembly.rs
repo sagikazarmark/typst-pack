@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use typst_pack::{ProjectSnapshotAssembly, ProjectSnapshotIssue};
+use typst_pack::{PackIssue, ProjectSnapshot};
 
 fuzz_target!(|data: &[u8]| {
     let stem: String = data
@@ -13,59 +13,53 @@ fuzz_target!(|data: &[u8]| {
     let canonical = format!("files/{stem}.typ");
     let alias = format!("./{canonical}");
 
-    let canonicalized = ProjectSnapshotAssembly::new(&alias)
-        .assemble([(alias.as_str(), data.to_vec())])
+    let canonicalized = ProjectSnapshot::new(&alias, [(alias.as_str(), data.to_vec())])
         .unwrap();
     assert_eq!(canonicalized.entrypoint(), canonical);
     assert_eq!(canonicalized.file(&canonical), Some(data));
 
-    let forward = ProjectSnapshotAssembly::new("main.typ")
-        .assemble([
+    let forward = ProjectSnapshot::new("main.typ", [
             ("main.typ", b"main".to_vec()),
             (canonical.as_str(), data.to_vec()),
         ])
         .unwrap();
-    let reverse = ProjectSnapshotAssembly::new("main.typ")
-        .assemble([
+    let reverse = ProjectSnapshot::new("main.typ", [
             (canonical.as_str(), data.to_vec()),
             ("main.typ", b"main".to_vec()),
         ])
         .unwrap();
     assert_eq!(forward, reverse);
 
-    let duplicate = ProjectSnapshotAssembly::new("main.typ")
-        .assemble([
+    let duplicate = ProjectSnapshot::new("main.typ", [
             ("main.typ", b"main".to_vec()),
             (canonical.as_str(), b"first".to_vec()),
             (alias.as_str(), b"second".to_vec()),
         ])
         .unwrap_err();
     assert_eq!(
-        duplicate.issues(),
-        [ProjectSnapshotIssue::DuplicatePath {
+        duplicate.issues.as_slice(),
+        [PackIssue::DuplicatePath {
             path: canonical.clone(),
         }]
     );
 
-    let missing = ProjectSnapshotAssembly::new("main.typ")
-        .assemble([(canonical.as_str(), data.to_vec())])
+    let missing = ProjectSnapshot::new("main.typ", [(canonical.as_str(), data.to_vec())])
         .unwrap_err();
     assert_eq!(
-        missing.issues(),
-        [ProjectSnapshotIssue::MissingEntrypoint {
+        missing.issues.as_slice(),
+        [PackIssue::MissingEntrypoint {
             path: "main.typ".to_owned(),
         }]
     );
 
     let pack_path = format!("archives/{stem}.typk/inside.typ");
-    let excluded = ProjectSnapshotAssembly::new("main.typ")
-        .assemble([
+    let excluded = ProjectSnapshot::new("main.typ", [
             ("main.typ", b"main".to_vec()),
             (pack_path.as_str(), data.to_vec()),
         ])
         .unwrap_err();
     assert!(
-        matches!(excluded.issues(), [ProjectSnapshotIssue::InvalidPath { path, .. }] if path == &pack_path)
+        matches!(excluded.issues.as_slice(), [PackIssue::InvalidPath { path, .. }] if path == &pack_path)
     );
 
     let mut fields = data.split(|byte| *byte == 0);
@@ -75,5 +69,5 @@ fuzz_target!(|data: &[u8]| {
         let bytes = fields.next().unwrap_or_default();
         entries.push((String::from_utf8_lossy(path).into_owned(), bytes.to_vec()));
     }
-    let _ = ProjectSnapshotAssembly::new(entrypoint).assemble(entries);
+    let _ = ProjectSnapshot::new(entrypoint, entries);
 });

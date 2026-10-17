@@ -5,20 +5,17 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use official_typst_cli::OfficialTypstCli;
-use typst_pack::pack_archive::encode;
-use typst_pack::{
-    CompilationOutputSpecification, CompilationRequestRejection, CompilationResult, Pack,
-    PackCompilationRequest, SvgOutputSpecification, compile as compile_to_report,
-};
+use typst_pack::Pack;
+use typst_pack::archive::encode;
+use typst_pack::compile;
+use typst_pack::compile::OutputFormat;
 
-fn compile(
-    request: PackCompilationRequest,
-) -> Result<CompilationResult, CompilationRequestRejection> {
-    let report = compile_to_report(request)?;
-    Ok(report
-        .result()
-        .expect("expected a semantic Compilation Result")
-        .clone())
+/// The embedded Typst release, from `typst_pack::VERSION` ("X (Typst Y)").
+fn engine_version() -> &'static str {
+    typst_pack::VERSION
+        .rsplit_once("(Typst ")
+        .and_then(|(_, version)| version.strip_suffix(')'))
+        .expect("VERSION names the embedded Typst release")
 }
 
 const PAGED_SOURCE: &str =
@@ -37,10 +34,9 @@ fn write_project(root: &Path, source: &str) -> PathBuf {
 fn write_pack(path: &Path, source: &str) -> Pack {
     let pack = Pack::builder("main.typ")
         .file("main.typ", source.as_bytes().to_vec())
-        .unwrap()
         .build()
         .unwrap();
-    std::fs::write(path, encode(&pack).unwrap()).unwrap();
+    std::fs::write(path, encode(&pack)).unwrap();
     pack
 }
 
@@ -97,7 +93,8 @@ fn assert_success(output: &Output) {
 
 #[cfg(unix)]
 fn read_eventually(path: &Path) -> String {
-    for _ in 0..100 {
+    // Viewers are detached; give a loaded machine time to run them.
+    for _ in 0..1000 {
         if let Ok(value) = std::fs::read_to_string(path) {
             return value;
         }
@@ -117,19 +114,12 @@ fn official_typst_compile_is_the_process_level_parity_baseline() {
     let pack_path = directory.path().join("project.typk");
     let pack = write_pack(&pack_path, PAGED_SOURCE);
 
-    let public_result = compile(PackCompilationRequest::new(
-        pack.clone(),
-        CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
-    ))
-    .expect("public Pack compilation must establish the embedded Engine baseline");
-    official.require_version(public_result.engine_identity().version());
+    official.require_version(engine_version());
     let pack_version = pack_run(directory.path(), ["--version"], &[]);
     assert_success(&pack_version);
     assert!(
-        String::from_utf8_lossy(&pack_version.stdout).contains(&format!(
-            "(Typst {})",
-            public_result.engine_identity().version()
-        )),
+        String::from_utf8_lossy(&pack_version.stdout)
+            .contains(&format!("(Typst {})", engine_version())),
         "{TEST_BINARY_ENV} must report the exact embedded Engine baseline"
     );
 
@@ -200,13 +190,13 @@ fn official_typst_compile_is_the_process_level_parity_baseline() {
         "HTML artifact differs from official Typst"
     );
 
-    let public_svg = compile(PackCompilationRequest::new(
+    let public_svg = compile(&compile::Request::new(
         pack,
-        CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
+        compile::Output::new(OutputFormat::Svg),
     ))
     .unwrap();
     assert_eq!(
-        public_svg.artifacts()[0].bytes(),
+        public_svg.artifacts[0].bytes,
         std::fs::read(directory.path().join("official.svg")).unwrap(),
         "CLI parity fixture must also traverse the proven public Pack compilation seam"
     );
@@ -326,6 +316,128 @@ fn official_typst_compile_gates_shared_environment_diagnostics_and_exit_behavior
         std::fs::read(pack_svg).unwrap(),
         std::fs::read(official_svg).unwrap()
     );
+}
+
+/// A timezone whose current date differs from the UTC date.
+#[cfg(unix)]
+fn timezone_off_the_utc_date() -> &'static str {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    if now.as_secs() % 86_400 >= 12 * 3600 {
+        "Etc/GMT-14"
+    } else {
+        "Etc/GMT+12"
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn official_typst_compile_gates_the_local_date_without_a_timestamp() {
+    let Some(official) = OfficialTypstCli::from_environment() else {
+        eprintln!("skipping official CLI parity outside its pinned Dagger gate");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    // Without SOURCE_DATE_EPOCH (removed for both), `today()` is the local
+    // date, and an explicit offset still shifts the current instant.
+    let source = "#let today = datetime.today()\n\
+                  #set page(width: today.month() * 1pt, height: today.day() * 1pt, margin: 0pt)\n\
+                  #rect(width: datetime.today(offset: 3).day() * 0.1pt)";
+    let project = write_project(directory.path(), source);
+    let pack_path = directory.path().join("today.typk");
+    write_pack(&pack_path, source);
+    let official_svg = directory.path().join("official.svg");
+    let pack_svg = directory.path().join("pack.svg");
+    let timezone = [("TZ", timezone_off_the_utc_date())];
+
+    let official_result = official.run(
+        &project,
+        [
+            "compile",
+            "main.typ",
+            official_svg.to_str().unwrap(),
+            "--ignore-system-fonts",
+        ],
+        &timezone,
+    );
+    let pack_result = pack_run(
+        directory.path(),
+        [
+            "compile",
+            pack_path.to_str().unwrap(),
+            pack_svg.to_str().unwrap(),
+            "--ignore-system-fonts",
+        ],
+        &timezone,
+    );
+    assert_success(&official_result);
+    assert_success(&pack_result);
+    assert_eq!(
+        std::fs::read_to_string(pack_svg).unwrap(),
+        std::fs::read_to_string(official_svg).unwrap()
+    );
+}
+
+#[test]
+fn official_typst_compile_gates_errors_before_warnings() {
+    let Some(official) = OfficialTypstCli::from_environment() else {
+        eprintln!("skipping official CLI parity outside its pinned Dagger gate");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    // Layout fails after evaluation warned.
+    let source = "#set text(font: \"No Such Family\")\nWarned\n#context panic(\"boom\")";
+    let project = write_project(directory.path(), source);
+    let pack_path = directory.path().join("failing.typk");
+    write_pack(&pack_path, source);
+
+    for format in ["short", "human"] {
+        let official_result = official.run(
+            &project,
+            [
+                "--color",
+                "never",
+                "compile",
+                "main.typ",
+                "out.pdf",
+                "--pages",
+                "1",
+                "--diagnostic-format",
+                format,
+                "--ignore-system-fonts",
+            ],
+            &[],
+        );
+        let pack_result = pack_run(
+            directory.path(),
+            [
+                "--color",
+                "never",
+                "compile",
+                pack_path.to_str().unwrap(),
+                "out.pdf",
+                "--pages",
+                "1",
+                "--diagnostic-format",
+                format,
+                "--ignore-system-fonts",
+            ],
+            &[],
+        );
+        let official_stderr = String::from_utf8_lossy(&official_result.stderr);
+        let first = official_stderr.lines().next().unwrap_or_default();
+        assert!(
+            first.contains("error: panicked with: boom"),
+            "{official_stderr}"
+        );
+        assert!(official_stderr.contains("warning: unknown font family"));
+        assert_eq!(pack_result.status.code(), official_result.status.code());
+        assert_eq!(
+            String::from_utf8_lossy(&pack_result.stderr),
+            String::from_utf8_lossy(&official_result.stderr)
+        );
+    }
 }
 
 #[test]
@@ -499,72 +611,6 @@ fn official_typst_compile_gates_package_font_and_offline_request_routing() {
         std::fs::read(pack_pdf).unwrap(),
         std::fs::read(official_pdf).unwrap(),
         "verified package and font fulfillment drifted from official Typst"
-    );
-}
-
-#[test]
-fn official_typst_compile_gates_pack_source_and_data_overrides() {
-    let Some(official) = OfficialTypstCli::from_environment() else {
-        eprintln!("skipping official CLI parity outside its pinned Dagger gate");
-        return;
-    };
-    let directory = tempfile::tempdir().unwrap();
-    let source = "#import \"chapter.typ\": source-width\n\
-                  #let data-width = int(read(\"data.txt\"))\n\
-                  #set page(width: 100pt, height: 20pt, margin: 0pt)\n\
-                  #rect(width: (source-width + data-width) * 1pt, height: 5pt)";
-    let project = write_project(directory.path(), source);
-    std::fs::write(project.join("chapter.typ"), "#let source-width = 20").unwrap();
-    std::fs::write(project.join("data.txt"), "30").unwrap();
-
-    let pack = Pack::builder("main.typ")
-        .file("main.typ", source.as_bytes().to_vec())
-        .unwrap()
-        .file("chapter.typ", b"#let source-width = 10".to_vec())
-        .unwrap()
-        .file("data.txt", b"10".to_vec())
-        .unwrap()
-        .build()
-        .unwrap();
-    let pack_path = directory.path().join("overrides.typk");
-    std::fs::write(&pack_path, encode(&pack).unwrap()).unwrap();
-    let source_replacement = directory.path().join("chapter-replacement.typ");
-    let data_replacement = directory.path().join("data-replacement.txt");
-    std::fs::write(&source_replacement, "#let source-width = 20").unwrap();
-    std::fs::write(&data_replacement, "30").unwrap();
-    let official_svg = directory.path().join("overrides-official.svg");
-    let pack_svg = directory.path().join("overrides-pack.svg");
-
-    let official_result = official.compile(
-        &project,
-        [
-            "main.typ",
-            official_svg.to_str().unwrap(),
-            "--ignore-system-fonts",
-        ],
-    );
-    let pack_result = pack_command(
-        directory.path(),
-        &[
-            pack_path.to_str().unwrap(),
-            pack_svg.to_str().unwrap(),
-            "--override",
-            "chapter.typ",
-            source_replacement.to_str().unwrap(),
-            "--override",
-            "data.txt",
-            data_replacement.to_str().unwrap(),
-            "--ignore-system-fonts",
-        ],
-    );
-
-    assert_success(&official_result);
-    assert_success(&pack_result);
-    assert_eq!(pack_result.stderr, official_result.stderr);
-    assert_eq!(
-        std::fs::read(pack_svg).unwrap(),
-        std::fs::read(official_svg).unwrap(),
-        "Pack Override output differs from direct official Typst input"
     );
 }
 

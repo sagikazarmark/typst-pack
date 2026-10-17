@@ -1,468 +1,310 @@
 //! The pack manifest stored as `typst-pack.toml` inside the archive.
 
-use std::str::FromStr;
+use std::collections::BTreeSet;
 
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
+use typst::layout::Ratio;
 use typst::syntax::package::PackageSpec;
+use typst::text::{FontStretch, FontStyle, FontWeight};
 
-/// The archive entry name of the manifest.
-pub const MANIFEST_PATH: &str = "typst-pack.toml";
+use crate::Digest;
+use crate::archive::DecodeError;
+use crate::font::Face;
+use crate::paths::canonical_relative_path;
+
+/// The archive member name of the manifest.
+pub(crate) const MANIFEST_PATH: &str = "typst-pack.toml";
 
 /// The pack format version this crate reads and writes.
-pub const FORMAT_VERSION: u32 = 1;
+///
+/// It changes on every incompatible format change; readers reject every other
+/// version. Unknown keys are ignored, so compatible additions keep the version.
+pub const FORMAT_VERSION: i64 = 2;
 
-/// The parsed contents of `typst-pack.toml`.
-#[derive(Debug, Clone, PartialEq, Serialize)]
+/// The `generator` this crate records.
+pub(crate) const GENERATOR: &str = concat!("typst-pack ", env!("CARGO_PKG_VERSION"));
+
+/// The contents of `typst-pack.toml`.
+///
+/// One struct is both written and read. Unknown keys are ignored so that newer
+/// producers can add compatible fields.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-pub(crate) struct PackManifest {
-    /// The pack format version. Readers must reject versions they don't know.
-    format_version: u32,
-    /// The packed Typst project.
-    project: ProjectManifest,
-    /// Package dependencies observed while creating the pack.
-    #[serde(default, skip_serializing_if = "PackagesManifest::is_empty")]
-    packages: PackagesManifest,
-    /// Fonts embedded in the pack.
+pub(crate) struct Manifest {
+    pub(crate) format_version: i64,
+    /// The Typst version of the producer; informational and omitted when
+    /// unknown.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub(crate) typst_version: String,
+    /// The producing tool and its version; informational.
+    #[serde(default)]
+    pub(crate) generator: String,
+    pub(crate) entrypoint: String,
+    #[serde(default)]
+    pub(crate) files: Vec<FileEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    fonts: Vec<FontManifest>,
-    /// Optional descriptive metadata about the packed project.
+    pub(crate) packages: Vec<PackageEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(crate) fonts: Vec<FontEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    metadata: Option<PackMetadata>,
+    pub(crate) metadata: Option<Metadata>,
 }
 
+/// One `[[files]]` entry: a project file and the SHA-256 of its bytes.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct FileEntry {
+    pub(crate) path: String,
+    pub(crate) digest: Digest,
+}
+
+/// One `[[packages]]` entry: an exact package and its tree digest.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct PackageEntry {
+    #[serde(with = "package_spec")]
+    pub(crate) spec: PackageSpec,
+    pub(crate) digest: Digest,
+    pub(crate) embedded: bool,
+}
+
+/// One `[[fonts]]` entry: a font container, in font book order.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub(crate) struct FontEntry {
+    pub(crate) digest: Digest,
+    pub(crate) embedded: bool,
+    /// The faces of the container; informational, so a malformed list reads
+    /// as its well-formed faces.
+    #[serde(default, deserialize_with = "lenient_faces")]
+    pub(crate) faces: Vec<FaceEntry>,
+}
+
+/// One `[[fonts.faces]]` entry.
+///
+/// Faces are informational, so reading them is lenient: every field is
+/// optional, a value of the wrong type reads as the default, an unknown style
+/// reads as `normal`, and out-of-range numbers are clamped.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(from = "RawFaceEntry")]
+pub(crate) struct FaceEntry {
+    /// The face index within the container.
+    pub(crate) index: u32,
+    /// The typographic family name.
+    pub(crate) family: String,
+    /// `normal`, `italic`, or `oblique`.
+    pub(crate) style: String,
+    /// The weight on the CSS scale from 100 to 900; 400 is normal.
+    pub(crate) weight: u16,
+    /// The width in per mille of the normal width, from 500 to 2000; 1000 is
+    /// normal.
+    pub(crate) stretch: u16,
+}
+
+/// Reads the faces that are tables, ignoring a list of another type and any
+/// element that is not a table.
+fn lenient_faces<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<FaceEntry>, D::Error> {
+    let toml::Value::Array(values) = toml::Value::deserialize(deserializer)? else {
+        return Ok(Vec::new());
+    };
+    let faces = values.into_iter().filter(toml::Value::is_table);
+    Ok(faces.filter_map(|value| value.try_into().ok()).collect())
+}
+
+/// A face entry as written, before [`FaceEntry`] reads it leniently.
 #[derive(Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-struct Version1Manifest {
-    format_version: u32,
-    project: ProjectManifest,
-    #[serde(default)]
-    packages: Version1PackagesManifest,
-    #[serde(default)]
-    fonts: Vec<FontManifest>,
-    #[serde(default)]
-    metadata: Option<PackMetadata>,
+struct RawFaceEntry {
+    index: Option<toml::Value>,
+    family: Option<toml::Value>,
+    style: Option<toml::Value>,
+    weight: Option<toml::Value>,
+    stretch: Option<toml::Value>,
 }
 
-impl TryFrom<Version1Manifest> for PackManifest {
-    type Error = PackManifestError;
-
-    fn try_from(manifest: Version1Manifest) -> Result<Self, Self::Error> {
-        Ok(Self {
-            format_version: manifest.format_version,
-            project: manifest.project,
-            packages: manifest.packages.try_into()?,
-            fonts: manifest.fonts,
-            metadata: manifest.metadata,
-        })
-    }
-}
-
-impl<'de> Deserialize<'de> for PackManifest {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        let value = toml::Value::deserialize(deserializer)?;
-        parse_manifest_value(value).map_err(serde::de::Error::custom)
-    }
-}
-
-/// The `[project]` section.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub(crate) struct ProjectManifest {
-    /// The root-relative path of the entrypoint file, e.g. `main.typ`.
-    entrypoint: String,
-}
-
-/// The `[packages]` section.
-#[derive(Debug, Clone, Default, PartialEq, Serialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub(crate) struct PackagesManifest {
-    /// Exact package trees whose files are stored inside the Pack.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    vendored: Vec<PackageManifest>,
-    /// Exact package trees that must be externally fulfilled.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    unvendored: Vec<PackageManifest>,
-}
-
-#[derive(Default, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-struct Version1PackagesManifest {
-    #[serde(default)]
-    vendored: Vec<PackageManifest>,
-    #[serde(default)]
-    unvendored: Vec<PackageManifest>,
-}
-
-impl TryFrom<Version1PackagesManifest> for PackagesManifest {
-    type Error = PackManifestError;
-
-    fn try_from(packages: Version1PackagesManifest) -> Result<Self, Self::Error> {
-        Ok(Self {
-            vendored: packages.vendored,
-            unvendored: packages.unvendored,
-        })
-    }
-}
-
-impl<'de> Deserialize<'de> for PackagesManifest {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        Version1PackagesManifest::deserialize(deserializer)?
-            .try_into()
-            .map_err(serde::de::Error::custom)
-    }
-}
-
-/// One exact Package Tree declaration.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub(crate) struct PackageManifest {
-    spec: String,
-    tree_digest: String,
-    tree_identity_kind: String,
-    tree_identity_schema: String,
-    tree_identity_algorithm: String,
-    file_count: u64,
-    byte_length: u64,
-}
-
-/// One `[[fonts]]` entry.
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub(crate) struct FontManifest {
-    /// The archive entry holding the font data, e.g. `fonts/dejavu-sans.ttf`.
-    path: String,
-    /// The face index inside the font file (non-zero for collections).
-    #[serde(default, skip_serializing_if = "is_zero")]
-    index: u32,
-    /// Family names provided by this face, informational only.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    families: Vec<String>,
-    /// Whether the exact container must be supplied when compiling.
-    #[serde(default, skip_serializing_if = "is_false")]
-    external: bool,
-    /// The canonical container digest, encoded as 32 lowercase hexadecimal digits.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    container_digest: Option<String>,
-    /// Canonical identity kind.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    container_identity_kind: Option<String>,
-    /// Canonical identity schema.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    container_identity_schema: Option<String>,
-    /// Canonical identity digest algorithm.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    container_identity_algorithm: Option<String>,
-    /// The exact container byte length.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    container_length: Option<u64>,
-}
-
-fn is_zero(index: &u32) -> bool {
-    *index == 0
-}
-
-fn is_false(value: &bool) -> bool {
-    !*value
-}
-
-/// The optional `[metadata]` section.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case", deny_unknown_fields)]
-pub struct PackMetadata {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    authors: Vec<String>,
-}
-
-impl ProjectManifest {
-    /// The root-relative entrypoint path.
-    pub fn entrypoint(&self) -> &str {
-        &self.entrypoint
-    }
-}
-
-impl PackagesManifest {
-    /// Exact package trees stored inside the Pack.
-    pub fn vendored(&self) -> &[PackageManifest] {
-        &self.vendored
-    }
-
-    /// Exact package trees fulfilled outside the Pack.
-    pub fn unvendored(&self) -> &[PackageManifest] {
-        &self.unvendored
-    }
-
-    fn is_empty(&self) -> bool {
-        self.vendored.is_empty() && self.unvendored.is_empty()
-    }
-}
-
-impl PackageManifest {
-    #[cfg(test)]
-    pub(crate) fn new(
-        spec: PackageSpec,
-        tree_digest: String,
-        file_count: u64,
-        byte_length: u64,
-    ) -> Self {
+impl From<RawFaceEntry> for FaceEntry {
+    fn from(raw: RawFaceEntry) -> Self {
+        fn integer<T: TryFrom<i64> + Copy>(value: Option<toml::Value>, min: T, max: T) -> Option<T>
+        where
+            i64: From<T>,
+        {
+            let value = value?.as_integer()?;
+            let clamped = value.clamp(i64::from(min), i64::from(max));
+            T::try_from(clamped).ok()
+        }
+        fn string(value: Option<toml::Value>) -> Option<String> {
+            match value? {
+                toml::Value::String(string) => Some(string),
+                _ => None,
+            }
+        }
+        let default = Self::default();
         Self {
-            spec: spec.to_string(),
-            tree_digest,
-            tree_identity_kind: "complete-package-tree".to_owned(),
-            tree_identity_schema: "typst-pack-complete-package-tree-v1".to_owned(),
-            tree_identity_algorithm: "typst-hash128-0.15".to_owned(),
-            file_count,
-            byte_length,
+            index: integer(raw.index, 0, u32::MAX).unwrap_or(default.index),
+            family: string(raw.family).unwrap_or(default.family),
+            style: string(raw.style).unwrap_or(default.style),
+            weight: integer(raw.weight, 0, u16::MAX).unwrap_or(default.weight),
+            stretch: integer(raw.stretch, 0, u16::MAX).unwrap_or(default.stretch),
         }
     }
-
-    pub(crate) fn spec(&self) -> Result<PackageSpec, InvalidPackageSpec> {
-        PackageSpec::from_str(&self.spec).map_err(|error| InvalidPackageSpec {
-            spec: self.spec.clone(),
-            message: error.to_string(),
-        })
-    }
-
-    pub fn tree_digest(&self) -> &str {
-        &self.tree_digest
-    }
-    pub fn tree_identity_kind(&self) -> &str {
-        &self.tree_identity_kind
-    }
-    pub fn tree_identity_schema(&self) -> &str {
-        &self.tree_identity_schema
-    }
-    pub fn tree_identity_algorithm(&self) -> &str {
-        &self.tree_identity_algorithm
-    }
-    pub fn file_count(&self) -> u64 {
-        self.file_count
-    }
-    pub fn byte_length(&self) -> u64 {
-        self.byte_length
-    }
 }
 
-impl std::fmt::Display for PackageManifest {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.spec)
-    }
-}
-
-impl FontManifest {
-    #[cfg(test)]
-    pub(crate) fn with_identity_fields(
-        container_digest: Option<String>,
-        container_identity_kind: Option<String>,
-        container_identity_schema: Option<String>,
-        container_identity_algorithm: Option<String>,
-    ) -> Self {
+impl Default for FaceEntry {
+    fn default() -> Self {
         Self {
-            path: "fonts/test.ttf".to_owned(),
             index: 0,
-            families: Vec::new(),
-            external: false,
-            container_digest,
-            container_identity_kind,
-            container_identity_schema,
-            container_identity_algorithm,
-            container_length: None,
+            family: String::new(),
+            style: "normal".to_owned(),
+            weight: 400,
+            stretch: 1000,
         }
     }
-
-    /// The archive path containing this font's bytes.
-    pub fn path(&self) -> &str {
-        &self.path
-    }
-
-    /// The face index within the font data.
-    pub fn index(&self) -> u32 {
-        self.index
-    }
-
-    /// Informational family names declared for this face.
-    #[cfg(test)]
-    pub(crate) fn families(&self) -> &[String] {
-        &self.families
-    }
-
-    /// Whether this face's container is externally fulfilled.
-    pub fn is_external(&self) -> bool {
-        self.external
-    }
-
-    pub(crate) fn container_digest(&self) -> Option<&str> {
-        self.container_digest.as_deref()
-    }
-
-    pub(crate) fn container_length(&self) -> Option<u64> {
-        self.container_length
-    }
-
-    pub(crate) fn container_identity_kind(&self) -> Option<&str> {
-        self.container_identity_kind.as_deref()
-    }
-
-    pub(crate) fn container_identity_schema(&self) -> Option<&str> {
-        self.container_identity_schema.as_deref()
-    }
-
-    pub(crate) fn container_identity_algorithm(&self) -> Option<&str> {
-        self.container_identity_algorithm.as_deref()
-    }
 }
 
-impl PackMetadata {
-    /// Creates empty Pack metadata.
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Sets the human-readable Pack name.
-    pub fn with_name(mut self, name: impl Into<String>) -> Self {
-        self.name = Some(name.into());
-        self
-    }
-
-    /// Sets the Pack description.
-    pub fn with_description(mut self, description: impl Into<String>) -> Self {
-        self.description = Some(description.into());
-        self
-    }
-
-    /// Adds a Pack author.
-    pub fn with_author(mut self, author: impl Into<String>) -> Self {
-        self.authors.push(author.into());
-        self
-    }
-
-    /// The human-readable Pack name.
-    pub fn name(&self) -> Option<&str> {
-        self.name.as_deref()
-    }
-
-    /// The Pack description.
-    pub fn description(&self) -> Option<&str> {
-        self.description.as_deref()
-    }
-
-    /// The Pack authors.
-    pub fn authors(&self) -> &[String] {
-        &self.authors
-    }
-}
-
-/// A manifest that could not be accepted.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum PackManifestError {
-    #[error("failed to parse manifest: {0}")]
-    Parse(#[from] toml::de::Error),
-    #[error("missing or invalid `format-version`")]
-    InvalidFormatVersion,
-    #[error("unsupported pack format version {0} (this reader supports version {FORMAT_VERSION})")]
-    UnsupportedVersion(u32),
-    #[error("the {MANIFEST_PATH} manifest is not valid UTF-8: {0}")]
-    NotUtf8(#[source] std::str::Utf8Error),
-}
-
-#[derive(Debug)]
-pub(crate) struct InvalidPackageSpec {
-    pub(crate) spec: String,
-    pub(crate) message: String,
-}
-
-impl PackManifest {
-    #[cfg(test)]
-    pub(crate) fn new(
-        entrypoint: String,
-        vendored_packages: Vec<PackageManifest>,
-        unvendored_packages: Vec<PackageManifest>,
-        fonts: Vec<FontManifest>,
-        metadata: Option<PackMetadata>,
-    ) -> Self {
+impl From<&Face> for FaceEntry {
+    fn from(face: &Face) -> Self {
+        let style = match face.style {
+            FontStyle::Normal => "normal",
+            FontStyle::Italic => "italic",
+            FontStyle::Oblique => "oblique",
+        };
         Self {
-            format_version: FORMAT_VERSION,
-            project: ProjectManifest { entrypoint },
-            packages: PackagesManifest {
-                vendored: vendored_packages,
-                unvendored: unvendored_packages,
-            },
-            fonts,
-            metadata,
+            index: face.index,
+            family: face.family.clone(),
+            style: style.to_owned(),
+            weight: face.weight.to_number(),
+            stretch: (face.stretch.to_ratio().get() * 1000.0).round() as u16,
         }
     }
+}
 
-    /// The Pack format version.
-    #[cfg(test)]
-    pub(crate) fn format_version(&self) -> u32 {
-        self.format_version
+impl From<&FaceEntry> for Face {
+    fn from(entry: &FaceEntry) -> Self {
+        let style = match entry.style.as_str() {
+            "italic" => FontStyle::Italic,
+            "oblique" => FontStyle::Oblique,
+            _ => FontStyle::Normal,
+        };
+        Self {
+            index: entry.index,
+            family: entry.family.clone(),
+            style,
+            weight: FontWeight::from_number(entry.weight),
+            // Half a unit up keeps the per-mille value exact through the
+            // ratio, which Typst truncates back to per mille.
+            stretch: FontStretch::from_ratio(Ratio::new((f64::from(entry.stretch) + 0.5) / 1000.0)),
+        }
+    }
+}
+
+/// Optional descriptive metadata of a pack, stored as `[metadata]` and
+/// excluded from its identity.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Metadata {
+    /// A human-readable pack name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// A description of the packed document.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The pack authors.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub authors: Vec<String>,
+}
+
+impl Manifest {
+    /// Parses a manifest, rejecting every format version but [`FORMAT_VERSION`]
+    /// before interpreting any other key.
+    pub(crate) fn parse(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let text = std::str::from_utf8(bytes).map_err(|_| DecodeError::ManifestNotUtf8)?;
+        let table: toml::Table = toml::from_str(text).map_err(DecodeError::manifest)?;
+        let version = table
+            .get("format-version")
+            .and_then(toml::Value::as_integer)
+            .ok_or(DecodeError::MissingFormatVersion)?;
+        if version != FORMAT_VERSION {
+            return Err(DecodeError::UnsupportedVersion(version));
+        }
+        let manifest: Self = table.try_into().map_err(DecodeError::manifest)?;
+        manifest.check().map_err(DecodeError::AmbiguousManifest)?;
+        Ok(manifest)
     }
 
-    /// The project declarations.
-    pub fn project(&self) -> &ProjectManifest {
-        &self.project
-    }
-
-    /// The package declarations.
-    pub fn packages(&self) -> &PackagesManifest {
-        &self.packages
-    }
-
-    /// The embedded font declarations.
-    pub fn fonts(&self) -> &[FontManifest] {
-        &self.fonts
-    }
-
-    /// Optional descriptive Pack metadata.
-    pub fn metadata(&self) -> Option<&PackMetadata> {
-        self.metadata.as_ref()
-    }
-
-    /// Parses and validates a manifest from TOML text.
-    pub fn from_toml(text: &str) -> Result<Self, PackManifestError> {
-        Self::from_toml_value(toml::from_str(text)?)
-    }
-
-    pub(crate) fn from_toml_value(value: toml::Value) -> Result<Self, PackManifestError> {
-        parse_manifest_value(value)
-    }
-
-    /// Serializes the manifest to TOML text.
-    #[cfg(test)]
-    pub fn to_toml(&self) -> String {
-        toml::to_string_pretty(self).expect("manifest is always serializable")
-    }
-
-    /// Checks internal consistency of the manifest.
-    fn validate(&self) -> Result<(), PackManifestError> {
-        if self.format_version != FORMAT_VERSION {
-            return Err(PackManifestError::UnsupportedVersion(self.format_version));
+    /// Rejects declarations that would give one archive several readings:
+    /// paths that are not already canonical, and a path, specification, or
+    /// font digest declared twice. Paths that cannot be canonicalized at all
+    /// are left to pack validation.
+    fn check(&self) -> Result<(), String> {
+        let canonical = |path: &str| {
+            canonical_relative_path(path).map_or(true, |canonical| canonical.as_str() == path)
+        };
+        if !canonical(&self.entrypoint) {
+            return Err(format!(
+                "entrypoint {:?} is not a canonical path",
+                self.entrypoint
+            ));
+        }
+        let mut paths = BTreeSet::new();
+        for entry in &self.files {
+            if !canonical(&entry.path) {
+                return Err(format!(
+                    "project file {:?} is not a canonical path",
+                    entry.path
+                ));
+            }
+            if !paths.insert(entry.path.as_str()) {
+                return Err(format!(
+                    "project file {:?} is declared more than once",
+                    entry.path
+                ));
+            }
+        }
+        let mut specs = BTreeSet::new();
+        for entry in &self.packages {
+            if !specs.insert(entry.spec.to_string()) {
+                return Err(format!("package {} is declared more than once", entry.spec));
+            }
+        }
+        let mut digests = BTreeSet::new();
+        for entry in &self.fonts {
+            if !digests.insert(entry.digest) {
+                return Err(format!(
+                    "font container {} is declared more than once",
+                    entry.digest
+                ));
+            }
         }
         Ok(())
     }
+
+    pub(crate) fn to_toml(&self) -> String {
+        toml::to_string(self).expect("a manifest is always representable as TOML")
+    }
 }
 
-fn parse_manifest_value(value: toml::Value) -> Result<PackManifest, PackManifestError> {
-    let version = value
-        .get("format-version")
-        .and_then(toml::Value::as_integer)
-        .ok_or(PackManifestError::InvalidFormatVersion)?;
-    let version = u32::try_from(version).map_err(|_| PackManifestError::InvalidFormatVersion)?;
-    if version != FORMAT_VERSION {
-        return Err(PackManifestError::UnsupportedVersion(version));
+mod package_spec {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use typst::syntax::package::PackageSpec;
+
+    pub(super) fn serialize<S: Serializer>(
+        spec: &PackageSpec,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        serializer.collect_str(spec)
     }
-    let wire: Version1Manifest = value.try_into()?;
-    let manifest = PackManifest::try_from(wire)?;
-    manifest.validate()?;
-    Ok(manifest)
+
+    /// Parses a specification written in canonical form only, so one
+    /// manifest text names one package.
+    pub(super) fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<PackageSpec, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        let spec: PackageSpec = value.parse().map_err(|error| {
+            serde::de::Error::custom(format!("invalid package spec {value:?}: {error}"))
+        })?;
+        if spec.to_string() != value {
+            return Err(serde::de::Error::custom(format!(
+                "package spec {value:?} is not in canonical form `{spec}`"
+            )));
+        }
+        Ok(spec)
+    }
 }
