@@ -16,18 +16,14 @@ pub struct ReadLimits {
     pub max_total_bytes: u64,
 }
 
-impl ReadLimits {
-    /// Ceilings suitable for ordinary Typst projects, packages, and font roots.
-    pub const DEFAULT: Self = Self {
-        max_entries: 100_000,
-        max_file_bytes: 256 * 1024 * 1024,
-        max_total_bytes: 1024 * 1024 * 1024,
-    };
-}
-
 impl Default for ReadLimits {
+    /// Ceilings suitable for ordinary Typst projects, packages, and font roots.
     fn default() -> Self {
-        Self::DEFAULT
+        Self {
+            max_entries: 100_000,
+            max_file_bytes: 256 * 1024 * 1024,
+            max_total_bytes: 1024 * 1024 * 1024,
+        }
     }
 }
 

@@ -1,13 +1,14 @@
 //! The one Typst [`World`] behind creation and compilation, and the
 //! [`Sources`] a run leaves behind for presenting its diagnostics.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::path::{Component, Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use typst::diag::{FileError, FileResult, PackageError};
 use typst::foundations::{Bytes, Datetime, Duration};
+use typst::syntax::package::PackageSpec;
 use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
 use typst::text::{Font, FontBook};
 use typst::utils::LazyHash;
@@ -16,10 +17,9 @@ use typst_kit::datetime::Time;
 use typst_kit::files::{FileLoader, FileStore};
 use typst_kit::fonts::FontStore;
 
-use crate::domain::DocumentTime;
-use crate::package_catalog::PackageTree;
-use crate::package_failure::{PackageReadFailure, PackageReadFailureReason, PackageReadFailures};
-use crate::project_snapshot::ProjectSnapshot;
+use crate::compile::DocumentTime;
+use crate::package::{ReadFailure, Tree};
+use crate::project::ProjectSnapshot;
 
 /// A world over bytes the caller already holds: one project, the package
 /// trees available to it, and an ordered list of font containers.
@@ -39,9 +39,9 @@ pub(crate) struct SourceWorld {
 pub(crate) struct Loader {
     pub(crate) project: ProjectSnapshot,
     /// Package trees keyed by specification text.
-    pub(crate) packages: BTreeMap<String, PackageTree>,
+    pub(crate) packages: BTreeMap<String, Tree>,
     /// Packages the caller declared it cannot supply.
-    pub(crate) failures: PackageReadFailures,
+    pub(crate) failures: HashMap<PackageSpec, ReadFailure>,
 }
 
 /// What a world answers `datetime.today()` with.
@@ -183,7 +183,7 @@ impl FileLoader for Loader {
             VirtualRoot::Package(spec) => {
                 let Some(tree) = self.packages.get(&spec.to_string()) else {
                     return Err(FileError::Package(match self.failures.get(spec) {
-                        Some(failure) => package_error(failure),
+                        Some(failure) => package_error(spec, failure),
                         None => PackageError::NotFound(spec.clone()),
                     }));
                 };
@@ -195,22 +195,19 @@ impl FileLoader for Loader {
     }
 }
 
-fn package_error(failure: &PackageReadFailure) -> PackageError {
-    let spec = failure.spec().clone();
-    match failure.reason() {
-        PackageReadFailureReason::NotFound => PackageError::NotFound(spec),
-        PackageReadFailureReason::VersionNotFound { latest } => {
-            PackageError::VersionNotFound(spec, *latest)
+fn package_error(spec: &PackageSpec, failure: &ReadFailure) -> PackageError {
+    match failure {
+        ReadFailure::NotFound => PackageError::NotFound(spec.clone()),
+        ReadFailure::VersionNotFound { latest } => {
+            PackageError::VersionNotFound(spec.clone(), *latest)
         }
-        PackageReadFailureReason::NetworkFailed { detail } => {
+        ReadFailure::NetworkFailed(detail) => {
             PackageError::NetworkFailed(detail.clone().map(Into::into))
         }
-        PackageReadFailureReason::MalformedArchive { detail } => {
+        ReadFailure::MalformedArchive(detail) => {
             PackageError::MalformedArchive(detail.clone().map(Into::into))
         }
-        PackageReadFailureReason::Other { detail } => {
-            PackageError::Other(detail.clone().map(Into::into))
-        }
+        ReadFailure::Other(detail) => PackageError::Other(detail.clone().map(Into::into)),
     }
 }
 
@@ -260,7 +257,7 @@ impl Sources {
     }
 
     /// Names project files by their location beneath a filesystem root.
-    #[cfg_attr(not(feature = "fs"), allow(dead_code))]
+    #[cfg(feature = "fs")]
     pub(crate) fn with_root(mut self, root: PathBuf) -> Self {
         self.root = Some(root.into());
         self

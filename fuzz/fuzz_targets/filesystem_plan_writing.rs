@@ -1,10 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use typst_pack::{
-    FilesystemWriteError, Pack, PackExtractionSelection, WritePolicy, plan_pack_extraction,
-    write_pack_extraction_plan_to_filesystem,
-};
+use typst_pack::{Pack, extract, fs};
 
 fuzz_target!(|data: &[u8]| {
     let flags = data.first().copied().unwrap_or_default();
@@ -20,7 +17,7 @@ fuzz_target!(|data: &[u8]| {
         builder = builder.file(format!("files/{index}.bin"), payload);
     }
     let pack = builder.build().unwrap();
-    let plan = plan_pack_extraction(&pack, PackExtractionSelection::default()).unwrap();
+    let plan = extract::plan(&pack, extract::Selection::default()).unwrap();
     let directory = tempfile::tempdir().unwrap();
     let destination = std::fs::canonicalize(directory.path())
         .unwrap()
@@ -36,22 +33,22 @@ fuzz_target!(|data: &[u8]| {
 
     for byte in data.iter().copied().skip(1).take(8) {
         let policy = if byte & 1 == 0 {
-            WritePolicy::CreateNew
+            fs::WritePolicy::CreateNew
         } else {
-            WritePolicy::Overwrite
+            fs::WritePolicy::Overwrite
         };
         let before = snapshot(&destination);
-        match write_pack_extraction_plan_to_filesystem(&plan, &destination, policy) {
+        match fs::write_extraction(&plan, &destination, policy) {
             Ok(()) => {
                 for entry in plan.entries() {
                     assert_eq!(
-                        std::fs::read(destination.join(entry.relative_path())).unwrap(),
+                        std::fs::read(destination.join(entry.path())).unwrap(),
                         entry.bytes()
                     );
                 }
             }
             // A refused write changes nothing.
-            Err(FilesystemWriteError::Rejected { .. }) => {
+            Err(fs::WriteError::Rejected { .. }) => {
                 assert_eq!(snapshot(&destination), before);
             }
             Err(error) => panic!("unexpected write failure: {error}"),

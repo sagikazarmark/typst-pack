@@ -1,23 +1,27 @@
-//! The validated in-memory Pack model.
+//! The validated in-memory pack model.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::fmt;
 use std::str::FromStr;
+use std::sync::Arc;
 
-use serde::{Deserialize, Serialize};
 use typst::syntax::package::PackageSpec;
-use typst::text::{Font, FontStretch, FontStyle, FontWeight};
+use typst::text::Font;
 
-use crate::identity::Preimage;
-use crate::manifest::PackMetadata;
+use crate::digest::Preimage;
+use crate::font::{self, Face};
+use crate::manifest::Metadata;
+use crate::package::{self, Tree};
 use crate::payload::SharedBytes;
-use crate::project_snapshot::ProjectSnapshot;
-use crate::{Digest, FontContainer, PackageTree, PackageTreeError};
+use crate::project::ProjectSnapshot;
+use crate::{Digest, list};
 
 /// The conventional file extension for packs.
 pub const FILE_EXTENSION: &str = "typk";
 
-/// Whether any segment of a root-relative path names a Pack.
+/// The longest member name a ZIP archive can hold.
+pub(crate) const MAX_MEMBER_NAME: usize = u16::MAX as usize;
+
+/// Whether any segment of a root-relative path names a pack.
 pub(crate) fn names_pack_path(path: &str) -> bool {
     path.split('/').any(|segment| {
         segment.strip_prefix('.') == Some(FILE_EXTENSION)
@@ -33,107 +37,30 @@ pub(crate) fn names_pack_path(path: &str) -> bool {
 /// and font containers the document needs, either embedded or declared by
 /// digest for external fulfillment, and optional metadata. Its archive form is
 /// a ZIP file with a `typst-pack.toml` manifest, conventionally named `*.typk`.
+///
+/// Cloning a pack is cheap.
 #[derive(Debug, Clone)]
-pub struct Pack {
+pub struct Pack(Arc<Contents>);
+
+#[derive(Debug)]
+struct Contents {
     identity: Digest,
     project: ProjectSnapshot,
-    metadata: Option<PackMetadata>,
+    metadata: Option<Metadata>,
     /// Embedded package trees, keyed by spec string.
-    packages: BTreeMap<String, PackageTree>,
-    package_requirements: Vec<PackageRequirement>,
-    font_requirements: Vec<FontRequirement>,
+    packages: BTreeMap<String, Tree>,
+    package_requirements: Vec<package::Requirement>,
+    font_requirements: Vec<font::Requirement>,
     /// Embedded font container bytes.
     font_data: BTreeMap<Digest, SharedBytes>,
 }
 
-/// One exact package a Pack needs: its specification, its tree digest, and
-/// whether the tree is embedded in the Pack.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PackageRequirement {
-    pub spec: PackageSpec,
-    /// The package tree digest.
-    pub digest: Digest,
-    /// Whether the tree's files are stored in the Pack.
-    pub embedded: bool,
-}
-
-/// One exact font container a Pack needs. Every face of the container is
-/// available to the document at compile time.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct FontRequirement {
-    /// The SHA-256 of the container bytes.
-    pub digest: Digest,
-    /// Whether the container's bytes are stored in the Pack.
-    pub embedded: bool,
-    /// The faces of the container, in container order.
-    pub faces: Vec<FontFace>,
-}
-
-/// Selection metadata of one face of a font container.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct FontFace {
-    /// The face index within the container.
-    pub index: u32,
-    /// The typographic family name.
-    pub family: String,
-    pub style: FontStyle,
-    pub weight: FontWeight,
-    pub stretch: FontStretch,
-}
-
-impl FontFace {
-    pub(crate) fn of(font: &Font) -> Self {
-        let info = font.info();
-        Self {
-            index: font.index(),
-            family: info.family.clone(),
-            style: info.variant.style,
-            weight: info.variant.weight,
-            stretch: info.variant.stretch,
-        }
-    }
-}
-
-impl fmt::Display for FontFace {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let style = match self.style {
-            FontStyle::Normal => "normal",
-            FontStyle::Italic => "italic",
-            FontStyle::Oblique => "oblique",
-        };
-        write!(
-            formatter,
-            "{} ({style}, weight {}, stretch {:?})",
-            self.family,
-            self.weight.to_number(),
-            self.stretch.to_ratio()
-        )
-    }
-}
-
-impl FontRequirement {
-    /// The family names of the container's faces, deduplicated, for messages.
-    pub fn families(&self) -> String {
-        let mut families = Vec::<&str>::new();
-        for face in &self.faces {
-            if !families.contains(&face.family.as_str()) {
-                families.push(&face.family);
-            }
-        }
-        if families.is_empty() {
-            "unknown family".to_owned()
-        } else {
-            families.join(", ")
-        }
-    }
-}
-
-/// The unvalidated content of a Pack, shared by the builder, creation, and
-/// the archive decoder.
+/// The unvalidated content of a pack, shared by the builder and the archive
+/// decoder.
 #[derive(Debug, Default)]
 pub(crate) struct PackInput {
     pub(crate) entrypoint: String,
-    pub(crate) metadata: Option<PackMetadata>,
+    pub(crate) metadata: Option<Metadata>,
     pub(crate) files: Vec<(String, SharedBytes)>,
     pub(crate) packages: Vec<PackageInput>,
     pub(crate) fonts: Vec<FontInput>,
@@ -150,7 +77,7 @@ pub(crate) struct PackageInput {
 pub(crate) enum PackageContent {
     Files(Vec<(String, SharedBytes)>),
     /// An already validated tree.
-    Tree(PackageTree),
+    Tree(Tree),
     /// A tree digest declared without its files; only for external packages.
     Declared(Digest),
 }
@@ -163,13 +90,13 @@ pub(crate) enum FontInput {
     },
     /// An already validated container.
     Container {
-        container: FontContainer,
+        container: font::Container,
         embedded: bool,
     },
     /// An external container declared without its bytes.
     Declared {
         digest: Digest,
-        faces: Vec<FontFace>,
+        faces: Vec<Face>,
     },
 }
 
@@ -179,14 +106,12 @@ impl Pack {
     /// `entrypoint` is the root-relative path of the main file, e.g.
     /// `main.typ`.
     ///
-    /// Building directly does not run Dependency Discovery: the pack contains
-    /// exactly the files, packages, and fonts added here. Use
-    /// [`create`](crate::create) when the library should discover requirements
-    /// from values the caller already holds.
+    /// The builder discovers no dependencies: the pack contains exactly the
+    /// files, packages, and fonts added to it. Use [`create()`](crate::create())
+    /// when the library should discover them by compiling the project.
     ///
     /// ```
-    /// use typst_pack::Pack;
-    /// use typst_pack::pack_archive::encode;
+    /// use typst_pack::{Pack, archive};
     ///
     /// let pack = Pack::builder("main.typ")
     ///     .file("main.typ", b"= Report\n".to_vec())
@@ -194,18 +119,22 @@ impl Pack {
     ///     .build()?;
     ///
     /// assert_eq!(pack.entrypoint(), "main.typ");
-    ///
-    /// let archive = encode(&pack)?;
-    /// assert!(!archive.is_empty());
+    /// assert!(!archive::encode(&pack).is_empty());
     /// # Ok::<(), Box<dyn std::error::Error>>(())
     /// ```
     pub fn builder(entrypoint: impl Into<String>) -> PackBuilder {
-        PackBuilder::new(entrypoint)
+        PackBuilder {
+            input: PackInput {
+                entrypoint: entrypoint.into(),
+                ..PackInput::default()
+            },
+            packages: BTreeMap::new(),
+        }
     }
 
-    /// Validates every whole-Pack invariant. This is the one constructor shared
-    /// by the builder, creation, and the archive decoder.
-    pub(crate) fn construct(input: PackInput) -> Result<Self, PackInvariantError> {
+    /// Validates every pack invariant; shared by the builder and the archive
+    /// decoder.
+    pub(crate) fn construct(input: PackInput) -> Result<Self, PackError> {
         let mut issues = Vec::new();
         let project = ProjectSnapshot::validate(&input.entrypoint, input.files, &mut issues);
         Self::assemble(project, input.metadata, input.packages, input.fonts, issues)
@@ -214,27 +143,27 @@ impl Pack {
     /// Adds validated dependencies to an already validated project.
     pub(crate) fn with_dependencies(
         project: ProjectSnapshot,
-        metadata: Option<PackMetadata>,
+        metadata: Option<Metadata>,
         packages: Vec<PackageInput>,
         fonts: Vec<FontInput>,
-    ) -> Result<Self, PackInvariantError> {
+    ) -> Result<Self, PackError> {
         Self::assemble(Some(project), metadata, packages, fonts, Vec::new())
     }
 
     fn assemble(
         project: Option<ProjectSnapshot>,
-        metadata: Option<PackMetadata>,
+        metadata: Option<Metadata>,
         packages: Vec<PackageInput>,
         fonts: Vec<FontInput>,
-        mut issues: Vec<PackInvariantIssue>,
-    ) -> Result<Self, PackInvariantError> {
+        mut issues: Vec<PackIssue>,
+    ) -> Result<Self, PackError> {
         let (packages, package_requirements) = validate_packages(packages, &mut issues);
         let (font_requirements, font_data) = validate_fonts(fonts, &mut issues);
         let Some(project) = project.filter(|_| issues.is_empty()) else {
-            return Err(PackInvariantError { issues });
+            return Err(PackError { issues });
         };
         let identity = pack_identity(&project, &package_requirements, &font_requirements);
-        Ok(Self {
+        Ok(Self(Arc::new(Contents {
             identity,
             project,
             metadata,
@@ -242,100 +171,92 @@ impl Pack {
             package_requirements,
             font_requirements,
             font_data,
-        })
+        })))
     }
 
-    /// The Pack Identity: the SHA-256 of the pack's content, excluding metadata.
+    /// The pack identity: the SHA-256 of the pack's content, excluding
+    /// metadata.
     pub fn identity(&self) -> Digest {
-        self.identity
+        self.0.identity
     }
 
     /// The root-relative path of the entrypoint file.
     pub fn entrypoint(&self) -> &str {
-        self.project.entrypoint()
+        self.0.project.entrypoint()
     }
 
-    /// Optional descriptive metadata, excluded from Pack Identity.
-    pub fn metadata(&self) -> Option<&PackMetadata> {
-        self.metadata.as_ref()
+    /// Optional descriptive metadata, excluded from the identity.
+    pub fn metadata(&self) -> Option<&Metadata> {
+        self.0.metadata.as_ref()
     }
 
     /// The project files, in root-relative path order.
     pub fn files(&self) -> impl Iterator<Item = (&str, &[u8])> {
-        self.project.files()
+        self.0.project.files()
     }
 
     /// Looks up a project file by root-relative path.
     pub fn file(&self, path: &str) -> Option<&[u8]> {
-        self.project.file(path)
+        self.0.project.file(path)
     }
 
     /// The validated project: entrypoint and project files.
     pub fn project(&self) -> &ProjectSnapshot {
-        &self.project
+        &self.0.project
     }
 
     pub(crate) fn file_digests(&self) -> impl Iterator<Item = (&str, Digest)> {
-        self.project.file_digests()
+        self.0.project.file_digests()
     }
 
-    /// The embedded packages and their files.
-    pub fn packages(
-        &self,
-    ) -> impl Iterator<Item = (&PackageSpec, impl Iterator<Item = (&str, &[u8])>)> {
-        self.package_requirements.iter().filter_map(|requirement| {
-            let tree = self.packages.get(&requirement.spec.to_string())?;
-            Some((&requirement.spec, tree.files()))
-        })
+    /// The embedded packages and their files, in specification order.
+    pub fn packages(&self) -> impl Iterator<Item = (&PackageSpec, &Tree)> {
+        self.0
+            .package_requirements
+            .iter()
+            .filter_map(|requirement| {
+                let tree = self.0.packages.get(&requirement.spec.to_string())?;
+                Some((&requirement.spec, tree))
+            })
     }
 
-    /// Looks up an embedded package file.
-    pub fn package_file(&self, spec: &PackageSpec, path: &str) -> Option<&[u8]> {
-        self.packages.get(&spec.to_string())?.file(path)
+    /// The exact packages this pack needs, in specification order.
+    pub fn package_requirements(&self) -> &[package::Requirement] {
+        &self.0.package_requirements
     }
 
-    pub(crate) fn shared_package_file(
-        &self,
-        spec: &PackageSpec,
-        path: &str,
-    ) -> Option<&SharedBytes> {
-        self.packages.get(&spec.to_string())?.shared_file(path)
-    }
-
-    /// Whether the pack embeds the given package.
-    pub fn has_package(&self, spec: &PackageSpec) -> bool {
-        self.packages.contains_key(&spec.to_string())
-    }
-
-    /// The exact packages this Pack needs, in specification order.
-    pub fn package_requirements(&self) -> &[PackageRequirement] {
-        &self.package_requirements
-    }
-
-    /// The exact font containers this Pack needs, in font book order.
-    pub fn font_requirements(&self) -> &[FontRequirement] {
-        &self.font_requirements
+    /// The exact font containers this pack needs, in font book order.
+    pub fn font_requirements(&self) -> &[font::Requirement] {
+        &self.0.font_requirements
     }
 
     /// The bytes of an embedded font container.
     pub fn font_data(&self, digest: &Digest) -> Option<&[u8]> {
-        self.font_data.get(digest).map(SharedBytes::as_slice)
+        self.0.font_data.get(digest).map(SharedBytes::as_slice)
     }
 
     pub(crate) fn shared_font_data(&self, digest: &Digest) -> Option<&SharedBytes> {
-        self.font_data.get(digest)
+        self.0.font_data.get(digest)
     }
 
     /// The embedded package trees, keyed by specification text.
-    pub(crate) fn embedded_packages(&self) -> &BTreeMap<String, PackageTree> {
-        &self.packages
+    pub(crate) fn embedded_packages(&self) -> &BTreeMap<String, Tree> {
+        &self.0.packages
     }
+}
+
+/// The archive member prefix of an embedded package.
+pub(crate) fn package_member_prefix(spec: &PackageSpec) -> String {
+    format!(
+        "packages/{}/{}/{}/",
+        spec.namespace, spec.name, spec.version
+    )
 }
 
 fn validate_packages(
     inputs: Vec<PackageInput>,
-    issues: &mut Vec<PackInvariantIssue>,
-) -> (BTreeMap<String, PackageTree>, Vec<PackageRequirement>) {
+    issues: &mut Vec<PackIssue>,
+) -> (BTreeMap<String, Tree>, Vec<package::Requirement>) {
     let mut pass = Vec::new();
     let mut seen = BTreeSet::new();
     let mut embedded = BTreeMap::new();
@@ -343,49 +264,67 @@ fn validate_packages(
     for input in inputs {
         let key = input.spec.to_string();
         if let Err(message) = validate_package_spec(&input.spec) {
-            pass.push(PackInvariantIssue::InvalidPackageSpec { spec: key, message });
+            pass.push(PackIssue::InvalidPackageSpec { spec: key, message });
             continue;
         }
         if !seen.insert(key.clone()) {
-            pass.push(PackInvariantIssue::DuplicatePackage { spec: input.spec });
+            pass.push(PackIssue::DuplicatePackage { spec: input.spec });
             continue;
         }
-        let digest = match input.content {
-            PackageContent::Declared(digest) if !input.embedded => digest,
+        let tree = match input.content {
+            PackageContent::Declared(digest) if !input.embedded => {
+                requirements.push(package::Requirement {
+                    spec: input.spec,
+                    digest,
+                    embedded: false,
+                });
+                continue;
+            }
             PackageContent::Declared(_) => {
                 unreachable!("embedded packages are always supplied with their files")
             }
-            PackageContent::Files(files) => match PackageTree::from_shared_entries(files) {
-                Ok(tree) => {
-                    let digest = tree.digest();
-                    if input.embedded {
-                        embedded.insert(key, tree);
-                    }
-                    digest
-                }
-                Err(source) => {
-                    pass.push(PackInvariantIssue::InvalidPackageTree {
+            PackageContent::Files(files) => match Tree::from_shared(files) {
+                Ok(tree) => tree,
+                Err(error) => {
+                    pass.push(PackIssue::InvalidPackage {
                         spec: input.spec,
-                        source,
+                        issues: error.issues,
                     });
                     continue;
                 }
             },
-            PackageContent::Tree(tree) => {
-                let digest = tree.digest();
-                if input.embedded {
-                    embedded.insert(key, tree);
-                }
-                digest
-            }
+            PackageContent::Tree(tree) => tree,
         };
-        requirements.push(PackageRequirement {
+        if input.embedded {
+            let prefix = package_member_prefix(&input.spec).len();
+            let long = tree
+                .files()
+                .map(|(path, _)| path)
+                .filter(|path| prefix + path.len() > MAX_MEMBER_NAME)
+                .map(|path| PackIssue::InvalidPath {
+                    path: path.to_owned(),
+                    message: "the path is too long for a pack archive".to_owned(),
+                })
+                .collect::<Vec<_>>();
+            if !long.is_empty() {
+                pass.push(PackIssue::InvalidPackage {
+                    spec: input.spec,
+                    issues: long,
+                });
+                continue;
+            }
+        }
+        requirements.push(package::Requirement {
+            digest: tree.digest(),
             spec: input.spec,
-            digest,
             embedded: input.embedded,
         });
+        if input.embedded {
+            embedded.insert(key, tree);
+        }
     }
-    push_sorted(issues, pass);
+    pass.sort_by_cached_key(ToString::to_string);
+    issues.extend(pass);
     requirements.sort_by_cached_key(|requirement| requirement.spec.to_string());
     (embedded, requirements)
 }
@@ -400,8 +339,8 @@ fn validate_package_spec(spec: &PackageSpec) -> Result<(), String> {
 
 fn validate_fonts(
     inputs: Vec<FontInput>,
-    issues: &mut Vec<PackInvariantIssue>,
-) -> (Vec<FontRequirement>, BTreeMap<Digest, SharedBytes>) {
+    issues: &mut Vec<PackIssue>,
+) -> (Vec<font::Requirement>, BTreeMap<Digest, SharedBytes>) {
     let mut seen = BTreeSet::new();
     let mut requirements = Vec::new();
     let mut font_data = BTreeMap::new();
@@ -409,17 +348,17 @@ fn validate_fonts(
         let requirement = match input {
             FontInput::Bytes { data, embedded } => {
                 let faces = Font::iter(data.to_typst())
-                    .map(|font| FontFace::of(&font))
+                    .map(|font| Face::of(&font))
                     .collect::<Vec<_>>();
                 if faces.is_empty() {
-                    issues.push(PackInvariantIssue::InvalidFontData { position });
+                    issues.push(PackIssue::InvalidFontData { position });
                     continue;
                 }
                 let digest = Digest::of(&data);
                 if embedded {
                     font_data.insert(digest, data);
                 }
-                FontRequirement {
+                font::Requirement {
                     digest,
                     embedded,
                     faces,
@@ -432,20 +371,20 @@ fn validate_fonts(
                 if embedded {
                     font_data.insert(container.digest(), container.shared_data().clone());
                 }
-                FontRequirement {
+                font::Requirement {
                     digest: container.digest(),
                     embedded,
                     faces: container.faces().to_vec(),
                 }
             }
-            FontInput::Declared { digest, faces } => FontRequirement {
+            FontInput::Declared { digest, faces } => font::Requirement {
                 digest,
                 embedded: false,
                 faces,
             },
         };
         if !seen.insert(requirement.digest) {
-            issues.push(PackInvariantIssue::DuplicateFont {
+            issues.push(PackIssue::DuplicateFont {
                 digest: requirement.digest,
             });
             continue;
@@ -455,16 +394,11 @@ fn validate_fonts(
     (requirements, font_data)
 }
 
-fn push_sorted(issues: &mut Vec<PackInvariantIssue>, mut pass: Vec<PackInvariantIssue>) {
-    pass.sort_by_cached_key(ToString::to_string);
-    issues.extend(pass);
-}
-
-/// The documented Pack Identity preimage; see the README's "Pack format".
+/// The documented pack identity preimage; see the README's "Pack format".
 fn pack_identity(
     project: &ProjectSnapshot,
-    packages: &[PackageRequirement],
-    fonts: &[FontRequirement],
+    packages: &[package::Requirement],
+    fonts: &[font::Requirement],
 ) -> Digest {
     let files = project.file_digests();
     let mut preimage = Preimage::new("typst-pack/pack/v1");
@@ -489,9 +423,8 @@ fn pack_identity(
 /// Builds a [`Pack`] from in-memory data.
 ///
 /// This is the constructor to use when the project does not live on a file
-/// system, for example in a web editor. For packing a project directory, use
-/// `FilesystemPacker` instead (requires the `fs` feature). Every
-/// invariant is checked once, by [`build`](Self::build).
+/// system, for example in a web editor. Every invariant is checked once, by
+/// [`build`](Self::build).
 #[derive(Debug)]
 pub struct PackBuilder {
     input: PackInput,
@@ -500,17 +433,6 @@ pub struct PackBuilder {
 }
 
 impl PackBuilder {
-    /// Creates a builder for a pack with the given entrypoint path.
-    pub fn new(entrypoint: impl Into<String>) -> Self {
-        Self {
-            input: PackInput {
-                entrypoint: entrypoint.into(),
-                ..PackInput::default()
-            },
-            packages: BTreeMap::new(),
-        }
-    }
-
     /// Adds a project file under a root-relative path.
     pub fn file(mut self, path: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
         self.input
@@ -530,7 +452,7 @@ impl PackBuilder {
     }
 
     /// Adds a file of a package that is declared by tree digest only and
-    /// must be supplied when the Pack is compiled.
+    /// must be supplied when the pack is compiled.
     pub fn external_package_file(
         self,
         spec: PackageSpec,
@@ -571,7 +493,7 @@ impl PackBuilder {
     }
 
     /// Declares a font file or collection by digest without storing its
-    /// bytes; it must be supplied when the Pack is compiled.
+    /// bytes; it must be supplied when the pack is compiled.
     pub fn external_font(mut self, data: impl Into<Vec<u8>>) -> Self {
         self.input.fonts.push(FontInput::Bytes {
             data: SharedBytes::new(data.into()),
@@ -581,24 +503,25 @@ impl PackBuilder {
     }
 
     /// Sets descriptive metadata.
-    pub fn metadata(mut self, metadata: PackMetadata) -> Self {
+    pub fn metadata(mut self, metadata: Metadata) -> Self {
         self.input.metadata = Some(metadata);
         self
     }
 
     /// Validates and finishes the pack.
-    pub fn build(mut self) -> Result<Pack, PackInvariantError> {
+    pub fn build(mut self) -> Result<Pack, PackError> {
         self.input.packages = self.packages.into_values().collect();
         Pack::construct(self.input)
     }
 }
 
-/// One violation of a whole-Pack invariant.
+/// One problem with the content of a pack, a project snapshot, a package
+/// tree, or a package catalog.
 #[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
 #[non_exhaustive]
-pub enum PackInvariantIssue {
-    /// A project path cannot name a canonical root-relative file.
-    #[error("invalid project path {path:?}: {message}")]
+pub enum PackIssue {
+    /// A path cannot name a canonical root-relative file.
+    #[error("invalid path {path:?}: {message}")]
     InvalidPath { path: String, message: String },
     /// The entrypoint cannot name a canonical root-relative file.
     #[error("invalid entrypoint {path:?}: {message}")]
@@ -606,11 +529,11 @@ pub enum PackInvariantIssue {
     /// The entrypoint is not among the project files.
     #[error("entrypoint {path:?} is not a project file")]
     MissingEntrypoint { path: String },
-    /// Two project entries name one canonical path.
-    #[error("project path {path:?} is supplied more than once")]
-    DuplicateProjectPath { path: String },
-    /// One project file path is an ancestor of another.
-    #[error("project file {ancestor:?} conflicts with descendant {descendant:?}")]
+    /// Two entries name one canonical path.
+    #[error("path {path:?} is supplied more than once")]
+    DuplicatePath { path: String },
+    /// One file path is an ancestor of another.
+    #[error("file {ancestor:?} conflicts with descendant {descendant:?}")]
     PathTreeConflict {
         ancestor: String,
         descendant: String,
@@ -619,15 +542,17 @@ pub enum PackInvariantIssue {
     #[error("invalid package spec {spec:?}: {message}")]
     InvalidPackageSpec { spec: String, message: String },
     /// A package's files do not form a valid package tree.
-    #[error("package {spec}: {source}")]
-    InvalidPackageTree {
+    #[error("package {spec}: {}", list("invalid package tree", issues))]
+    InvalidPackage {
         spec: PackageSpec,
-        #[source]
-        source: PackageTreeError,
+        issues: Vec<PackIssue>,
     },
-    /// A package is declared more than once, or both embedded and external.
-    #[error("package {spec} is declared more than once")]
+    /// A package is supplied more than once, or both embedded and external.
+    #[error("package {spec} is supplied more than once")]
     DuplicatePackage { spec: PackageSpec },
+    /// A package tree's `typst.toml` does not declare its specification.
+    #[error("the tree supplied for package {spec} {message}")]
+    InvalidDeclaration { spec: PackageSpec, message: String },
     /// Font bytes contain no face the embedded Typst engine can read.
     #[error("font input {position} contains no readable face")]
     InvalidFontData { position: usize },
@@ -636,24 +561,10 @@ pub enum PackInvariantIssue {
     DuplicateFont { digest: Digest },
 }
 
-/// A violation of the invariants shared by every [`Pack`] construction path.
+/// Invalid pack content, listing every issue found.
 #[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
-#[error("invalid pack: {}", display_issues(.issues))]
-pub struct PackInvariantError {
-    pub(crate) issues: Vec<PackInvariantIssue>,
-}
-
-impl PackInvariantError {
-    /// Every detected issue: project, entrypoint, package, then font issues.
-    pub fn issues(&self) -> &[PackInvariantIssue] {
-        &self.issues
-    }
-}
-
-fn display_issues(issues: &[PackInvariantIssue]) -> String {
-    issues
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>()
-        .join("; ")
+#[error("{}", list("invalid pack content", .issues))]
+pub struct PackError {
+    /// Every issue, in a canonical order independent of the input order.
+    pub issues: Vec<PackIssue>,
 }

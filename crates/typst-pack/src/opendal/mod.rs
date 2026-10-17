@@ -1,4 +1,4 @@
-#![doc = include_str!("../docs/opendal-integration.md")]
+#![doc = include_str!("../../docs/opendal-integration.md")]
 
 #[cfg(feature = "package-reading")]
 mod assembler;
@@ -7,19 +7,18 @@ mod write;
 
 pub use ::opendal::Operator;
 #[cfg(feature = "package-reading")]
-pub use assembler::{AssembledPack, OpenDalPackAssembler};
+pub use assembler::Assembler;
 #[cfg(feature = "package-reading")]
 pub use read::insert_package;
 pub use read::{
-    FontSource, PackageRead, PackageSource, read_fonts, read_pack_archive, read_package,
-    read_project,
+    FontSource, PackageRead, PackageSource, read_archive, read_fonts, read_package, read_project,
 };
 pub use write::{
-    WriteError, WriteOutcome, WritePolicy, write_compilation_artifacts, write_pack_archive,
-    write_pack_extraction_plan, write_package_archive,
+    WriteError, WriteOutcome, WritePolicy, write_archive, write_artifacts, write_extraction,
+    write_package_archive,
 };
 
-use crate::LimitExceeded;
+use crate::{LimitExceeded, PackError};
 
 /// A failure of an OpenDAL adapter operation.
 ///
@@ -56,33 +55,24 @@ pub enum Error {
     /// The number of artifact keys does not match the number of artifacts.
     #[error("expected {expected} artifact key(s), got {actual}")]
     ArtifactKeyCount { expected: usize, actual: usize },
-    /// The read project files do not form a valid project.
+    /// The objects read do not form a valid project or package tree, or the
+    /// catalog rejected a package.
     #[error(transparent)]
-    Project(#[from] crate::PackInvariantError),
-    /// A selected font object is not a valid Font Container.
-    #[error("font object {path:?} is not a valid font container")]
-    Font {
-        path: String,
-        #[source]
-        source: crate::FontContainerError,
-    },
-    /// Read package files do not form a valid Package Tree.
-    #[error(transparent)]
-    PackageTree(#[from] crate::PackageTreeError),
+    Invalid(#[from] PackError),
+    /// A selected font object is not a readable font.
+    #[error("font object {path:?} is not a readable font")]
+    Font { path: String },
     /// A read package archive could not be expanded.
     #[cfg(feature = "package-reading")]
     #[error(transparent)]
-    PackageArchive(#[from] crate::PackageReadError),
-    /// The Package Catalog rejected a read package.
-    #[error(transparent)]
-    PackageCatalog(#[from] crate::PackageCatalogError),
+    PackageArchive(#[from] crate::package::registry::ExpandError),
     /// Pack creation failed.
     #[cfg(feature = "package-reading")]
     #[error(transparent)]
-    Creation(Box<crate::CreateError>),
-    /// Pack Creation reported a package missing again after it was read.
+    Create(Box<crate::create::Error>),
+    /// Creation reported a package missing again after it was read.
     #[cfg(feature = "package-reading")]
-    #[error("Pack Creation requested package {spec} again after it was read")]
+    #[error("creation requested package {spec} again after it was read")]
     RepeatedPackage {
         spec: typst::syntax::package::PackageSpec,
     },

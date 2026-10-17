@@ -12,8 +12,8 @@ use typst::syntax::Span;
 use typst_layout::{Page, PagedDocument};
 use typst_pdf::PdfOptions;
 
-use super::output::{Normalized, Output, OutputFormat, PageSelection};
-use super::{Artifact, CompilationLimits};
+use super::output::{Normalized, OutputFormat, PageSelection};
+use super::{Artifact, Limits};
 use crate::LimitExceeded;
 
 /// What a successful run produced.
@@ -47,19 +47,23 @@ impl From<LimitExceeded> for Failure {
 pub(super) fn export(
     world: &dyn World,
     normalized: &Normalized,
-    limits: CompilationLimits,
+    limits: Limits,
 ) -> Result<Exported, Failure> {
-    if let Output::Html(html) = &normalized.output {
-        let Warned { output, warnings } = typst::compile::<typst_html::HtmlDocument>(world);
+    let output = &normalized.output;
+    if output.format == OutputFormat::Html {
+        let Warned {
+            output: document,
+            warnings,
+        } = typst::compile::<typst_html::HtmlDocument>(world);
         let failed = |errors| Failure::Diagnostics {
             errors,
             warnings: warnings.clone(),
         };
-        let document = output.map_err(failed)?;
+        let document = document.map_err(failed)?;
         check_count(limits, 1)?;
         let _timing = typst_timing::TimingScope::new("export");
         let options = typst_html::HtmlOptions {
-            pretty: html.pretty,
+            pretty: output.pretty,
         };
         let bytes = typst_html::html(&document, &options).map_err(failed)?;
         let artifacts = vec![artifact(OutputFormat::Html, None, bytes.into_bytes())];
@@ -72,7 +76,7 @@ pub(super) fn export(
     }
 
     let Warned {
-        output,
+        output: document,
         mut warnings,
     } = typst::compile::<PagedDocument>(world);
     if normalized.untagged_by_selection {
@@ -84,27 +88,27 @@ pub(super) fn export(
                 ]),
         );
     }
-    let document = output.map_err(|errors| Failure::Diagnostics {
+    let document = document.map_err(|errors| Failure::Diagnostics {
         errors,
         warnings: warnings.clone(),
     })?;
     let page_count = document.pages().len();
     LimitExceeded::check(page_count as u64, limits.max_pages, "pages")?;
     let _timing = typst_timing::TimingScope::new("export");
-    let artifacts = match &normalized.output {
-        Output::Pdf(pdf) => {
+    let artifacts = match output.format {
+        OutputFormat::Pdf => {
             check_count(limits, 1)?;
             let options = PdfOptions {
-                ident: pdf.identifier.clone(),
-                creator: pdf.creator.clone(),
+                ident: output.pdf_identifier.clone(),
+                creator: output.pdf_creator.clone(),
                 timestamp: normalized.pdf_timestamp,
-                page_ranges: pdf.page_selection.typst_page_ranges(),
+                page_ranges: output.pages.typst_page_ranges(),
                 standards: normalized
                     .pdf_standards
                     .clone()
                     .expect("validated PDF standards"),
-                tagged: matches!(pdf.tags, Smart::Custom(true)),
-                pretty: pdf.pretty,
+                tagged: matches!(output.pdf_tags, Smart::Custom(true)),
+                pretty: output.pretty,
             };
             let bytes =
                 typst_pdf::pdf(&document, &options).map_err(|errors| Failure::Diagnostics {
@@ -113,12 +117,12 @@ pub(super) fn export(
                 })?;
             vec![artifact(OutputFormat::Pdf, None, bytes)]
         }
-        Output::Png(png) => {
+        OutputFormat::Png => {
             let options = typst_render::RenderOptions {
-                pixel_per_pt: (png.pixels_per_inch.expect("normalized PPI") / 72.0).into(),
-                render_bleed: png.render_bleed,
+                pixel_per_pt: (output.ppi.expect("normalized PPI") / 72.0).into(),
+                render_bleed: output.render_bleed,
             };
-            let pages = selected_pages(&document, &png.page_selection);
+            let pages = selected_pages(&document, &output.pages);
             check_count(limits, pages.len())?;
             check_pixels(limits, &pages, &options)?;
             export_pages(pages, limits, |(page, content)| {
@@ -132,19 +136,19 @@ pub(super) fn export(
                 Ok(artifact(OutputFormat::Png, Some(page), bytes))
             })?
         }
-        Output::Svg(svg) => {
+        OutputFormat::Svg => {
             let options = typst_svg::SvgOptions {
-                render_bleed: svg.render_bleed,
-                pretty: svg.pretty,
+                render_bleed: output.render_bleed,
+                pretty: output.pretty,
             };
-            let pages = selected_pages(&document, &svg.page_selection);
+            let pages = selected_pages(&document, &output.pages);
             check_count(limits, pages.len())?;
             export_pages(pages, limits, |(page, content)| {
                 let bytes = typst_svg::svg(content, &options).into_bytes();
                 Ok(artifact(OutputFormat::Svg, Some(page), bytes))
             })?
         }
-        Output::Html(_) => unreachable!("HTML is exported above"),
+        OutputFormat::Html => unreachable!("HTML is exported above"),
     };
     check_bytes(limits, &artifacts)?;
     Ok(Exported {
@@ -180,12 +184,12 @@ fn selected_pages<'a>(
         .collect()
 }
 
-fn check_count(limits: CompilationLimits, count: usize) -> Result<(), LimitExceeded> {
+fn check_count(limits: Limits, count: usize) -> Result<(), LimitExceeded> {
     LimitExceeded::check(count as u64, limits.max_artifacts, "artifacts")
 }
 
 fn check_pixels(
-    limits: CompilationLimits,
+    limits: Limits,
     pages: &[(NonZeroUsize, &Page)],
     options: &typst_render::RenderOptions,
 ) -> Result<(), LimitExceeded> {
@@ -210,18 +214,14 @@ fn check_pixels(
     Ok(())
 }
 
-fn check_bytes(limits: CompilationLimits, artifacts: &[Artifact]) -> Result<(), LimitExceeded> {
+fn check_bytes(limits: Limits, artifacts: &[Artifact]) -> Result<(), LimitExceeded> {
     let mut total = 0;
     artifacts
         .iter()
         .try_for_each(|artifact| retain(limits, &mut total, artifact))
 }
 
-fn retain(
-    limits: CompilationLimits,
-    total: &mut u64,
-    artifact: &Artifact,
-) -> Result<(), LimitExceeded> {
+fn retain(limits: Limits, total: &mut u64, artifact: &Artifact) -> Result<(), LimitExceeded> {
     let bytes = artifact.bytes.len() as u64;
     LimitExceeded::check(bytes, limits.max_artifact_bytes, "artifact bytes")?;
     LimitExceeded::add(
@@ -237,7 +237,7 @@ fn retain(
 #[cfg(feature = "parallel")]
 pub(super) fn export_pages<T: Send>(
     items: Vec<T>,
-    limits: CompilationLimits,
+    limits: Limits,
     export: impl Fn(T) -> Result<Artifact, Failure> + Sync + Send,
 ) -> Result<Vec<Artifact>, Failure> {
     let workers = usize::try_from(limits.export_workers.max(1))
@@ -270,7 +270,7 @@ pub(super) fn export_pages<T: Send>(
 #[cfg(not(feature = "parallel"))]
 pub(super) fn export_pages<T>(
     items: Vec<T>,
-    limits: CompilationLimits,
+    limits: Limits,
     export: impl Fn(T) -> Result<Artifact, Failure>,
 ) -> Result<Vec<Artifact>, Failure> {
     let mut artifacts = Vec::new();
@@ -297,19 +297,15 @@ mod tests {
             let active = Arc::new(AtomicUsize::new(0));
             let peak = Arc::new(AtomicUsize::new(0));
             let barrier = Arc::new(Barrier::new(expected_peak));
-            let output = export_pages(
-                (0u8..demand).collect(),
-                CompilationLimits::default(),
-                |item| {
-                    let now = active.fetch_add(1, Ordering::SeqCst) + 1;
-                    peak.fetch_max(now, Ordering::SeqCst);
-                    if usize::from(item) < expected_peak {
-                        barrier.wait();
-                    }
-                    active.fetch_sub(1, Ordering::SeqCst);
-                    Ok(artifact(OutputFormat::Svg, None, vec![item]))
-                },
-            )
+            let output = export_pages((0u8..demand).collect(), Limits::default(), |item| {
+                let now = active.fetch_add(1, Ordering::SeqCst) + 1;
+                peak.fetch_max(now, Ordering::SeqCst);
+                if usize::from(item) < expected_peak {
+                    barrier.wait();
+                }
+                active.fetch_sub(1, Ordering::SeqCst);
+                Ok(artifact(OutputFormat::Svg, None, vec![item]))
+            })
             .unwrap_or_else(|_| panic!("export failed"));
 
             assert_eq!(peak.load(Ordering::SeqCst), expected_peak);

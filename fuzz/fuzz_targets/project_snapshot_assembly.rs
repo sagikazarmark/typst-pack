@@ -1,7 +1,7 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use typst_pack::{PackInvariantIssue, ProjectSnapshot};
+use typst_pack::{PackIssue, ProjectSnapshot};
 
 fuzz_target!(|data: &[u8]| {
     let stem: String = data
@@ -37,8 +37,8 @@ fuzz_target!(|data: &[u8]| {
         ])
         .unwrap_err();
     assert_eq!(
-        duplicate.issues(),
-        [PackInvariantIssue::DuplicateProjectPath {
+        duplicate.issues.as_slice(),
+        [PackIssue::DuplicatePath {
             path: canonical.clone(),
         }]
     );
@@ -46,8 +46,8 @@ fuzz_target!(|data: &[u8]| {
     let missing = ProjectSnapshot::new("main.typ", [(canonical.as_str(), data.to_vec())])
         .unwrap_err();
     assert_eq!(
-        missing.issues(),
-        [PackInvariantIssue::MissingEntrypoint {
+        missing.issues.as_slice(),
+        [PackIssue::MissingEntrypoint {
             path: "main.typ".to_owned(),
         }]
     );
@@ -59,7 +59,7 @@ fuzz_target!(|data: &[u8]| {
         ])
         .unwrap_err();
     assert!(
-        matches!(excluded.issues(), [PackInvariantIssue::InvalidPath { path, .. }] if path == &pack_path)
+        matches!(excluded.issues.as_slice(), [PackIssue::InvalidPath { path, .. }] if path == &pack_path)
     );
 
     let mut fields = data.split(|byte| *byte == 0);

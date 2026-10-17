@@ -5,8 +5,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use official_typst_cli::OfficialTypstCli;
-use typst_pack::pack_archive::encode;
-use typst_pack::{CompileRequest, OutputFormat, Pack, compile};
+use typst_pack::Pack;
+use typst_pack::archive::encode;
+use typst_pack::compile;
+use typst_pack::compile::OutputFormat;
 
 /// The embedded Typst release, from `typst_pack::VERSION` ("X (Typst Y)").
 fn engine_version() -> &'static str {
@@ -34,7 +36,7 @@ fn write_pack(path: &Path, source: &str) -> Pack {
         .file("main.typ", source.as_bytes().to_vec())
         .build()
         .unwrap();
-    std::fs::write(path, encode(&pack).unwrap()).unwrap();
+    std::fs::write(path, encode(&pack)).unwrap();
     pack
 }
 
@@ -187,9 +189,9 @@ fn official_typst_compile_is_the_process_level_parity_baseline() {
         "HTML artifact differs from official Typst"
     );
 
-    let public_svg = compile(&CompileRequest::new(
+    let public_svg = compile(&compile::Request::new(
         pack,
-        typst_pack::Output::new(OutputFormat::Svg),
+        compile::Output::new(OutputFormat::Svg),
     ))
     .unwrap();
     assert_eq!(

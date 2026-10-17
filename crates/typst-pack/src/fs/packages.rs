@@ -1,54 +1,50 @@
-//! Package reading for the filesystem packer: the local package directory,
-//! then the package cache, then, only when downloads were enabled in a build
-//! with `egress`, the Typst Universe registry.
+//! Reading packages for the packer: the local package directory, then the
+//! package cache, then, only when downloads are enabled in a build with
+//! `egress`, the Typst Universe registry.
 
 use std::path::{Path, PathBuf};
 
 use typst::syntax::package::PackageSpec;
 use typst_kit::packages::FsPackages;
 
-use crate::fs_read::{FilesystemReadError, Root, Walker, utf8_path};
-use crate::limits::ReadLimits;
-use crate::package_catalog::PackageTree;
-use crate::package_failure::{PackageReadFailure, PackageReadFailureReason};
+use super::Error;
+use super::walk::{Root, Walker, utf8_path};
+use crate::ReadLimits;
+use crate::package::{ReadFailure, Tree};
 
-/// Reads every file beneath one package root into a validated Package Tree.
+/// Reads every file beneath one package root into a package tree.
 ///
 /// The root may itself be a symbolic link, as `@local` development packages
 /// commonly are. Links inside the tree are followed when they resolve beneath
 /// the root.
-pub fn read_filesystem_package(
-    root: impl AsRef<Path>,
-    limits: ReadLimits,
-) -> Result<PackageTree, FilesystemReadError> {
+pub fn read_package(root: impl AsRef<Path>, limits: ReadLimits) -> Result<Tree, Error> {
     let root_path = root.as_ref();
     let root = Root::open(root_path)?;
-    let mut entries = Vec::new();
+    let mut files = Vec::new();
     Walker::strict(limits).walk(
         &root,
-        &mut |relative, _| utf8_path(root_path, relative).map(|_| true),
-        &mut |relative, bytes| {
-            entries.push((utf8_path(root_path, &relative)?, bytes));
+        |relative, _| utf8_path(root_path, relative).map(|_| true),
+        |relative, bytes| {
+            files.push((utf8_path(root_path, &relative)?, bytes));
             Ok(())
         },
     )?;
-    PackageTree::from_owned_entries(entries).map_err(FilesystemReadError::PackageTree)
+    Ok(Tree::new(files)?)
 }
 
-/// Where filesystem packing and resolution read packages from: the local
-/// package directory, then the package cache, then, when configured, the
-/// official registry.
+/// Where the packer reads packages from.
 #[derive(Clone, Debug)]
 pub(crate) struct PackageDirs {
     data: Option<FsPackages>,
     cache: Option<FsPackages>,
-    pub(crate) registry: Option<Registry>,
+    #[cfg(feature = "egress")]
+    registry: Option<Registry>,
     limits: ReadLimits,
 }
 
 /// A package tree read from the filesystem or registry.
 pub(crate) struct Found {
-    pub(crate) tree: PackageTree,
+    pub(crate) tree: Tree,
     /// The directory the tree was read from or cached to.
     pub(crate) root: Option<PathBuf>,
 }
@@ -57,7 +53,7 @@ impl PackageDirs {
     pub(crate) fn new(
         package_path: Option<&Path>,
         package_cache_path: Option<&Path>,
-        registry: Option<Registry>,
+        #[cfg(feature = "egress")] registry: Option<Registry>,
         limits: ReadLimits,
     ) -> Self {
         Self {
@@ -65,58 +61,30 @@ impl PackageDirs {
                 .map_or_else(FsPackages::system_data, |path| Some(FsPackages::new(path))),
             cache: package_cache_path
                 .map_or_else(FsPackages::system_cache, |path| Some(FsPackages::new(path))),
+            #[cfg(feature = "egress")]
             registry,
             limits,
         }
     }
 
     /// Reads one exact package tree.
-    pub(crate) fn read(&self, spec: &PackageSpec) -> Result<Found, PackageReadFailure> {
+    pub(crate) fn read(&self, spec: &PackageSpec) -> Result<Found, ReadFailure> {
         for packages in [&self.data, &self.cache].into_iter().flatten() {
             let Some(root) = packages.obtain(spec) else {
                 continue;
             };
-            let tree = read_filesystem_package(root.path(), self.limits)
-                .map_err(|error| other_failure(spec, error.to_string()))?;
+            let tree = read_package(root.path(), self.limits)
+                .map_err(|error| ReadFailure::Other(Some(error.to_string())))?;
             return Ok(Found {
                 tree,
                 root: Some(root.path().to_owned()),
             });
         }
-        match &self.registry {
-            Some(registry) => registry.read(spec, self.cache.as_ref(), self.limits),
-            None => Err(not_found(spec)),
+        #[cfg(feature = "egress")]
+        if let Some(registry) = &self.registry {
+            return registry.read(spec, self.cache.as_ref(), self.limits);
         }
-    }
-}
-
-fn not_found(spec: &PackageSpec) -> PackageReadFailure {
-    PackageReadFailure::new(spec.clone(), PackageReadFailureReason::NotFound)
-}
-
-fn other_failure(spec: &PackageSpec, detail: impl Into<String>) -> PackageReadFailure {
-    PackageReadFailure::new(
-        spec.clone(),
-        PackageReadFailureReason::Other {
-            detail: Some(detail.into()),
-        },
-    )
-}
-
-/// Registry downloads are not compiled into a build without `egress`.
-#[cfg(not(feature = "egress"))]
-#[derive(Clone, Debug)]
-pub(crate) enum Registry {}
-
-#[cfg(not(feature = "egress"))]
-impl Registry {
-    fn read(
-        &self,
-        _: &PackageSpec,
-        _: Option<&FsPackages>,
-        _: ReadLimits,
-    ) -> Result<Found, PackageReadFailure> {
-        match *self {}
+        Err(ReadFailure::NotFound)
     }
 }
 
@@ -133,15 +101,12 @@ mod egress {
     use typst::diag::PackageError;
     use typst::syntax::package::PackageSpec;
     use typst_kit::downloader::Downloader;
-
-    use super::{Found, not_found, other_failure};
-    use crate::package_catalog::PackageTree;
-    use crate::package_failure::{PackageReadFailure, PackageReadFailureReason};
-    use crate::{
-        PackageArchiveReadError, PackageReadError, ReadLimits, expand_package_archive,
-        package_archive_url, read_package_archive,
-    };
     use typst_kit::packages::FsPackages;
+
+    use super::Found;
+    use crate::package::registry::{ExpandError, archive_url, expand_archive};
+    use crate::package::{ReadFailure, Tree, tree_key};
+    use crate::{LimitExceeded, ReadLimits};
 
     const USER_AGENT: &str = concat!("typst-pack/", env!("CARGO_PKG_VERSION"));
 
@@ -151,35 +116,33 @@ mod egress {
     /// Downloads from the official registry over TLS.
     #[derive(Clone, Debug)]
     pub(crate) struct Registry {
-        pub(crate) certificate: Option<PathBuf>,
+        certificate: Option<PathBuf>,
     }
 
     impl Registry {
+        pub(crate) fn new(certificate: Option<PathBuf>) -> Self {
+            Self { certificate }
+        }
+
         pub(super) fn read(
             &self,
             spec: &PackageSpec,
             cache: Option<&FsPackages>,
             limits: ReadLimits,
-        ) -> Result<Found, PackageReadFailure> {
-            let url = package_archive_url(spec).map_err(|_| not_found(spec))?;
+        ) -> Result<Found, ReadFailure> {
+            let url = archive_url(spec).ok_or(ReadFailure::NotFound)?;
             let downloader = RustlsDownloader::new(USER_AGENT, self.certificate.clone());
             let (known_size, reader) = downloader.stream(spec, &url).map_err(|source| {
-                // Do not turn a bounded archive request into an unprofiled
+                // Do not turn a bounded archive request into an unbounded
                 // package index download merely to refine NotFound into
                 // VersionNotFound.
                 if source.kind() == std::io::ErrorKind::NotFound {
-                    not_found(spec)
+                    ReadFailure::NotFound
                 } else {
-                    PackageReadFailure::new(
-                        spec.clone(),
-                        PackageReadFailureReason::NetworkFailed {
-                            detail: Some(source.to_string()),
-                        },
-                    )
+                    ReadFailure::NetworkFailed(Some(source.to_string()))
                 }
             })?;
-            let tree =
-                read_registry_tree(spec, reader, known_size.map(|size| size as u64), limits)?;
+            let tree = read_registry_tree(reader, known_size.map(|size| size as u64), limits)?;
 
             // typst-kit stages the tree in a temporary sibling directory and
             // renames it into place, so a failed or concurrent download never
@@ -188,12 +151,8 @@ mod egress {
                 Some(cache) => {
                     cache
                         .store(spec, |directory| write_tree(directory, &tree))
-                        .map_err(|source| other_failure(spec, source.to_string()))?;
-                    Some(
-                        cache
-                            .path()
-                            .join(crate::read_layout::package_tree_key(spec)),
-                    )
+                        .map_err(|source| ReadFailure::Other(Some(source.to_string())))?;
+                    Some(cache.path().join(tree_key(spec)))
                 }
                 None => None,
             };
@@ -201,39 +160,32 @@ mod egress {
         }
     }
 
+    /// Reads at most `limits.max_file_bytes` of archive bytes, checking a
+    /// known size before reading, and expands them.
     pub(super) fn read_registry_tree(
-        spec: &PackageSpec,
         reader: impl Read,
         known_size: Option<u64>,
         limits: ReadLimits,
-    ) -> Result<PackageTree, PackageReadFailure> {
-        let archive =
-            read_package_archive(reader, known_size, limits.max_file_bytes).map_err(|source| {
-                match &source {
-                    PackageArchiveReadError::Read(error) => PackageReadFailure::new(
-                        spec.clone(),
-                        PackageReadFailureReason::NetworkFailed {
-                            detail: Some(error.to_string()),
-                        },
-                    ),
-                    PackageArchiveReadError::Limit(error) => other_failure(spec, error.to_string()),
-                }
-            })?;
-        expand_package_archive(spec.clone(), &archive, limits).map_err(|source| match &source {
-            PackageReadError::UnservedNamespace { .. } => not_found(spec),
-            PackageReadError::Limit { .. } => other_failure(spec, source.to_string()),
-            PackageReadError::MalformedArchive { .. }
-            | PackageReadError::InvalidPackageTree { .. } => PackageReadFailure::new(
-                spec.clone(),
-                PackageReadFailureReason::MalformedArchive {
-                    detail: Some(source.to_string()),
-                },
-            ),
+    ) -> Result<Tree, ReadFailure> {
+        let max = limits.max_file_bytes;
+        let limit = |error: LimitExceeded| ReadFailure::Other(Some(error.to_string()));
+        if let Some(size) = known_size {
+            LimitExceeded::check(size, max, "package archive bytes").map_err(limit)?;
+        }
+        let mut archive = Vec::new();
+        reader
+            .take(max.saturating_add(1))
+            .read_to_end(&mut archive)
+            .map_err(|error| ReadFailure::NetworkFailed(Some(error.to_string())))?;
+        LimitExceeded::check(archive.len() as u64, max, "package archive bytes").map_err(limit)?;
+        expand_archive(&archive, limits).map_err(|error| match error {
+            ExpandError::Limit(_) => ReadFailure::Other(Some(error.to_string())),
+            _ => ReadFailure::MalformedArchive(Some(error.to_string())),
         })
     }
 
     /// Writes a downloaded tree into typst-kit's private staging directory.
-    fn write_tree(directory: &Path, tree: &PackageTree) -> typst::diag::PackageResult<()> {
+    fn write_tree(directory: &Path, tree: &Tree) -> typst::diag::PackageResult<()> {
         for (path, data) in tree.files() {
             let destination = directory.join(path);
             if let Some(parent) = destination.parent() {
@@ -450,11 +402,9 @@ D/11HiutermQt0RJByBT1FPDdLyRtRPwY1PoAi2/OlAb\n\
 
         #[test]
         fn registry_response_bytes_are_bounded_then_expanded_without_a_reread() {
-            let spec = "@preview/example:1.0.0".parse().unwrap();
             let archive = package_archive(&[("lib.typ", b"exact registry bytes")]);
 
             let tree = read_registry_tree(
-                &spec,
                 std::io::Cursor::new(&archive),
                 Some(archive.len() as u64),
                 ReadLimits::default(),
@@ -466,7 +416,6 @@ D/11HiutermQt0RJByBT1FPDdLyRtRPwY1PoAi2/OlAb\n\
 
         #[test]
         fn registry_expansion_limits_are_not_reported_as_malformed_bytes() {
-            let spec = "@preview/example:1.0.0".parse().unwrap();
             let archive = package_archive(&[("lib.typ", b"12345")]);
             let limits = ReadLimits {
                 max_total_bytes: 4,
@@ -474,17 +423,34 @@ D/11HiutermQt0RJByBT1FPDdLyRtRPwY1PoAi2/OlAb\n\
             };
 
             let error = read_registry_tree(
-                &spec,
                 std::io::Cursor::new(&archive),
                 Some(archive.len() as u64),
                 limits,
             )
             .unwrap_err();
 
-            assert!(matches!(
-                error.reason(),
-                PackageReadFailureReason::Other { .. }
-            ));
+            assert!(matches!(error, ReadFailure::Other(_)));
+        }
+
+        #[test]
+        fn registry_responses_are_bounded_before_and_while_reading() {
+            struct Unread;
+            impl Read for Unread {
+                fn read(&mut self, _: &mut [u8]) -> std::io::Result<usize> {
+                    panic!("a known oversized archive is refused before it is read");
+                }
+            }
+            let limits = ReadLimits {
+                max_file_bytes: 4,
+                ..ReadLimits::default()
+            };
+
+            let known = read_registry_tree(Unread, Some(5), limits).unwrap_err();
+            let streamed =
+                read_registry_tree(std::io::Cursor::new(b"12345"), None, limits).unwrap_err();
+
+            assert!(matches!(known, ReadFailure::Other(_)));
+            assert!(matches!(streamed, ReadFailure::Other(_)));
         }
     }
 }

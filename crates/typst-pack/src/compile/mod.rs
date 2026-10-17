@@ -1,4 +1,7 @@
-//! Compiling a Pack into output artifacts.
+//! Compiling a pack into output artifacts.
+//!
+//! Compilation reads nothing but its [`Request`]: no project files, package
+//! caches, fonts, environment variables, clock, or network.
 
 mod export;
 mod output;
@@ -8,19 +11,15 @@ use std::num::NonZeroUsize;
 
 use typst::Feature;
 use typst::diag::SourceDiagnostic;
-use typst::foundations::{Bytes, Dict, IntoValue};
+use typst::foundations::{Bytes, Datetime, Dict, IntoValue};
 use typst::syntax::package::PackageSpec;
 use typst::text::Font;
 use typst::{Library, LibraryExt};
 
-pub use self::output::{
-    CompilationLimits, CreationTimestamp, HtmlOutput, Output, OutputFormat, PageRange,
-    PageSelection, PdfOutput, PngOutput, SvgOutput, parse_page_selection,
-};
-use crate::domain::DocumentTime;
-use crate::identity::Preimage;
-use crate::world::{Clock, Loader, SourceWorld, Sources};
-use crate::{Digest, FontContainer, LimitExceeded, Pack, PackageTree, VERSION};
+pub use self::output::{CreationTimestamp, Limits, Output, OutputFormat, PageRange, PageSelection};
+use crate::digest::Preimage;
+use crate::world::{Clock, Loader, SourceWorld};
+use crate::{Digest, LimitExceeded, Pack, Sources, VERSION, font, list, package};
 
 /// A value exposed to document code through `sys.inputs`.
 ///
@@ -28,7 +27,9 @@ use crate::{Digest, FontContainer, LimitExceeded, Pack, PackageTree, VERSION};
 /// a document can, for example, decode an image with `image(sys.inputs.logo)`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Input {
+    /// A Typst `str`.
     Str(String),
+    /// A Typst `bytes`.
     Bytes(Vec<u8>),
 }
 
@@ -50,9 +51,21 @@ impl From<Vec<u8>> for Input {
     }
 }
 
+/// What `datetime.today()` returns to a document.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Hash)]
+pub enum DocumentTime {
+    /// `datetime.today()` returns `none`.
+    #[default]
+    Absent,
+    /// One fixed Typst date or datetime, whatever offset is requested.
+    Fixed(Datetime),
+    /// One UNIX timestamp, shifted to each requested UTC offset.
+    UnixTimestamp(i64),
+}
+
 /// The document-facing controls shared by creation and compilation.
 #[derive(Debug, Clone, Default)]
-pub struct CompileOptions {
+pub struct Options {
     /// Values exposed as `sys.inputs`, in order; a repeated key replaces the
     /// earlier value in place.
     pub inputs: Vec<(String, Input)>,
@@ -63,40 +76,37 @@ pub struct CompileOptions {
     pub features: Vec<Feature>,
 }
 
-/// One compilation of a Pack.
-///
-/// Compilation reads nothing but these values: no project files, package
-/// caches, fonts, environment variables, clock, or network.
+/// One compilation of a pack.
 #[derive(Debug, Clone)]
-pub struct CompileRequest {
+pub struct Request {
     /// The pack to compile.
     pub pack: Pack,
     /// The output to produce.
     pub output: Output,
     /// Inputs, document time, and features.
-    pub options: CompileOptions,
+    pub options: Options,
     /// Package trees for the pack's external package requirements. Each
     /// requirement uses the tree supplied under its specification; trees the
     /// pack does not require externally are ignored.
-    pub packages: Vec<(PackageSpec, PackageTree)>,
+    pub packages: Vec<(PackageSpec, package::Tree)>,
     /// Font containers for the pack's external font requirements, matched by
     /// digest. Containers the pack does not require externally are ignored.
-    pub fonts: Vec<FontContainer>,
+    pub fonts: Vec<font::Container>,
     /// Resource ceilings for the produced output.
-    pub limits: CompilationLimits,
+    pub limits: Limits,
 }
 
-impl CompileRequest {
+impl Request {
     /// Compiles `pack` to `output` with default options, no external
     /// dependencies, and default limits.
     pub fn new(pack: Pack, output: Output) -> Self {
         Self {
             pack,
             output,
-            options: CompileOptions::default(),
+            options: Options::default(),
             packages: Vec::new(),
             fonts: Vec::new(),
-            limits: CompilationLimits::default(),
+            limits: Limits::default(),
         }
     }
 }
@@ -119,15 +129,17 @@ pub struct Compiled {
 /// One file produced by compiling a pack.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Artifact {
+    /// The artifact's format.
     pub format: OutputFormat,
     /// The one-based source page of a PNG or SVG artifact.
     pub page: Option<NonZeroUsize>,
+    /// The exported bytes.
     pub bytes: Vec<u8>,
 }
 
 /// A compilation that produced no artifacts.
 #[derive(Debug, thiserror::Error)]
-pub enum CompileError {
+pub enum Error {
     /// The request holds invalid values; nothing was compiled.
     #[error("{}", list("invalid compile request", .0))]
     InvalidRequest(Vec<RequestIssue>),
@@ -135,7 +147,7 @@ pub enum CompileError {
     /// compiled.
     #[error("{}", list("the pack's external dependencies are not satisfied", .0))]
     Unfulfilled(Vec<Unfulfilled>),
-    /// The output exceeded a [`CompilationLimits`] ceiling.
+    /// The output exceeded a [`Limits`] ceiling.
     #[error(transparent)]
     Limit(#[from] LimitExceeded),
     /// Typst reported errors while compiling or exporting.
@@ -155,7 +167,7 @@ pub enum CompileError {
     },
 }
 
-impl CompileError {
+impl Error {
     /// Advice for resolving the error, for presentation after its message.
     pub fn hints(&self) -> Vec<String> {
         match self {
@@ -196,32 +208,25 @@ impl CompileError {
     }
 }
 
-/// Formats an aggregate as its only issue, or a summary listing every issue.
-pub(crate) fn list(summary: &str, issues: &[impl std::fmt::Display]) -> String {
-    match issues {
-        [issue] => issue.to_string(),
-        issues => {
-            let issues = issues.iter().map(ToString::to_string).collect::<Vec<_>>();
-            format!("{summary}: {}", issues.join("; "))
-        }
-    }
-}
-
 /// One invalid value in a compile or create request.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum RequestIssue {
+    /// A page range ends before it starts.
     #[error("page selection range {start}-{end} ends before it starts")]
     InvalidPageRange {
         start: NonZeroUsize,
         end: NonZeroUsize,
     },
+    /// The PNG pixels per inch are not finite and positive.
     #[error("PNG pixels per inch must be finite and greater than zero")]
     InvalidPpi,
     /// Typst's PDF exporter rejects the combination of standards.
     #[error("{message}")]
     InvalidPdfStandards { message: String, hints: Vec<String> },
+    /// The document-time timestamp cannot be represented.
     #[error("the document-time UNIX timestamp is out of range")]
     InvalidDocumentTimestamp,
+    /// The Typst Bundle feature was requested.
     #[error("the Typst Bundle feature is not supported")]
     UnsupportedBundleFeature,
 }
@@ -229,14 +234,17 @@ pub enum RequestIssue {
 /// One external requirement of a pack that the request does not satisfy.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum Unfulfilled {
+    /// No tree was supplied for a required package.
     #[error("required package {spec} was not supplied")]
     MissingPackage { spec: PackageSpec },
+    /// Only trees with other digests were supplied for a required package.
     #[error("package {spec} was supplied with tree {actual}, but the pack requires {expected}")]
     MismatchedPackage {
         spec: PackageSpec,
         expected: Digest,
         actual: Digest,
     },
+    /// No container with a required digest was supplied.
     #[error("required font container {digest} ({families}) was not supplied")]
     MissingFont { digest: Digest, families: String },
 }
@@ -253,7 +261,7 @@ pub(crate) struct Environment {
 impl Environment {
     /// Validates `options`, enabling HTML when the target requires it.
     pub(crate) fn new(
-        options: &CompileOptions,
+        options: &Options,
         html: bool,
         issues: &mut Vec<RequestIssue>,
     ) -> Option<Self> {
@@ -345,26 +353,27 @@ impl Environment {
 /// document and exports the output.
 ///
 /// ```
-/// use typst_pack::{CompileRequest, Input, Output, OutputFormat, Pack, compile};
+/// use typst_pack::compile::{Input, Output, OutputFormat, Request};
+/// use typst_pack::{Pack, compile};
 ///
 /// let pack = Pack::builder("main.typ")
 ///     .file("main.typ", b"Hello, #sys.inputs.name!".to_vec())
 ///     .build()?;
-/// let mut request = CompileRequest::new(pack, Output::new(OutputFormat::Svg));
+/// let mut request = Request::new(pack, Output::new(OutputFormat::Svg));
 /// request.options.inputs.push(("name".into(), Input::from("World")));
 ///
 /// let compiled = compile(&request)?;
 /// assert_eq!(compiled.artifacts.len(), 1);
 /// # Ok::<(), Box<dyn std::error::Error>>(())
 /// ```
-pub fn compile(request: &CompileRequest) -> Result<Compiled, CompileError> {
+pub fn compile(request: &Request) -> Result<Compiled, Error> {
     let _timing = typst_timing::TimingScope::new("typst-pack compilation");
     let mut issues = Vec::new();
     let normalized = request.output.normalize(&mut issues);
-    let html = matches!(normalized.output, Output::Html(_));
+    let html = normalized.output.format == OutputFormat::Html;
     let environment = Environment::new(&request.options, html, &mut issues);
     let Some(environment) = environment.filter(|_| issues.is_empty()) else {
-        return Err(CompileError::InvalidRequest(issues));
+        return Err(Error::InvalidRequest(issues));
     };
 
     let pack = &request.pack;
@@ -412,8 +421,8 @@ pub fn compile(request: &CompileRequest) -> Result<Compiled, CompileError> {
             identity,
             sources,
         }),
-        Err(export::Failure::Limit(error)) => Err(CompileError::Limit(error)),
-        Err(export::Failure::Diagnostics { errors, warnings }) => Err(CompileError::Failed {
+        Err(export::Failure::Limit(error)) => Err(Error::Limit(error)),
+        Err(export::Failure::Diagnostics { errors, warnings }) => Err(Error::Failed {
             errors: errors.into_iter().collect(),
             warnings: warnings.into_iter().collect(),
             sources,
@@ -422,7 +431,7 @@ pub fn compile(request: &CompileRequest) -> Result<Compiled, CompileError> {
             page,
             message,
             warnings,
-        }) => Err(CompileError::Export {
+        }) => Err(Error::Export {
             page,
             message,
             warnings: warnings.into_iter().collect(),
@@ -432,16 +441,16 @@ pub fn compile(request: &CompileRequest) -> Result<Compiled, CompileError> {
 }
 
 type Fulfilled = (
-    BTreeMap<String, PackageTree>,
-    BTreeMap<Digest, FontContainer>,
+    BTreeMap<String, package::Tree>,
+    BTreeMap<Digest, font::Container>,
 );
 
 /// Selects the supplied tree or container for every external requirement.
 fn fulfill(
     pack: &Pack,
-    packages: &[(PackageSpec, PackageTree)],
-    fonts: &[FontContainer],
-) -> Result<Fulfilled, CompileError> {
+    packages: &[(PackageSpec, package::Tree)],
+    fonts: &[font::Container],
+) -> Result<Fulfilled, Error> {
     let mut issues = Vec::new();
     let mut trees = BTreeMap::new();
     for requirement in pack.package_requirements().iter().filter(|r| !r.embedded) {
@@ -484,6 +493,6 @@ fn fulfill(
     if issues.is_empty() {
         Ok((trees, containers))
     } else {
-        Err(CompileError::Unfulfilled(issues))
+        Err(Error::Unfulfilled(issues))
     }
 }

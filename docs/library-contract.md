@@ -7,10 +7,10 @@ but too detailed for the README.
 
 A `Pack` is valid only when its entrypoint, project paths, packages, and font
 containers agree. The builder, creation, and archive decoding all construct a
-Pack through the same whole-Pack validation.
+pack through the same validation.
 
 Every identity is a SHA-256 `Digest` over a documented preimage (see the README's
-"Pack format"). Pack Identity covers the entrypoint, project paths and bytes,
+"Pack format"). The pack identity covers the entrypoint, project paths and bytes,
 each package's tree digest and whether it is embedded, and each font container's
 digest and whether it is embedded, in font book order. Metadata, informational
 manifest fields, archive compression and member order, storage locations, and
@@ -21,7 +21,7 @@ required container to Typst, so text the representative compile did not render
 uses the same fonts. External containers are matched by exact digest, and
 fulfillment failures name the families the pack expects.
 
-A compilation identity covers the Pack Identity, the normalized output and
+A compilation identity covers the pack identity, the normalized output and
 its controls, the `sys.inputs` strings and byte digests, document time,
 features, the digests of the externally supplied packages and font containers
 the pack requires, and the implementation string `typst_pack::VERSION`. Its
@@ -31,36 +31,35 @@ identity is a cache key across build configurations of one release.
 
 ## Creation and fulfillment
 
-`create` reads one `CreateRequest`: a validated `ProjectSnapshot`, a
-`PackageCatalog` and `FontCatalog` whose entries carry their embedded or
-external disposition, failed package reads, the discovery target, options
-(inputs, document time, features), and input variants. It reads no files, uses
+`create` reads one `create::Request`: a validated `ProjectSnapshot`, a
+`package::Catalog` and a list of `font::Entry` values that each say whether
+the dependency is embedded or external, failed package reads, the discovery
+target, options (inputs, document time, features), and input variants. It reads no files, uses
 no network, and consults no wall clock. It compiles the base options and then
 each variant with its inputs replacing or adding to the base inputs; the
 packages and font containers any of those compiles used become requirements.
-Project membership comes only from the snapshot, which the Pack carries without
+Project membership comes only from the snapshot, which the pack carries without
 validating it again. The HTML target enables Typst's HTML feature itself.
 
-Creation may return `MissingPackages`. This is a normal resumable state: add
-exact trees to the package catalog (or record a failed read) and invoke the
-stateless operation again; a package any variant reached is reported. A
-creation whose compiles succeeded returns the Pack, the warnings of all of them
-without repeats, and the `Sources` they read. A Pack assembler, such as
-`FilesystemPacker::pack` or `opendal::OpenDalPackAssembler`, owns the
-source-specific reading and retry loop.
+Creation may return `create::Outcome::MissingPackages`. This is a normal
+resumable state: add exact trees to the package catalog (or record a failed
+read) and invoke the stateless operation again; a package any variant reached
+is reported. A creation whose compiles succeeded returns the pack, the warnings
+of all of them without repeats, and the `Sources` they read. `fs::Packer::pack`
+and `opendal::Assembler` own the source-specific reading and retry loop.
 
-Compilation receives external dependencies as `CompileRequest::packages`
-(trees under their specifications) and `CompileRequest::fonts` (containers).
+Compilation receives external dependencies as `compile::Request::packages`
+(trees under their specifications) and `compile::Request::fonts` (containers).
 Each external requirement uses the supplied tree or container whose digest
 matches; others are ignored and never reach Typst. A requirement with no
 match, or whose specification was supplied only with other bytes, is a
-`CompileError::Unfulfilled` naming the package specification or the font
-families. `FilesystemPacker::resolve` finds them in the configured package
+`compile::Error::Unfulfilled` naming the package specification or the font
+families. `fs::Packer::resolve` finds them in the configured package
 directories and font sources.
 
 ## Environment independence
 
-Once a `CompileRequest` is fixed, compilation does not fall back to ambient
+Once a `compile::Request` is fixed, compilation does not fall back to ambient
 project files, package caches, fonts, environment variables, wall-clock time, or
 the network. `DocumentTime`, `sys.inputs`, features, and output controls are
 explicit request values. A project file of the pack never changes between
@@ -72,10 +71,10 @@ not add project paths or change package or font requirements.
 ## Limits
 
 Operations over caller-controlled values need no read limits;
-`CompileRequest::limits` bounds compiled output with `CompilationLimits`
+`compile::Request::limits` bounds compiled output with `compile::Limits`
 (pages, artifacts, pixels, and bytes), and an exceeded one is
-`CompileError::Limit`. Operations that cross a byte trust boundary take
-explicit limits: `pack_archive::DecodeLimits` for archive reading and decoding,
+`compile::Error::Limit`. Operations that cross a byte trust boundary take
+explicit limits: `archive::DecodeLimits` for archive reading and decoding,
 and `ReadLimits` for package archive expansion, filesystem source reading, and
 OpenDAL reads. Every limits type is a plain struct with public fields and a
 `Default`; an exceeded limit is a `LimitExceeded` naming the resource and the
@@ -88,7 +87,7 @@ concurrency between independent operations.
 Project, package, and font readers share one bounded walker. It lists each
 directory through the handle of its parent and takes `ReadLimits` (entries,
 per-file bytes, total bytes); an exceeded limit is a `LimitExceeded` naming the
-resource. All three report one error type, `FilesystemReadError`.
+resource. Reading, packing, and resolving report one error type, `fs::Error`.
 
 Projects and packages follow symbolic links whose targets resolve beneath the
 root, including directory links, and refuse a link resolving outside it with
@@ -102,9 +101,9 @@ nested policy files are ordinary project files.
 Font directories are host configuration. Links are followed wherever they
 lead, only files with a font extension are considered, and an unreadable
 directory or file, an unsupported entry, or an unparseable font is skipped and
-reported in `FilesystemFonts::skipped` instead of failing the catalog. Only an
-explicitly configured root that cannot be opened, or an exceeded limit, fails
-the read.
+reported in `fs::Packed::skipped_fonts` (or `fs::Resolved::skipped_fonts`)
+instead of failing the read. Only an explicitly configured font path that
+cannot be opened, or an exceeded limit, fails the read.
 
 These checks are validation, not confinement. The adapter uses the process's
 ambient authority and claims nothing against a filesystem peer acting between
@@ -114,8 +113,8 @@ instant.
 
 ## Writes and recovery
 
-Write policy is explicit. Filesystem writes take `WritePolicy::CreateNew`
-(fail when a target exists) or `WritePolicy::Overwrite` (replace or create).
+Write policy is explicit. Filesystem writes take `fs::WritePolicy::CreateNew`
+(fail when a target exists) or `fs::WritePolicy::Overwrite` (replace or create).
 Each file is written to a temporary sibling and then committed: `Overwrite`
 renames it over the target, so readers see the old or the new content;
 `CreateNew` hard-links it, which fails on an existing target, and falls back to
@@ -124,7 +123,7 @@ interrupted write can leave a partial file. The temporary file is removed on
 every path, and a failed cleanup after a successful commit is not an error.
 Nothing is flushed to stable storage, so there is no crash-durability claim.
 
-Before writing a Pack Extraction Plan, the adapter checks the plan and the
+Before writing an extraction plan, the adapter checks the plan and the
 destination and writes nothing if any check fails, listing every issue:
 paths must be canonical and portable (no Windows device names, trailing dots
 or spaces, or control characters, on every platform), must not collide when
@@ -152,12 +151,12 @@ receipt or error.
 
 ## Archive representation
 
-Archive bytes are plain `Vec<u8>` values: `pack_archive::encode` returns them,
-`pack_archive::decode` borrows them, and `read`, `read_pack`, `write_pack`,
-`open_pack`, and `save_pack` compose them with streams and files.
+Archive bytes are plain `Vec<u8>` values: `archive::encode` returns them,
+`archive::decode` borrows them, and `archive::read`, `archive::write`,
+`archive::open`, and `archive::save` compose them with streams and files.
 
 Decoding verifies every member against the digest the manifest declares, so a
-decoded Pack is exactly the content its producer encoded, whatever ZIP writer
-produced the archive. Re-encoding a decoded Pack yields the canonical encoding,
+decoded pack is exactly the content its producer encoded, whatever ZIP writer
+produced the archive. Re-encoding a decoded pack yields the canonical encoding,
 which may differ from the original archive in compression, timestamps, and
-member order, but never in Pack Identity.
+member order, but never in its identity.

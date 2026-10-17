@@ -8,11 +8,11 @@ use std::io::{self, Cursor, Read, Write};
 
 use proptest::prelude::*;
 use typst::syntax::package::PackageSpec;
-use typst_pack::pack_archive::{
-    DecodeError, DecodeLimits, ManifestError, ReadError, ReadPackError, WritePackError, decode,
-    encode, read, read_pack, write_pack,
-};
-use typst_pack::{LimitExceeded, Pack, PackMetadata};
+use typst_pack::archive;
+use typst_pack::archive::{DecodeError, DecodeLimits, decode, encode};
+#[cfg(feature = "fs")]
+use typst_pack::fs;
+use typst_pack::{LimitExceeded, Metadata, Pack};
 
 fn spec(value: &str) -> PackageSpec {
     value.parse().unwrap()
@@ -85,7 +85,7 @@ fn manifest(archive: &[u8]) -> String {
 }
 
 fn decode_default(archive: &[u8]) -> Result<Pack, DecodeError> {
-    decode(archive, DecodeLimits::DEFAULT)
+    decode(archive, DecodeLimits::default())
 }
 
 type Files = Vec<(String, Vec<u8>)>;
@@ -95,11 +95,11 @@ struct Projection {
     identity: typst_pack::Digest,
     entrypoint: String,
     files: Files,
-    package_requirements: Vec<typst_pack::PackageRequirement>,
+    package_requirements: Vec<typst_pack::package::Requirement>,
     packages: Vec<(String, Files)>,
-    font_requirements: Vec<typst_pack::FontRequirement>,
+    font_requirements: Vec<typst_pack::font::Requirement>,
     font_data: Vec<Option<Vec<u8>>>,
-    metadata: Option<PackMetadata>,
+    metadata: Option<Metadata>,
 }
 
 fn projection(pack: &Pack) -> Projection {
@@ -113,10 +113,10 @@ fn projection(pack: &Pack) -> Projection {
         package_requirements: pack.package_requirements().to_vec(),
         packages: pack
             .packages()
-            .map(|(spec, files)| {
+            .map(|(spec, tree)| {
                 (
                     spec.to_string(),
-                    files
+                    tree.files()
                         .map(|(path, data)| (path.to_owned(), data.to_vec()))
                         .collect(),
                 )
@@ -153,11 +153,11 @@ proptest! {
             builder = builder.external_package_file(spec("@local/external:1.0.0"), path, data);
         }
         if name.is_some() || description.is_some() || !authors.is_empty() {
-            builder = builder.metadata(PackMetadata { name, description, authors });
+            builder = builder.metadata(Metadata { name, description, authors });
         }
         let pack = builder.build().unwrap();
 
-        let decoded = decode_default(&encode(&pack).unwrap()).unwrap();
+        let decoded = decode_default(&encode(&pack)).unwrap();
 
         prop_assert_eq!(projection(&decoded), projection(&pack));
     }
@@ -180,7 +180,7 @@ fn encode_decode_preserves_font_containers() {
         let pack = builder.build().unwrap();
         assert_eq!(pack.font_requirements()[0].faces.len(), 2);
 
-        let decoded = decode_default(&encode(&pack).unwrap()).unwrap();
+        let decoded = decode_default(&encode(&pack)).unwrap();
 
         assert_eq!(projection(&decoded), projection(&pack));
     }
@@ -189,14 +189,14 @@ fn encode_decode_preserves_font_containers() {
 #[test]
 fn encoding_is_deterministic() {
     let pack = simple_pack();
-    let archive = encode(&pack).unwrap();
-    assert_eq!(encode(&pack).unwrap(), archive);
-    assert_eq!(encode(&decode_default(&archive).unwrap()).unwrap(), archive);
+    let archive = encode(&pack);
+    assert_eq!(encode(&pack), archive);
+    assert_eq!(encode(&decode_default(&archive).unwrap()), archive);
 }
 
 #[test]
 fn manifest_declares_every_member_by_digest() {
-    let archive = encode(&simple_pack()).unwrap();
+    let archive = encode(&simple_pack());
     let manifest = manifest(&archive);
 
     assert!(manifest.starts_with("format-version = 2\n"), "{manifest}");
@@ -227,7 +227,7 @@ fn manifest_declares_every_member_by_digest() {
 #[test]
 fn decoding_tolerates_unknown_manifest_keys_and_other_zip_writers() {
     let pack = simple_pack();
-    let archive = edit_manifest(&encode(&pack).unwrap(), |manifest| {
+    let archive = edit_manifest(&encode(&pack), |manifest| {
         let manifest = manifest
             .replacen("entrypoint", "future-key = [1, 2]\nentrypoint", 1)
             .replace("[[files]]\n", "[[files]]\nfuture-entry-key = true\n");
@@ -247,14 +247,14 @@ fn decoding_tolerates_unknown_manifest_keys_and_other_zip_writers() {
 
 #[test]
 fn decoding_rejects_other_format_versions() {
-    let archive = encode(&simple_pack()).unwrap();
+    let archive = encode(&simple_pack());
     for version in ["1", "3", "0"] {
         let changed = edit_manifest(&archive, |manifest| {
             manifest.replace("format-version = 2", &format!("format-version = {version}"))
         });
         assert!(matches!(
             decode_default(&changed),
-            Err(DecodeError::Manifest(ManifestError::UnsupportedVersion(found)))
+            Err(DecodeError::UnsupportedVersion(found))
                 if found.to_string() == version
         ));
     }
@@ -263,14 +263,14 @@ fn decoding_rejects_other_format_versions() {
     });
     assert!(matches!(
         decode_default(&missing),
-        Err(DecodeError::Manifest(ManifestError::MissingFormatVersion))
+        Err(DecodeError::MissingFormatVersion)
     ));
     let malformed = edit_manifest(&archive, |manifest| {
         manifest.replace("@local/outside:1.0.0", "not a spec")
     });
     assert!(matches!(
         decode_default(&malformed),
-        Err(DecodeError::Manifest(ManifestError::Parse(_)))
+        Err(DecodeError::InvalidManifest(_))
     ));
 }
 
@@ -289,7 +289,7 @@ fn decoding_rejects_non_packs() {
 
 #[test]
 fn decoding_rejects_unsafe_and_duplicate_member_names() {
-    let archive = encode(&simple_pack()).unwrap();
+    let archive = encode(&simple_pack());
     for name in [
         "../escape.typ",
         "project/../../escape.typ",
@@ -330,7 +330,7 @@ fn decoding_rejects_unsafe_and_duplicate_member_names() {
 
 #[test]
 fn decoding_rejects_links_and_other_member_kinds() {
-    let archive = encode(&simple_pack()).unwrap();
+    let archive = encode(&simple_pack());
     let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
     for (name, data) in members(&archive) {
         writer
@@ -355,7 +355,7 @@ fn decoding_rejects_links_and_other_member_kinds() {
 
 #[test]
 fn decoding_requires_exactly_the_declared_members() {
-    let archive = encode(&simple_pack()).unwrap();
+    let archive = encode(&simple_pack());
 
     let undeclared = rewrite(&archive, |members| {
         members.push(("project/extra.typ".to_owned(), b"extra".to_vec()));
@@ -400,7 +400,7 @@ fn decoding_requires_exactly_the_declared_members() {
 
 #[test]
 fn decoding_verifies_every_member_digest() {
-    let archive = encode(&simple_pack()).unwrap();
+    let archive = encode(&simple_pack());
     for target in ["project/main.typ", "packages/local/inside/1.0.0/lib.typ"] {
         let tampered = rewrite(&archive, |members| {
             members
@@ -438,7 +438,7 @@ fn decoding_verifies_embedded_font_digests() {
         .font(font.clone())
         .build()
         .unwrap();
-    let archive = encode(&pack).unwrap();
+    let archive = encode(&pack);
     let mut other = font;
     other.push(0);
     let tampered = rewrite(&archive, |members| {
@@ -456,12 +456,12 @@ fn decoding_verifies_embedded_font_digests() {
 
 #[test]
 fn decoding_is_bounded() {
-    let archive = encode(&simple_pack()).unwrap();
+    let archive = encode(&simple_pack());
     let limited = |limits: DecodeLimits| match decode(&archive, limits) {
         Err(DecodeError::Limit(LimitExceeded { resource, .. })) => resource,
         other => panic!("expected a limit, got {other:?}"),
     };
-    let base = DecodeLimits::DEFAULT;
+    let base = DecodeLimits::default();
     limited(DecodeLimits {
         max_archive_bytes: archive.len() as u64 - 1,
         ..base
@@ -497,12 +497,12 @@ fn decoding_meters_actual_inflation_not_declared_sizes() {
         .file("main.typ", vec![b'a'; 1 << 20])
         .build()
         .unwrap();
-    let archive = encode(&pack).unwrap();
+    let archive = encode(&pack);
     // Declare one byte for a member that inflates to a megabyte.
     let dishonest = with_declared_size(archive, b"project/main.typ", 1);
     let limits = DecodeLimits {
         max_member_bytes: 1024,
-        ..DecodeLimits::DEFAULT
+        ..DecodeLimits::default()
     };
 
     assert!(matches!(
@@ -513,20 +513,25 @@ fn decoding_meters_actual_inflation_not_declared_sizes() {
 
 #[test]
 fn stream_read_is_bounded() {
-    let archive = encode(&simple_pack()).unwrap();
+    let archive = encode(&simple_pack());
+    let limits = |max_archive_bytes| DecodeLimits {
+        max_archive_bytes,
+        ..DecodeLimits::default()
+    };
     let length = archive.len() as u64;
-    assert_eq!(read(Cursor::new(&archive), length).unwrap(), archive);
-    assert!(matches!(
-        read(Cursor::new(&archive), length - 1),
-        Err(ReadError::Limit(_))
-    ));
-    assert!(matches!(read(FailingReader, length), Err(ReadError::Io(_))));
-
-    let pack = read_pack(Cursor::new(&archive), DecodeLimits::DEFAULT).unwrap();
+    let pack = archive::read(Cursor::new(&archive), limits(length)).unwrap();
     assert_eq!(pack.identity(), simple_pack().identity());
     assert!(matches!(
-        read_pack(Cursor::new(b"not a zip"), DecodeLimits::DEFAULT),
-        Err(ReadPackError::Decode(DecodeError::Zip(_)))
+        archive::read(Cursor::new(&archive), limits(length - 1)),
+        Err(DecodeError::Limit(_))
+    ));
+    assert!(matches!(
+        archive::read(FailingReader, limits(length)),
+        Err(DecodeError::Io(_))
+    ));
+    assert!(matches!(
+        archive::read(Cursor::new(b"not a zip"), DecodeLimits::default()),
+        Err(DecodeError::Zip(_))
     ));
 }
 
@@ -534,41 +539,35 @@ fn stream_read_is_bounded() {
 fn stream_write_writes_the_encoded_archive() {
     let pack = simple_pack();
     let mut output = Vec::new();
-    write_pack(&mut output, &pack).unwrap();
-    assert_eq!(output, encode(&pack).unwrap());
-    assert!(matches!(
-        write_pack(FailingWriter, &pack),
-        Err(WritePackError::Io(_))
-    ));
+    archive::write(&mut output, &pack).unwrap();
+    assert_eq!(output, encode(&pack));
+    assert!(archive::write(FailingWriter, &pack).is_err());
 }
 
 #[cfg(feature = "fs")]
 #[test]
 fn files_are_written_without_replacing_unless_asked() {
-    use typst_pack::pack_archive::{SavePackError, open_pack, save_pack, write_file};
-    use typst_pack::{FilesystemWriteError, WritePolicy};
-
     let directory = tempfile::tempdir().unwrap();
     let destination = directory.path().join("archive.typk");
-    write_file(&destination, b"first", WritePolicy::CreateNew).unwrap();
-    let error = write_file(&destination, b"second", WritePolicy::CreateNew).unwrap_err();
+    fs::write_file(&destination, b"first", fs::WritePolicy::CreateNew).unwrap();
+    let error = fs::write_file(&destination, b"second", fs::WritePolicy::CreateNew).unwrap_err();
     assert!(matches!(
         error,
-        FilesystemWriteError::Io { ref source, .. } if source.kind() == io::ErrorKind::AlreadyExists
+        fs::WriteError::Io { ref source, .. } if source.kind() == io::ErrorKind::AlreadyExists
     ));
     assert_eq!(std::fs::read(&destination).unwrap(), b"first");
 
     let pack = simple_pack();
-    save_pack(&destination, &pack, WritePolicy::Overwrite).unwrap();
+    archive::save(&destination, &pack, fs::WritePolicy::Overwrite).unwrap();
     assert_eq!(
-        open_pack(&destination, DecodeLimits::DEFAULT)
+        archive::open(&destination, DecodeLimits::default())
             .unwrap()
             .identity(),
         pack.identity()
     );
     assert!(matches!(
-        save_pack(&destination, &pack, WritePolicy::CreateNew),
-        Err(SavePackError::Write(_))
+        archive::save(&destination, &pack, fs::WritePolicy::CreateNew),
+        Err(fs::WriteError::Io { .. })
     ));
     let names = std::fs::read_dir(directory.path()).unwrap().count();
     assert_eq!(names, 1, "no temporary file is left behind");
@@ -576,33 +575,29 @@ fn files_are_written_without_replacing_unless_asked() {
 
 #[cfg(feature = "fs")]
 #[test]
-fn opening_a_file_is_bounded_and_names_the_path() {
-    use typst_pack::pack_archive::open_pack;
-
+fn opening_a_file_is_bounded() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("archive.typk");
-    let archive = encode(&simple_pack()).unwrap();
+    let archive = encode(&simple_pack());
     std::fs::write(&path, &archive).unwrap();
 
-    let error = open_pack(
+    let error = archive::open(
         &path,
         DecodeLimits {
             max_archive_bytes: archive.len() as u64 - 1,
-            ..DecodeLimits::DEFAULT
+            ..DecodeLimits::default()
         },
     )
     .unwrap_err();
-    assert_eq!(error.path, path);
-    assert!(matches!(
-        error.source,
-        ReadPackError::Read(ReadError::Limit(_))
-    ));
-    assert!(error.to_string().contains("archive.typk"));
+    assert!(matches!(error, DecodeError::Limit(_)));
 
-    let missing = open_pack(directory.path().join("missing.typk"), DecodeLimits::DEFAULT);
+    let missing = archive::open(
+        directory.path().join("missing.typk"),
+        DecodeLimits::default(),
+    );
     assert!(matches!(
         missing,
-        Err(error) if matches!(error.source, ReadPackError::Read(ReadError::Io(_)))
+        Err(DecodeError::Io(error)) if error.kind() == io::ErrorKind::NotFound
     ));
 }
 

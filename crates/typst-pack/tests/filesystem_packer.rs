@@ -5,9 +5,8 @@
 
 use std::path::Path;
 
-use typst_pack::{
-    CompileError, CompileRequest, FilesystemPacker, Output, OutputFormat, Unfulfilled, compile,
-};
+use typst_pack::compile::{Output, OutputFormat, Unfulfilled};
+use typst_pack::{compile, fs};
 
 fn write_package(packages: &Path, name: &str) {
     let package = packages.join(format!("local/{name}/0.1.0"));
@@ -23,9 +22,11 @@ fn write_package(packages: &Path, name: &str) {
 #[test]
 fn one_packer_packs_several_projects() {
     let directory = tempfile::tempdir().unwrap();
-    let packer = FilesystemPacker::new()
-        .system_fonts(false)
-        .typst_embedded_fonts(false);
+    let packer = fs::Packer {
+        system_fonts: false,
+        typst_embedded_fonts: false,
+        ..fs::Packer::default()
+    };
     for name in ["first", "second"] {
         let project = directory.path().join(name);
         std::fs::create_dir(&project).unwrap();
@@ -43,10 +44,12 @@ fn the_default_document_time_is_the_host_clock() {
         "#assert(datetime.today().year() >= 2024)",
     )
     .unwrap();
-    FilesystemPacker::new()
-        .system_fonts(false)
-        .pack(directory.path(), "main.typ")
-        .unwrap();
+    fs::Packer {
+        system_fonts: false,
+        ..fs::Packer::default()
+    }
+    .pack(directory.path(), "main.typ")
+    .unwrap();
 }
 
 #[test]
@@ -61,10 +64,12 @@ fn external_packages_resolve_from_the_package_path() {
     .unwrap();
     let packages = directory.path().join("packages");
     write_package(&packages, "kept");
-    let packer = FilesystemPacker::new()
-        .system_fonts(false)
-        .package_path(&packages)
-        .vendor_packages(false);
+    let packer = fs::Packer {
+        system_fonts: false,
+        package_path: Some(packages.clone()),
+        vendor_packages: false,
+        ..fs::Packer::default()
+    };
     let pack = packer.pack(&project, "main.typ").unwrap().pack;
     assert!(!pack.package_requirements()[0].embedded);
 
@@ -74,7 +79,7 @@ fn external_packages_resolve_from_the_package_path() {
         resolved.package_dirs["@local/kept:0.1.0"],
         packages.join("local/kept/0.1.0")
     );
-    let mut request = CompileRequest::new(pack.clone(), Output::new(OutputFormat::Svg));
+    let mut request = compile::Request::new(pack.clone(), Output::new(OutputFormat::Svg));
     request.packages = resolved.packages;
     request.fonts = resolved.fonts;
     compile(&request).unwrap();
@@ -86,7 +91,7 @@ fn external_packages_resolve_from_the_package_path() {
     request.packages = resolved.packages;
     assert!(matches!(
         compile(&request),
-        Err(CompileError::Unfulfilled(issues))
+        Err(compile::Error::Unfulfilled(issues))
             if matches!(issues.as_slice(), [Unfulfilled::MissingPackage { .. }])
     ));
 }

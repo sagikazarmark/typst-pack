@@ -4,10 +4,10 @@ use std::num::NonZeroUsize;
 
 use libfuzzer_sys::fuzz_target;
 use typst::syntax::package::PackageSpec;
-use typst_pack::{
-    CompileError, CompileOptions, CompileRequest, DocumentTime, Input, Output, Pack, PackageTree,
-    PageSelection, PngOutput, RequestIssue, SvgOutput, compile,
+use typst_pack::compile::{
+    DocumentTime, Input, Output, OutputFormat, PageSelection, RequestIssue,
 };
+use typst_pack::{Pack, compile, package};
 
 // Request validation reports exactly the invalid values, whatever the input
 // order, and caller inputs never make a valid request fail validation.
@@ -28,15 +28,13 @@ fuzz_target!(|data: &[u8]| {
         inputs.reverse();
     }
     let undeclared: PackageSpec = "@local/undeclared:1.0.0".parse().unwrap();
-    let unrequired = PackageTree::from_owned_entries([("lib.typ", data.to_vec())]).unwrap();
+    let unrequired = package::Tree::new([("lib.typ", data.to_vec())]).unwrap();
 
     if flags & 8 != 0 {
-        let mut request = CompileRequest::new(
+        let mut request = compile::Request::new(
             pack.clone(),
-            Output::Svg(SvgOutput {
-                pretty: reverse,
-                ..SvgOutput::default()
-            }),
+            Output {
+                pretty: reverse, ..Output::new(OutputFormat::Svg) },
         );
         request.options.inputs = inputs.clone();
         // Dependencies the pack does not require are ignored.
@@ -52,24 +50,23 @@ fuzz_target!(|data: &[u8]| {
             _ => typst::Feature::A11yExtras,
         })
         .collect::<Vec<_>>();
-    let mut request = CompileRequest::new(
+    let mut request = compile::Request::new(
         pack,
-        Output::Png(PngOutput {
-            page_selection: PageSelection::new(vec![
+        Output {
+            pages: PageSelection { ranges: vec![
                 Some(NonZeroUsize::new(2).unwrap())..=Some(NonZeroUsize::new(1).unwrap()),
-            ]),
-            pixels_per_inch: Some(if invalid_ppi { f64::NAN } else { 144.0 }),
-            render_bleed: false,
-        }),
+            ] },
+            ppi: Some(if invalid_ppi { f64::NAN } else { 144.0 }),
+            render_bleed: false, ..Output::new(OutputFormat::Png) },
     );
-    request.options = CompileOptions {
+    request.options = compile::Options {
         inputs,
         document_time: DocumentTime::UnixTimestamp(if invalid_document_time { i64::MAX } else { 0 }),
         features: features.clone(),
     };
     request.packages = vec![(undeclared, unrequired)];
 
-    let Err(CompileError::InvalidRequest(issues)) = compile(&request) else {
+    let Err(compile::Error::InvalidRequest(issues)) = compile(&request) else {
         panic!("an invalid request was compiled");
     };
     let mut kinds = issues

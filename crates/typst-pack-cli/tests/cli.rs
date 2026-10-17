@@ -3,17 +3,17 @@ use std::process::{Command, Stdio};
 
 use hayro_syntax::object::{DateTime, Dict, Name};
 use typst_pack::Pack;
-use typst_pack::pack_archive::{DecodeLimits, decode, encode};
+use typst_pack::archive::{DecodeLimits, decode, encode};
 
 #[cfg(all(feature = "_test-package-download-probe", debug_assertions))]
 const PACKAGE_DOWNLOAD_PROBE_ENV: &str = "TYPST_PACK_TEST_PACKAGE_DOWNLOAD_PROBE";
 
 fn decode_reference(archive: Vec<u8>) -> Pack {
-    decode(&archive, DecodeLimits::DEFAULT).unwrap()
+    decode(&archive, DecodeLimits::default()).unwrap()
 }
 
 fn encode_reference(pack: &Pack) -> Vec<u8> {
-    encode(pack).unwrap()
+    encode(pack)
 }
 
 fn write_minimal_project(directory: &std::path::Path) -> std::path::PathBuf {
@@ -373,7 +373,7 @@ fn create_packs_the_structural_project_closure_with_root_ignore_policy() {
 fn create_rejects_ignored_entrypoints_and_invalid_ignore_policies() {
     for (policy, expected) in [
         ("main.typ\n", "entrypoint `main.typ` is excluded"),
-        ("trailing\\\n", "invalid Project Ignore Policy"),
+        ("trailing\\\n", ".typkignore`: line 1"),
     ] {
         let directory = tempfile::tempdir().unwrap();
         let project = directory.path().join("project");
@@ -2020,7 +2020,12 @@ fn create_uses_shared_font_and_package_environment() {
     );
     let pack = decode_reference(std::fs::read(output).unwrap());
     let spec = "@preview/create-cache:0.1.0".parse().unwrap();
-    assert!(pack.package_file(&spec, "lib.typ").is_some());
+    assert!(
+        pack.packages()
+            .find(|(s, _)| *s == &spec)
+            .and_then(|(_, t)| t.file("lib.typ"))
+            .is_some()
+    );
     assert!(
         pack.font_requirements()
             .iter()
@@ -2075,7 +2080,7 @@ fn no_vendor_packages_records_dependency_and_compiles_with_package_path() {
 
     let pack = decode_reference(std::fs::read(&pack_path).unwrap());
     let spec = "@preview/unvendored:0.1.0".parse().unwrap();
-    assert!(!pack.has_package(&spec));
+    assert!(!pack.packages().any(|(s, _)| s == &spec));
     assert_eq!(pack.package_requirements()[0].spec, spec);
 
     let output = directory.path().join("project.svg");

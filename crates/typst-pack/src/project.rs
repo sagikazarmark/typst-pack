@@ -1,20 +1,23 @@
-//! The validated project part of a Pack: an entrypoint and its project files.
+//! The validated project part of a pack: an entrypoint and its project files.
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::Digest;
-use crate::pack::{FILE_EXTENSION, PackInvariantError, PackInvariantIssue, names_pack_path};
+use crate::pack::{FILE_EXTENSION, MAX_MEMBER_NAME, PackError, PackIssue, names_pack_path};
 use crate::paths::{CanonicalPath, canonical_relative_path, path_tree_conflicts};
 use crate::payload::SharedBytes;
+
+/// The archive member prefix of project files.
+pub(crate) const PROJECT_PREFIX: &str = "project/";
 
 /// An entrypoint and the exact bytes of every project file, validated under
 /// the same rules a [`Pack`](crate::Pack) enforces.
 ///
-/// A snapshot is what Pack creation reads project files from: source readers
-/// decide membership, and the snapshot checks canonical paths, duplicates,
-/// path-tree conflicts, `.typk` paths, and that the entrypoint is present. A
-/// Pack created from a snapshot carries it unchanged, so the project is
-/// validated once.
+/// Pack creation reads project files from a snapshot: the reader decides
+/// which files belong to the project, and the snapshot checks canonical
+/// paths, duplicates, path-tree conflicts, `.typk` paths, and that the
+/// entrypoint is present. A pack created from a snapshot carries it
+/// unchanged.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectSnapshot {
     entrypoint: CanonicalPath,
@@ -22,13 +25,12 @@ pub struct ProjectSnapshot {
 }
 
 impl ProjectSnapshot {
-    /// Validates an entrypoint and project files given as path and bytes.
-    ///
-    /// Every independently detectable issue is reported, in canonical order.
+    /// Validates an entrypoint and project files given as path and bytes,
+    /// reporting every issue.
     pub fn new(
         entrypoint: impl Into<String>,
         files: impl IntoIterator<Item = (impl Into<String>, impl Into<Vec<u8>>)>,
-    ) -> Result<Self, PackInvariantError> {
+    ) -> Result<Self, PackError> {
         let files = files
             .into_iter()
             .map(|(path, data)| (path.into(), SharedBytes::new(data.into())))
@@ -37,15 +39,15 @@ impl ProjectSnapshot {
         let snapshot = Self::validate(&entrypoint.into(), files, &mut issues);
         match snapshot {
             Some(snapshot) if issues.is_empty() => Ok(snapshot),
-            _ => Err(PackInvariantError { issues }),
+            _ => Err(PackError { issues }),
         }
     }
 
-    /// The shared project validation of every Pack construction path.
+    /// The project validation shared by every pack construction path.
     pub(crate) fn validate(
         entrypoint: &str,
         files: Vec<(String, SharedBytes)>,
-        issues: &mut Vec<PackInvariantIssue>,
+        issues: &mut Vec<PackIssue>,
     ) -> Option<Self> {
         let mut pass = Vec::new();
         let mut canonical = BTreeMap::new();
@@ -58,37 +60,31 @@ impl ProjectSnapshot {
                         duplicates.insert(path);
                     }
                 }
-                Err(message) => pass.push(PackInvariantIssue::InvalidPath { path, message }),
+                Err(message) => pass.push(PackIssue::InvalidPath { path, message }),
             }
         }
-        pass.extend(
-            duplicates
-                .into_iter()
-                .map(|path| PackInvariantIssue::DuplicateProjectPath {
-                    path: path.into_string(),
-                }),
-        );
-        pass.extend(
-            path_tree_conflicts(canonical.keys().map(|path| (path, ())))
-                .into_iter()
-                .map(|conflict| PackInvariantIssue::PathTreeConflict {
-                    ancestor: conflict.ancestor.to_string(),
-                    descendant: conflict.descendant.to_string(),
-                }),
-        );
+        pass.extend(duplicates.into_iter().map(|path| PackIssue::DuplicatePath {
+            path: path.into_string(),
+        }));
+        pass.extend(path_tree_conflicts(canonical.keys()).into_iter().map(
+            |(ancestor, descendant)| PackIssue::PathTreeConflict {
+                ancestor: ancestor.to_string(),
+                descendant: descendant.to_string(),
+            },
+        ));
         pass.sort_by_cached_key(ToString::to_string);
         issues.extend(pass);
 
         let entrypoint = match project_path(entrypoint) {
             Ok(path) if canonical.contains_key(&path) => Some(path),
             Ok(path) => {
-                issues.push(PackInvariantIssue::MissingEntrypoint {
+                issues.push(PackIssue::MissingEntrypoint {
                     path: path.into_string(),
                 });
                 None
             }
             Err(message) => {
-                issues.push(PackInvariantIssue::InvalidEntrypoint {
+                issues.push(PackIssue::InvalidEntrypoint {
                     path: entrypoint.to_owned(),
                     message,
                 });
@@ -131,11 +127,14 @@ impl ProjectSnapshot {
 
 fn project_path(path: &str) -> Result<CanonicalPath, String> {
     let canonical = canonical_relative_path(path).map_err(|error| error.to_string())?;
-    // No route into a Pack can name a Pack as a project file.
+    // No route into a pack can name a pack as a project file.
     if names_pack_path(canonical.as_str()) {
         return Err(format!(
             "`.{FILE_EXTENSION}` paths are excluded from project membership"
         ));
+    }
+    if PROJECT_PREFIX.len() + canonical.as_str().len() > MAX_MEMBER_NAME {
+        return Err("the path is too long for a pack archive".to_owned());
     }
     Ok(canonical)
 }

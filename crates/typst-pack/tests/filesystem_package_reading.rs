@@ -1,32 +1,28 @@
 //! Package Tree reading from the reference filesystem source.
 
 #![cfg(feature = "fs")]
-
-use std::fs;
 use std::path::{Path, PathBuf};
 
 use typst::syntax::package::PackageSpec;
-use typst_pack::{
-    FilesystemPackError, FilesystemPacker, FilesystemReadError, LimitExceeded, Pack, ReadLimits,
-    read_filesystem_package,
-};
+use typst_pack::fs;
+use typst_pack::{LimitExceeded, Pack, ReadLimits};
 
 fn write_package(base: &Path, marker: &[u8]) -> PathBuf {
     let root = base.join("local/example/1.0.0");
-    fs::create_dir_all(&root).unwrap();
-    fs::write(root.join("marker.txt"), marker).unwrap();
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("marker.txt"), marker).unwrap();
     root
 }
 
 #[test]
 fn reading_returns_one_validated_complete_package_tree_in_canonical_order() {
     let dir = tempfile::tempdir().unwrap();
-    fs::create_dir_all(dir.path().join("assets")).unwrap();
-    fs::write(dir.path().join("typst.toml"), b"declaration").unwrap();
-    fs::write(dir.path().join("lib.typ"), b"library").unwrap();
-    fs::write(dir.path().join("assets/unused.txt"), b"unused").unwrap();
+    std::fs::create_dir_all(dir.path().join("assets")).unwrap();
+    std::fs::write(dir.path().join("typst.toml"), b"declaration").unwrap();
+    std::fs::write(dir.path().join("lib.typ"), b"library").unwrap();
+    std::fs::write(dir.path().join("assets/unused.txt"), b"unused").unwrap();
 
-    let tree = read_filesystem_package(dir.path(), ReadLimits::default()).unwrap();
+    let tree = fs::read_package(dir.path(), ReadLimits::default()).unwrap();
 
     assert_eq!(
         tree.files().collect::<Vec<_>>(),
@@ -41,9 +37,9 @@ fn reading_returns_one_validated_complete_package_tree_in_canonical_order() {
 #[test]
 fn package_reading_is_bounded() {
     let dir = tempfile::tempdir().unwrap();
-    fs::write(dir.path().join("lib.typ"), b"library").unwrap();
+    std::fs::write(dir.path().join("lib.typ"), b"library").unwrap();
 
-    let error = read_filesystem_package(
+    let error = fs::read_package(
         dir.path(),
         ReadLimits {
             max_file_bytes: 6,
@@ -54,7 +50,7 @@ fn package_reading_is_bounded() {
 
     assert!(matches!(
         error,
-        FilesystemReadError::Limit { source, .. }
+        fs::Error::Limit { source, .. }
             if source == LimitExceeded { resource: "file bytes", limit: 6 }
     ));
 }
@@ -69,16 +65,14 @@ fn requiring(spec: &PackageSpec) -> Pack {
 }
 
 /// Resolves `spec` from a package directory and cache, as compilation does.
-fn resolve(
-    data: &Path,
-    cache: &Path,
-    spec: &PackageSpec,
-) -> Result<typst_pack::Resolved, FilesystemPackError> {
-    FilesystemPacker::new()
-        .system_fonts(false)
-        .package_path(data)
-        .package_cache_path(cache)
-        .resolve(&requiring(spec))
+fn resolve(data: &Path, cache: &Path, spec: &PackageSpec) -> Result<fs::Resolved, fs::Error> {
+    fs::Packer {
+        system_fonts: false,
+        package_path: Some(data.into()),
+        package_cache_path: Some(cache.into()),
+        ..fs::Packer::default()
+    }
+    .resolve(&requiring(spec))
 }
 
 #[cfg(unix)]
@@ -88,11 +82,11 @@ fn a_symlinked_package_root_and_internal_links_are_read() {
 
     let dir = tempfile::tempdir().unwrap();
     let development = dir.path().join("dev/example");
-    fs::create_dir_all(development.join("src")).unwrap();
-    fs::write(development.join("src/lib.typ"), b"library").unwrap();
+    std::fs::create_dir_all(development.join("src")).unwrap();
+    std::fs::write(development.join("src/lib.typ"), b"library").unwrap();
     symlink("src/lib.typ", development.join("lib.typ")).unwrap();
     let data = dir.path().join("data");
-    fs::create_dir_all(data.join("local/example")).unwrap();
+    std::fs::create_dir_all(data.join("local/example")).unwrap();
     symlink(&development, data.join("local/example/1.0.0")).unwrap();
     let spec: PackageSpec = "@local/example:1.0.0".parse().unwrap();
 
@@ -110,21 +104,21 @@ fn links_escaping_the_package_root_are_refused() {
 
     let dir = tempfile::tempdir().unwrap();
     let root = write_package(dir.path(), b"local");
-    fs::write(dir.path().join("outside.txt"), b"outside").unwrap();
+    std::fs::write(dir.path().join("outside.txt"), b"outside").unwrap();
     symlink(dir.path().join("outside.txt"), root.join("alias.txt")).unwrap();
 
-    let error = read_filesystem_package(&root, ReadLimits::default()).unwrap_err();
+    let error = fs::read_package(&root, ReadLimits::default()).unwrap_err();
     assert!(matches!(
         error,
-        FilesystemReadError::EscapingSymlink { ref path, .. } if path == &root.join("alias.txt")
+        fs::Error::EscapingSymlink { ref path, .. } if path == &root.join("alias.txt")
     ));
 
     let spec: PackageSpec = "@local/example:1.0.0".parse().unwrap();
     let error = resolve(dir.path(), dir.path(), &spec).unwrap_err();
-    let FilesystemPackError::Package(failure) = &error else {
+    let fs::Error::Package { spec: failed, .. } = &error else {
         panic!("expected a package read failure, got {error}");
     };
-    assert_eq!(failure.spec(), &spec);
+    assert_eq!(failed, &spec);
     assert!(error.to_string().contains("alias.txt"), "{error}");
 }
 
@@ -144,7 +138,7 @@ fn the_package_directory_precedes_the_cache() {
     );
     assert_eq!(resolved.package_dirs[&spec.to_string()], data_root);
 
-    fs::remove_dir_all(&data_root).unwrap();
+    std::fs::remove_dir_all(&data_root).unwrap();
     let resolved = resolve(&data, &cache, &spec).unwrap();
     assert_eq!(
         resolved.packages[0].1.file("marker.txt"),
@@ -165,8 +159,8 @@ fn a_tree_is_found_under_its_namespace_name_and_version() {
     ];
     for (_, key) in layouts {
         let root = data.join(key);
-        fs::create_dir_all(&root).unwrap();
-        fs::write(root.join("marker.txt"), key.as_bytes()).unwrap();
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("marker.txt"), key.as_bytes()).unwrap();
     }
 
     for (text, key) in layouts {

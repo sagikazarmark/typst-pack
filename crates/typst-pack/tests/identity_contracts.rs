@@ -5,12 +5,10 @@ use proptest::prelude::*;
 use sha2::{Digest as _, Sha256};
 use typst::foundations::{Datetime, Smart};
 use typst::syntax::package::PackageSpec;
-use typst_pack::pack_archive::{DecodeLimits, decode, encode};
-use typst_pack::{
-    CompileOptions, CompileRequest, CreationTimestamp, Digest, DocumentTime, HtmlOutput, Input,
-    Output, OutputFormat, Pack, PackMetadata, PackageDisposition, PackageTree, PdfOutput,
-    PngOutput, SvgOutput, compile, parse_page_selection,
-};
+use typst_pack::archive::{DecodeLimits, decode, encode};
+use typst_pack::compile::{CreationTimestamp, DocumentTime, Input, Output, OutputFormat};
+use typst_pack::{Digest, Metadata, Pack};
+use typst_pack::{compile, package};
 
 fn identity_pack() -> Pack {
     Pack::builder("main.typ")
@@ -37,7 +35,7 @@ proptest! {
             .build().unwrap();
         let described = Pack::builder("main.typ")
             .file("main.typ", project_bytes.clone())
-            .metadata(PackMetadata {
+            .metadata(Metadata {
                 name: Some(metadata_name),
                 description: None,
                 authors: vec![metadata_author],
@@ -123,8 +121,7 @@ fn file_digests_are_plain_sha256() {
 #[test]
 fn frozen_package_tree_and_pack_identity_vectors() {
     let spec: PackageSpec = "@local/example:1.0.0".parse().unwrap();
-    let tree =
-        PackageTree::copy_from_entries([("lib.typ", b"lib".as_slice()), ("a.typ", b"a")]).unwrap();
+    let tree = package::Tree::new([("lib.typ", b"lib".as_slice()), ("a.typ", b"a")]).unwrap();
     let tree_digest = Preimage::new("typst-pack/package-tree/v1")
         .count(2)
         .str("a.typ")
@@ -164,12 +161,8 @@ fn frozen_package_tree_and_pack_identity_vectors() {
 #[cfg(feature = "embedded-fonts")]
 #[test]
 fn font_containers_bind_their_digest_and_disposition_into_pack_identity() {
-    let data = typst_pack::typst_embedded_font_containers()
-        .next()
-        .unwrap()
-        .data()
-        .to_vec();
-    let container = typst_pack::FontContainer::new(data.clone()).unwrap();
+    let data = typst_pack::font::embedded().next().unwrap().data().to_vec();
+    let container = typst_pack::font::Container::new(data.clone()).unwrap();
     assert_eq!(container.digest().to_string(), hex(sha256(&data)));
 
     for embedded in [true, false] {
@@ -200,13 +193,13 @@ fn pack_identity_ignores_archive_order_and_compression() {
         .file("main.typ", b"main".to_vec())
         .file("b.txt", b"b".to_vec())
         .file("a.txt", b"a".to_vec())
-        .metadata(PackMetadata {
+        .metadata(Metadata {
             name: Some("ordered".to_owned()),
-            ..PackMetadata::default()
+            ..Metadata::default()
         })
         .build()
         .unwrap();
-    let archive = encode(&pack).unwrap();
+    let archive = encode(&pack);
 
     // Rewrite every member in reverse order, stored rather than deflated.
     let mut source = zip::ZipArchive::new(std::io::Cursor::new(&archive)).unwrap();
@@ -233,13 +226,13 @@ fn pack_identity_ignores_archive_order_and_compression() {
     let rewritten = writer.finish().unwrap().into_inner();
 
     assert_ne!(rewritten, archive);
-    let decoded = decode(&rewritten, DecodeLimits::DEFAULT).unwrap();
+    let decoded = decode(&rewritten, DecodeLimits::default()).unwrap();
     assert_eq!(decoded.identity(), pack.identity());
-    assert_eq!(encode(&decoded).unwrap(), archive);
+    assert_eq!(encode(&decoded), archive);
 }
 
 fn manifest_of(pack: &Pack) -> String {
-    let archive = encode(pack).unwrap();
+    let archive = encode(pack);
     let mut zip = zip::ZipArchive::new(std::io::Cursor::new(archive)).unwrap();
     let mut manifest = String::new();
     std::io::Read::read_to_string(&mut zip.by_name("typst-pack.toml").unwrap(), &mut manifest)
@@ -257,7 +250,7 @@ fn pack_identity_binds_every_project_and_package_semantic() {
         package: typst::syntax::package::PackageSpec,
         package_path: &'a str,
         package_bytes: &'a [u8],
-        disposition: PackageDisposition,
+        disposition: bool,
         extra_package_file: bool,
     }
 
@@ -270,14 +263,14 @@ fn pack_identity_binds_every_project_and_package_semantic() {
         package,
         package_path: "lib.typ",
         package_bytes: b"package",
-        disposition: PackageDisposition::Embedded,
+        disposition: true,
         extra_package_file: false,
     };
     let build = |case: PackCase<'_>| {
         let mut builder = Pack::builder(case.entrypoint)
             .file("main.typ", b"main".to_vec())
             .file(case.project_path, case.project_bytes.to_vec());
-        builder = if case.disposition.is_embedded() {
+        builder = if case.disposition {
             builder.package_file(
                 case.package.clone(),
                 case.package_path,
@@ -291,7 +284,7 @@ fn pack_identity_binds_every_project_and_package_semantic() {
             )
         };
         if case.extra_package_file {
-            builder = if case.disposition.is_embedded() {
+            builder = if case.disposition {
                 builder.package_file(case.package, "extra.typ", b"extra".to_vec())
             } else {
                 builder.external_package_file(case.package, "extra.typ", b"extra".to_vec())
@@ -331,7 +324,7 @@ fn pack_identity_binds_every_project_and_package_semantic() {
             ..baseline.clone()
         },
         PackCase {
-            disposition: PackageDisposition::External,
+            disposition: false,
             ..baseline
         },
     ];
@@ -345,7 +338,7 @@ fn pack_identity_binds_every_project_and_package_semantic() {
 fn frozen_compilation_identity_vector() {
     let spec: PackageSpec = "@local/example:1.0.0".parse().unwrap();
     let manifest = b"[package]\nname = \"example\"\nversion = \"1.0.0\"\nentrypoint = \"lib.typ\"";
-    let tree = PackageTree::copy_from_entries([
+    let tree = package::Tree::new([
         ("lib.typ", b"#let value = 1".as_slice()),
         ("typst.toml", manifest),
     ])
@@ -359,15 +352,15 @@ fn frozen_compilation_identity_vector() {
         .external_package_file(spec.clone(), "typst.toml", manifest.to_vec())
         .build()
         .unwrap();
-    let mut request = CompileRequest::new(
+    let mut request = compile::Request::new(
         pack.clone(),
-        Output::Svg(SvgOutput {
-            page_selection: parse_page_selection("2-3,1,5-").unwrap(),
-            ..SvgOutput::default()
-        }),
+        Output {
+            pages: "2-3,1,5-".parse::<compile::PageSelection>().unwrap(),
+            ..Output::new(OutputFormat::Svg)
+        },
     );
     request.packages = vec![(spec, tree.clone())];
-    request.options = CompileOptions {
+    request.options = compile::Options {
         inputs: vec![
             ("a".into(), Input::from("x")),
             ("b".into(), Input::Bytes(b"y".to_vec())),
@@ -413,7 +406,7 @@ fn frozen_compilation_identity_vector() {
 #[test]
 fn compilation_identity_binds_every_effective_output_control() {
     let identity = |output| {
-        compile(&CompileRequest::new(identity_pack(), output))
+        compile(&compile::Request::new(identity_pack(), output))
             .unwrap()
             .identity
     };
@@ -427,95 +420,98 @@ fn compilation_identity_binds_every_effective_output_control() {
 
     distinct(vec![
         identity(Output::new(OutputFormat::Pdf)),
-        identity(Output::Pdf(PdfOutput {
-            page_selection: parse_page_selection("1").unwrap(),
-            ..PdfOutput::default()
-        })),
-        identity(Output::Pdf(PdfOutput {
-            standards: vec![typst_pdf::PdfStandard::V_1_7],
-            ..PdfOutput::default()
-        })),
-        identity(Output::Pdf(PdfOutput {
-            identifier: Smart::Custom("identity".to_owned()),
-            ..PdfOutput::default()
-        })),
-        identity(Output::Pdf(PdfOutput {
-            creator: Smart::Custom(Some("identity".to_owned())),
-            ..PdfOutput::default()
-        })),
-        identity(Output::Pdf(PdfOutput {
-            creator: Smart::Custom(None),
-            ..PdfOutput::default()
-        })),
-        identity(Output::Pdf(PdfOutput {
-            tags: Smart::Custom(false),
-            ..PdfOutput::default()
-        })),
-        identity(Output::Pdf(PdfOutput {
-            creation_timestamp: CreationTimestamp::Utc(1_700_000_000),
-            ..PdfOutput::default()
-        })),
-        identity(Output::Pdf(PdfOutput {
-            creation_timestamp: CreationTimestamp::Local {
+        identity(Output {
+            pages: "1".parse::<compile::PageSelection>().unwrap(),
+            ..Output::new(OutputFormat::Pdf)
+        }),
+        identity(Output {
+            pdf_standards: vec![typst_pdf::PdfStandard::V_1_7],
+            ..Output::new(OutputFormat::Pdf)
+        }),
+        identity(Output {
+            pdf_identifier: Smart::Custom("identity".to_owned()),
+            ..Output::new(OutputFormat::Pdf)
+        }),
+        identity(Output {
+            pdf_creator: Smart::Custom(Some("identity".to_owned())),
+            ..Output::new(OutputFormat::Pdf)
+        }),
+        identity(Output {
+            pdf_creator: Smart::Custom(None),
+            ..Output::new(OutputFormat::Pdf)
+        }),
+        identity(Output {
+            pdf_tags: Smart::Custom(false),
+            ..Output::new(OutputFormat::Pdf)
+        }),
+        identity(Output {
+            pdf_timestamp: CreationTimestamp::Utc(1_700_000_000),
+            ..Output::new(OutputFormat::Pdf)
+        }),
+        identity(Output {
+            pdf_timestamp: CreationTimestamp::Local {
                 unix: 1_700_000_000,
                 offset_minutes: 60,
             },
-            ..PdfOutput::default()
-        })),
-        identity(Output::Pdf(PdfOutput {
+            ..Output::new(OutputFormat::Pdf)
+        }),
+        identity(Output {
             pretty: true,
-            ..PdfOutput::default()
-        })),
+            ..Output::new(OutputFormat::Pdf)
+        }),
         identity(Output::new(OutputFormat::Png)),
-        identity(Output::Png(PngOutput {
-            page_selection: parse_page_selection("1").unwrap(),
-            ..PngOutput::default()
-        })),
-        identity(Output::Png(PngOutput {
-            pixels_per_inch: Some(216.0),
-            ..PngOutput::default()
-        })),
-        identity(Output::Png(PngOutput {
+        identity(Output {
+            pages: "1".parse::<compile::PageSelection>().unwrap(),
+            ..Output::new(OutputFormat::Png)
+        }),
+        identity(Output {
+            ppi: Some(216.0),
+            ..Output::new(OutputFormat::Png)
+        }),
+        identity(Output {
             render_bleed: true,
-            ..PngOutput::default()
-        })),
+            ..Output::new(OutputFormat::Png)
+        }),
         identity(Output::new(OutputFormat::Svg)),
-        identity(Output::Svg(SvgOutput {
+        identity(Output {
             render_bleed: true,
-            ..SvgOutput::default()
-        })),
+            ..Output::new(OutputFormat::Svg)
+        }),
         identity(Output::new(OutputFormat::Html)),
-        identity(Output::Html(HtmlOutput { pretty: true })),
+        identity(Output {
+            pretty: true,
+            ..Output::new(OutputFormat::Html)
+        }),
     ]);
 
     // Defaults and their explicit values are one request.
     assert_eq!(
         identity(Output::new(OutputFormat::Png)),
-        identity(Output::Png(PngOutput {
-            pixels_per_inch: Some(144.0),
-            ..PngOutput::default()
-        }))
+        identity(Output {
+            ppi: Some(144.0),
+            ..Output::new(OutputFormat::Png)
+        })
     );
     assert_eq!(
         identity(Output::new(OutputFormat::Pdf)),
-        identity(Output::Pdf(PdfOutput {
-            tags: Smart::Custom(true),
-            ..PdfOutput::default()
-        }))
+        identity(Output {
+            pdf_tags: Smart::Custom(true),
+            ..Output::new(OutputFormat::Pdf)
+        })
     );
 }
 
 #[test]
 fn compilation_identity_binds_pack_inputs_features_and_document_time() {
-    let identity = |pack: Pack, options: CompileOptions| {
-        let mut request = CompileRequest::new(pack, Output::new(OutputFormat::Svg));
+    let identity = |pack: Pack, options: compile::Options| {
+        let mut request = compile::Request::new(pack, Output::new(OutputFormat::Svg));
         request.options = options;
         compile(&request).unwrap().identity
     };
-    let baseline = identity(identity_pack(), CompileOptions::default());
-    let input = |value: Input| CompileOptions {
+    let baseline = identity(identity_pack(), compile::Options::default());
+    let input = |value: Input| compile::Options {
         inputs: vec![("unused".into(), value)],
-        ..CompileOptions::default()
+        ..compile::Options::default()
     };
     let changed = Pack::builder("main.typ")
         .file("main.typ", b"changed pack".to_vec())
@@ -524,29 +520,29 @@ fn compilation_identity_binds_pack_inputs_features_and_document_time() {
 
     let identities = vec![
         baseline,
-        identity(changed, CompileOptions::default()),
+        identity(changed, compile::Options::default()),
         identity(identity_pack(), input(Input::from("value"))),
         identity(identity_pack(), input(Input::Bytes(b"value".to_vec()))),
         identity(identity_pack(), input(Input::Bytes(b"other".to_vec()))),
         identity(
             identity_pack(),
-            CompileOptions {
+            compile::Options {
                 features: vec![typst::Feature::A11yExtras],
-                ..CompileOptions::default()
+                ..compile::Options::default()
             },
         ),
         identity(
             identity_pack(),
-            CompileOptions {
+            compile::Options {
                 document_time: DocumentTime::Fixed(Datetime::from_ymd(2024, 2, 3).unwrap()),
-                ..CompileOptions::default()
+                ..compile::Options::default()
             },
         ),
         identity(
             identity_pack(),
-            CompileOptions {
+            compile::Options {
                 document_time: DocumentTime::UnixTimestamp(1_700_000_000),
-                ..CompileOptions::default()
+                ..compile::Options::default()
             },
         ),
     ];
@@ -562,12 +558,12 @@ fn compilation_identity_binds_pack_inputs_features_and_document_time() {
             identity_pack().file("main.typ").unwrap().to_vec(),
         )
         .file("unused.txt", b"baseline".to_vec())
-        .metadata(PackMetadata {
+        .metadata(Metadata {
             name: Some("Named Pack".to_owned()),
             description: Some("Operational description".to_owned()),
             authors: vec!["Pack Author".to_owned()],
         })
         .build()
         .unwrap();
-    assert_eq!(identity(described, CompileOptions::default()), baseline);
+    assert_eq!(identity(described, compile::Options::default()), baseline);
 }

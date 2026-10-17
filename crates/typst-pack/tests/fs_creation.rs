@@ -10,26 +10,20 @@
 
 #![cfg(feature = "fs")]
 
-#[path = "support/archive.rs"]
-mod archive_support;
-
-use std::fs;
 use std::path::{Path, PathBuf};
 
-use archive_support::{decode_reference, encode_reference};
-use typst_pack::{
-    CompileOptions, CreateError, DocumentTime, FilesystemPackError, FilesystemPacker,
-    FilesystemReadError, Input, Pack, Packed, RequestIssue, TypstTarget,
-};
+use typst_pack::Pack;
+use typst_pack::compile::{DocumentTime, Input, RequestIssue};
+use typst_pack::{compile, create, fs};
 
 /// A project directory with an image, a data file, an included chapter, and an
 /// import from a local package, plus the package itself in a separate
 /// directory laid out like a package path.
 fn fixture(dir: &Path) -> (PathBuf, PathBuf) {
     let project = dir.join("project");
-    fs::create_dir_all(project.join("chapters")).unwrap();
-    fs::create_dir_all(project.join("assets")).unwrap();
-    fs::write(
+    std::fs::create_dir_all(project.join("chapters")).unwrap();
+    std::fs::create_dir_all(project.join("assets")).unwrap();
+    std::fs::write(
         project.join("main.typ"),
         r#"#import "@local/greet:0.1.0": greet
 #set page(width: 10cm, height: 8cm)
@@ -40,26 +34,26 @@ Rows: #csv("data.csv").len()
 "#,
     )
     .unwrap();
-    fs::write(project.join("chapters/intro.typ"), "= Introduction\n").unwrap();
-    fs::write(project.join("assets/logo.png"), tiny_png()).unwrap();
-    fs::write(project.join("data.csv"), "a,b\n1,2\n").unwrap();
+    std::fs::write(project.join("chapters/intro.typ"), "= Introduction\n").unwrap();
+    std::fs::write(project.join("assets/logo.png"), tiny_png()).unwrap();
+    std::fs::write(project.join("data.csv"), "a,b\n1,2\n").unwrap();
     // A file the compile never reads:
-    fs::write(project.join("notes.txt"), "extra").unwrap();
+    std::fs::write(project.join("notes.txt"), "extra").unwrap();
 
     let packages = dir.join("packages");
     let package = packages.join("local/greet/0.1.0");
-    fs::create_dir_all(&package).unwrap();
-    fs::write(
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
         package.join("typst.toml"),
         "[package]\nname = \"greet\"\nversion = \"0.1.0\"\nentrypoint = \"lib.typ\"\n",
     )
     .unwrap();
-    fs::write(
+    std::fs::write(
         package.join("lib.typ"),
         "#let greet(name) = [Hello #name!]\n",
     )
     .unwrap();
-    fs::write(package.join("unused.txt"), "complete package").unwrap();
+    std::fs::write(package.join("unused.txt"), "complete package").unwrap();
 
     (project, packages)
 }
@@ -73,17 +67,20 @@ fn project_files(pack: &Pack) -> Vec<&str> {
     pack.files().map(|(path, _)| path).collect()
 }
 
-fn no_font_assembler() -> FilesystemPacker {
-    FilesystemPacker::new().system_fonts(false)
+fn no_font_assembler() -> fs::Packer {
+    fs::Packer {
+        system_fonts: false,
+        ..fs::Packer::default()
+    }
 }
 
 /// Packs `project` with `main.typ` as its entrypoint.
 trait PackProject {
-    fn assemble(&self, project: &Path) -> Result<Packed, FilesystemPackError>;
+    fn assemble(&self, project: &Path) -> Result<fs::Packed, fs::Error>;
 }
 
-impl PackProject for FilesystemPacker {
-    fn assemble(&self, project: &Path) -> Result<Packed, FilesystemPackError> {
+impl PackProject for fs::Packer {
+    fn assemble(&self, project: &Path) -> Result<fs::Packed, fs::Error> {
         self.pack(project, "main.typ")
     }
 }
@@ -93,9 +90,11 @@ fn structural_creation_packs_all_project_files_and_complete_packages() {
     let dir = tempfile::tempdir().unwrap();
     let (project, packages) = fixture(dir.path());
 
-    let assembler = FilesystemPacker::new()
-        .package_path(&packages)
-        .system_fonts(false);
+    let assembler = fs::Packer {
+        package_path: Some(packages.to_path_buf()),
+        system_fonts: false,
+        ..fs::Packer::default()
+    };
     let report = assembler.assemble(&project).unwrap();
 
     for expected in [
@@ -113,14 +112,19 @@ fn structural_creation_packs_all_project_files_and_complete_packages() {
     assert!(requirement.embedded);
     assert_eq!(requirement.spec.to_string(), "@local/greet:0.1.0");
 
-    let spec = &requirement.spec;
-    assert!(report.pack.has_package(spec));
-    assert!(report.pack.package_file(spec, "lib.typ").is_some());
-    assert!(report.pack.package_file(spec, "typst.toml").is_some());
-    // The whole Package Tree travels, not only what was read.
-    assert!(report.pack.package_file(spec, "unused.txt").is_some());
+    let (_, tree) = report.pack.packages().next().unwrap();
+    assert_eq!(tree.digest(), requirement.digest);
+    // The whole package tree travels, not only what was read.
+    assert_eq!(
+        tree.files().map(|(path, _)| path).collect::<Vec<_>>(),
+        ["lib.typ", "typst.toml", "unused.txt"]
+    );
 
-    let reread = decode_reference(encode_reference(&report.pack).unwrap()).unwrap();
+    let reread = typst_pack::archive::decode(
+        &typst_pack::archive::encode(&report.pack),
+        Default::default(),
+    )
+    .unwrap();
     assert_eq!(reread.identity(), report.pack.identity());
 }
 
@@ -128,21 +132,21 @@ fn structural_creation_packs_all_project_files_and_complete_packages() {
 fn structural_creation_applies_the_root_project_ignore_policy() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("project");
-    fs::create_dir_all(project.join("ignored/reincluded")).unwrap();
-    fs::create_dir_all(project.join("nested")).unwrap();
-    fs::write(project.join("main.typ"), "Hello").unwrap();
-    fs::write(project.join("unused.txt"), "packed").unwrap();
-    fs::write(
+    std::fs::create_dir_all(project.join("ignored/reincluded")).unwrap();
+    std::fs::create_dir_all(project.join("nested")).unwrap();
+    std::fs::write(project.join("main.typ"), "Hello").unwrap();
+    std::fs::write(project.join("unused.txt"), "packed").unwrap();
+    std::fs::write(
         project.join(".typkignore"),
         "ignored/**\n!ignored/reincluded/\n!ignored/reincluded/keep.txt\n*.secret\n",
     )
     .unwrap();
-    fs::write(project.join("ignored/drop.txt"), "drop").unwrap();
-    fs::write(project.join("ignored/reincluded/keep.txt"), "keep").unwrap();
-    fs::write(project.join("nested/.typkignore"), "*.txt\n").unwrap();
-    fs::write(project.join("nested/ordinary.txt"), "packed").unwrap();
-    fs::write(project.join("private.secret"), "drop").unwrap();
-    fs::write(project.join("old.typk"), "drop").unwrap();
+    std::fs::write(project.join("ignored/drop.txt"), "drop").unwrap();
+    std::fs::write(project.join("ignored/reincluded/keep.txt"), "keep").unwrap();
+    std::fs::write(project.join("nested/.typkignore"), "*.txt\n").unwrap();
+    std::fs::write(project.join("nested/ordinary.txt"), "packed").unwrap();
+    std::fs::write(project.join("private.secret"), "drop").unwrap();
+    std::fs::write(project.join("old.typk"), "drop").unwrap();
 
     let report = no_font_assembler().assemble(&project).unwrap();
 
@@ -163,10 +167,10 @@ fn structural_creation_applies_the_root_project_ignore_policy() {
 fn structural_creation_does_not_reinclude_files_beneath_ignored_parents() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("project");
-    fs::create_dir_all(project.join("ignored")).unwrap();
-    fs::write(project.join("main.typ"), "Hello").unwrap();
-    fs::write(project.join(".typkignore"), "ignored/\n!ignored/keep.txt\n").unwrap();
-    fs::write(project.join("ignored/keep.txt"), "still ignored").unwrap();
+    std::fs::create_dir_all(project.join("ignored")).unwrap();
+    std::fs::write(project.join("main.typ"), "Hello").unwrap();
+    std::fs::write(project.join(".typkignore"), "ignored/\n!ignored/keep.txt\n").unwrap();
+    std::fs::write(project.join("ignored/keep.txt"), "still ignored").unwrap();
 
     let report = no_font_assembler().assemble(&project).unwrap();
 
@@ -177,9 +181,9 @@ fn structural_creation_does_not_reinclude_files_beneath_ignored_parents() {
 fn structural_creation_supports_gitignore_pattern_syntax() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("project");
-    fs::create_dir_all(project.join("nested/cache")).unwrap();
-    fs::write(project.join("main.typ"), "Hello").unwrap();
-    fs::write(
+    std::fs::create_dir_all(project.join("nested/cache")).unwrap();
+    std::fs::write(project.join("main.typ"), "Hello").unwrap();
+    std::fs::write(
         project.join(".typkignore"),
         concat!(
             "# Project policy\n",
@@ -194,16 +198,16 @@ fn structural_creation_supports_gitignore_pattern_syntax() {
         ),
     )
     .unwrap();
-    fs::write(project.join("# Project policy"), "packed").unwrap();
-    fs::write(project.join("root-only.secret"), "ignored").unwrap();
-    fs::write(project.join("nested/root-only.secret"), "packed").unwrap();
-    fs::write(project.join("!important.txt"), "ignored").unwrap();
-    fs::write(project.join("#notes.txt"), "ignored").unwrap();
-    fs::write(project.join("nested/cache/data.txt"), "ignored").unwrap();
-    fs::write(project.join("drop.tmp"), "ignored").unwrap();
-    fs::write(project.join("nested/keep.tmp"), "packed").unwrap();
-    fs::write(project.join(" leading.txt"), "ignored").unwrap();
-    fs::write(project.join("trailing.txt"), "ignored").unwrap();
+    std::fs::write(project.join("# Project policy"), "packed").unwrap();
+    std::fs::write(project.join("root-only.secret"), "ignored").unwrap();
+    std::fs::write(project.join("nested/root-only.secret"), "packed").unwrap();
+    std::fs::write(project.join("!important.txt"), "ignored").unwrap();
+    std::fs::write(project.join("#notes.txt"), "ignored").unwrap();
+    std::fs::write(project.join("nested/cache/data.txt"), "ignored").unwrap();
+    std::fs::write(project.join("drop.tmp"), "ignored").unwrap();
+    std::fs::write(project.join("nested/keep.tmp"), "packed").unwrap();
+    std::fs::write(project.join(" leading.txt"), "ignored").unwrap();
+    std::fs::write(project.join("trailing.txt"), "ignored").unwrap();
 
     let report = no_font_assembler().assemble(&project).unwrap();
 
@@ -226,11 +230,11 @@ fn structural_creation_supports_gitignore_pattern_syntax() {
 fn structural_creation_matches_an_escaped_trailing_space() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("project");
-    fs::create_dir_all(&project).unwrap();
-    fs::write(project.join("main.typ"), "Hello").unwrap();
-    fs::write(project.join(".typkignore"), "literal\\ \n").unwrap();
-    fs::write(project.join("literal "), "ignored").unwrap();
-    fs::write(project.join("literal"), "packed").unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("main.typ"), "Hello").unwrap();
+    std::fs::write(project.join(".typkignore"), "literal\\ \n").unwrap();
+    std::fs::write(project.join("literal "), "ignored").unwrap();
+    std::fs::write(project.join("literal"), "packed").unwrap();
 
     let report = no_font_assembler().assemble(&project).unwrap();
 
@@ -247,11 +251,11 @@ fn structural_creation_prunes_conclusively_ignored_subtrees() {
 
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("project");
-    fs::create_dir_all(project.join("ignored")).unwrap();
-    fs::create_dir_all(project.join("other")).unwrap();
-    fs::write(project.join("main.typ"), "Hello").unwrap();
-    fs::write(project.join(".typkignore"), "ignored/\n!/other/keep.txt\n").unwrap();
-    fs::write(project.join("other/keep.txt"), "keep").unwrap();
+    std::fs::create_dir_all(project.join("ignored")).unwrap();
+    std::fs::create_dir_all(project.join("other")).unwrap();
+    std::fs::write(project.join("main.typ"), "Hello").unwrap();
+    std::fs::write(project.join(".typkignore"), "ignored/\n!/other/keep.txt\n").unwrap();
+    std::fs::write(project.join("other/keep.txt"), "keep").unwrap();
     symlink(dir.path(), project.join("ignored/outside")).unwrap();
 
     let report = no_font_assembler().assemble(&project).unwrap();
@@ -269,9 +273,9 @@ fn structural_creation_rejects_a_root_ignore_policy_linked_from_outside() {
 
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("project");
-    fs::create_dir_all(&project).unwrap();
-    fs::write(project.join("main.typ"), "Hello").unwrap();
-    fs::write(dir.path().join("outside-ignore"), "*.txt\n").unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("main.typ"), "Hello").unwrap();
+    std::fs::write(dir.path().join("outside-ignore"), "*.txt\n").unwrap();
     symlink(
         dir.path().join("outside-ignore"),
         project.join(".typkignore"),
@@ -283,7 +287,7 @@ fn structural_creation_rejects_a_root_ignore_policy_linked_from_outside() {
 
     assert!(matches!(
         result,
-        Err(FilesystemPackError::Project(FilesystemReadError::EscapingSymlink { ref path, .. }))
+        Err(fs::Error::EscapingSymlink { ref path, .. })
             if path == &policy
     ));
 }
@@ -292,22 +296,24 @@ fn structural_creation_rejects_a_root_ignore_policy_linked_from_outside() {
 fn an_invalid_document_time_is_rejected_before_compiling() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("project");
-    fs::create_dir(&project).unwrap();
-    fs::write(project.join("main.typ"), "Hello").unwrap();
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(project.join("main.typ"), "Hello").unwrap();
 
-    let result = no_font_assembler()
-        .options(CompileOptions {
+    let result = fs::Packer {
+        options: compile::Options {
             document_time: DocumentTime::UnixTimestamp(i64::MAX),
-            ..CompileOptions::default()
-        })
-        .assemble(&project);
+            ..compile::Options::default()
+        },
+        ..no_font_assembler()
+    }
+    .assemble(&project);
 
     let Err(error) = result else {
         panic!("the invalid document time was accepted");
     };
     assert!(matches!(
         &error,
-        FilesystemPackError::Create(CreateError::InvalidRequest(issues))
+        fs::Error::Create(create::Error::InvalidRequest(issues))
             if issues == &[RequestIssue::InvalidDocumentTimestamp]
     ));
     assert_eq!(
@@ -320,12 +326,12 @@ fn an_invalid_document_time_is_rejected_before_compiling() {
 fn an_ignored_entrypoint_is_named() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("project");
-    fs::create_dir(&project).unwrap();
-    fs::write(project.join("main.typ"), "Hello").unwrap();
-    fs::write(project.join(".typkignore"), "main.typ\n").unwrap();
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(project.join("main.typ"), "Hello").unwrap();
+    std::fs::write(project.join(".typkignore"), "main.typ\n").unwrap();
 
     let error = no_font_assembler().assemble(&project).unwrap_err();
-    assert!(matches!(&error, FilesystemPackError::EntrypointIgnored(path) if path == "main.typ"));
+    assert!(matches!(&error, fs::Error::EntrypointIgnored(path) if path == "main.typ"));
     assert!(error.to_string().contains(".typkignore"), "{error}");
 }
 
@@ -333,19 +339,21 @@ fn an_ignored_entrypoint_is_named() {
 fn creation_target_does_not_select_project_files() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("project");
-    fs::create_dir_all(&project).unwrap();
-    fs::write(
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
         project.join("main.typ"),
         "#context if target() == \"html\" { read(\"html.txt\") } else { read(\"paged.txt\") }",
     )
     .unwrap();
-    fs::write(project.join("paged.txt"), "paged").unwrap();
-    fs::write(project.join("html.txt"), "html").unwrap();
+    std::fs::write(project.join("paged.txt"), "paged").unwrap();
+    std::fs::write(project.join("html.txt"), "html").unwrap();
 
-    let report = no_font_assembler()
-        .target(TypstTarget::Html)
-        .assemble(&project)
-        .unwrap();
+    let report = fs::Packer {
+        target: create::Target::Html,
+        ..no_font_assembler()
+    }
+    .assemble(&project)
+    .unwrap();
 
     assert_eq!(
         project_files(&report.pack),
@@ -357,23 +365,25 @@ fn creation_target_does_not_select_project_files() {
 fn exact_inputs_and_document_time_drive_representative_creation() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("project");
-    fs::create_dir_all(&project).unwrap();
-    fs::write(
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
         project.join("main.typ"),
         r#"#if sys.inputs.at("pick") == "yes" { read("input.txt") }
 #if datetime.today().year() == 2024 { read("time.txt") }"#,
     )
     .unwrap();
-    fs::write(project.join("input.txt"), "input").unwrap();
-    fs::write(project.join("time.txt"), "time").unwrap();
-    let report = no_font_assembler()
-        .options(CompileOptions {
+    std::fs::write(project.join("input.txt"), "input").unwrap();
+    std::fs::write(project.join("time.txt"), "time").unwrap();
+    let report = fs::Packer {
+        options: compile::Options {
             inputs: vec![("pick".into(), Input::from("yes"))],
             document_time: DocumentTime::UnixTimestamp(1_704_067_200),
-            ..CompileOptions::default()
-        })
-        .assemble(&project)
-        .unwrap();
+            ..compile::Options::default()
+        },
+        ..no_font_assembler()
+    }
+    .assemble(&project)
+    .unwrap();
 
     assert_eq!(
         project_files(&report.pack),
@@ -385,34 +395,36 @@ fn exact_inputs_and_document_time_drive_representative_creation() {
 fn package_data_precedes_package_cache_during_creation() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("project");
-    fs::create_dir_all(&project).unwrap();
-    fs::write(
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
         project.join("main.typ"),
         "#import \"@local/chosen:0.1.0\": mark\n#mark",
     )
     .unwrap();
 
     let data_package = dir.path().join("data/local/chosen/0.1.0");
-    fs::create_dir_all(&data_package).unwrap();
-    fs::write(
+    std::fs::create_dir_all(&data_package).unwrap();
+    std::fs::write(
         data_package.join("typst.toml"),
         "[package]\nname = \"chosen\"\nversion = \"0.1.0\"\nentrypoint = \"lib.typ\"\n",
     )
     .unwrap();
-    fs::write(
+    std::fs::write(
         data_package.join("lib.typ"),
         "#let mark = rect(width: 1pt, height: 1pt)",
     )
     .unwrap();
 
     let cache_package = dir.path().join("cache/local/chosen/0.1.0");
-    fs::create_dir_all(&cache_package).unwrap();
-    fs::write(cache_package.join("lib.typ"), "this is not valid Typst: {").unwrap();
+    std::fs::create_dir_all(&cache_package).unwrap();
+    std::fs::write(cache_package.join("lib.typ"), "this is not valid Typst: {").unwrap();
 
-    let assembler = FilesystemPacker::new()
-        .package_path(dir.path().join("data"))
-        .package_cache_path(dir.path().join("cache"))
-        .system_fonts(false);
+    let assembler = fs::Packer {
+        package_path: Some(dir.path().join("data")),
+        package_cache_path: Some(dir.path().join("cache")),
+        system_fonts: false,
+        ..fs::Packer::default()
+    };
     let report = assembler.assemble(&project).unwrap();
 
     assert_eq!(report.pack.package_requirements().len(), 1);
@@ -422,42 +434,48 @@ fn package_data_precedes_package_cache_during_creation() {
 fn package_cache_resolves_during_online_and_offline_creation() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("project");
-    fs::create_dir_all(&project).unwrap();
-    fs::write(
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
         project.join("main.typ"),
         "#import \"@preview/cached:0.1.0\": mark\n#mark",
     )
     .unwrap();
 
     let data = dir.path().join("data");
-    fs::create_dir_all(&data).unwrap();
+    std::fs::create_dir_all(&data).unwrap();
     let cache = dir.path().join("cache/preview/cached/0.1.0");
-    fs::create_dir_all(&cache).unwrap();
-    fs::write(
+    std::fs::create_dir_all(&cache).unwrap();
+    std::fs::write(
         cache.join("typst.toml"),
         "[package]\nname = \"cached\"\nversion = \"0.1.0\"\nentrypoint = \"lib.typ\"\n",
     )
     .unwrap();
-    fs::write(
+    std::fs::write(
         cache.join("lib.typ"),
         "#let mark = rect(width: 1pt, height: 1pt)",
     )
     .unwrap();
 
-    let offline = FilesystemPacker::new()
-        .package_path(&data)
-        .package_cache_path(dir.path().join("cache"))
-        .system_fonts(false);
+    let offline = fs::Packer {
+        package_path: Some(data.to_path_buf()),
+        package_cache_path: Some(dir.path().join("cache")),
+        system_fonts: false,
+        ..fs::Packer::default()
+    };
     #[cfg(feature = "egress")]
-    let online = offline.clone().download_packages(None);
+    let online = fs::Packer {
+        download_packages: true,
+        certificate: None,
+        ..offline.clone()
+    };
     #[cfg(not(feature = "egress"))]
     let online = offline.clone();
     for assembler in [offline, online] {
         let report = assembler.assemble(&project).unwrap();
 
-        let spec = &report.pack.package_requirements()[0].spec;
+        let (spec, tree) = report.pack.packages().next().unwrap();
         assert_eq!(spec.to_string(), "@preview/cached:0.1.0");
-        assert!(report.pack.package_file(spec, "lib.typ").is_some());
+        assert!(tree.file("lib.typ").is_some());
     }
 }
 
@@ -465,8 +483,8 @@ fn package_cache_resolves_during_online_and_offline_creation() {
 fn a_project_needing_chained_packages_is_resolved_to_completion() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("project");
-    fs::create_dir_all(&project).unwrap();
-    fs::write(
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
         project.join("main.typ"),
         "#import \"@local/outer:0.1.0\": mark\n#mark",
     )
@@ -484,9 +502,11 @@ fn a_project_needing_chained_packages_is_resolved_to_completion() {
         "#let inner = rect(width: 1pt, height: 1pt)",
     );
 
-    let assembler = FilesystemPacker::new()
-        .package_path(&packages)
-        .system_fonts(false);
+    let assembler = fs::Packer {
+        package_path: Some(packages.to_path_buf()),
+        system_fonts: false,
+        ..fs::Packer::default()
+    };
     let report = assembler.assemble(&project).unwrap();
 
     // The package only another package's tree imports is resolved too, however
@@ -505,13 +525,13 @@ fn a_project_needing_chained_packages_is_resolved_to_completion() {
 /// Writes one local package whose `lib.typ` holds `body`.
 fn write_package(packages: &Path, name: &str, body: &str) {
     let package = packages.join(format!("local/{name}/0.1.0"));
-    fs::create_dir_all(&package).unwrap();
-    fs::write(
+    std::fs::create_dir_all(&package).unwrap();
+    std::fs::write(
         package.join("typst.toml"),
         format!("[package]\nname = \"{name}\"\nversion = \"0.1.0\"\nentrypoint = \"lib.typ\"\n"),
     )
     .unwrap();
-    fs::write(package.join("lib.typ"), body).unwrap();
+    std::fs::write(package.join("lib.typ"), body).unwrap();
 }
 
 #[test]
@@ -519,9 +539,11 @@ fn offline_creation_works_with_local_packages() {
     let dir = tempfile::tempdir().unwrap();
     let (project, packages) = fixture(dir.path());
 
-    let assembler = FilesystemPacker::new()
-        .package_path(&packages)
-        .system_fonts(false);
+    let assembler = fs::Packer {
+        package_path: Some(packages.to_path_buf()),
+        system_fonts: false,
+        ..fs::Packer::default()
+    };
     let report = assembler.assemble(&project).unwrap();
 
     assert_eq!(report.pack.package_requirements().len(), 1);
@@ -532,19 +554,21 @@ fn offline_creation_works_with_local_packages() {
 fn offline_creation_fails_on_an_uncached_universe_package() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("project");
-    fs::create_dir_all(&project).unwrap();
-    fs::write(
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
         project.join("main.typ"),
         "#import \"@preview/typst-pack-no-such-package:0.0.1\": x\n",
     )
     .unwrap();
     let empty = dir.path().join("empty");
-    fs::create_dir_all(&empty).unwrap();
+    std::fs::create_dir_all(&empty).unwrap();
 
-    let assembler = FilesystemPacker::new()
-        .system_fonts(false)
-        .package_path(&empty)
-        .package_cache_path(&empty);
+    let assembler = fs::Packer {
+        system_fonts: false,
+        package_path: Some(empty.to_path_buf()),
+        package_cache_path: Some(empty.to_path_buf()),
+        ..fs::Packer::default()
+    };
     let result = assembler.assemble(&project);
 
     // A specification the Package Authority cannot resolve fails the
@@ -566,18 +590,20 @@ fn offline_creation_fails_on_an_uncached_universe_package() {
 fn creation_without_egress_never_downloads_a_universe_package() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("project");
-    fs::create_dir_all(&project).unwrap();
-    fs::write(
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
         project.join("main.typ"),
         "#import \"@preview/typst-pack-no-such-package:0.0.1\": x\n",
     )
     .unwrap();
     let empty = dir.path().join("empty");
-    fs::create_dir_all(&empty).unwrap();
+    std::fs::create_dir_all(&empty).unwrap();
 
-    let assembler = FilesystemPacker::new()
-        .system_fonts(false)
-        .package_path(&empty);
+    let assembler = fs::Packer {
+        system_fonts: false,
+        package_path: Some(empty.to_path_buf()),
+        ..fs::Packer::default()
+    };
     let result = assembler.assemble(&project);
 
     assert_eq!(
@@ -592,8 +618,8 @@ fn creation_without_egress_never_downloads_a_universe_package() {
 /// Asserting on them is asserting that the failure reaches the import: only a
 /// failed representative request carries a span, and the adapter has none of
 /// its own to offer.
-fn unresolvable_package_diagnostics(result: Result<Packed, FilesystemPackError>) -> Vec<String> {
-    let Err(FilesystemPackError::Create(CreateError::Failed { errors, .. })) = result else {
+fn unresolvable_package_diagnostics(result: Result<fs::Packed, fs::Error>) -> Vec<String> {
+    let Err(fs::Error::Create(create::Error::Failed { errors, .. })) = result else {
         panic!("an unresolvable package did not fail the representative request");
     };
     for error in &errors {
@@ -612,14 +638,14 @@ fn unresolvable_package_diagnostics(result: Result<Packed, FilesystemPackError>)
 fn a_representative_compile_that_fails_issues_no_pack() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("broken");
-    fs::create_dir_all(&project).unwrap();
-    fs::write(project.join("main.typ"), "#import \"missing.typ\": x\n").unwrap();
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(project.join("main.typ"), "#import \"missing.typ\": x\n").unwrap();
 
     let result = no_font_assembler().assemble(&project);
 
     assert!(matches!(
         result,
-        Err(FilesystemPackError::Create(CreateError::Failed { .. }))
+        Err(fs::Error::Create(create::Error::Failed { .. }))
     ));
 }
 
@@ -627,16 +653,18 @@ fn a_representative_compile_that_fails_issues_no_pack() {
 fn creation_retains_representative_compile_warnings() {
     let dir = tempfile::tempdir().unwrap();
     let project = dir.path().join("project");
-    fs::create_dir_all(&project).unwrap();
-    fs::write(
+    std::fs::create_dir_all(&project).unwrap();
+    std::fs::write(
         project.join("main.typ"),
         "#set text(font: \"Definitely Missing\")\nWarning",
     )
     .unwrap();
 
-    let assembler = FilesystemPacker::new()
-        .system_fonts(false)
-        .typst_embedded_fonts(false);
+    let assembler = fs::Packer {
+        system_fonts: false,
+        typst_embedded_fonts: false,
+        ..fs::Packer::default()
+    };
     let report = assembler.assemble(&project).unwrap();
 
     assert!(
@@ -660,14 +688,17 @@ mod fonts {
         let dir = tempfile::tempdir().unwrap();
         let (project, packages) = fixture(dir.path());
 
-        let assembler = FilesystemPacker::new()
-            .package_path(&packages)
-            .system_fonts(false);
-        let slim = assembler
-            .clone()
-            .embed_fonts(true)
-            .assemble(&project)
-            .unwrap();
+        let assembler = fs::Packer {
+            package_path: Some(packages.to_path_buf()),
+            system_fonts: false,
+            ..fs::Packer::default()
+        };
+        let slim = fs::Packer {
+            embed_fonts: true,
+            ..assembler.clone()
+        }
+        .assemble(&project)
+        .unwrap();
         assert!(
             !slim
                 .pack
@@ -677,11 +708,13 @@ mod fonts {
             "only Typst embedded fonts are used, so nothing should be embedded"
         );
 
-        let full = assembler
-            .embed_fonts(true)
-            .include_typst_embedded_fonts(true)
-            .assemble(&project)
-            .unwrap();
+        let full = fs::Packer {
+            embed_fonts: true,
+            include_typst_embedded_fonts: true,
+            ..assembler
+        }
+        .assemble(&project)
+        .unwrap();
         assert!(
             full.pack
                 .font_requirements()
@@ -689,22 +722,25 @@ mod fonts {
                 .any(|requirement| requirement.embedded)
         );
         // The embedded containers must load again from the pack.
-        decode_reference(encode_reference(&full.pack).unwrap()).unwrap();
+        typst_pack::archive::decode(&typst_pack::archive::encode(&full.pack), Default::default())
+            .unwrap();
     }
 
     #[test]
     fn html_creation_embeds_fonts_used_inside_frames() {
         let dir = tempfile::tempdir().unwrap();
         let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(project.join("main.typ"), "#html.frame[Hello]").unwrap();
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(project.join("main.typ"), "#html.frame[Hello]").unwrap();
 
-        let report = no_font_assembler()
-            .target(TypstTarget::Html)
-            .embed_fonts(true)
-            .include_typst_embedded_fonts(true)
-            .assemble(&project)
-            .unwrap();
+        let report = fs::Packer {
+            target: create::Target::Html,
+            embed_fonts: true,
+            include_typst_embedded_fonts: true,
+            ..no_font_assembler()
+        }
+        .assemble(&project)
+        .unwrap();
 
         assert!(
             report
@@ -717,21 +753,28 @@ mod fonts {
 
     #[test]
     fn a_created_pack_compiles_with_its_resolved_external_fonts() {
-        use typst_pack::{CompileRequest, Output, OutputFormat, compile};
-
         let dir = tempfile::tempdir().unwrap();
         let (project, packages) = fixture(dir.path());
-        let packer = FilesystemPacker::new()
-            .package_path(&packages)
-            .system_fonts(false);
+        let packer = fs::Packer {
+            package_path: Some(packages.to_path_buf()),
+            system_fonts: false,
+            ..fs::Packer::default()
+        };
         let report = packer.assemble(&project).unwrap();
 
         // Round-trip through bytes: nothing may depend on the read project.
-        let pack = decode_reference(encode_reference(&report.pack).unwrap()).unwrap();
-        let mut request = CompileRequest::new(pack.clone(), Output::new(OutputFormat::Pdf));
+        let pack = typst_pack::archive::decode(
+            &typst_pack::archive::encode(&report.pack),
+            Default::default(),
+        )
+        .unwrap();
+        let mut request = compile::Request::new(
+            pack.clone(),
+            compile::Output::new(compile::OutputFormat::Pdf),
+        );
         assert!(matches!(
             compile(&request),
-            Err(typst_pack::CompileError::Unfulfilled(_))
+            Err(typst_pack::compile::Error::Unfulfilled(_))
         ));
 
         // The fonts the packer offered were Typst's own, declared externally.

@@ -3,7 +3,6 @@
 //! See the README's "Pack format" section for the exact byte layouts.
 
 use std::fmt;
-use std::str::FromStr;
 
 use sha2::{Digest as _, Sha256};
 
@@ -27,7 +26,7 @@ impl Digest {
     }
 
     /// The 64 lowercase hexadecimal digits, without the `sha256:` prefix.
-    pub fn to_hex(&self) -> String {
+    pub(crate) fn to_hex(self) -> String {
         self.0.iter().map(|byte| format!("{byte:02x}")).collect()
     }
 
@@ -106,19 +105,10 @@ impl fmt::Debug for Digest {
     }
 }
 
-/// A string that is not `sha256:` followed by 64 lowercase hexadecimal digits.
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
-#[error("invalid digest {0:?}: expected `sha256:` and 64 lowercase hexadecimal digits")]
-pub struct InvalidDigest(pub String);
-
-impl FromStr for Digest {
-    type Err = InvalidDigest;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        value
-            .strip_prefix("sha256:")
-            .and_then(Self::from_hex)
-            .ok_or_else(|| InvalidDigest(value.to_owned()))
+impl Digest {
+    /// Parses `sha256:` followed by 64 lowercase hexadecimal digits.
+    fn parse(value: &str) -> Option<Self> {
+        value.strip_prefix("sha256:").and_then(Self::from_hex)
     }
 }
 
@@ -131,7 +121,11 @@ impl serde::Serialize for Digest {
 impl<'de> serde::Deserialize<'de> for Digest {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = String::deserialize(deserializer)?;
-        value.parse().map_err(serde::de::Error::custom)
+        Self::parse(&value).ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "invalid digest {value:?}: expected `sha256:` and 64 lowercase hexadecimal digits"
+            ))
+        })
     }
 }
 
@@ -146,14 +140,14 @@ mod tests {
             digest.to_string(),
             "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
-        assert_eq!(digest.to_string().parse::<Digest>(), Ok(digest));
+        assert_eq!(Digest::parse(&digest.to_string()), Some(digest));
         for invalid in [
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
             "sha256:BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD",
             "sha256:ba78",
             "sha1:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
         ] {
-            assert!(invalid.parse::<Digest>().is_err(), "{invalid}");
+            assert!(Digest::parse(invalid).is_none(), "{invalid}");
         }
     }
 }

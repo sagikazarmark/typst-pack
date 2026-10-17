@@ -13,16 +13,13 @@ use std::io::Write as _;
 
 use futures_util::StreamExt as _;
 use opendal::{ErrorKind, Operator};
+use typst_pack::archive::{DecodeLimits, decode, encode};
 use typst_pack::opendal::{
     Error, FontSource, PackageRead, PackageSource, WriteOutcome, WritePolicy, insert_package,
-    read_fonts, read_pack_archive, read_package, read_project, write_pack_archive,
-    write_pack_extraction_plan, write_package_archive,
+    read_archive, read_fonts, read_package, read_project, write_archive, write_extraction,
+    write_package_archive,
 };
-use typst_pack::pack_archive::{DecodeLimits, decode, encode};
-use typst_pack::{
-    FontDisposition, Pack, PackExtractionSelection, PackageCatalog, PackageDisposition,
-    PackageReadFailures, ReadLimits, plan_pack_extraction,
-};
+use typst_pack::{Pack, ProjectSnapshot, ReadLimits, create, extract};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires the pinned MinIO Compose fixture"]
@@ -79,9 +76,8 @@ async fn conditional_create_preserves_existing_bytes(admin: &Operator) {
             .file("main.typ", b"= Conflict".to_vec())
             .build()
             .unwrap(),
-    )
-    .unwrap();
-    let error = write_pack_archive(admin, path, &archive, WritePolicy::CreateOrVerify)
+    );
+    let error = write_archive(admin, path, &archive, WritePolicy::CreateOrVerify)
         .await
         .unwrap_err();
     assert!(matches!(error.error, Error::Conflict { .. }));
@@ -146,15 +142,15 @@ async fn paginated_font_read_reaches_the_second_page(admin: &Operator) {
         .unwrap();
     let sources = [FontSource {
         prefix: "fonts/paged/".into(),
-        disposition: FontDisposition::External,
+        embedded: false,
     }];
 
     let catalog = read_fonts(admin, &sources, &ReadLimits::default())
         .await
         .unwrap();
 
-    assert_eq!(catalog.entries().len(), 1);
-    assert_eq!(catalog.entries()[0].container().data(), font);
+    assert_eq!(catalog.len(), 1);
+    assert_eq!(catalog[0].container.data(), font);
 }
 
 async fn package_registry_read_validates_then_populates_cache(admin: &Operator) {
@@ -181,17 +177,9 @@ async fn package_registry_read_validates_then_populates_cache(admin: &Operator) 
         .await
         .unwrap();
     assert_eq!(read, PackageRead::RegistryArchive(archive.clone()));
-    let mut catalog = PackageCatalog::new();
-    let mut failures = PackageReadFailures::new();
-    insert_package(
-        &mut catalog,
-        &mut failures,
-        &spec,
-        read,
-        PackageDisposition::External,
-        ReadLimits::DEFAULT,
-    )
-    .unwrap();
+    let project = ProjectSnapshot::new("main.typ", [("main.typ", "")]).unwrap();
+    let mut request = create::Request::new(project);
+    insert_package(&mut request, &spec, read, false, ReadLimits::default()).unwrap();
     let outcome = write_package_archive(admin, "packages/cache/", &spec, &archive)
         .await
         .unwrap();
@@ -208,20 +196,18 @@ async fn pack_archive_write_and_read_preserve_exact_bytes(admin: &Operator) {
         .file("main.typ", b"= Archive".to_vec())
         .build()
         .unwrap();
-    let archive = encode(&pack).unwrap();
+    let archive = encode(&pack);
     let path = "archives/document.typk";
     for expected in [WriteOutcome::Created, WriteOutcome::AlreadyMatching] {
-        let outcome = write_pack_archive(admin, path, &archive, WritePolicy::CreateOrVerify)
+        let outcome = write_archive(admin, path, &archive, WritePolicy::CreateOrVerify)
             .await
             .unwrap();
         assert_eq!(outcome, expected);
     }
 
-    let read = read_pack_archive(admin, path, 512 * 1024 * 1024)
-        .await
-        .unwrap();
+    let read = read_archive(admin, path, 512 * 1024 * 1024).await.unwrap();
     assert_eq!(read.as_slice(), archive.as_slice());
-    let decoded = decode(&read, DecodeLimits::DEFAULT).unwrap();
+    let decoded = decode(&read, DecodeLimits::default()).unwrap();
     assert_eq!(decoded.identity(), pack.identity());
 }
 
@@ -230,7 +216,7 @@ async fn authorization_and_partial_write_evidence(admin: &Operator, partial: &Op
         .write("authorization/secret.typk", b"secret".to_vec())
         .await
         .unwrap();
-    let error = read_pack_archive(partial, "authorization/secret.typk", 1024)
+    let error = read_archive(partial, "authorization/secret.typk", 1024)
         .await
         .unwrap_err();
     assert!(
@@ -247,8 +233,8 @@ async fn authorization_and_partial_write_evidence(admin: &Operator, partial: &Op
         .file("assets/logo.bin", b"logo".to_vec())
         .build()
         .unwrap();
-    let plan = plan_pack_extraction(&pack, PackExtractionSelection::default()).unwrap();
-    let error = write_pack_extraction_plan(
+    let plan = extract::plan(&pack, extract::Selection::default()).unwrap();
+    let error = write_extraction(
         partial,
         "publication/partial/",
         &plan,

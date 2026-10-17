@@ -19,7 +19,8 @@ use typst_kit::diagnostics::DiagnosticFormat;
 use typst_kit::diagnostics::termcolor::{
     Color, ColorChoice, ColorSpec, StandardStream, WriteColor,
 };
-use typst_pack::{CompileOptions, DocumentTime, FilesystemPacker, Input, Sources};
+use typst_pack::compile::{DocumentTime, Input, Options};
+use typst_pack::{Sources, fs};
 
 use crate::cli::{Cli, Command, CompilationArgs, FontArgs, PackageArgs};
 
@@ -159,7 +160,7 @@ fn initialize_jobs(jobs: Option<usize>) {
 fn compile_options(
     args: &CompilationArgs,
     document_time: DocumentTime,
-) -> Result<(CompileOptions, Vec<PathBuf>), Failure> {
+) -> Result<(Options, Vec<PathBuf>), Failure> {
     let mut inputs = args
         .inputs
         .iter()
@@ -172,7 +173,7 @@ fn compile_options(
         inputs.push((key.clone(), Input::Bytes(data)));
         files.push(path.clone());
     }
-    let options = CompileOptions {
+    let options = Options {
         inputs,
         document_time,
         features: args.features.clone(),
@@ -181,23 +182,17 @@ fn compile_options(
 }
 
 /// The host fonts and packages the arguments select.
-fn packer(fonts: &FontArgs, packages: &PackageArgs, cert: Option<PathBuf>) -> FilesystemPacker {
-    let mut packer = FilesystemPacker::new()
-        .system_fonts(!fonts.ignore_system_fonts)
-        .typst_embedded_fonts(!fonts.ignore_embedded_fonts);
-    for path in &fonts.font_paths {
-        packer = packer.font_path(path);
+fn packer(fonts: &FontArgs, packages: &PackageArgs, cert: Option<PathBuf>) -> fs::Packer {
+    fs::Packer {
+        font_paths: fonts.font_paths.clone(),
+        system_fonts: !fonts.ignore_system_fonts,
+        typst_embedded_fonts: !fonts.ignore_embedded_fonts,
+        package_path: packages.package_path.clone(),
+        package_cache_path: packages.package_cache_path.clone(),
+        download_packages: !packages.offline,
+        certificate: cert,
+        ..fs::Packer::default()
     }
-    if let Some(path) = &packages.package_path {
-        packer = packer.package_path(path);
-    }
-    if let Some(path) = &packages.package_cache_path {
-        packer = packer.package_cache_path(path);
-    }
-    if !packages.offline {
-        packer = packer.download_packages(cert);
-    }
-    packer
 }
 
 /// Performance timing of one command, as Typst's `--timings` records it.

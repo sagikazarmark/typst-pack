@@ -11,16 +11,14 @@ mod fonts;
 use faults::{Faults, block_on};
 use opendal::{ErrorKind, Operator};
 use typst::syntax::package::PackageSpec;
+use typst_pack::archive::{DecodeLimits, decode, encode};
+use typst_pack::compile::{Artifact, Output, OutputFormat};
 use typst_pack::opendal::{
-    Error, FontSource, PackageRead, PackageSource, WriteOutcome, WritePolicy, read_fonts,
-    read_pack_archive, read_package, read_project, write_compilation_artifacts, write_pack_archive,
-    write_pack_extraction_plan, write_package_archive,
+    Error, PackageRead, PackageSource, WriteOutcome, WritePolicy, read_archive, read_package,
+    read_project, write_archive, write_artifacts, write_extraction, write_package_archive,
 };
-use typst_pack::pack_archive::{DecodeLimits, decode, encode};
-use typst_pack::{
-    Artifact, CompileRequest, FontDisposition, Output, OutputFormat, Pack, PackExtractionSelection,
-    ReadLimits, compile, plan_pack_extraction,
-};
+use typst_pack::{Pack, ReadLimits};
+use typst_pack::{compile, extract};
 
 fn memory() -> Operator {
     Operator::new(opendal::services::Memory::default()).unwrap()
@@ -87,7 +85,7 @@ fn project_read_from_the_root_and_snapshot_validation() {
     assert_eq!(project.file("main.typ"), Some(b"= Root".as_slice()));
 
     let missing = block_on(read_project(&op, "", "absent.typ", &ReadLimits::default()));
-    assert!(matches!(missing, Err(Error::Project(_))), "{missing:?}");
+    assert!(matches!(missing, Err(Error::Invalid(_))), "{missing:?}");
 }
 
 #[test]
@@ -106,7 +104,7 @@ fn malformed_prefixes_and_keys_are_rejected_before_storage_access() {
         );
     }
     for key in ["", "pack.typk/", "/pack.typk", "a/../pack.typk"] {
-        let result = block_on(read_pack_archive(&op, key, 1024));
+        let result = block_on(read_archive(&op, key, 1024));
         assert!(matches!(result, Err(Error::InvalidPath { .. })), "{key:?}");
     }
 }
@@ -152,7 +150,7 @@ fn every_read_limit_is_enforced() {
 
     put(&op, "pack.typk", vec![0; 11]);
     assert!(matches!(
-        block_on(read_pack_archive(&op, "pack.typk", 10)),
+        block_on(read_archive(&op, "pack.typk", 10)),
         Err(Error::Limit { .. })
     ));
 }
@@ -160,6 +158,8 @@ fn every_read_limit_is_enforced() {
 #[cfg(feature = "embedded-fonts")]
 #[test]
 fn font_read_selects_containers_case_insensitively_in_source_order() {
+    use typst_pack::opendal::{FontSource, read_fonts};
+
     let op = memory();
     let font = fonts::typst_container();
     put(&op, "fonts/a/one.TTF", font.clone());
@@ -169,29 +169,21 @@ fn font_read_selects_containers_case_insensitively_in_source_order() {
     let sources = [
         FontSource {
             prefix: "fonts/b/".into(),
-            disposition: FontDisposition::Embedded,
+            embedded: true,
         },
         FontSource {
             prefix: "fonts/a/".into(),
-            disposition: FontDisposition::External,
+            embedded: false,
         },
     ];
 
     let catalog = block_on(read_fonts(&op, &sources, &ReadLimits::default())).unwrap();
 
     let dispositions = catalog
-        .entries()
         .iter()
-        .map(|entry| entry.disposition())
+        .map(|entry| entry.embedded)
         .collect::<Vec<_>>();
-    assert_eq!(
-        dispositions,
-        [
-            FontDisposition::Embedded,
-            FontDisposition::External,
-            FontDisposition::External
-        ]
-    );
+    assert_eq!(dispositions, [true, false, false]);
 
     put(&op, "fonts/a/broken.ttf", "not a font");
     let error = block_on(read_fonts(&op, &sources, &ReadLimits::default())).unwrap_err();
@@ -297,25 +289,15 @@ fn a_failing_source_stops_package_fallback() {
 
 #[cfg(feature = "package-reading")]
 #[test]
-fn inserting_a_read_package_updates_catalog_and_failures() {
+fn inserting_a_read_package_updates_the_request_packages_and_failures() {
     use typst_pack::opendal::insert_package;
-    use typst_pack::{
-        PackageCatalog, PackageDisposition, PackageReadFailure, PackageReadFailureReason,
-        PackageReadFailures, ReadLimits,
-    };
+    use typst_pack::{ProjectSnapshot, create, package};
 
-    let mut catalog = PackageCatalog::new();
-    let mut failures = PackageReadFailures::new();
+    let project = ProjectSnapshot::new("main.typ", [("main.typ", "")]).unwrap();
+    let mut request = create::Request::new(project);
     let tree_spec = spec("@local/tree:1.0.0");
     let mut insert = |spec: &PackageSpec, read| {
-        insert_package(
-            &mut catalog,
-            &mut failures,
-            spec,
-            read,
-            PackageDisposition::Embedded,
-            ReadLimits::DEFAULT,
-        )
+        insert_package(&mut request, spec, read, true, ReadLimits::default())
     };
 
     insert(&spec("@local/gone:1.0.0"), PackageRead::Unavailable).unwrap();
@@ -333,45 +315,34 @@ fn inserting_a_read_package_updates_catalog_and_failures() {
     );
     assert!(invalid_tree.is_err());
 
-    failures.insert(PackageReadFailure::new(
-        tree_spec.clone(),
-        PackageReadFailureReason::NotFound,
-    ));
+    request
+        .package_failures
+        .insert(tree_spec.clone(), package::ReadFailure::NotFound);
+    let tree = PackageRead::Tree(vec![
+        ("typst.toml".into(), package_manifest("tree").into_bytes()),
+        ("lib.typ".into(), b"#let x = 1".to_vec()),
+    ]);
     insert_package(
-        &mut catalog,
-        &mut failures,
+        &mut request,
         &tree_spec,
-        PackageRead::Tree(vec![
-            ("typst.toml".into(), package_manifest("tree").into_bytes()),
-            ("lib.typ".into(), b"#let x = 1".to_vec()),
-        ]),
-        PackageDisposition::External,
-        ReadLimits::DEFAULT,
+        tree.clone(),
+        false,
+        ReadLimits::default(),
     )
     .unwrap();
 
-    assert!(catalog.get(&tree_spec).is_some());
-    let reasons = failures
-        .entries()
-        .map(|failure| (failure.spec().to_string(), failure.reason().clone()))
-        .collect::<Vec<_>>();
-    assert!(reasons.contains(&(
-        "@local/gone:1.0.0".into(),
-        PackageReadFailureReason::NotFound
-    )));
-    assert!(reasons.contains(&(
-        "@preview/bad:1.0.0".into(),
-        PackageReadFailureReason::MalformedArchive { detail: None }
-    )));
-    assert!(
-        reasons
-            .iter()
-            .any(|(spec, _)| spec == "@local/no-manifest:1.0.0")
+    // The tree is cataloged: inserting it again is a duplicate.
+    assert!(insert_package(&mut request, &tree_spec, tree, false, ReadLimits::default()).is_err());
+    let failures = &request.package_failures;
+    assert_eq!(
+        failures.get(&spec("@local/gone:1.0.0")),
+        Some(&package::ReadFailure::NotFound)
     );
-    assert!(
-        failures.get(&tree_spec).is_none(),
-        "success clears a stale failure"
+    assert_eq!(
+        failures.get(&spec("@preview/bad:1.0.0")),
+        Some(&package::ReadFailure::MalformedArchive(None))
     );
+    assert!(failures.contains_key(&spec("@local/no-manifest:1.0.0")));
 }
 
 #[test]
@@ -430,8 +401,8 @@ fn a_failed_object_read_names_the_object() {
 fn pack_archives_round_trip_under_both_policies() {
     let op = memory();
     let pack = sample_pack();
-    let archive = encode(&pack).unwrap();
-    let write = |policy| block_on(write_pack_archive(&op, "out/sample.typk", &archive, policy));
+    let archive = encode(&pack);
+    let write = |policy| block_on(write_archive(&op, "out/sample.typk", &archive, policy));
 
     assert_eq!(
         write(WritePolicy::CreateOrVerify).unwrap(),
@@ -446,12 +417,12 @@ fn pack_archives_round_trip_under_both_policies() {
         WriteOutcome::Written
     );
 
-    let read = block_on(read_pack_archive(&op, "out/sample.typk", 1 << 20)).unwrap();
+    let read = block_on(read_archive(&op, "out/sample.typk", 1 << 20)).unwrap();
     assert_eq!(read.as_slice(), archive.as_slice());
-    let decoded = decode(&read, DecodeLimits::DEFAULT).unwrap();
+    let decoded = decode(&read, DecodeLimits::default()).unwrap();
     assert_eq!(decoded.identity(), pack.identity());
 
-    let absent = block_on(read_pack_archive(&op, "out/absent.typk", 1 << 20));
+    let absent = block_on(read_archive(&op, "out/absent.typk", 1 << 20));
     assert!(
         matches!(&absent, Err(Error::Storage { source, .. }) if source.kind() == ErrorKind::NotFound),
         "{absent:?}"
@@ -461,12 +432,12 @@ fn pack_archives_round_trip_under_both_policies() {
 #[test]
 fn create_or_verify_refuses_different_bytes_without_writing() {
     let op = memory();
-    let pack = encode(&sample_pack()).unwrap();
+    let pack = encode(&sample_pack());
     // Same length with different bytes needs a comparison; a different
     // length conflicts on the advertised size alone.
     for existing in [vec![0; pack.as_slice().len()], b"short".to_vec()] {
         put(&op, "out.typk", existing.clone());
-        let error = block_on(write_pack_archive(
+        let error = block_on(write_archive(
             &op,
             "out.typk",
             &pack,
@@ -484,7 +455,7 @@ fn empty_objects_are_created_verified_and_read() {
     let op = memory();
     let empty = Vec::<u8>::new();
     for expected in [WriteOutcome::Created, WriteOutcome::AlreadyMatching] {
-        let outcome = block_on(write_pack_archive(
+        let outcome = block_on(write_archive(
             &op,
             "empty.typk",
             &empty,
@@ -492,17 +463,17 @@ fn empty_objects_are_created_verified_and_read() {
         ));
         assert_eq!(outcome.unwrap(), expected);
     }
-    let read = block_on(read_pack_archive(&op, "empty.typk", 0)).unwrap();
+    let read = block_on(read_archive(&op, "empty.typk", 0)).unwrap();
     assert!(read.as_slice().is_empty());
 }
 
 #[test]
 fn create_or_verify_checks_every_key_before_creating_any() {
     let op = memory();
-    let plan = plan_pack_extraction(&sample_pack(), PackExtractionSelection::default()).unwrap();
+    let plan = extract::plan(&sample_pack(), extract::Selection::default()).unwrap();
     put(&op, "out/main.typ", "conflicting");
 
-    let error = block_on(write_pack_extraction_plan(
+    let error = block_on(write_extraction(
         &op,
         "out/",
         &plan,
@@ -518,8 +489,8 @@ fn create_or_verify_checks_every_key_before_creating_any() {
 #[test]
 fn extraction_writes_replay_as_already_matching() {
     let op = memory();
-    let plan = plan_pack_extraction(&sample_pack(), PackExtractionSelection::default()).unwrap();
-    let write = |policy| block_on(write_pack_extraction_plan(&op, "out/", &plan, policy)).unwrap();
+    let plan = extract::plan(&sample_pack(), extract::Selection::default()).unwrap();
+    let write = |policy| block_on(write_extraction(&op, "out/", &plan, policy)).unwrap();
 
     let created = write(WritePolicy::CreateOrVerify);
     assert_eq!(
@@ -544,14 +515,13 @@ fn extraction_writes_replay_as_already_matching() {
 
 #[test]
 fn a_write_failure_reports_the_completed_prefix_and_indeterminate_effect() {
-    let plan = plan_pack_extraction(&sample_pack(), PackExtractionSelection::default()).unwrap();
+    let plan = extract::plan(&sample_pack(), extract::Selection::default()).unwrap();
     for policy in [WritePolicy::Overwrite, WritePolicy::CreateOrVerify] {
         let op = memory();
         let (faulty, faults) = Faults::wrap(&op);
         faults.fail_write("out/main.typ");
 
-        let error =
-            block_on(write_pack_extraction_plan(&faulty, "out/", &plan, policy)).unwrap_err();
+        let error = block_on(write_extraction(&faulty, "out/", &plan, policy)).unwrap_err();
 
         assert_eq!(error.completed.len(), 1, "{policy:?}");
         assert_eq!(error.completed[0].0, "out/assets/logo.bin");
@@ -560,7 +530,7 @@ fn a_write_failure_reports_the_completed_prefix_and_indeterminate_effect() {
 
         // Replaying with CreateOrVerify after the fault clears completes the
         // already written prefix as matching.
-        let replay = block_on(write_pack_extraction_plan(
+        let replay = block_on(write_extraction(
             &op,
             "out/",
             &plan,
@@ -575,12 +545,12 @@ fn a_write_failure_reports_the_completed_prefix_and_indeterminate_effect() {
 fn a_lost_conditional_create_race_is_verified() {
     let op = memory();
     let (faulty, faults) = Faults::wrap(&op);
-    let archive = encode(&sample_pack()).unwrap();
+    let archive = encode(&sample_pack());
 
     // Another writer created matching bytes after the preflight check.
     put(&op, "matching.typk", archive.as_slice().to_vec());
     faults.stale_stat_once("matching.typk");
-    let outcome = block_on(write_pack_archive(
+    let outcome = block_on(write_archive(
         &faulty,
         "matching.typk",
         &archive,
@@ -591,7 +561,7 @@ fn a_lost_conditional_create_race_is_verified() {
     // ... or different bytes, which are kept.
     put(&op, "different.typk", "theirs");
     faults.stale_stat_once("different.typk");
-    let error = block_on(write_pack_archive(
+    let error = block_on(write_archive(
         &faulty,
         "different.typk",
         &archive,
@@ -607,9 +577,9 @@ fn a_lost_conditional_create_race_is_verified() {
 fn create_or_verify_requires_conditional_create() {
     let (faulty, faults) = Faults::wrap(&memory());
     faults.hide_conditional_create();
-    let archive = encode(&sample_pack()).unwrap();
+    let archive = encode(&sample_pack());
 
-    let error = block_on(write_pack_archive(
+    let error = block_on(write_archive(
         &faulty,
         "out.typk",
         &archive,
@@ -621,7 +591,7 @@ fn create_or_verify_requires_conditional_create() {
         "{error:?}"
     );
 
-    let written = block_on(write_pack_archive(
+    let written = block_on(write_archive(
         &faulty,
         "out.typk",
         &archive,
@@ -656,7 +626,7 @@ fn compilation_artifacts_are_written_at_validated_keys() {
     let op = memory();
     let result = two_page_result();
     let write = |keys: &[&str]| {
-        block_on(write_compilation_artifacts(
+        block_on(write_artifacts(
             &op,
             "pages/",
             &result,
@@ -703,7 +673,7 @@ fn compilation_result(source: &str) -> Vec<Artifact> {
         .file("main.typ", source.as_bytes().to_vec())
         .build()
         .unwrap();
-    compile(&CompileRequest::new(pack, Output::new(OutputFormat::Svg)))
+    compile(&compile::Request::new(pack, Output::new(OutputFormat::Svg)))
         .unwrap()
         .artifacts
 }
@@ -712,13 +682,13 @@ fn compilation_result(source: &str) -> Vec<Artifact> {
 
 #[cfg(feature = "package-reading")]
 mod assembly {
-    use typst_pack::CreateError;
-    use typst_pack::opendal::{Error, OpenDalPackAssembler, Operator, PackageSource};
+    use typst_pack::create;
+    use typst_pack::opendal::{Assembler, Error, Operator, PackageSource};
 
     use super::{block_on, memory, package_manifest, put};
 
-    fn assembler(op: &Operator) -> OpenDalPackAssembler {
-        let mut assembler = OpenDalPackAssembler::new(op.clone(), "doc/", "main.typ");
+    fn assembler(op: &Operator) -> Assembler {
+        let mut assembler = Assembler::new(op.clone(), "doc/", "main.typ");
         assembler.packages = vec![
             PackageSource::Trees {
                 operator: op.clone(),
@@ -802,8 +772,8 @@ mod assembly {
         let error = block_on(assembler(&op).assemble()).unwrap_err();
 
         match error {
-            Error::Creation(error) => match *error {
-                CreateError::Failed { errors, .. } => assert!(!errors.is_empty()),
+            Error::Create(error) => match *error {
+                create::Error::Failed { errors, .. } => assert!(!errors.is_empty()),
                 other => panic!("unexpected {other:?}"),
             },
             other => panic!("unexpected {other:?}"),

@@ -4,28 +4,22 @@
 //! See the README's "Pack format" section for the layout and verification
 //! rules.
 
-mod read;
-mod write;
-
-pub use read::*;
-pub use write::*;
-
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{Cursor, Read, Write};
+use std::io::{self, Cursor, Read, Write};
+#[cfg(feature = "fs")]
+use std::path::Path;
 
-use typst::syntax::package::PackageSpec;
 use zip::ZipWriter;
 use zip::write::SimpleFileOptions;
 
-pub use crate::manifest::{FORMAT_VERSION, MANIFEST_PATH, ManifestError};
-use crate::manifest::{FileEntry, FontEntry, Manifest, PackageEntry};
-use crate::pack::{FontInput, PackInput, PackInvariantError, PackageContent, PackageInput};
+pub use crate::manifest::FORMAT_VERSION;
+use crate::manifest::{FileEntry, FontEntry, MANIFEST_PATH, Manifest, PackageEntry};
+use crate::pack::{FontInput, PackInput, PackageContent, PackageInput, package_member_prefix};
 use crate::paths::canonical_relative_path;
 use crate::payload::SharedBytes;
-use crate::{Digest, LimitExceeded, Pack};
+use crate::project::PROJECT_PREFIX;
+use crate::{Digest, LimitExceeded, Pack, PackError};
 
-const PROJECT_PREFIX: &str = "project/";
-const PACKAGES_PREFIX: &str = "packages/";
 const FONTS_PREFIX: &str = "fonts/";
 
 /// The archive member name of an embedded font container.
@@ -40,29 +34,12 @@ pub(crate) fn font_member_name(digest: &Digest, data: &[u8]) -> String {
     format!("{FONTS_PREFIX}{}.{extension}", digest.to_hex())
 }
 
-fn package_member_prefix(spec: &PackageSpec) -> String {
-    format!(
-        "{PACKAGES_PREFIX}{}/{}/{}/",
-        spec.namespace, spec.name, spec.version
-    )
-}
-
-/// A Pack that cannot be represented as a ZIP archive.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum EncodeError {
-    #[error("archive member name {0:?} exceeds the 65535-byte ZIP limit")]
-    MemberNameTooLong(String),
-    #[error("failed to write ZIP structure: {0}")]
-    Zip(#[from] zip::result::ZipError),
-}
-
-/// Encodes a [`Pack`] as archive bytes.
+/// Encodes a pack as archive bytes.
 ///
 /// The output is deterministic for a given build: members are written in a
 /// fixed order with a fixed timestamp (1980-01-01), permissions, and
 /// compression level.
-pub fn encode(pack: &Pack) -> Result<Vec<u8>, EncodeError> {
+pub fn encode(pack: &Pack) -> Vec<u8> {
     let manifest = Manifest {
         format_version: FORMAT_VERSION,
         typst_version: env!("TYPST_PACK_ENGINE_VERSION").to_owned(),
@@ -96,50 +73,59 @@ pub fn encode(pack: &Pack) -> Result<Vec<u8>, EncodeError> {
         metadata: pack.metadata().cloned(),
     };
 
+    // Pack validation keeps every member name within the ZIP limit, and
+    // writing to memory cannot fail.
     let mut zip = ZipWriter::new(Cursor::new(Vec::new()));
-    add_member(
-        &mut zip,
-        MANIFEST_PATH.to_owned(),
-        manifest.to_toml().as_bytes(),
-    )?;
+    let mut add = |name: String, data: &[u8]| {
+        // Deflate may expand incompressible input; nine bits per byte plus
+        // framing bounds the compressed size.
+        let bound = data.len() as u64 + (data.len() as u64).div_ceil(8) + 16;
+        let options = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated)
+            .compression_level(Some(6))
+            .last_modified_time(zip::DateTime::DEFAULT)
+            .system(zip::System::Unix)
+            .unix_permissions(0o644)
+            .large_file(bound > zip::ZIP64_BYTES_THR);
+        zip.start_file(name, options)
+            .expect("a validated pack has unique, short member names");
+        zip.write_all(data).expect("writing to memory cannot fail");
+    };
+    add(MANIFEST_PATH.to_owned(), manifest.to_toml().as_bytes());
     for (path, data) in pack.files() {
-        add_member(&mut zip, format!("{PROJECT_PREFIX}{path}"), data)?;
+        add(format!("{PROJECT_PREFIX}{path}"), data);
     }
-    for (spec, files) in pack.packages() {
+    for (spec, tree) in pack.packages() {
         let prefix = package_member_prefix(spec);
-        for (path, data) in files {
-            add_member(&mut zip, format!("{prefix}{path}"), data)?;
+        for (path, data) in tree.files() {
+            add(format!("{prefix}{path}"), data);
         }
     }
     for requirement in pack.font_requirements() {
         if let Some(data) = pack.font_data(&requirement.digest) {
-            add_member(&mut zip, font_member_name(&requirement.digest, data), data)?;
+            add(font_member_name(&requirement.digest, data), data);
         }
     }
-    Ok(zip.finish()?.into_inner())
+    zip.finish()
+        .expect("writing to memory cannot fail")
+        .into_inner()
 }
 
-fn add_member(
-    zip: &mut ZipWriter<Cursor<Vec<u8>>>,
-    name: String,
-    data: &[u8],
-) -> Result<(), EncodeError> {
-    if name.len() > usize::from(u16::MAX) {
-        return Err(EncodeError::MemberNameTooLong(name));
-    }
-    // Deflate may expand incompressible input; nine bits per byte plus framing
-    // bounds the compressed size.
-    let bound = data.len() as u64 + (data.len() as u64).div_ceil(8) + 16;
-    let options = SimpleFileOptions::default()
-        .compression_method(zip::CompressionMethod::Deflated)
-        .compression_level(Some(6))
-        .last_modified_time(zip::DateTime::DEFAULT)
-        .system(zip::System::Unix)
-        .unix_permissions(0o644)
-        .large_file(bound > zip::ZIP64_BYTES_THR);
-    zip.start_file(name, options)?;
-    zip.write_all(data).map_err(zip::result::ZipError::Io)?;
-    Ok(())
+/// Encodes a pack and writes it to a stream, then flushes the stream.
+pub fn write(mut writer: impl Write, pack: &Pack) -> io::Result<()> {
+    writer.write_all(&encode(pack))?;
+    writer.flush()
+}
+
+/// Encodes a pack and writes it to a file through a temporary sibling; see
+/// [`fs::WritePolicy`](crate::fs::WritePolicy).
+#[cfg(feature = "fs")]
+pub fn save(
+    path: impl AsRef<Path>,
+    pack: &Pack,
+    policy: crate::fs::WritePolicy,
+) -> Result<(), crate::fs::WriteError> {
+    crate::fs::write_file(path, &encode(pack), policy)
 }
 
 /// Ceilings for decoding an untrusted pack archive.
@@ -155,61 +141,100 @@ pub struct DecodeLimits {
     pub max_total_bytes: u64,
 }
 
-impl DecodeLimits {
-    /// Ceilings suitable for ordinary packs.
-    pub const DEFAULT: Self = Self {
-        max_archive_bytes: 512 * 1024 * 1024,
-        max_members: 100_000,
-        max_member_bytes: 256 * 1024 * 1024,
-        max_total_bytes: 2 * 1024 * 1024 * 1024,
-    };
-}
-
 impl Default for DecodeLimits {
     fn default() -> Self {
-        Self::DEFAULT
+        Self {
+            max_archive_bytes: 512 * 1024 * 1024,
+            max_members: 100_000,
+            max_member_bytes: 256 * 1024 * 1024,
+            max_total_bytes: 2 * 1024 * 1024 * 1024,
+        }
     }
 }
 
-/// A failure while decoding archive bytes into a [`Pack`].
+/// Archive bytes that could not be read or decoded into a pack.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum DecodeError {
+    /// The archive could not be read from its stream or file.
+    #[error("failed to read pack archive bytes: {0}")]
+    Io(#[from] io::Error),
+    /// A decode limit was exceeded.
     #[error(transparent)]
     Limit(#[from] LimitExceeded),
+    /// The bytes are not a valid ZIP archive.
     #[error("not a valid ZIP archive: {0}")]
     Zip(#[from] zip::result::ZipError),
+    /// A member could not be decompressed.
     #[error("archive member {name:?} could not be read: {source}")]
     UnreadableMember {
         name: String,
         #[source]
-        source: std::io::Error,
+        source: io::Error,
     },
+    /// A member name is not a safe relative path.
     #[error("archive member {0:?} has an unsafe name")]
     UnsafeMemberName(String),
+    /// Two members share one name.
     #[error("archive member {0:?} appears more than once")]
     DuplicateMember(String),
+    /// A member is a link or another special entry.
     #[error("archive member {0:?} is not a regular file or directory")]
     UnsupportedMemberKind(String),
+    /// The archive holds no manifest.
     #[error("the archive contains no {MANIFEST_PATH} manifest (is this a Typst Pack?)")]
     MissingManifest,
-    #[error(transparent)]
-    Manifest(#[from] ManifestError),
+    /// The manifest is not UTF-8.
+    #[error("the {MANIFEST_PATH} manifest is not valid UTF-8")]
+    ManifestNotUtf8,
+    /// The manifest is not valid TOML of the expected shape.
+    #[error("failed to parse the {MANIFEST_PATH} manifest: {0}")]
+    InvalidManifest(#[from] toml::de::Error),
+    /// The manifest declares no format version.
+    #[error("the {MANIFEST_PATH} manifest has no integer `format-version`")]
+    MissingFormatVersion,
+    /// The manifest declares a format version this reader does not implement.
+    #[error("unsupported pack format version {0} (this reader supports version {FORMAT_VERSION})")]
+    UnsupportedVersion(i64),
+    /// A member is not declared by the manifest.
     #[error("archive member {0:?} is not declared by the manifest")]
     UndeclaredMember(String),
+    /// A declared file, package, or font is missing.
     #[error("{0} is declared by the manifest but missing from the archive")]
     MissingMember(String),
+    /// Content does not match the digest the manifest declares.
     #[error("{name} does not match its declared digest {declared} (actual {actual})")]
     DigestMismatch {
         name: String,
         declared: Digest,
         actual: Digest,
     },
+    /// The content does not form a valid pack.
     #[error(transparent)]
-    InvalidPack(#[from] PackInvariantError),
+    InvalidPack(#[from] PackError),
 }
 
-/// Decodes archive bytes into a [`Pack`], verifying every member against the
+/// Reads and decodes a pack from a stream, reading at most
+/// [`DecodeLimits::max_archive_bytes`].
+pub fn read(reader: impl Read, limits: DecodeLimits) -> Result<Pack, DecodeError> {
+    let mut archive = Vec::new();
+    reader
+        .take(limits.max_archive_bytes.saturating_add(1))
+        .read_to_end(&mut archive)?;
+    decode(&archive, limits)
+}
+
+/// Reads and decodes a pack file, refusing a file larger than
+/// [`DecodeLimits::max_archive_bytes`] before reading it.
+#[cfg(feature = "fs")]
+pub fn open(path: impl AsRef<Path>, limits: DecodeLimits) -> Result<Pack, DecodeError> {
+    let file = std::fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    LimitExceeded::check(size, limits.max_archive_bytes, "archive bytes")?;
+    read(file, limits)
+}
+
+/// Decodes archive bytes into a pack, verifying every member against the
 /// digest the manifest declares for it.
 pub fn decode(archive: &[u8], limits: DecodeLimits) -> Result<Pack, DecodeError> {
     LimitExceeded::check(

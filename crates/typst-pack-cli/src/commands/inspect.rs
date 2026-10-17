@@ -1,13 +1,14 @@
 //! `typst-pack inspect`: list what a pack contains.
 
-use typst_pack::FontRequirement;
-use typst_pack::pack_archive::{DecodeLimits, FORMAT_VERSION, open_pack};
+use typst_pack::archive::{self, DecodeLimits, FORMAT_VERSION};
+use typst_pack::font;
 
 use super::CommandResult;
 use crate::cli::InspectArgs;
 
 pub fn run(args: InspectArgs) -> CommandResult {
-    let pack = open_pack(&args.pack, DecodeLimits::DEFAULT)?;
+    let pack = archive::open(&args.pack, DecodeLimits::default())
+        .map_err(|error| format!("cannot open pack `{}`: {error}", args.pack.display()))?;
 
     println!("pack: {}", args.pack.display());
     println!("format version: {FORMAT_VERSION}");
@@ -32,8 +33,8 @@ pub fn run(args: InspectArgs) -> CommandResult {
     let vendored = pack.packages().collect::<Vec<_>>();
     if !vendored.is_empty() {
         println!("\nvendored packages:");
-        for (spec, files) in vendored {
-            let (count, size) = files.fold((0, 0), |(count, size), (_, data)| {
+        for (spec, tree) in vendored {
+            let (count, size) = tree.files().fold((0, 0), |(count, size), (_, data)| {
                 (count + 1, size + data.len())
             });
             println!("  {spec} ({count} files, {})", human_size(size));
@@ -48,7 +49,7 @@ pub fn run(args: InspectArgs) -> CommandResult {
         }
     }
 
-    let line = |requirement: &FontRequirement| {
+    let line = |requirement: &font::Requirement| {
         let faces = requirement.faces.iter().map(ToString::to_string);
         let faces = faces.collect::<Vec<_>>().join("; ");
         format!("  {} - {faces}", requirement.digest)

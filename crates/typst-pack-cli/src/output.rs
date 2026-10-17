@@ -4,9 +4,8 @@ use std::collections::{BTreeSet, HashSet};
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
 
-use typst_pack::{
-    Compiled, OutputFormat, WritePolicy, write_compilation_artifacts_to_filesystem_paths,
-};
+use typst_pack::compile::{Compiled, OutputFormat};
+use typst_pack::fs::{self, WritePolicy};
 
 use crate::cli::DepsFormat;
 
@@ -107,12 +106,8 @@ pub fn write(targets: &[PathBuf], compiled: &Compiled) -> Result<(), String> {
             .write_all(&artifact.bytes)
             .map_err(|error| format!("cannot write output to stdout: {error}"));
     }
-    write_compilation_artifacts_to_filesystem_paths(
-        &compiled.artifacts,
-        targets,
-        WritePolicy::Overwrite,
-    )
-    .map_err(|error| error.to_string())
+    fs::write_artifacts(&compiled.artifacts, targets, WritePolicy::Overwrite)
+        .map_err(|error| error.to_string())
 }
 
 /// Serializes the inputs and outputs of a compilation in one of Typst's

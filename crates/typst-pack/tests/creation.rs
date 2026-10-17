@@ -8,12 +8,9 @@
 use std::str::FromStr;
 
 use typst::syntax::package::PackageSpec;
-use typst_pack::{
-    CreateError, CreateOutcome, CreateRequest, DocumentTime, Input, Pack, PackMetadata,
-    PackageCatalog, PackageCatalogError, PackageCatalogIssue, PackageDisposition,
-    PackageReadFailure, PackageReadFailureReason, PackageTree, PackageTreeIssue, ProjectSnapshot,
-    RequestIssue, TypstTarget, create,
-};
+use typst_pack::compile::{DocumentTime, Input, RequestIssue};
+use typst_pack::{Metadata, PackError, PackIssue, ProjectSnapshot};
+use typst_pack::{create, package};
 
 /// 2023-11-14T22:13:20Z, the Document Time every representative request here
 /// is fixed to.
@@ -29,62 +26,57 @@ fn document(source: &str) -> ProjectSnapshot {
 }
 
 /// Creation of `project` at a fixed document time.
-fn request(project: ProjectSnapshot) -> CreateRequest {
-    let mut request = CreateRequest::new(project);
+fn request(project: ProjectSnapshot) -> create::Request {
+    let mut request = create::Request::new(project);
     request.options.document_time = DocumentTime::UnixTimestamp(CREATION_TIMESTAMP);
     request
 }
 
 /// Chained request setup for the tests below.
 trait Setup {
-    fn packages(self, packages: PackageCatalog) -> Self;
+    fn packages(self, packages: package::Catalog) -> Self;
     #[cfg(feature = "embedded-fonts")]
-    fn fonts(self, fonts: typst_pack::FontCatalog) -> Self;
-    fn failure(self, failure: PackageReadFailure) -> Self;
-    fn metadata(self, metadata: PackMetadata) -> Self;
+    fn fonts(self, fonts: Vec<typst_pack::font::Entry>) -> Self;
+    fn failure(self, spec: PackageSpec, failure: package::ReadFailure) -> Self;
+    fn metadata(self, metadata: Metadata) -> Self;
 }
 
-impl Setup for CreateRequest {
-    fn packages(mut self, packages: PackageCatalog) -> Self {
+impl Setup for create::Request {
+    fn packages(mut self, packages: package::Catalog) -> Self {
         self.packages = packages;
         self
     }
 
     #[cfg(feature = "embedded-fonts")]
-    fn fonts(mut self, fonts: typst_pack::FontCatalog) -> Self {
+    fn fonts(mut self, fonts: Vec<typst_pack::font::Entry>) -> Self {
         self.fonts = fonts;
         self
     }
 
-    fn failure(mut self, failure: PackageReadFailure) -> Self {
-        self.package_failures.insert(failure);
+    fn failure(mut self, spec: PackageSpec, failure: package::ReadFailure) -> Self {
+        self.package_failures.insert(spec, failure);
         self
     }
 
-    fn metadata(mut self, metadata: PackMetadata) -> Self {
+    fn metadata(mut self, metadata: Metadata) -> Self {
         self.metadata = Some(metadata);
         self
     }
 }
 
-struct Created {
-    pack: Pack,
-    warnings: Vec<typst::diag::SourceDiagnostic>,
-}
-
 /// The errors of a creation whose discovery failed.
-fn failed(request: &CreateRequest) -> Vec<typst::diag::SourceDiagnostic> {
+fn failed(request: &create::Request) -> Vec<typst::diag::SourceDiagnostic> {
     match create(request) {
-        Err(CreateError::Failed { errors, .. }) => errors,
+        Err(create::Error::Failed { errors, .. }) => errors,
         other => panic!("expected a failed discovery, got {other:?}"),
     }
 }
 
 /// The Pack of an invocation every tree of which is already supplied.
-fn issue(request: &CreateRequest) -> Created {
+fn issue(request: &create::Request) -> create::Created {
     match create(request).unwrap() {
-        CreateOutcome::Created { pack, warnings, .. } => Created { pack, warnings },
-        CreateOutcome::MissingPackages(missing) => {
+        create::Outcome::Created(created) => created,
+        create::Outcome::MissingPackages(missing) => {
             panic!("every tree was supplied, yet creation reported {missing:?} as missing")
         }
     }
@@ -108,26 +100,26 @@ fn package_files(name: &str, body: &str) -> Vec<(&'static str, Vec<u8>)> {
     ]
 }
 
-type CatalogEntry = (PackageSpec, PackageTree, PackageDisposition);
+type CatalogEntry = (PackageSpec, package::Tree, bool);
 
 fn package_entry(
     spec: PackageSpec,
     files: impl IntoIterator<Item = (&'static str, Vec<u8>)>,
-    disposition: PackageDisposition,
+    embedded: bool,
 ) -> CatalogEntry {
-    (
-        spec,
-        PackageTree::from_owned_entries(files).unwrap(),
-        disposition,
-    )
+    (spec, package::Tree::new(files).unwrap(), embedded)
 }
 
-fn package_catalog(entries: impl IntoIterator<Item = CatalogEntry>) -> PackageCatalog {
-    PackageCatalog::from_entries(entries).unwrap()
+fn package_catalog(entries: impl IntoIterator<Item = CatalogEntry>) -> package::Catalog {
+    let mut catalog = package::Catalog::new();
+    for (spec, tree, embedded) in entries {
+        catalog.insert(spec, tree, embedded).unwrap();
+    }
+    catalog
 }
 
 fn embedded_package(spec: PackageSpec, files: Vec<(&'static str, Vec<u8>)>) -> CatalogEntry {
-    package_entry(spec, files, PackageDisposition::Embedded)
+    package_entry(spec, files, true)
 }
 
 #[test]
@@ -185,7 +177,7 @@ fn discovery_rejection_retains_complete_diagnostics_and_warnings() {
          #context { assert(false, message: \"first rejection\") }\n\
          #context { assert(false, message: \"second rejection\") }",
     );
-    let Err(CreateError::Failed {
+    let Err(create::Error::Failed {
         errors, warnings, ..
     }) = create(&request(snapshot))
     else {
@@ -228,7 +220,7 @@ fn an_out_of_range_creation_timestamp_is_rejected() {
     request.options.document_time = DocumentTime::UnixTimestamp(i64::MAX);
     request.options.features.push(typst::Feature::Bundle);
 
-    let Err(CreateError::InvalidRequest(issues)) = create(&request) else {
+    let Err(create::Error::InvalidRequest(issues)) = create(&request) else {
         panic!("an invalid request was compiled");
     };
     assert_eq!(
@@ -242,9 +234,9 @@ fn an_out_of_range_creation_timestamp_is_rejected() {
 
 #[test]
 fn the_request_is_reusable_and_creation_retains_nothing() {
-    let request = request(document("#rect(width: 5pt, height: 5pt)")).metadata(PackMetadata {
+    let request = request(document("#rect(width: 5pt, height: 5pt)")).metadata(Metadata {
         name: Some("Reused".into()),
-        ..PackMetadata::default()
+        ..Metadata::default()
     });
 
     let first = issue(&request);
@@ -280,7 +272,7 @@ fn the_html_target_enables_the_html_feature_itself() {
     assert!(!failed(&request(document(source))).is_empty());
 
     let mut html = request(document(source));
-    html.target = TypstTarget::Html;
+    html.target = create::Target::Html;
     let issued = issue(&html);
 
     // The target fixes the discovery run only; it does not become Pack state.
@@ -298,7 +290,7 @@ fn variants_union_the_packages_and_fonts_every_input_set_reaches() {
             embedded_package(spec("beta"), package_files("beta", "#let value = 2")),
         ])
     };
-    let required = |request: &CreateRequest| {
+    let required = |request: &create::Request| {
         let pack = issue(request).pack;
         let specs = pack.package_requirements().iter();
         specs
@@ -312,10 +304,10 @@ fn variants_union_the_packages_and_fonts_every_input_set_reaches() {
     assert_eq!(required(&base), ["alpha", "beta"]);
 
     // A package only one variant reaches is reported missing like any other.
-    base.packages = PackageCatalog::new();
+    base.packages = package::Catalog::new();
     assert!(matches!(
         create(&base).unwrap(),
-        CreateOutcome::MissingPackages(missing) if missing == [spec("alpha"), spec("beta")]
+        create::Outcome::MissingPackages(missing) if missing == [spec("alpha"), spec("beta")]
     ));
 
     // A variant that does not compile fails creation.
@@ -345,7 +337,7 @@ fn package_trees_are_supplied_per_specification_with_their_own_disposition() {
         package_entry(
             external.clone(),
             package_files("external", "#let other = 4"),
-            PackageDisposition::External,
+            false,
         ),
         embedded_package(unused.clone(), package_files("unused", "#let unused = 5")),
     ])));
@@ -362,12 +354,26 @@ fn package_trees_are_supplied_per_specification_with_their_own_disposition() {
     );
     assert!(requirements[0].embedded);
     assert!(!requirements[1].embedded);
-    assert!(issued.pack.has_package(&embedded));
-    assert!(!issued.pack.has_package(&external));
-    assert!(!issued.pack.has_package(&unused));
+    assert!(issued.pack.packages().any(|(s, _)| s == &embedded));
+    assert!(!issued.pack.packages().any(|(s, _)| s == &external));
+    assert!(!issued.pack.packages().any(|(s, _)| s == &unused));
     // The whole Package Tree travels, not only the observed files.
-    assert!(issued.pack.package_file(&embedded, "typst.toml").is_some());
-    assert!(issued.pack.package_file(&embedded, "lib.typ").is_some());
+    assert!(
+        issued
+            .pack
+            .packages()
+            .find(|(s, _)| *s == &embedded)
+            .and_then(|(_, t)| t.file("typst.toml"))
+            .is_some()
+    );
+    assert!(
+        issued
+            .pack
+            .packages()
+            .find(|(s, _)| *s == &embedded)
+            .and_then(|(_, t)| t.file("lib.typ"))
+            .is_some()
+    );
 }
 
 #[test]
@@ -380,7 +386,7 @@ fn a_package_no_supplied_tree_covers_is_reported_as_a_resumable_outcome() {
     // A normal outcome, not a failure, and no Pack: the caller resolves what it
     // names and invokes creation again. The specification is the one the
     // compiler asked for, fully versioned, so no diagnostic text is parsed.
-    let CreateOutcome::MissingPackages(missing) = outcome else {
+    let create::Outcome::MissingPackages(missing) = outcome else {
         panic!("the package no tree covers is reported, not packed");
     };
     assert_eq!(
@@ -401,7 +407,7 @@ fn missing_package_specifications_are_nonempty_deduplicated_and_canonical() {
     );
     let request = request(snapshot);
 
-    let CreateOutcome::MissingPackages(missing) = create(&request).unwrap() else {
+    let create::Outcome::MissingPackages(missing) = create(&request).unwrap() else {
         panic!("missing package trees must produce a resumable outcome");
     };
 
@@ -431,7 +437,7 @@ fn resolvable(spec: &PackageSpec) -> CatalogEntry {
 /// Drives the resume protocol to an issued Pack, returning it with the trees
 /// the loop resolved. Every round builds fresh Pack Creation input from the same
 /// values, as a caller resuming across a host request boundary must.
-fn resume(source: &str) -> (Created, Vec<CatalogEntry>) {
+fn resume(source: &str) -> (create::Created, Vec<CatalogEntry>) {
     let mut resolved: Vec<CatalogEntry> = Vec::new();
     // Bounded so that a loop making no progress fails instead of hanging; the
     // number of rounds it actually takes is not asserted.
@@ -439,10 +445,8 @@ fn resume(source: &str) -> (Created, Vec<CatalogEntry>) {
         let request = request(document(source)).packages(package_catalog(resolved.iter().cloned()));
         let outcome = create(&request).unwrap();
         match outcome {
-            CreateOutcome::Created { pack, warnings, .. } => {
-                return (Created { pack, warnings }, resolved);
-            }
-            CreateOutcome::MissingPackages(missing) => {
+            create::Outcome::Created(created) => return (created, resolved),
+            create::Outcome::MissingPackages(missing) => {
                 assert!(
                     !missing.is_empty(),
                     "a missing outcome names a specification"
@@ -488,13 +492,8 @@ fn a_resumed_creation_issues_the_pack_one_invocation_would_have() {
 #[test]
 fn a_specification_declared_unresolvable_fails_the_request_that_needed_it() {
     let source = "#import \"@local/first:1.0.0\": first\n#first";
-    let failure = PackageReadFailure::new(
-        spec("first"),
-        PackageReadFailureReason::NetworkFailed {
-            detail: Some("connection refused".to_owned()),
-        },
-    );
-    let errors = failed(&request(document(source)).failure(failure));
+    let failure = package::ReadFailure::NetworkFailed(Some("connection refused".to_owned()));
+    let errors = failed(&request(document(source)).failure(spec("first"), failure));
 
     // The caller's own reason reaches the import that asked for the package,
     // which is the only place it and a source location can meet.
@@ -511,10 +510,7 @@ fn a_specification_declared_unresolvable_fails_the_request_that_needed_it() {
 #[test]
 fn a_declared_specification_is_no_longer_reported_as_missing() {
     let source = "#import \"@local/first:1.0.0\": first\n#first";
-    let request = request(document(source)).failure(PackageReadFailure::new(
-        spec("first"),
-        PackageReadFailureReason::NotFound,
-    ));
+    let request = request(document(source)).failure(spec("first"), package::ReadFailure::NotFound);
 
     // Reporting it again would ask the caller for what it said it cannot
     // supply, which is a loop that never progresses.
@@ -526,38 +522,33 @@ fn a_tree_supplied_for_a_declared_specification_takes_precedence() {
     let source = "#import \"@local/first:1.0.0\": first\n#rect(width: first * 1pt, height: 1pt)";
     let issued = issue(
         &request(document(source))
-            .failure(PackageReadFailure::new(
-                spec("first"),
-                PackageReadFailureReason::NotFound,
-            ))
+            .failure(spec("first"), package::ReadFailure::NotFound)
             .packages(package_catalog([embedded_package(
                 spec("first"),
                 package_files("first", "#let first = 1"),
             )])),
     );
 
-    assert!(issued.pack.has_package(&spec("first")));
+    assert!(issued.pack.packages().any(|(s, _)| s == &spec("first")));
 }
 
-/// Creates over one tree supplied for `@local/declared:1.0.0`, which the
-/// document imports, and returns the failure that tree produced.
-fn declared_tree_failure(files: Vec<(&'static str, Vec<u8>)>) -> PackageCatalogError {
-    PackageCatalog::from_entries([embedded_package(spec("declared"), files)]).unwrap_err()
+/// Catalogs one tree supplied for `@local/declared:1.0.0`, and returns the
+/// failure that tree produced.
+fn declared_tree_failure(files: Vec<(&'static str, Vec<u8>)>) -> PackError {
+    let tree = package::Tree::new(files).unwrap();
+    package::Catalog::new()
+        .insert(spec("declared"), tree, true)
+        .unwrap_err()
 }
 
 /// Whether the failure is the distinct one a tree that does not declare its
 /// specification produces, rather than a missing-package outcome or a compile
 /// failure.
-fn is_mismatched_declared_tree(error: &PackageCatalogError) -> bool {
-    error.issues().iter().any(|issue| {
+fn is_mismatched_declared_tree(error: &PackError) -> bool {
+    error.issues.iter().any(|issue| {
         matches!(
             issue,
-            PackageCatalogIssue::MissingDeclaration { spec: reported }
-                | PackageCatalogIssue::DeclarationNotUtf8 { spec: reported }
-                | PackageCatalogIssue::MalformedDeclaration { spec: reported, .. }
-                | PackageCatalogIssue::MismatchedName { spec: reported, .. }
-                | PackageCatalogIssue::MismatchedVersion { spec: reported, .. }
-                if reported == &spec("declared")
+            PackIssue::InvalidDeclaration { spec: reported, .. } if reported == &spec("declared")
         )
     })
 }
@@ -592,17 +583,17 @@ fn a_tree_the_representative_request_never_reads_is_checked_too() {
     // exactly as a package path that cannot be represented is.
     let unread = spec("unread");
 
-    let error = PackageCatalog::from_entries([embedded_package(
-        unread.clone(),
-        package_files("other", "#let value = 1"),
-    )])
-    .unwrap_err();
+    let tree = package::Tree::new(package_files("other", "#let value = 1")).unwrap();
+    let error = package::Catalog::new()
+        .insert(unread.clone(), tree, true)
+        .unwrap_err();
 
-    assert!(
-        error.issues().iter().any(
-            |issue| matches!(issue, PackageCatalogIssue::MismatchedName { spec, .. } if spec == &unread)
-        ),
-        "{error}"
+    assert_eq!(
+        error.issues,
+        [PackIssue::InvalidDeclaration {
+            spec: unread,
+            message: "declares the name \"other\"".to_owned()
+        }]
     );
 }
 
@@ -636,7 +627,7 @@ fn a_tree_declaring_its_specification_is_accepted_whatever_else_it_declares() {
         &request(snapshot).packages(package_catalog([embedded_package(declared.clone(), files)])),
     );
 
-    assert!(issued.pack.has_package(&declared));
+    assert!(issued.pack.packages().any(|(s, _)| s == &declared));
 }
 
 #[test]
@@ -654,28 +645,26 @@ fn a_supplied_tree_whose_declaration_cannot_be_read_fails_creation() {
 
 #[test]
 fn a_supplied_tree_path_that_cannot_name_a_package_file_is_rejected() {
-    let error = PackageTree::from_owned_entries([("../escape.typ", b"nope".to_vec())]).unwrap_err();
+    let error = package::Tree::new([("../escape.typ", b"nope".to_vec())]).unwrap_err();
 
     assert!(
-        error.issues().iter().any(
-            |issue| matches!(issue, PackageTreeIssue::InvalidPath { path, .. }
-                if path == "../escape.typ")
-        ),
+        error
+            .issues
+            .iter()
+            .any(|issue| matches!(issue, PackIssue::InvalidPath { path, .. }
+                if path == "../escape.typ")),
         "{error}"
     );
 }
 
-/// Face selection out of the supplied Font Catalog.
+/// Face selection out of the supplied fonts.
 #[cfg(feature = "embedded-fonts")]
 mod fonts {
-    use typst_pack::{
-        CreateOutcome, Digest, FontCatalog, FontCatalogEntry, FontContainer, FontDisposition,
-        create,
-    };
+    use typst_pack::{Digest, create, font};
 
     use crate::{
-        CatalogEntry, Created, Setup, document, embedded_package, issue, package_catalog,
-        package_files, request, spec,
+        CatalogEntry, Setup, document, embedded_package, issue, package_catalog, package_files,
+        request,
     };
 
     /// The exact bytes of the Font Container Typst ships the given family in.
@@ -691,15 +680,15 @@ mod fonts {
         let serif = typst_container("Libertinus Serif");
         let mono = typst_container("DejaVu Sans Mono");
         let snapshot = document("Serif text\n\n#text(font: \"DejaVu Sans Mono\")[Mono text]\n");
-        let catalog = FontCatalog::from_iter([
-            FontCatalogEntry::new(
-                FontContainer::new(serif.clone()).unwrap(),
-                FontDisposition::Embedded,
-            ),
-            FontCatalogEntry::new(
-                FontContainer::new(mono.clone()).unwrap(),
-                FontDisposition::External,
-            ),
+        let catalog = Vec::from([
+            font::Entry {
+                container: font::Container::new(serif.clone()).unwrap(),
+                embedded: true,
+            },
+            font::Entry {
+                container: font::Container::new(mono.clone()).unwrap(),
+                embedded: false,
+            },
         ]);
 
         let issued = issue(&request(snapshot).fonts(catalog));
@@ -729,12 +718,15 @@ mod fonts {
         let serif = typst_container("Libertinus Serif");
         let mono = typst_container("DejaVu Sans Mono");
         let snapshot = document("Serif text only\n");
-        let catalog = FontCatalog::from_iter([
-            FontCatalogEntry::new(
-                FontContainer::new(serif.clone()).unwrap(),
-                FontDisposition::Embedded,
-            ),
-            FontCatalogEntry::new(FontContainer::new(mono).unwrap(), FontDisposition::Embedded),
+        let catalog = Vec::from([
+            font::Entry {
+                container: font::Container::new(serif.clone()).unwrap(),
+                embedded: true,
+            },
+            font::Entry {
+                container: font::Container::new(mono).unwrap(),
+                embedded: true,
+            },
         ]);
 
         let issued = issue(&request(snapshot).fonts(catalog));
@@ -746,10 +738,16 @@ mod fonts {
 
     #[test]
     fn selection_uses_the_first_matching_catalog_position_and_its_disposition() {
-        let serif = FontContainer::new(typst_container("Libertinus Serif")).unwrap();
-        let catalog = FontCatalog::from_iter([
-            FontCatalogEntry::new(serif.clone(), FontDisposition::External),
-            FontCatalogEntry::new(serif, FontDisposition::Embedded),
+        let serif = font::Container::new(typst_container("Libertinus Serif")).unwrap();
+        let catalog = Vec::from([
+            font::Entry {
+                container: serif.clone(),
+                embedded: false,
+            },
+            font::Entry {
+                container: serif,
+                embedded: true,
+            },
         ]);
 
         let issued = issue(&request(document("Selected text")).fonts(catalog));
@@ -766,10 +764,10 @@ mod fonts {
     #[test]
     fn a_resumed_creation_selects_the_faces_one_invocation_would_have() {
         let serif = typst_container("Libertinus Serif");
-        let catalog = FontCatalog::from_iter([FontCatalogEntry::new(
-            FontContainer::new(serif.clone()).unwrap(),
-            FontDisposition::Embedded,
-        )]);
+        let catalog = Vec::from([font::Entry {
+            container: font::Container::new(serif.clone()).unwrap(),
+            embedded: true,
+        }]);
         // Text before the import, so the round that reports the missing
         // package is one that already laid out a face.
         let source = "Selected text\n\n#import \"@local/first:1.0.0\": first\n#first";
@@ -780,10 +778,8 @@ mod fonts {
                 .fonts(catalog.clone())
                 .packages(package_catalog(resolved.iter().cloned()));
             match create(&request).unwrap() {
-                CreateOutcome::Created { pack, warnings, .. } => {
-                    break Created { pack, warnings };
-                }
-                CreateOutcome::MissingPackages(missing) => {
+                create::Outcome::Created(created) => break created,
+                create::Outcome::MissingPackages(missing) => {
                     resolved.extend(missing.iter().map(|missing| {
                         embedded_package(
                             missing.clone(),
@@ -806,6 +802,5 @@ mod fonts {
             "a resumed creation selected no face"
         );
         assert_eq!(resumed.pack.identity(), single.pack.identity());
-        let _ = spec("first");
     }
 }

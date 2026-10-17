@@ -1,21 +1,25 @@
-//! What a compilation produces: output formats and their controls.
+//! What a compilation produces: the output format and its controls.
 
 use std::num::NonZeroUsize;
+use std::str::FromStr;
 
 use typst::foundations::{Datetime, Smart};
 use typst_pdf::{PdfOptions, PdfStandard, PdfStandards, Timestamp};
 
 use super::RequestIssue;
-use crate::identity::Preimage;
+use crate::digest::Preimage;
 
 /// The formats a pack can be compiled to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum OutputFormat {
+    /// One PDF document.
     Pdf,
+    /// One PNG image per page.
     Png,
+    /// One SVG image per page.
     Svg,
-    /// HTML export is experimental in Typst. Compiling to HTML enables the
-    /// required [`Feature::Html`](typst::Feature::Html).
+    /// One HTML document. HTML export is experimental in Typst and enables
+    /// [`Feature::Html`](typst::Feature::Html).
     Html,
 }
 
@@ -38,101 +42,53 @@ impl OutputFormat {
     }
 }
 
-/// The output a compilation produces, with its format's controls.
+/// The output a compilation produces, and its controls.
+///
+/// Controls that do not apply to the format are ignored.
 #[derive(Debug, Clone)]
-pub enum Output {
-    Pdf(PdfOutput),
-    Png(PngOutput),
-    Svg(SvgOutput),
-    Html(HtmlOutput),
-}
-
-impl Output {
-    /// The output format with default controls.
-    pub fn new(format: OutputFormat) -> Self {
-        match format {
-            OutputFormat::Pdf => Self::Pdf(PdfOutput::default()),
-            OutputFormat::Png => Self::Png(PngOutput::default()),
-            OutputFormat::Svg => Self::Svg(SvgOutput::default()),
-            OutputFormat::Html => Self::Html(HtmlOutput::default()),
-        }
-    }
-
-    /// The format this output produces.
-    pub fn format(&self) -> OutputFormat {
-        match self {
-            Self::Pdf(_) => OutputFormat::Pdf,
-            Self::Png(_) => OutputFormat::Png,
-            Self::Svg(_) => OutputFormat::Svg,
-            Self::Html(_) => OutputFormat::Html,
-        }
-    }
-}
-
-/// Controls for PDF output.
-#[derive(Debug, Clone)]
-pub struct PdfOutput {
-    /// Which source pages to export.
-    pub page_selection: PageSelection,
-    /// PDF standards the exporter enforces.
-    pub standards: Vec<PdfStandard>,
+pub struct Output {
+    /// The format to export.
+    pub format: OutputFormat,
+    /// Which source pages to export (PDF, PNG, SVG).
+    pub pages: PageSelection,
+    /// Whether to pretty-print the output (PDF, SVG, HTML).
+    pub pretty: bool,
+    /// Pixels per inch (PNG); `None` selects Typst's default of 144.
+    pub ppi: Option<f64>,
+    /// Whether to render into the page bleed region (PNG, SVG).
+    pub render_bleed: bool,
+    /// The PDF standards the exporter enforces.
+    pub pdf_standards: Vec<PdfStandard>,
     /// The PDF file identifier; automatic by default.
-    pub identifier: Smart<String>,
+    pub pdf_identifier: Smart<String>,
     /// The PDF creator metadata; automatic by default.
-    pub creator: Smart<Option<String>>,
-    /// Whether accessibility tags are written.
+    pub pdf_creator: Smart<Option<String>>,
+    /// Whether PDF accessibility tags are written.
     ///
     /// Automatic tagging is disabled with a warning for a page subset, as in
     /// Typst's CLI. Explicit tagging is passed to the exporter.
-    pub tags: Smart<bool>,
+    pub pdf_tags: Smart<bool>,
     /// The creation datetime recorded in PDF metadata.
-    pub creation_timestamp: CreationTimestamp,
-    /// Whether to pretty-print the PDF.
-    pub pretty: bool,
+    pub pdf_timestamp: CreationTimestamp,
 }
 
-impl Default for PdfOutput {
-    fn default() -> Self {
+impl Output {
+    /// The format with default controls.
+    pub fn new(format: OutputFormat) -> Self {
         let pdf = PdfOptions::default();
         Self {
-            page_selection: PageSelection::default(),
-            standards: vec![],
-            identifier: pdf.ident,
-            creator: pdf.creator,
-            tags: Smart::Auto,
-            creation_timestamp: CreationTimestamp::Omit,
-            pretty: pdf.pretty,
+            format,
+            pages: PageSelection::default(),
+            pretty: false,
+            ppi: None,
+            render_bleed: false,
+            pdf_standards: Vec::new(),
+            pdf_identifier: pdf.ident,
+            pdf_creator: pdf.creator,
+            pdf_tags: Smart::Auto,
+            pdf_timestamp: CreationTimestamp::Omit,
         }
     }
-}
-
-/// Controls for PNG output, one artifact per selected page.
-#[derive(Debug, Clone, Default)]
-pub struct PngOutput {
-    /// Which source pages to export.
-    pub page_selection: PageSelection,
-    /// Pixels per inch; `None` selects Typst's default of 144.
-    pub pixels_per_inch: Option<f64>,
-    /// Whether to render into the page bleed region.
-    pub render_bleed: bool,
-}
-
-/// Controls for SVG output, one artifact per selected page.
-#[derive(Debug, Clone, Default)]
-pub struct SvgOutput {
-    /// Which source pages to export.
-    pub page_selection: PageSelection,
-    /// Whether to render into the page bleed region.
-    pub render_bleed: bool,
-    /// Whether to pretty-print the SVG.
-    pub pretty: bool,
-}
-
-/// Controls for HTML output.
-#[derive(Debug, Clone, Default)]
-pub struct HtmlOutput {
-    /// Whether to pretty-print the HTML.
-    pub pretty: bool,
 }
 
 /// The creation datetime recorded in PDF metadata.
@@ -144,7 +100,7 @@ pub enum CreationTimestamp {
     /// Record no creation datetime.
     #[default]
     Omit,
-    /// The instant `unix` seconds after the UNIX epoch, recorded in UTC.
+    /// The instant this many seconds after the UNIX epoch, recorded in UTC.
     Utc(i64),
     /// The instant `unix` seconds after the UNIX epoch, recorded as local time
     /// at a UTC offset of `offset_minutes`.
@@ -153,7 +109,7 @@ pub enum CreationTimestamp {
 
 impl CreationTimestamp {
     /// The exporter timestamp, if it can be represented.
-    pub(crate) fn to_pdf(self) -> Option<Timestamp> {
+    fn to_pdf(self) -> Option<Timestamp> {
         match self {
             Self::Omit => None,
             Self::Utc(unix) => datetime_at(unix, 0).map(Timestamp::new_utc),
@@ -198,30 +154,17 @@ fn datetime_at(unix: i64, offset: i64) -> Option<Datetime> {
 /// A one-indexed, inclusive page range with optional open ends.
 pub type PageRange = std::ops::RangeInclusive<Option<NonZeroUsize>>;
 
-/// A selection of one-indexed source page ranges.
+/// The source pages to export: the union of its ranges, or every page when
+/// there are none.
 ///
-/// An empty range collection selects all source pages.
+/// Parses from text like `1,3-5,9-`.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Hash)]
 pub struct PageSelection {
-    ranges: Vec<PageRange>,
+    /// The selected ranges.
+    pub ranges: Vec<PageRange>,
 }
 
 impl PageSelection {
-    /// Selects all source pages.
-    pub fn all() -> Self {
-        Self::default()
-    }
-
-    /// Selects the union of the given ranges; none selects all pages.
-    pub fn new(ranges: Vec<PageRange>) -> Self {
-        Self { ranges }
-    }
-
-    /// The selected source page ranges.
-    pub fn ranges(&self) -> &[PageRange] {
-        &self.ranges
-    }
-
     pub(crate) fn typst_page_ranges(&self) -> Option<typst::layout::PageRanges> {
         (!self.ranges.is_empty()).then(|| typst::layout::PageRanges::new(self.ranges.clone()))
     }
@@ -272,42 +215,46 @@ impl PageSelection {
     }
 }
 
-/// Parses a textual page selection like `1,3-5,9-`.
-pub fn parse_page_selection(text: &str) -> Result<PageSelection, String> {
-    let page = |value: &str| -> Result<NonZeroUsize, String> {
-        if value == "0" {
-            return Err("page numbers start at one".to_owned());
-        }
-        value
-            .parse::<NonZeroUsize>()
-            .map_err(|_| format!("`{value}` is not a valid page number"))
-    };
-    text.split(',')
-        .map(
-            |part| match part.trim().split('-').map(str::trim).collect::<Vec<_>>()[..] {
-                [""] => Err("page export range must not be empty".to_owned()),
-                [single] => page(single).map(|page| Some(page)..=Some(page)),
-                ["", ""] => Err("page export range must have start or end".to_owned()),
-                [start, ""] => Ok(Some(page(start)?)..=None),
-                ["", end] => Ok(None..=Some(page(end)?)),
-                [start, end] => {
-                    let (start, end) = (page(start)?, page(end)?);
-                    if start > end {
-                        Err("page export range must end at a page after the start".to_owned())
-                    } else {
-                        Ok(Some(start)..=Some(end))
+impl FromStr for PageSelection {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        let page = |value: &str| -> Result<NonZeroUsize, String> {
+            if value == "0" {
+                return Err("page numbers start at one".to_owned());
+            }
+            value
+                .parse::<NonZeroUsize>()
+                .map_err(|_| format!("`{value}` is not a valid page number"))
+        };
+        let ranges = text
+            .split(',')
+            .map(
+                |part| match part.trim().split('-').map(str::trim).collect::<Vec<_>>()[..] {
+                    [""] => Err("page export range must not be empty".to_owned()),
+                    [single] => page(single).map(|page| Some(page)..=Some(page)),
+                    ["", ""] => Err("page export range must have start or end".to_owned()),
+                    [start, ""] => Ok(Some(page(start)?)..=None),
+                    ["", end] => Ok(None..=Some(page(end)?)),
+                    [start, end] => {
+                        let (start, end) = (page(start)?, page(end)?);
+                        if start > end {
+                            Err("page export range must end at a page after the start".to_owned())
+                        } else {
+                            Ok(Some(start)..=Some(end))
+                        }
                     }
-                }
-                _ => Err("page export range must have a single hyphen".to_owned()),
-            },
-        )
-        .collect::<Result<Vec<_>, _>>()
-        .map(PageSelection::new)
+                    _ => Err("page export range must have a single hyphen".to_owned()),
+                },
+            )
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Self { ranges })
+    }
 }
 
 /// Resource ceilings for compilation output.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
-pub struct CompilationLimits {
+pub struct Limits {
     /// Maximum number of pages in the compiled document.
     pub max_pages: u64,
     /// Maximum number of exported artifacts.
@@ -324,7 +271,7 @@ pub struct CompilationLimits {
     pub export_workers: u64,
 }
 
-impl Default for CompilationLimits {
+impl Default for Limits {
     fn default() -> Self {
         Self {
             max_pages: 10_000,
@@ -354,16 +301,16 @@ impl Output {
     pub(crate) fn normalize(&self, issues: &mut Vec<RequestIssue>) -> Normalized {
         let mut output = self.clone();
         let mut normalized = Normalized {
-            output: Output::Html(HtmlOutput::default()),
+            output: Output::new(OutputFormat::Html),
             pdf_timestamp: None,
             pdf_standards: None,
             untagged_by_selection: false,
         };
-        match &mut output {
-            Output::Pdf(pdf) => {
-                pdf.page_selection.normalize(issues);
-                pdf.standards.sort_by_key(standard_name);
-                match PdfStandards::new(&pdf.standards) {
+        match output.format {
+            OutputFormat::Pdf => {
+                output.pages.normalize(issues);
+                output.pdf_standards.sort_by_key(standard_name);
+                match PdfStandards::new(&output.pdf_standards) {
                     Ok(standards) => normalized.pdf_standards = Some(standards),
                     Err(error) => issues.push(RequestIssue::InvalidPdfStandards {
                         message: error.message().to_string(),
@@ -371,24 +318,25 @@ impl Output {
                     }),
                 }
                 let default_tagged = PdfOptions::default().tagged;
-                let selected = !pdf.page_selection.ranges().is_empty();
-                normalized.untagged_by_selection = selected && pdf.tags.is_auto() && default_tagged;
-                if pdf.tags.is_auto() {
-                    pdf.tags = Smart::Custom(default_tagged && !selected);
+                let selected = !output.pages.ranges.is_empty();
+                normalized.untagged_by_selection =
+                    selected && output.pdf_tags.is_auto() && default_tagged;
+                if output.pdf_tags.is_auto() {
+                    output.pdf_tags = Smart::Custom(default_tagged && !selected);
                 }
-                normalized.pdf_timestamp = pdf.creation_timestamp.to_pdf();
+                normalized.pdf_timestamp = output.pdf_timestamp.to_pdf();
             }
-            Output::Png(png) => {
-                png.page_selection.normalize(issues);
-                let ppi = png.pixels_per_inch.get_or_insert_with(|| {
+            OutputFormat::Png => {
+                output.pages.normalize(issues);
+                let ppi = output.ppi.get_or_insert_with(|| {
                     typst_render::RenderOptions::default().pixel_per_pt.get() * 72.0
                 });
                 if !ppi.is_finite() || *ppi <= 0.0 {
                     issues.push(RequestIssue::InvalidPpi);
                 }
             }
-            Output::Svg(svg) => svg.page_selection.normalize(issues),
-            Output::Html(_) => {}
+            OutputFormat::Svg => output.pages.normalize(issues),
+            OutputFormat::Html => {}
         }
         normalized.output = output;
         normalized
@@ -396,25 +344,25 @@ impl Output {
 
     /// Writes a normalized output to the compilation identity preimage.
     pub(crate) fn write(&self, preimage: &mut Preimage) {
-        match self {
-            Output::Pdf(pdf) => {
+        match self.format {
+            OutputFormat::Pdf => {
                 preimage.str("pdf");
-                pdf.page_selection.write(preimage);
-                preimage.count(pdf.standards.len());
-                for standard in &pdf.standards {
+                self.pages.write(preimage);
+                preimage.count(self.pdf_standards.len());
+                for standard in &self.pdf_standards {
                     preimage.str(standard_name(standard));
                 }
-                match &pdf.identifier {
+                match &self.pdf_identifier {
                     Smart::Auto => preimage.str("auto"),
                     Smart::Custom(identifier) => preimage.str("custom").str(identifier),
                 };
-                match &pdf.creator {
+                match &self.pdf_creator {
                     Smart::Auto => preimage.str("auto"),
                     Smart::Custom(None) => preimage.str("none"),
                     Smart::Custom(Some(creator)) => preimage.str("custom").str(creator),
                 };
-                preimage.bool(matches!(pdf.tags, Smart::Custom(true)));
-                match pdf.creation_timestamp {
+                preimage.bool(matches!(self.pdf_tags, Smart::Custom(true)));
+                match self.pdf_timestamp {
                     CreationTimestamp::Omit => preimage.str("omit"),
                     CreationTimestamp::Utc(unix) => preimage.str("utc").int(unix),
                     CreationTimestamp::Local {
@@ -425,22 +373,22 @@ impl Output {
                         .int(unix)
                         .int(i64::from(offset_minutes)),
                 };
-                preimage.bool(pdf.pretty);
+                preimage.bool(self.pretty);
             }
-            Output::Png(png) => {
+            OutputFormat::Png => {
                 preimage.str("png");
-                png.page_selection.write(preimage);
+                self.pages.write(preimage);
                 preimage
-                    .int(png.pixels_per_inch.unwrap_or_default().to_bits() as i64)
-                    .bool(png.render_bleed);
+                    .int(self.ppi.unwrap_or_default().to_bits() as i64)
+                    .bool(self.render_bleed);
             }
-            Output::Svg(svg) => {
+            OutputFormat::Svg => {
                 preimage.str("svg");
-                svg.page_selection.write(preimage);
-                preimage.bool(svg.render_bleed).bool(svg.pretty);
+                self.pages.write(preimage);
+                preimage.bool(self.render_bleed).bool(self.pretty);
             }
-            Output::Html(html) => {
-                preimage.str("html").bool(html.pretty);
+            OutputFormat::Html => {
+                preimage.str("html").bool(self.pretty);
             }
         }
     }

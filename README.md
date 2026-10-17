@@ -145,59 +145,59 @@ there is verified against the release you are reading about.
 
 | Task | Start here |
 | --- | --- |
-| Pack a project directory from disk | [`FilesystemPacker`](https://docs.rs/typst-pack/latest/typst_pack/struct.FilesystemPacker.html) |
+| Pack a project directory from disk | [`fs::Packer`](https://docs.rs/typst-pack/latest/typst_pack/fs/struct.Packer.html) |
 | Pack in-memory bytes with no filesystem | [`Pack::builder`](https://docs.rs/typst-pack/latest/typst_pack/struct.Pack.html#method.builder) |
-| Supply packages yourself and resume creation | [`create`](https://docs.rs/typst-pack/latest/typst_pack/fn.create.html) |
-| Compile a pack with inputs | [`compile`](https://docs.rs/typst-pack/latest/typst_pack/fn.compile.html) |
-| Find a pack's external packages and fonts on disk | [`FilesystemPacker::resolve`](https://docs.rs/typst-pack/latest/typst_pack/struct.FilesystemPacker.html#method.resolve) |
+| Supply packages yourself and resume creation | [`create`](https://docs.rs/typst-pack/latest/typst_pack/create/fn.create.html) |
+| Compile a pack with inputs | [`compile`](https://docs.rs/typst-pack/latest/typst_pack/compile/fn.compile.html) |
+| Find a pack's external packages and fonts on disk | [`fs::Packer::resolve`](https://docs.rs/typst-pack/latest/typst_pack/fs/struct.Packer.html#method.resolve) |
 | Read and write packs through object storage | [OpenDAL guide](crates/typst-pack/docs/opendal-integration.md) |
 
 The shortest complete example — build a pack in memory and encode it:
 
 ```rust
-use typst_pack::Pack;
-use typst_pack::pack_archive::encode;
+use typst_pack::{Pack, archive};
 
 let pack = Pack::builder("main.typ")
     .file("main.typ", b"= Report\n".to_vec())
     .build()
     .expect("the entrypoint is contained");
 
-let archive = encode(&pack).expect("the pack is representable as a ZIP archive");
-assert!(!archive.is_empty());
+let bytes = archive::encode(&pack);
+assert!(!bytes.is_empty());
 ```
 
 `Pack::builder` does not discover dependencies: the pack contains exactly the
-files added to it. Use `create` when the library should run dependency
-discovery over values the caller already holds, and a Pack Assembler when it
-should also read those values from a source.
+files added to it. Use `create` when the library should discover them by
+compiling the project over values the caller already holds, and `fs::Packer`
+or `opendal::Assembler` when it should also read those values from a source.
 
 Pack creation is stateless and resumable. If the representative compile reaches
 a package that is not in the supplied catalog, creation reports that exact
 specification instead of failing; add its tree and call `create` again. The
 `package-reading` feature provides official registry URL construction and
 bounded `.tar.gz` expansion without choosing an HTTP client, and
-`opendal::OpenDalPackAssembler` runs the same lifecycle over OpenDAL storage.
+`opendal::Assembler` runs the same loop over OpenDAL storage.
 
-Compilation takes one `CompileRequest`: the pack, the output and its controls,
-`sys.inputs` strings and bytes, document time, features, the packages and font
-containers the pack requires externally, and limits. It returns `Compiled`
-artifacts and warnings, or a `CompileError` whose message names every invalid
-value or unsatisfied requirement. Diagnostics come with the `Sources` they
-point into:
+Compilation takes one `compile::Request`: the pack, the output and its
+controls, `sys.inputs` strings and bytes, document time, features, the packages
+and font containers the pack requires externally, and limits. It returns
+`compile::Compiled` artifacts and warnings, or a `compile::Error` whose message
+names every invalid value or unsatisfied requirement. Diagnostics come with the
+`Sources` they point into:
 
 ```rust
-use typst_pack::{CompileError, CompileRequest, Input, Output, OutputFormat, Pack, compile};
+use typst_pack::compile::{self, Input, Output, OutputFormat, Request};
+use typst_pack::Pack;
 
 let pack = Pack::builder("main.typ")
     .file("main.typ", b"#str(sys.inputs.greeting)".to_vec())
     .build()?;
-let mut request = CompileRequest::new(pack, Output::new(OutputFormat::Pdf));
+let mut request = Request::new(pack, Output::new(OutputFormat::Pdf));
 request.options.inputs.push(("greeting".into(), Input::Bytes(b"Hello".to_vec())));
 
-match compile(&request) {
+match compile::compile(&request) {
     Ok(compiled) => assert!(compiled.artifacts[0].bytes.starts_with(b"%PDF")),
-    Err(CompileError::Failed { errors, sources, .. }) => {
+    Err(compile::Error::Failed { errors, sources, .. }) => {
         for error in &errors {
             let file = error.span.id().map(|id| sources.name(id));
             eprintln!("{file:?}: {}", error.message);
@@ -212,7 +212,7 @@ match compile(&request) {
 
 - `fs`: Read projects, local packages, caches, and system fonts from the filesystem; unavailable on wasm targets.
 - `egress`: Download missing packages during filesystem assembly; implies `fs` and `package-reading` and links HTTP/TLS dependencies.
-- `package-reading`: Construct registry URLs, read bounded package archives, and expand them without choosing a transport.
+- `package-reading`: Construct registry URLs and expand bounded package archives without choosing a transport (`package::registry`).
 - `opendal`: Read, assemble, and write packs through caller-supplied OpenDAL operators, with caller-polled futures and no bundled runtime.
 - `embedded-fonts`: Make Typst's bundled fonts available to assembly and external fulfillment.
 - `diagnostics`: Implement `typst-kit`'s `DiagnosticWorld` for `Sources`, so `typst_kit::diagnostics::emit` renders diagnostics with source context.
@@ -304,7 +304,7 @@ pack         = str("typst-pack/pack/v1") str(entrypoint)
 
 ### Compilation identity
 
-`Compiled::identity` is SHA-256 over this preimage, in the same encoding, plus
+`compile::Compiled::identity` is SHA-256 over this preimage, in the same encoding, plus
 `int(n)`, a big-endian two's-complement 64-bit integer:
 
 ```text
@@ -347,7 +347,7 @@ project file and embedded font container matches its digest, each embedded
 package's files match its tree digest, and no member is missing or undeclared.
 Member names must be safe relative paths without duplicates; links and other
 special entries are refused; directory entries are ignored. Declared sizes and
-actual inflated bytes are both bounded by `DecodeLimits`. External packages and
+actual inflated bytes are both bounded by `archive::DecodeLimits`. External packages and
 fonts are matched by digest when the pack is compiled.
 
 The encoder is deterministic for a given build: fixed member order, timestamps,

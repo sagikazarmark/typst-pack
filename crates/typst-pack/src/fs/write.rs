@@ -1,5 +1,4 @@
-//! Filesystem writing for Pack Extraction Plans, Compilation Results, and
-//! Pack Archives.
+//! Writing extraction plans, compiled artifacts, and pack archives.
 //!
 //! Every file is first written to a uniquely named temporary file in its
 //! target directory, then committed under one [`WritePolicy`]:
@@ -15,7 +14,7 @@
 //! The temporary file is removed on every path. Nothing is flushed to stable
 //! storage: the adapter makes no crash-durability guarantee.
 //!
-//! A Pack Extraction Plan is checked before anything is written: its paths
+//! An extraction plan is checked before anything is written: its paths
 //! must be canonical, portable to every platform, and free of case-insensitive
 //! collisions, and existing destination entries must not conflict with it.
 //! Directories beneath the destination are created without following
@@ -33,8 +32,9 @@ use cap_fs_ext::DirExt;
 use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 
-use crate::error_display::format_error_list;
-use crate::{Artifact, PackExtractionPlan};
+use crate::compile::Artifact;
+use crate::extract::Plan;
+use crate::list;
 
 /// How a filesystem write treats a target that already exists.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -50,18 +50,25 @@ pub enum WritePolicy {
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 #[non_exhaustive]
 pub enum WriteIssue {
+    /// A planned path is not a canonical relative path.
     #[error("`{}` is not a canonical relative path", path.display())]
     InvalidPath { path: PathBuf },
+    /// A planned path has a component some platform cannot create.
     #[error("`{}` contains `{component}`, which is not a portable file name", path.display())]
     ReservedName { path: PathBuf, component: String },
+    /// Two paths collide when case is ignored, or one needs the other as a directory.
     #[error("`{}` and `{}` collide on case-insensitive filesystems", first.display(), second.display())]
     PathConflict { first: PathBuf, second: PathBuf },
+    /// A target exists under `CreateNew`.
     #[error("`{}` already exists", path.display())]
     ExistingTarget { path: PathBuf },
+    /// A target exists and is not a regular file.
     #[error("`{}` exists and is not a regular file", path.display())]
     ConflictingTarget { path: PathBuf },
+    /// A directory a target needs is a link or a file.
     #[error("`{}` is a symbolic link or a file, not a directory", ancestor.display())]
     ConflictingAncestor { path: PathBuf, ancestor: PathBuf },
+    /// The numbers of artifacts and paths differ.
     #[error("{artifacts} artifact(s) were given, but {paths} path(s)")]
     PathCountMismatch { artifacts: usize, paths: usize },
 }
@@ -69,9 +76,9 @@ pub enum WriteIssue {
 /// A failed filesystem write.
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
-pub enum FilesystemWriteError {
+pub enum WriteError {
     /// The write was refused before anything was written.
-    #[error("nothing was written{}", format_error_list(issues))]
+    #[error("{}", list("nothing was written", issues))]
     Rejected { issues: Vec<WriteIssue> },
     /// Writing `path` failed after the `completed` files were written.
     #[error("cannot write `{}`: {source}", path.display())]
@@ -84,21 +91,21 @@ pub enum FilesystemWriteError {
     },
 }
 
-/// Writes every file of a Pack Extraction Plan beneath `destination`.
+/// Writes every file of an extraction plan beneath `destination`.
 ///
 /// The destination is created when missing. Nothing is written when the plan
 /// or an existing destination entry conflicts with it; a failure while
 /// writing reports the files already committed.
-pub fn write_pack_extraction_plan_to_filesystem(
-    plan: &PackExtractionPlan,
+pub fn write_extraction(
+    plan: &Plan,
     destination: impl AsRef<Path>,
     policy: WritePolicy,
-) -> Result<(), FilesystemWriteError> {
+) -> Result<(), WriteError> {
     let destination = destination.as_ref();
     let files = plan
         .entries()
         .iter()
-        .map(|entry| (Path::new(entry.relative_path()), entry.bytes()))
+        .map(|entry| (Path::new(entry.path()), entry.bytes()))
         .collect::<Vec<_>>();
 
     let mut issues = check_plan(&files);
@@ -106,11 +113,11 @@ pub fn write_pack_extraction_plan_to_filesystem(
         check_destination(destination, &files, policy, &mut issues)?;
     }
     if !issues.is_empty() {
-        return Err(FilesystemWriteError::Rejected { issues });
+        return Err(WriteError::Rejected { issues });
     }
 
     let failed = |path: PathBuf, completed: Vec<PathBuf>| {
-        move |source| FilesystemWriteError::Io {
+        move |source| WriteError::Io {
             path,
             completed,
             source,
@@ -135,11 +142,11 @@ pub fn write_pack_extraction_plan_to_filesystem(
 /// `paths` pairs with the artifacts in order. Each path's directory
 /// must exist; the path is resolved natively, so it may contain symbolic
 /// links and `..` components.
-pub fn write_compilation_artifacts_to_filesystem_paths(
+pub fn write_artifacts(
     artifacts: &[Artifact],
     paths: &[PathBuf],
     policy: WritePolicy,
-) -> Result<(), FilesystemWriteError> {
+) -> Result<(), WriteError> {
     let mut issues = Vec::new();
     if artifacts.len() != paths.len() {
         issues.push(WriteIssue::PathCountMismatch {
@@ -160,12 +167,12 @@ pub fn write_compilation_artifacts_to_filesystem_paths(
         }
     }
     if !issues.is_empty() {
-        return Err(FilesystemWriteError::Rejected { issues });
+        return Err(WriteError::Rejected { issues });
     }
 
     let mut completed = Vec::with_capacity(paths.len());
     for (artifact, path) in artifacts.iter().zip(paths) {
-        write_one(path, &artifact.bytes, policy).map_err(|source| FilesystemWriteError::Io {
+        write_one(path, &artifact.bytes, policy).map_err(|source| WriteError::Io {
             path: path.clone(),
             completed: completed.clone(),
             source,
@@ -176,12 +183,13 @@ pub fn write_compilation_artifacts_to_filesystem_paths(
 }
 
 /// Writes one file through a temporary sibling under `policy`.
-pub(crate) fn write_file(
-    path: &Path,
+pub fn write_file(
+    path: impl AsRef<Path>,
     bytes: &[u8],
     policy: WritePolicy,
-) -> Result<(), FilesystemWriteError> {
-    write_one(path, bytes, policy).map_err(|source| FilesystemWriteError::Io {
+) -> Result<(), WriteError> {
+    let path = path.as_ref();
+    write_one(path, bytes, policy).map_err(|source| WriteError::Io {
         path: path.to_owned(),
         completed: Vec::new(),
         source,
@@ -322,7 +330,7 @@ fn check_plan(files: &[(&Path, &[u8])]) -> Vec<WriteIssue> {
 /// Whether one path component can be created on every supported platform.
 ///
 /// Windows reserves device names, strips trailing dots and spaces, and
-/// forbids control characters; these are refused everywhere so a Pack
+/// forbids control characters; these are refused everywhere so a pack
 /// extracts the same on every host. Characters Windows forbids are refused
 /// only there, where `:` would otherwise name an alternate data stream.
 fn is_portable_name(component: &str) -> bool {
@@ -356,9 +364,9 @@ fn check_destination(
     files: &[(&Path, &[u8])],
     policy: WritePolicy,
     issues: &mut Vec<WriteIssue>,
-) -> Result<(), FilesystemWriteError> {
+) -> Result<(), WriteError> {
     let failed = |path: PathBuf| {
-        move |source| FilesystemWriteError::Io {
+        move |source| WriteError::Io {
             path,
             completed: Vec::new(),
             source,

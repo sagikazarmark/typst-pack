@@ -1,10 +1,10 @@
 #![no_main]
 
 use libfuzzer_sys::fuzz_target;
-use typst_pack::{Digest, FontContainer, Pack};
+use typst_pack::{Digest, Pack, font};
 
 fuzz_target!(|data: &[u8]| {
-    let Ok(container) = FontContainer::new(data.to_vec()) else {
+    let Some(container) = font::Container::new(data.to_vec()) else {
         return;
     };
 

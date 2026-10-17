@@ -2,30 +2,31 @@
 
 use std::path::{Path, PathBuf};
 
-use typst_pack::pack_archive::{DecodeLimits, open_pack};
-use typst_pack::{
-    FilesystemWriteError, PackExtractionSelection, WriteIssue, WritePolicy, plan_pack_extraction,
-    write_pack_extraction_plan_to_filesystem,
-};
+use typst_pack::archive::{self, DecodeLimits};
+use typst_pack::extract::{self, Selection};
+use typst_pack::fs::{self, WriteError, WriteIssue, WritePolicy};
 
 use super::CommandResult;
 use crate::cli::ExtractArgs;
 
 pub fn run(args: ExtractArgs) -> CommandResult {
-    let pack = open_pack(&args.pack, DecodeLimits::DEFAULT)?;
+    let pack = archive::open(&args.pack, DecodeLimits::default())
+        .map_err(|error| format!("cannot open pack `{}`: {error}", args.pack.display()))?;
     let output = args.output.unwrap_or_else(|| match args.pack.file_stem() {
         Some(stem) => PathBuf::from(stem),
         None => PathBuf::from("extracted"),
     });
-    let selection = PackExtractionSelection::new(args.packages || args.all, args.fonts || args.all);
-    let plan = plan_pack_extraction(&pack, selection)?;
+    let selection = Selection {
+        packages: args.packages || args.all,
+        fonts: args.fonts || args.all,
+    };
+    let plan = extract::plan(&pack, selection)?;
     let policy = if args.force {
         WritePolicy::Overwrite
     } else {
         WritePolicy::CreateNew
     };
-    write_pack_extraction_plan_to_filesystem(&plan, &output, policy)
-        .map_err(|error| describe(&error, &output))?;
+    fs::write_extraction(&plan, &output, policy).map_err(|error| describe(&error, &output))?;
     println!(
         "extracted {} file(s) into `{}`",
         plan.entries().len(),
@@ -34,8 +35,8 @@ pub fn run(args: ExtractArgs) -> CommandResult {
     Ok(())
 }
 
-fn describe(error: &FilesystemWriteError, destination: &Path) -> String {
-    let FilesystemWriteError::Rejected { issues } = error else {
+fn describe(error: &WriteError, destination: &Path) -> String {
+    let WriteError::Rejected { issues } = error else {
         return error.to_string();
     };
     let conflict = |path: &Path| {

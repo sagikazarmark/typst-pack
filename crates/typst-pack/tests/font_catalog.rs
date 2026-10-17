@@ -1,44 +1,24 @@
-//! The ordered Font Catalog Pack Creation selects faces from.
+//! Font containers and the order creation selects them in.
 //!
-//! The catalog itself is core: its tests run on a build with no crate feature
-//! enabled, except the ones that need real font bytes, which Typst only ships
-//! with the `embedded-fonts` feature. The filesystem section covers the
-//! catalog the reference Pack Assembler composes.
+//! The tests that need real font bytes need the `embedded-fonts` feature,
+//! because Typst only ships font bytes with it. The filesystem section covers
+//! the fonts the filesystem packer offers.
 
 #[cfg(feature = "embedded-fonts")]
 #[path = "support/fonts.rs"]
 mod font_bytes;
 
-use typst_pack::{FontCatalog, FontContainer, FontContainerError, FontDisposition};
+use typst_pack::font;
 
 #[test]
-fn an_empty_catalog_offers_no_faces() {
-    let catalog = FontCatalog::new();
-
-    assert!(catalog.entries().is_empty());
-}
-
-#[test]
-fn a_container_that_holds_no_readable_face_is_rejected() {
-    assert_eq!(
-        FontContainer::new(b"not a font".to_vec()).unwrap_err(),
-        FontContainerError::NoReadableFace
-    );
-}
-
-#[test]
-fn a_disposition_names_whether_container_bytes_travel_in_the_pack() {
-    assert!(FontDisposition::Embedded.is_embedded());
-    assert!(!FontDisposition::External.is_embedded());
+fn bytes_that_hold_no_readable_face_are_no_container() {
+    assert!(font::Container::new(b"not a font".to_vec()).is_none());
 }
 
 #[cfg(feature = "embedded-fonts")]
 mod containers {
-    use typst_pack::{
-        CompileRequest, CreateOutcome, CreateRequest, Digest, FontCatalog, FontCatalogEntry,
-        FontContainer, FontDisposition, Input, Output, OutputFormat, ProjectSnapshot, compile,
-        create, typst_embedded_font_containers,
-    };
+    use typst_pack::compile::{Input, Output, OutputFormat};
+    use typst_pack::{Digest, ProjectSnapshot, compile, create, font};
 
     use crate::font_bytes::{font_collection, typst_container};
 
@@ -53,8 +33,8 @@ mod containers {
         let data = typst_container();
         let expected = Digest::of(&data);
 
-        let first = FontContainer::new(data.clone()).unwrap();
-        let second = FontContainer::new(data).unwrap();
+        let first = font::Container::new(data.clone()).unwrap();
+        let second = font::Container::new(data).unwrap();
 
         assert_eq!(first.digest(), expected);
         assert_eq!(second.digest(), expected);
@@ -65,7 +45,7 @@ mod containers {
     #[test]
     fn faces_are_listed_in_container_local_index_order() {
         let collection = two_face_collection(&typst_container());
-        let container = FontContainer::new(collection).unwrap();
+        let container = font::Container::new(collection).unwrap();
 
         assert_eq!(
             container
@@ -75,26 +55,6 @@ mod containers {
                 .collect::<Vec<_>>(),
             [0, 1]
         );
-    }
-
-    #[test]
-    fn catalog_entries_keep_the_order_and_disposition_the_caller_chose() {
-        let container = FontContainer::new(typst_container()).unwrap();
-        let mut catalog = FontCatalog::from_iter([FontCatalogEntry::new(
-            container.clone(),
-            FontDisposition::External,
-        )]);
-        catalog.push(FontCatalogEntry::new(container, FontDisposition::Embedded));
-        catalog.extend(
-            typst_embedded_font_containers()
-                .map(|container| FontCatalogEntry::new(container, FontDisposition::External)),
-        );
-
-        let entries = catalog.entries();
-        assert!(entries.len() > 2);
-        assert_eq!(entries[0].container(), entries[1].container());
-        assert_eq!(entries[0].disposition(), FontDisposition::External);
-        assert_eq!(entries[1].disposition(), FontDisposition::Embedded);
     }
 
     /// The exact bytes of the container Typst ships one family and weight in.
@@ -120,12 +80,13 @@ mod containers {
         let source = "#set text(font: \"Libertinus Serif\")\n\
                       #if sys.inputs.at(\"bold\", default: \"no\") == \"yes\" [*Text*] else [Text]";
         let project = ProjectSnapshot::new("main.typ", [("main.typ", source)]).unwrap();
-        let mut request = CreateRequest::new(project);
-        request.fonts = FontCatalog::from_iter([FontCatalogEntry::new(
-            FontContainer::new(collection.clone()).unwrap(),
-            FontDisposition::Embedded,
-        )]);
-        let CreateOutcome::Created { pack, .. } = create(&request).unwrap() else {
+        let mut request = create::Request::new(project);
+        request.fonts = Vec::from([font::Entry {
+            container: font::Container::new(collection.clone()).unwrap(),
+            embedded: true,
+        }]);
+        let create::Outcome::Created(create::Created { pack, .. }) = create(&request).unwrap()
+        else {
             panic!("creation needs no packages");
         };
         assert_eq!(pack.font_requirements().len(), 1);
@@ -135,7 +96,7 @@ mod containers {
         // Typst does not synthesize bold, so different glyphs prove the bold
         // face of the container was available.
         let svg = |bold: &str| {
-            let mut request = CompileRequest::new(pack.clone(), Output::new(OutputFormat::Svg));
+            let mut request = compile::Request::new(pack.clone(), Output::new(OutputFormat::Svg));
             request.options.inputs = vec![("bold".into(), Input::from(bold))];
             let compiled = compile(&request).unwrap();
             assert!(compiled.warnings.is_empty(), "{:?}", compiled.warnings);
@@ -149,26 +110,25 @@ mod containers {
 /// system fonts, Typst's embedded fonts, and scanned font directories.
 #[cfg(all(feature = "fs", feature = "embedded-fonts"))]
 mod filesystem {
-    use std::fs;
     use std::path::{Path, PathBuf};
 
-    use typst_pack::{Digest, FilesystemPacker};
+    use typst_pack::{Digest, fs};
 
     use crate::font_bytes::{family_of, renamed_family, typst_container};
 
     /// Writes `data` as the only font file of a fresh directory.
     fn font_directory(dir: &Path, name: &str, data: &[u8]) -> PathBuf {
         let directory = dir.join(name);
-        fs::create_dir_all(&directory).unwrap();
-        fs::write(directory.join("font.ttf"), data).unwrap();
+        std::fs::create_dir_all(&directory).unwrap();
+        std::fs::write(directory.join("font.ttf"), data).unwrap();
         directory
     }
 
     /// Writes a project whose text selects one exact family.
     fn project_using_family(dir: &Path, family: &str) -> PathBuf {
         let project = dir.join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
             project.join("main.typ"),
             format!("#set text(font: \"{family}\")\nSelected"),
         )
@@ -189,11 +149,13 @@ mod filesystem {
         let second_directory = font_directory(dir.path(), "second", &second);
 
         let selected = |directories: [&Path; 2]| {
-            let mut packer = FilesystemPacker::new()
-                .system_fonts(false)
-                .typst_embedded_fonts(false);
+            let mut packer = fs::Packer {
+                system_fonts: false,
+                typst_embedded_fonts: false,
+                ..fs::Packer::default()
+            };
             for directory in directories {
-                packer = packer.font_path(directory);
+                packer.font_paths.push(directory.to_path_buf());
             }
             let packed = packer.pack(&project, "main.typ").unwrap();
             let requirements = packed.pack.font_requirements();
@@ -220,19 +182,21 @@ mod filesystem {
         let scanned_font = renamed_family(&typst_font, &typst_family, &scanned_family);
         let fonts = font_directory(dir.path(), "fonts", &scanned_font);
         let project = dir.path().join("project");
-        fs::create_dir_all(&project).unwrap();
-        fs::write(
+        std::fs::create_dir_all(&project).unwrap();
+        std::fs::write(
             project.join("main.typ"),
             format!("Typst's own\n\n#text(font: \"{scanned_family}\")[Scanned]"),
         )
         .unwrap();
 
-        let packed = FilesystemPacker::new()
-            .system_fonts(false)
-            .font_path(&fonts)
-            .embed_fonts(true)
-            .pack(&project, "main.typ")
-            .unwrap();
+        let packed = fs::Packer {
+            font_paths: vec![fonts.to_path_buf()],
+            system_fonts: false,
+            embed_fonts: true,
+            ..fs::Packer::default()
+        }
+        .pack(&project, "main.typ")
+        .unwrap();
 
         let requirements = packed.pack.font_requirements();
         let embedded = requirements
@@ -269,13 +233,15 @@ mod filesystem {
         let project = project_using_family(dir.path(), &family_of(&data));
         let fonts = font_directory(dir.path(), "fonts", &data);
 
-        let packed = FilesystemPacker::new()
-            .system_fonts(false)
-            .typst_embedded_fonts(false)
-            .font_path(&fonts)
-            .embed_fonts(true)
-            .pack(&project, "main.typ")
-            .unwrap();
+        let packed = fs::Packer {
+            font_paths: vec![fonts.to_path_buf()],
+            system_fonts: false,
+            typst_embedded_fonts: false,
+            embed_fonts: true,
+            ..fs::Packer::default()
+        }
+        .pack(&project, "main.typ")
+        .unwrap();
 
         let requirements = packed.pack.font_requirements();
         assert_eq!(requirements.len(), 1);

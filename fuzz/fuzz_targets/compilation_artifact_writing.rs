@@ -5,8 +5,9 @@ use std::sync::OnceLock;
 use std::task::{Context, Poll, Waker};
 
 use libfuzzer_sys::fuzz_target;
-use typst_pack::opendal::{Error, Operator, WritePolicy, write_compilation_artifacts};
-use typst_pack::{Artifact, CompileRequest, Output, OutputFormat, Pack, compile};
+use typst_pack::compile::{Artifact, Output, OutputFormat};
+use typst_pack::opendal::{Error, Operator, WritePolicy, write_artifacts};
+use typst_pack::{Pack, compile};
 
 /// Polls a Memory-service future, which never pends.
 fn ready<F: IntoFuture>(future: F) -> F::Output {
@@ -35,7 +36,7 @@ fuzz_target!(|data: &[u8]| {
     };
     let op = Operator::new(opendal::services::Memory::default()).unwrap();
 
-    match ready(write_compilation_artifacts(&op, "artifacts/", result, &keys, policy)) {
+    match ready(write_artifacts(&op, "artifacts/", result, &keys, policy)) {
         Ok(written) => {
             assert_eq!(written.len(), keys.len());
             for (key, artifact) in keys.iter().zip(result) {
@@ -70,7 +71,7 @@ fn two_page_result() -> &'static [Artifact] {
             )
             .build()
             .unwrap();
-        compile(&CompileRequest::new(pack, Output::new(OutputFormat::Svg)))
+        compile(&compile::Request::new(pack, Output::new(OutputFormat::Svg)))
             .unwrap()
             .artifacts
     })

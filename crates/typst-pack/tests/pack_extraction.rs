@@ -1,11 +1,9 @@
-//! Featureless semantic planning for Pack Extraction.
+//! Planning the extraction of a pack.
 
 use proptest::prelude::*;
 use typst::syntax::package::PackageSpec;
-use typst_pack::{
-    Pack, PackExtractionEntryRole, PackExtractionPlanIssue, PackExtractionSelection,
-    plan_pack_extraction,
-};
+use typst_pack::Pack;
+use typst_pack::extract::{self, Conflict, Selection};
 
 #[cfg(feature = "embedded-fonts")]
 #[path = "support/fonts.rs"]
@@ -24,85 +22,57 @@ fn pack_with_package() -> Pack {
         .unwrap()
 }
 
-fn observed_entries(
-    pack: &Pack,
-    selection: PackExtractionSelection,
-) -> Vec<(String, PackExtractionEntryRole, u64, Vec<u8>)> {
-    plan_pack_extraction(pack, selection)
+fn selection(packages: bool, fonts: bool) -> Selection {
+    Selection { packages, fonts }
+}
+
+fn observed_entries(pack: &Pack, selection: Selection) -> Vec<(String, Vec<u8>)> {
+    extract::plan(pack, selection)
         .unwrap()
         .entries()
         .iter()
-        .map(|entry| {
-            (
-                entry.relative_path().to_owned(),
-                entry.role(),
-                entry.len(),
-                entry.bytes().to_vec(),
-            )
-        })
+        .map(|entry| (entry.path().to_owned(), entry.bytes().to_vec()))
         .collect()
 }
 
-#[test]
-fn plan_owns_identity_selection_and_canonical_entries() {
-    let pack = pack_with_package();
-    let identity = pack.identity();
-    let selection = PackExtractionSelection::new(true, false);
-    let plan = plan_pack_extraction(&pack, selection).unwrap();
+fn conflicts(pack: &Pack) -> Vec<Conflict> {
+    extract::plan(pack, selection(true, false))
+        .unwrap_err()
+        .issues
+}
 
-    assert_eq!(plan.pack_identity(), &identity);
-    assert_eq!(plan.selection(), selection);
+#[test]
+fn plans_list_canonical_entries_in_path_order() {
+    let plan = extract::plan(&pack_with_package(), selection(true, false)).unwrap();
+
     assert_eq!(
         plan.entries()
             .iter()
-            .map(|entry| (
-                entry.relative_path(),
-                entry.role(),
-                entry.len(),
-                entry.bytes(),
-            ))
+            .map(|entry| (entry.path(), entry.bytes()))
             .collect::<Vec<_>>(),
         [
-            (
-                "assets/logo.bin",
-                PackExtractionEntryRole::ProjectFile,
-                4,
-                b"logo".as_slice(),
-            ),
-            (
-                "main.typ",
-                PackExtractionEntryRole::ProjectFile,
-                4,
-                b"main".as_slice(),
-            ),
+            ("assets/logo.bin", b"logo".as_slice()),
+            ("main.typ", b"main".as_slice()),
             (
                 "packages/local/example/1.0.0/lib.typ",
-                PackExtractionEntryRole::PackageFile,
-                7,
-                b"package".as_slice(),
+                b"package".as_slice()
             ),
         ]
     );
-
-    drop(pack);
-    assert_eq!(plan.entries()[0].bytes(), b"logo");
 }
 
 #[test]
 fn projects_are_unconditional_and_embedded_packages_are_selected_explicitly() {
     let pack = pack_with_package();
 
-    for include_packages in [false, true] {
-        for include_fonts in [false, true] {
-            let selection = PackExtractionSelection::new(include_packages, include_fonts);
-            let entries = observed_entries(&pack, selection);
+    for packages in [false, true] {
+        for fonts in [false, true] {
+            let entries = observed_entries(&pack, selection(packages, fonts));
 
             assert!(entries.iter().any(|entry| entry.0 == "main.typ"));
             assert_eq!(
-                entries
-                    .iter()
-                    .any(|entry| entry.1 == PackExtractionEntryRole::PackageFile),
-                include_packages
+                entries.iter().any(|entry| entry.0.starts_with("packages/")),
+                packages
             );
         }
     }
@@ -116,13 +86,10 @@ fn external_package_trees_are_never_planned() {
         .build()
         .unwrap();
 
-    let plan = plan_pack_extraction(&pack, PackExtractionSelection::new(true, true)).unwrap();
+    let plan = extract::plan(&pack, selection(true, true)).unwrap();
 
     assert_eq!(plan.entries().len(), 1);
-    assert_eq!(
-        plan.entries()[0].role(),
-        PackExtractionEntryRole::ProjectFile
-    );
+    assert_eq!(plan.entries()[0].path(), "main.typ");
 }
 
 #[test]
@@ -137,28 +104,26 @@ fn planning_aggregates_collisions_in_canonical_path_order() {
         .build()
         .unwrap();
 
-    let error = plan_pack_extraction(&pack, PackExtractionSelection::new(true, false))
-        .expect_err("both projected path collisions must reject the plan");
-    let paths = error
-        .issues()
-        .iter()
-        .filter_map(|issue| match issue {
-            PackExtractionPlanIssue::PathConflict { first_path, .. } => Some(first_path.as_str()),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
+    let error = extract::plan(&pack, selection(true, false)).unwrap_err();
 
     assert_eq!(
-        paths,
-        [
-            "packages/local/example/1.0.0/a.typ",
-            "packages/local/example/1.0.0/z.typ",
-        ]
+        error.issues,
+        ["a.typ", "z.typ"].map(|name| {
+            let path = format!("{base}/{name}");
+            Conflict {
+                path: path.clone(),
+                kind: "project file",
+                other_path: path,
+                other_kind: "package file",
+            }
+        })
     );
+    assert!(error.to_string().contains("a.typ"), "{error}");
+    assert!(error.to_string().contains("z.typ"), "{error}");
 }
 
 #[test]
-fn collision_issue_order_places_roles_before_paths() {
+fn conflicts_are_ordered_by_kind_then_path() {
     let base = "packages/local/example/1.0.0";
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"main".to_vec())
@@ -169,32 +134,14 @@ fn collision_issue_order_places_roles_before_paths() {
         .build()
         .unwrap();
 
-    let error = plan_pack_extraction(&pack, PackExtractionSelection::new(true, false))
-        .expect_err("both role collisions must reject the plan");
-    let roles_and_paths = error
-        .issues()
-        .iter()
-        .filter_map(|issue| match issue {
-            PackExtractionPlanIssue::PathConflict {
-                first_path,
-                first_role,
-                ..
-            } => Some((*first_role, first_path.as_str())),
-            _ => None,
-        })
-        .collect::<Vec<_>>();
-
     assert_eq!(
-        roles_and_paths,
+        conflicts(&pack)
+            .iter()
+            .map(|conflict| (conflict.kind, conflict.path.as_str()))
+            .collect::<Vec<_>>(),
         [
-            (
-                PackExtractionEntryRole::ProjectFile,
-                "packages/local/example/1.0.0/z",
-            ),
-            (
-                PackExtractionEntryRole::PackageFile,
-                "packages/local/example/1.0.0/a",
-            ),
+            ("project file", "packages/local/example/1.0.0/z"),
+            ("package file", "packages/local/example/1.0.0/a"),
         ]
     );
 }
@@ -224,18 +171,15 @@ proptest! {
             for (path, bytes) in entries {
                 builder = builder.file(path, bytes);
             }
-            builder
-                .package_file(package_spec(), "lib.typ", b"package".to_vec())
+            builder.package_file(package_spec(), "lib.typ", b"package".to_vec())
                 .build()
                 .unwrap()
         };
-        let forward = build(entries);
-        let backward = build(reversed);
-        let selection = PackExtractionSelection::new(include_packages, include_fonts);
+        let selection = selection(include_packages, include_fonts);
 
         prop_assert_eq!(
-            observed_entries(&forward, selection),
-            observed_entries(&backward, selection),
+            observed_entries(&build(entries), selection),
+            observed_entries(&build(reversed), selection),
         );
     }
 
@@ -256,17 +200,11 @@ proptest! {
             .package_file(package_spec(), stem, b"package".to_vec())
             .build().unwrap();
 
-        let error = plan_pack_extraction(
-            &pack,
-            PackExtractionSelection::new(true, false),
-        ).unwrap_err();
-
-        let is_path_conflict = matches!(error.issues(), [PackExtractionPlanIssue::PathConflict { .. }]);
-        prop_assert!(is_path_conflict);
+        prop_assert_eq!(conflicts(&pack).len(), 1);
     }
 
     #[test]
-    fn generated_collision_issue_order_is_invariant_under_input_permutation(
+    fn generated_collision_order_is_invariant_under_input_permutation(
         stems in prop::collection::btree_set("[a-z][a-z0-9]{0,12}", 2..8),
     ) {
         let entries = stems.into_iter().collect::<Vec<_>>();
@@ -282,39 +220,15 @@ proptest! {
                 );
             }
             for stem in package_order {
-                builder = builder.package_file(
-                    package_spec(),
-                    stem,
-                    format!("package {stem}").into_bytes(),
-                );
+                builder = builder.package_file(package_spec(), stem, format!("package {stem}").into_bytes());
             }
             builder.build().unwrap()
         };
-        let forward = build(&entries, &reversed);
-        let backward = build(&reversed, &entries);
-        let project = |pack: &Pack| {
-            plan_pack_extraction(pack, PackExtractionSelection::new(true, false))
-                .unwrap_err()
-                .issues()
-                .iter()
-                .map(|issue| match issue {
-                    PackExtractionPlanIssue::PathConflict {
-                        first_path,
-                        first_role,
-                        second_path,
-                        second_role,
-                    } => (
-                        first_path.clone(),
-                        *first_role,
-                        second_path.clone(),
-                        *second_role,
-                    ),
-                    issue => panic!("unexpected generated plan issue: {issue:?}"),
-                })
-                .collect::<Vec<_>>()
-        };
 
-        prop_assert_eq!(project(&forward), project(&backward));
+        prop_assert_eq!(
+            conflicts(&build(&entries, &reversed)),
+            conflicts(&build(&reversed, &entries))
+        );
     }
 
     #[test]
@@ -328,32 +242,9 @@ proptest! {
             .package_file(package_spec(), stem, b"package".to_vec())
             .build().unwrap();
 
-        let plan = plan_pack_extraction(
-            &pack,
-            PackExtractionSelection::new(true, false),
-        ).unwrap();
+        let plan = extract::plan(&pack, selection(true, false)).unwrap();
 
         prop_assert_eq!(plan.entries().len(), 3);
-    }
-
-    #[test]
-    fn planning_and_plan_clones_share_generated_payloads(
-        bytes in prop::collection::vec(any::<u8>(), 0..256),
-    ) {
-        let source_pointer = bytes.as_ptr();
-        let pack = Pack::builder("main.typ")
-            .file("main.typ", bytes)
-            .build().unwrap();
-        let pack_pointer = pack.file("main.typ").unwrap().as_ptr();
-        let plan = plan_pack_extraction(
-            &pack,
-            PackExtractionSelection::new(false, false),
-        ).unwrap();
-        let cloned = plan.clone();
-
-        prop_assert_eq!(pack_pointer, source_pointer);
-        prop_assert_eq!(plan.entries()[0].bytes().as_ptr(), pack_pointer);
-        prop_assert_eq!(cloned.entries()[0].bytes().as_ptr(), pack_pointer);
     }
 }
 
@@ -372,25 +263,19 @@ fn embedded_font_containers_are_selected_explicitly_and_external_fonts_are_exclu
         .build()
         .unwrap();
 
-    let excluded =
-        plan_pack_extraction(&embedded, PackExtractionSelection::new(false, false)).unwrap();
-    let included =
-        plan_pack_extraction(&embedded, PackExtractionSelection::new(false, true)).unwrap();
-    let unavailable =
-        plan_pack_extraction(&external, PackExtractionSelection::new(false, true)).unwrap();
+    let excluded = extract::plan(&embedded, selection(false, false)).unwrap();
+    let included = extract::plan(&embedded, selection(false, true)).unwrap();
+    let unavailable = extract::plan(&external, selection(false, true)).unwrap();
 
     assert_eq!(excluded.entries().len(), 1);
     assert_eq!(included.entries().len(), 2);
-    assert_eq!(
-        included.entries()[0].role(),
-        PackExtractionEntryRole::FontContainer
-    );
+    assert!(included.entries()[0].path().starts_with("fonts/"));
     assert_eq!(unavailable.entries().len(), 1);
 }
 
 #[cfg(feature = "embedded-fonts")]
 #[test]
-fn a_multi_face_container_is_extracted_once_without_copying() {
+fn a_multi_face_container_is_extracted_once() {
     let face = fonts::typst_container();
     let collection = fonts::font_collection(&[face.clone(), face]);
     let pack = Pack::builder("main.typ")
@@ -398,18 +283,13 @@ fn a_multi_face_container_is_extracted_once_without_copying() {
         .font(collection.clone())
         .build()
         .unwrap();
-    let plan = plan_pack_extraction(&pack, PackExtractionSelection::new(false, true)).unwrap();
+    let plan = extract::plan(&pack, selection(false, true)).unwrap();
     let font_entries = plan
         .entries()
         .iter()
-        .filter(|entry| entry.role() == PackExtractionEntryRole::FontContainer)
+        .filter(|entry| entry.path().starts_with("fonts/"))
         .collect::<Vec<_>>();
 
-    let digest = pack.font_requirements()[0].digest;
     assert_eq!(font_entries.len(), 1);
     assert_eq!(font_entries[0].bytes(), collection.as_slice());
-    assert_eq!(
-        font_entries[0].bytes().as_ptr(),
-        pack.font_data(&digest).unwrap().as_ptr()
-    );
 }

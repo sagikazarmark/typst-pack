@@ -8,17 +8,12 @@
 
 #![cfg(feature = "package-reading")]
 
-use std::cell::Cell;
-use std::io::{self, Read};
-use std::rc::Rc;
+use std::io;
 use std::str::FromStr;
 
 use typst::syntax::package::PackageSpec;
-use typst_pack::{
-    CreateOutcome, CreateRequest, LimitExceeded, PackageArchiveReadError, PackageDisposition,
-    PackageReadError, PackageTree, PackageTreeIssue, ProjectSnapshot, ReadLimits, create,
-    expand_package_archive, package_archive_url, read_package_archive,
-};
+use typst_pack::package::registry::{ExpandError, archive_url, expand_archive};
+use typst_pack::{LimitExceeded, PackIssue, ProjectSnapshot, ReadLimits, create, package};
 
 fn spec(text: &str) -> PackageSpec {
     PackageSpec::from_str(text).unwrap()
@@ -56,14 +51,8 @@ fn archive_builder() -> tar::Builder<flate2::write::GzEncoder<Vec<u8>>> {
     ))
 }
 
-const LIMITS: ReadLimits = ReadLimits::DEFAULT;
-
-fn expand(bytes: &[u8]) -> Result<PackageTree, PackageReadError> {
-    expand_package_archive(spec("@preview/example:1.0.0"), bytes, LIMITS)
-}
-
-fn expand_under(bytes: &[u8], limits: ReadLimits) -> Result<PackageTree, PackageReadError> {
-    expand_package_archive(spec("@preview/example:1.0.0"), bytes, limits)
+fn expand(bytes: &[u8]) -> Result<package::Tree, ExpandError> {
+    expand_archive(bytes, ReadLimits::default())
 }
 
 /// An archive with one member whose raw header the test shapes.
@@ -78,52 +67,11 @@ fn raw_member(shape: impl FnOnce(&mut tar::Header), data: &[u8]) -> Vec<u8> {
     finish(builder)
 }
 
-fn limit_resource(error: PackageReadError) -> &'static str {
+fn limit_resource(error: ExpandError) -> &'static str {
     match error {
-        PackageReadError::Limit {
-            source: LimitExceeded { resource, .. },
-            ..
-        } => resource,
+        ExpandError::Limit(LimitExceeded { resource, .. }) => resource,
         other => panic!("expected a limit, got {other}"),
     }
-}
-
-struct ObservedReader {
-    bytes: io::Cursor<Vec<u8>>,
-    reads: Rc<Cell<usize>>,
-}
-
-impl Read for ObservedReader {
-    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
-        self.reads.set(self.reads.get() + 1);
-        self.bytes.read(buffer)
-    }
-}
-
-#[test]
-fn package_archive_reads_are_bounded() {
-    assert_eq!(
-        read_package_archive(io::Cursor::new(b"1234"), None, 4).unwrap(),
-        b"1234"
-    );
-    for known_size in [None, Some(4)] {
-        assert!(matches!(
-            read_package_archive(io::Cursor::new(b"12345-extra"), known_size, 4),
-            Err(PackageArchiveReadError::Limit(LimitExceeded {
-                limit: 4,
-                ..
-            }))
-        ));
-    }
-
-    // A known oversized archive is refused before the reader is touched.
-    let reads = Rc::new(Cell::new(0));
-    let reader = ObservedReader {
-        bytes: io::Cursor::new(vec![0; 5]),
-        reads: Rc::clone(&reads),
-    };
-    assert!(read_package_archive(reader, Some(5), 4).is_err());
-    assert_eq!(reads.get(), 0);
 }
 
 #[test]
@@ -144,7 +92,7 @@ fn the_registry_url_of_a_specification_is_obtained_without_a_transport() {
     ];
 
     for (text, expected) in layouts {
-        let url = package_archive_url(&spec(text)).unwrap();
+        let url = archive_url(&spec(text)).unwrap();
 
         assert_eq!(url, expected, "{text}");
     }
@@ -157,14 +105,7 @@ fn a_specification_the_registry_does_not_serve_has_no_url() {
         "@custom/example:1.2.3",
         "@Preview/example:1.2.3",
     ] {
-        let unserved = spec(text);
-
-        let error = package_archive_url(&unserved).unwrap_err();
-
-        assert!(
-            matches!(&error, PackageReadError::UnservedNamespace { spec } if spec == &unserved),
-            "{text}: {error}"
-        );
+        assert_eq!(archive_url(&spec(text)), None, "{text}");
     }
 }
 
@@ -239,10 +180,7 @@ fn duplicate_and_conflicting_entries_are_rejected_by_package_tree_validation() {
         &[("lib", &b"file"[..]), ("lib/nested.typ", b"descendant")][..],
     ] {
         let error = expand(&archive(files)).unwrap_err();
-        assert!(
-            matches!(error, PackageReadError::InvalidPackageTree { .. }),
-            "{error}"
-        );
+        assert!(matches!(error, ExpandError::Invalid(_)), "{error}");
     }
 }
 
@@ -254,14 +192,14 @@ fn an_archive_entry_that_cannot_name_a_package_file_is_rejected() {
             b"#let value = 1",
         );
         let error = expand(&bytes).unwrap_err();
-        let PackageReadError::InvalidPackageTree { source, .. } = &error else {
+        let ExpandError::Invalid(source) = &error else {
             panic!("{error}");
         };
         assert!(
             source
-                .issues()
+                .issues
                 .iter()
-                .any(|issue| matches!(issue, PackageTreeIssue::InvalidPath { .. }))
+                .any(|issue| matches!(issue, PackIssue::InvalidPath { .. }))
         );
     }
 }
@@ -286,7 +224,7 @@ fn links_and_other_member_kinds_are_rejected() {
             .unwrap();
         let error = expand(&finish(builder)).unwrap_err();
         assert!(
-            matches!(&error, PackageReadError::MalformedArchive { message, .. } if message.contains("secrets")),
+            matches!(&error, ExpandError::Malformed(message) if message.contains("secrets")),
             "{kind:?}: {error}"
         );
     }
@@ -318,20 +256,17 @@ fn directories_are_not_package_files() {
 fn malformed_bytes_and_names_are_rejected() {
     assert!(matches!(
         expand(b"<!doctype html><title>404</title>"),
-        Err(PackageReadError::MalformedArchive { .. })
+        Err(ExpandError::Malformed(_))
     ));
     let non_utf8 = raw_member(|header| header.as_gnu_mut().unwrap().name[0] = 0xff, b"x");
-    assert!(matches!(
-        expand(&non_utf8),
-        Err(PackageReadError::MalformedArchive { .. })
-    ));
+    assert!(matches!(expand(&non_utf8), Err(ExpandError::Malformed(_))));
 }
 
 #[test]
 fn expansion_is_bounded() {
     let bytes = archive(&[("a.typ", b"12345"), ("b.typ", b"12345"), ("c.typ", b"1")]);
     assert!(
-        expand_under(
+        expand_archive(
             &bytes,
             ReadLimits {
                 max_entries: 3,
@@ -341,18 +276,18 @@ fn expansion_is_bounded() {
         )
         .is_ok()
     );
-    let limited = |limits| limit_resource(expand_under(&bytes, limits).unwrap_err());
+    let limited = |limits| limit_resource(expand_archive(&bytes, limits).unwrap_err());
     limited(ReadLimits {
         max_entries: 2,
-        ..LIMITS
+        ..ReadLimits::default()
     });
     limited(ReadLimits {
         max_file_bytes: 4,
-        ..LIMITS
+        ..ReadLimits::default()
     });
     limited(ReadLimits {
         max_total_bytes: 10,
-        ..LIMITS
+        ..ReadLimits::default()
     });
 }
 
@@ -366,7 +301,7 @@ fn a_compression_bomb_stops_at_the_limit() {
     // A member that inflates far past the limit.
     let bomb = archive(&[("bomb.typ", &vec![0; 64 << 20])]);
     assert!(bomb.len() < 1 << 20);
-    limit_resource(expand_under(&bomb, limits).unwrap_err());
+    limit_resource(expand_archive(&bomb, limits).unwrap_err());
 
     // A long-name extension inflating far past the limit is cut off before
     // it is materialized.
@@ -376,8 +311,8 @@ fn a_compression_bomb_stops_at_the_limit() {
     header.set_size(1);
     builder.append_data(&mut header, &name, &b"x"[..]).unwrap();
     assert!(matches!(
-        expand_under(&finish(builder), limits),
-        Err(PackageReadError::MalformedArchive { .. })
+        expand_archive(&finish(builder), limits),
+        Err(ExpandError::Malformed(_))
     ));
 }
 
@@ -420,25 +355,22 @@ fn a_resume_loop_fetches_and_expands_what_creation_reported() {
     )
     .unwrap();
 
-    let mut request = CreateRequest::new(project);
+    let mut request = create::Request::new(project);
     // Bounded so that a loop making no progress fails instead of hanging; the
     // number of rounds it actually takes is not asserted.
     let mut issued = None;
     for _ in 0..8 {
         match create(&request).unwrap() {
-            CreateOutcome::Created { pack, .. } => {
+            create::Outcome::Created(create::Created { pack, .. }) => {
                 issued = Some(pack);
                 break;
             }
-            CreateOutcome::MissingPackages(missing) => {
+            create::Outcome::MissingPackages(missing) => {
                 for spec in missing {
-                    let url = package_archive_url(&spec).unwrap();
+                    let url = archive_url(&spec).unwrap();
                     let bytes = fetch(&url).expect("the registry serves the reported package");
-                    let tree = expand_package_archive(spec.clone(), &bytes, LIMITS).unwrap();
-                    request
-                        .packages
-                        .insert(spec, tree, PackageDisposition::Embedded)
-                        .unwrap();
+                    let tree = expand(&bytes).unwrap();
+                    request.packages.insert(spec, tree, true).unwrap();
                 }
             }
         }
@@ -455,7 +387,9 @@ fn a_resume_loop_fetches_and_expands_what_creation_reported() {
     // The whole expanded tree travels, not only what the representative request
     // read.
     assert!(
-        pack.package_file(&spec("@preview/example:1.0.0"), "README.md")
+        pack.packages()
+            .find(|(s, _)| *s == &spec("@preview/example:1.0.0"))
+            .and_then(|(_, t)| t.file("README.md"))
             .is_some()
     );
 }

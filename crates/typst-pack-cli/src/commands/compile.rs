@@ -5,10 +5,11 @@ use std::path::{Path, PathBuf};
 
 use typst::foundations::Smart;
 use typst::syntax::VirtualRoot;
-use typst_pack::pack_archive::{DecodeLimits, open_pack, read_pack};
-use typst_pack::{
-    CompilationLimits, CompileError, CompileRequest, CreationTimestamp, DocumentTime, HtmlOutput,
-    Output, OutputFormat, PageSelection, PdfOutput, PngOutput, Sources, SvgOutput, compile,
+use typst_pack::Sources;
+use typst_pack::archive::{self, DecodeLimits};
+use typst_pack::compile::{
+    self, CreationTimestamp, DocumentTime, Error, Limits, Output, OutputFormat, PageSelection,
+    Request,
 };
 
 use super::{
@@ -34,10 +35,11 @@ pub fn run(args: CompileArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comm
     initialize_jobs(args.automation.jobs);
 
     let pack = if stdin {
-        read_pack(std::io::stdin().lock(), DecodeLimits::DEFAULT)
+        archive::read(std::io::stdin().lock(), DecodeLimits::default())
             .map_err(|error| format!("cannot read Pack from stdin: {error}"))?
     } else {
-        open_pack(&args.pack, DecodeLimits::DEFAULT)?
+        archive::open(&args.pack, DecodeLimits::default())
+            .map_err(|error| format!("cannot open pack `{}`: {error}", args.pack.display()))?
     };
     // An explicit timestamp is recorded in UTC, the current time locally.
     let (unix, timestamp) = match args.automation.creation_timestamp {
@@ -56,14 +58,32 @@ pub fn run(args: CompileArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comm
     let (options, input_files) =
         compile_options(&args.compilation, DocumentTime::UnixTimestamp(unix))?;
     let resolved = packer(&args.fonts, &args.packages, cert).resolve(&pack)?;
-    let defaults = CompilationLimits::default();
+    let defaults = Limits::default();
     let workers = u64::try_from(rayon::current_num_threads()).unwrap_or(defaults.export_workers);
-    let request = CompileRequest {
-        output: output(&args, format, standards, timestamp),
+    let request = Request {
+        output: Output {
+            pages: PageSelection {
+                ranges: args
+                    .pages
+                    .iter()
+                    .flat_map(|pages| pages.ranges.clone())
+                    .collect(),
+            },
+            pretty: args.pretty,
+            ppi: Some(args.ppi),
+            pdf_standards: standards,
+            pdf_tags: if args.no_pdf_tags {
+                Smart::Custom(false)
+            } else {
+                Smart::Auto
+            },
+            pdf_timestamp: timestamp,
+            ..Output::new(format)
+        },
         options,
         packages: resolved.packages,
         fonts: resolved.fonts,
-        limits: CompilationLimits {
+        limits: Limits {
             export_workers: workers.clamp(1, defaults.export_workers),
             ..defaults
         },
@@ -71,12 +91,10 @@ pub fn run(args: CompileArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comm
     };
 
     let timings = Timings::start(args.automation.timings.clone());
-    let result = compile(&request);
+    let result = compile::compile(&request);
     let sources = match &result {
         Ok(compiled) => Some(&compiled.sources),
-        Err(CompileError::Failed { sources, .. } | CompileError::Export { sources, .. }) => {
-            Some(sources)
-        }
+        Err(Error::Failed { sources, .. } | Error::Export { sources, .. }) => Some(sources),
         Err(_) => None,
     };
     let timing_error = timings.finish(sources);
@@ -122,7 +140,7 @@ pub fn run(args: CompileArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comm
                 }
             }
         }
-        Err(CompileError::Failed {
+        Err(Error::Failed {
             errors,
             warnings,
             sources,
@@ -131,7 +149,7 @@ pub fn run(args: CompileArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comm
             failed()
         }
         Err(
-            ref error @ CompileError::Export {
+            ref error @ Error::Export {
                 ref warnings,
                 ref sources,
                 ..
@@ -143,7 +161,7 @@ pub fn run(args: CompileArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comm
         }
         Err(error) => {
             let mut hints = error.hints();
-            if matches!(error, CompileError::Unfulfilled(_)) {
+            if matches!(error, Error::Unfulfilled(_)) {
                 hints.push(format!(
                     "`typst-pack inspect {}` lists every requirement this pack expects to be \
                      supplied",
@@ -194,42 +212,6 @@ fn pdf_standards(args: &CompileArgs) -> Result<Vec<typst_pdf::PdfStandard>, Fail
         return Err(Failure::Error { message, hints });
     }
     Ok(standards)
-}
-
-/// The output and its controls.
-fn output(
-    args: &CompileArgs,
-    format: OutputFormat,
-    standards: Vec<typst_pdf::PdfStandard>,
-    creation_timestamp: CreationTimestamp,
-) -> Output {
-    let page_selection = PageSelection::new(args.pages.clone());
-    let pretty = args.pretty;
-    match format {
-        OutputFormat::Pdf => Output::Pdf(PdfOutput {
-            page_selection,
-            standards,
-            tags: if args.no_pdf_tags {
-                Smart::Custom(false)
-            } else {
-                Smart::Auto
-            },
-            creation_timestamp,
-            pretty,
-            ..PdfOutput::default()
-        }),
-        OutputFormat::Png => Output::Png(PngOutput {
-            page_selection,
-            pixels_per_inch: Some(args.ppi),
-            render_bleed: false,
-        }),
-        OutputFormat::Svg => Output::Svg(SvgOutput {
-            page_selection,
-            render_bleed: false,
-            pretty,
-        }),
-        OutputFormat::Html => Output::Html(HtmlOutput { pretty }),
-    }
 }
 
 /// Opens the first written artifact in a viewer, unless it went to stdout.

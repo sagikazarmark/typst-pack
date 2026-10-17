@@ -40,9 +40,9 @@ jobs:
       - if: ${{ !cancelled() }}
         run: cargo test --locked -p typst-pack --no-default-features --features fs,opendal,package-reading,embedded-fonts --target ${{ matrix.target }} --test creation_conformance
       - if: ${{ !cancelled() }}
-        run: cargo test --locked -p typst-pack --features fs,embedded-fonts --lib filesystem_write::tests
+        run: cargo test --locked -p typst-pack --features fs,embedded-fonts --lib fs::
       - if: ${{ !cancelled() }}
-        run: cargo test --locked -p typst-pack --features fs,embedded-fonts --test filesystem_project_reading --test filesystem_font_catalog_reading --test filesystem_package_reading --test filesystem_pack_assembly --test fs_creation --test pack_archive_reading --test pack_archive_writing --test filesystem_writing
+        run: cargo test --locked -p typst-pack --features fs,embedded-fonts --test filesystem_project_reading --test filesystem_package_reading --test filesystem_packer --test fs_creation --test pack_archive --test filesystem_writing
 
   opendal:
     name: opendal (feature-isolated)

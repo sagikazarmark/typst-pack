@@ -1,5 +1,5 @@
-//! Exact-key writes of Pack Archives, package cache archives, extraction
-//! plans, and compilation artifacts.
+//! Exact-key writes of pack archives, package cache archives, extraction
+//! plans, and compiled artifacts.
 
 use std::collections::HashSet;
 
@@ -8,7 +8,9 @@ use futures_util::TryStreamExt;
 use typst::syntax::package::PackageSpec;
 
 use super::{Error, check_key, check_prefix, storage};
-use crate::{Artifact, PackExtractionPlan, read_layout};
+use crate::compile::Artifact;
+use crate::extract::Plan;
+use crate::package;
 
 /// How a write treats objects that already exist.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -44,8 +46,11 @@ pub enum WriteOutcome {
 #[derive(Debug, thiserror::Error)]
 #[error("write failed after {} completed key(s)", .completed.len())]
 pub struct WriteError {
+    /// The keys whose outcome was established before the failure, in order.
     pub completed: Vec<(String, WriteOutcome)>,
+    /// Whether the failing key's write was issued and may have taken effect.
     pub indeterminate: bool,
+    /// Why the write failed.
     #[source]
     pub error: Error,
 }
@@ -212,8 +217,8 @@ async fn write_one(
     Ok(completed.pop().expect("one key was written").1)
 }
 
-/// Writes one Pack Archive object at `path`.
-pub async fn write_pack_archive(
+/// Writes one pack archive object at `path`.
+pub async fn write_archive(
     op: &Operator,
     path: &str,
     archive: &[u8],
@@ -237,22 +242,22 @@ pub async fn write_package_archive(
     bytes: &[u8],
 ) -> Result<WriteOutcome, WriteError> {
     check_prefix(prefix)?;
-    let path = format!("{prefix}{}", read_layout::package_archive_cache_key(spec));
+    let path = format!("{prefix}{}", package::archive_cache_key(spec));
     write_one(op, WritePolicy::CreateOrVerify, path, bytes).await
 }
 
-/// Writes every entry of a Pack Extraction Plan below `prefix`.
-pub async fn write_pack_extraction_plan(
+/// Writes every entry of an extraction plan below `prefix`.
+pub async fn write_extraction(
     op: &Operator,
     prefix: &str,
-    plan: &PackExtractionPlan,
+    plan: &Plan,
     policy: WritePolicy,
 ) -> Result<Vec<(String, WriteOutcome)>, WriteError> {
     check_prefix(prefix)?;
     let entries = plan
         .entries()
         .iter()
-        .map(|entry| (format!("{prefix}{}", entry.relative_path()), entry.bytes()))
+        .map(|entry| (format!("{prefix}{}", entry.path()), entry.bytes()))
         .collect::<Vec<_>>();
     write_keys(op, policy, &entries).await
 }
@@ -261,7 +266,7 @@ pub async fn write_pack_extraction_plan(
 /// artifacts in order.
 ///
 /// Keys must be relative, normalized, and distinct.
-pub async fn write_compilation_artifacts(
+pub async fn write_artifacts(
     op: &Operator,
     prefix: &str,
     artifacts: &[Artifact],

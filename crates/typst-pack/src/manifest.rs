@@ -4,10 +4,11 @@ use serde::{Deserialize, Serialize};
 use typst::syntax::package::PackageSpec;
 
 use crate::Digest;
-use crate::pack::FontFace;
+use crate::archive::DecodeError;
+use crate::font::Face;
 
 /// The archive member name of the manifest.
-pub const MANIFEST_PATH: &str = "typst-pack.toml";
+pub(crate) const MANIFEST_PATH: &str = "typst-pack.toml";
 
 /// The pack format version this crate reads and writes.
 ///
@@ -37,7 +38,7 @@ pub(crate) struct Manifest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub(crate) fonts: Vec<FontEntry>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(crate) metadata: Option<PackMetadata>,
+    pub(crate) metadata: Option<Metadata>,
 }
 
 /// One `[[files]]` entry: a project file and the SHA-256 of its bytes.
@@ -63,13 +64,13 @@ pub(crate) struct FontEntry {
     pub(crate) embedded: bool,
     /// The faces of the container; informational for embedded containers.
     #[serde(default)]
-    pub(crate) faces: Vec<FontFace>,
+    pub(crate) faces: Vec<Face>,
 }
 
-/// Optional descriptive metadata, stored as `[metadata]` and excluded from
-/// Pack Identity.
+/// Optional descriptive metadata of a pack, stored as `[metadata]` and
+/// excluded from its identity.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PackMetadata {
+pub struct Metadata {
     /// A human-readable pack name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
@@ -81,32 +82,18 @@ pub struct PackMetadata {
     pub authors: Vec<String>,
 }
 
-/// A manifest that could not be accepted.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum ManifestError {
-    #[error("the {MANIFEST_PATH} manifest is not valid UTF-8: {0}")]
-    NotUtf8(#[source] std::str::Utf8Error),
-    #[error("failed to parse the {MANIFEST_PATH} manifest: {0}")]
-    Parse(#[from] toml::de::Error),
-    #[error("the {MANIFEST_PATH} manifest has no integer `format-version`")]
-    MissingFormatVersion,
-    #[error("unsupported pack format version {0} (this reader supports version {FORMAT_VERSION})")]
-    UnsupportedVersion(i64),
-}
-
 impl Manifest {
     /// Parses a manifest, rejecting every format version but [`FORMAT_VERSION`]
     /// before interpreting any other key.
-    pub(crate) fn parse(bytes: &[u8]) -> Result<Self, ManifestError> {
-        let text = std::str::from_utf8(bytes).map_err(ManifestError::NotUtf8)?;
+    pub(crate) fn parse(bytes: &[u8]) -> Result<Self, DecodeError> {
+        let text = std::str::from_utf8(bytes).map_err(|_| DecodeError::ManifestNotUtf8)?;
         let table: toml::Table = toml::from_str(text)?;
         let version = table
             .get("format-version")
             .and_then(toml::Value::as_integer)
-            .ok_or(ManifestError::MissingFormatVersion)?;
+            .ok_or(DecodeError::MissingFormatVersion)?;
         if version != FORMAT_VERSION {
-            return Err(ManifestError::UnsupportedVersion(version));
+            return Err(DecodeError::UnsupportedVersion(version));
         }
         Ok(table.try_into()?)
     }

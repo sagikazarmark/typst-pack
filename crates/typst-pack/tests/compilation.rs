@@ -2,12 +2,12 @@ use std::num::NonZeroUsize;
 
 use typst::foundations::Smart;
 use typst::syntax::package::PackageSpec;
-use typst_pack::{
-    CompilationLimits, CompileError, CompileRequest, Compiled, CreationTimestamp, DocumentTime,
-    HtmlOutput, Input, LimitExceeded, Output, OutputFormat, Pack, PackMetadata, PackageTree,
-    PageSelection, PdfOutput, PngOutput, RequestIssue, SvgOutput, Unfulfilled, compile,
-    parse_page_selection,
+use typst_pack::compile::{
+    Compiled, CreationTimestamp, DocumentTime, Input, Output, OutputFormat, PageSelection,
+    RequestIssue, Unfulfilled,
 };
+use typst_pack::{LimitExceeded, Metadata, Pack};
+use typst_pack::{compile, package};
 
 fn pack(source: &str) -> Pack {
     Pack::builder("main.typ")
@@ -16,12 +16,12 @@ fn pack(source: &str) -> Pack {
         .unwrap()
 }
 
-fn compiled(request: &CompileRequest) -> Compiled {
+fn compiled(request: &compile::Request) -> Compiled {
     compile(request).unwrap_or_else(|error| panic!("compilation failed: {error}"))
 }
 
 fn compile_to(pack: Pack, output: Output) -> Compiled {
-    compiled(&CompileRequest::new(pack, output))
+    compiled(&compile::Request::new(pack, output))
 }
 
 fn pages(compiled: &Compiled) -> Vec<usize> {
@@ -30,7 +30,7 @@ fn pages(compiled: &Compiled) -> Vec<usize> {
 }
 
 fn selection(text: &str) -> PageSelection {
-    parse_page_selection(text).unwrap()
+    text.parse::<compile::PageSelection>().unwrap()
 }
 
 fn page_pack(widths: &[u32]) -> Pack {
@@ -47,32 +47,32 @@ fn five_page_pack() -> Pack {
 }
 
 fn svg(page_selection: PageSelection) -> Output {
-    Output::Svg(SvgOutput {
-        page_selection,
-        ..SvgOutput::default()
-    })
+    Output {
+        pages: page_selection,
+        ..Output::new(OutputFormat::Svg)
+    }
 }
 
 fn png(ppi: f64) -> Output {
-    Output::Png(PngOutput {
-        pixels_per_inch: Some(ppi),
-        ..PngOutput::default()
-    })
+    Output {
+        ppi: Some(ppi),
+        ..Output::new(OutputFormat::Png)
+    }
 }
 
 fn limited(
     pack: Pack,
     output: Output,
-    limits: CompilationLimits,
-) -> Result<Compiled, CompileError> {
-    let mut request = CompileRequest::new(pack, output);
+    limits: compile::Limits,
+) -> Result<Compiled, compile::Error> {
+    let mut request = compile::Request::new(pack, output);
     request.limits = limits;
     compile(&request)
 }
 
-fn limit_error(result: Result<Compiled, CompileError>) -> (&'static str, u64) {
+fn limit_error(result: Result<Compiled, compile::Error>) -> (&'static str, u64) {
     match result {
-        Err(CompileError::Limit(LimitExceeded { resource, limit })) => (resource, limit),
+        Err(compile::Error::Limit(LimitExceeded { resource, limit })) => (resource, limit),
         other => panic!("expected an exceeded limit, got {other:?}"),
     }
 }
@@ -132,10 +132,10 @@ fn page_selection_follows_typst_semantics() {
 
     let pdf = compile_to(
         five_page_pack(),
-        Output::Pdf(PdfOutput {
-            page_selection: selection("5,2"),
-            ..PdfOutput::default()
-        }),
+        Output {
+            pages: selection("5,2"),
+            ..Output::new(OutputFormat::Pdf)
+        },
     );
     let document = hayro_syntax::Pdf::new(pdf.artifacts[0].bytes.clone()).unwrap();
     let widths = document
@@ -145,7 +145,10 @@ fn page_selection_follows_typst_semantics() {
     assert_eq!(widths.collect::<Vec<_>>(), [20.0, 50.0]);
 
     for expression in ["", "0", "-", "5-3", "1,", ",1", "1--2", "nope"] {
-        assert!(parse_page_selection(expression).is_err(), "{expression:?}");
+        assert!(
+            expression.parse::<compile::PageSelection>().is_err(),
+            "{expression:?}"
+        );
     }
 }
 
@@ -154,11 +157,11 @@ fn pdf_page_selection_disables_automatic_tags_with_a_warning() {
     let warned = |tags| {
         let compiled = compile_to(
             pack("Tagged"),
-            Output::Pdf(PdfOutput {
-                page_selection: selection("1"),
-                tags,
-                ..PdfOutput::default()
-            }),
+            Output {
+                pages: selection("1"),
+                pdf_tags: tags,
+                ..Output::new(OutputFormat::Pdf)
+            },
         );
         compiled
             .warnings
@@ -171,36 +174,34 @@ fn pdf_page_selection_disables_automatic_tags_with_a_warning() {
 
 #[test]
 fn exporter_rejections_are_failed_compilations() {
-    let rejected = |source: &str, pdf: PdfOutput| match compile(&CompileRequest::new(
-        pack(source),
-        Output::Pdf(pdf),
-    )) {
-        Err(CompileError::Failed { errors, .. }) => errors,
-        other => panic!("expected an exporter rejection, got {other:?}"),
-    };
+    let rejected =
+        |source: &str, pdf: Output| match compile(&compile::Request::new(pack(source), pdf)) {
+            Err(compile::Error::Failed { errors, .. }) => errors,
+            other => panic!("expected an exporter rejection, got {other:?}"),
+        };
 
     let errors = rejected(
         "#pdf.attach(\"twice.txt\", bytes(\"a\"))\n#pdf.attach(\"twice.txt\", bytes(\"b\"))",
-        PdfOutput::default(),
+        Output::new(OutputFormat::Pdf),
     );
     assert!(errors[0].message.contains("attempted to attach file"));
 
     let errors = rejected(
         "One page",
-        PdfOutput {
-            page_selection: selection("1"),
-            tags: Smart::Custom(true),
-            ..PdfOutput::default()
+        Output {
+            pages: selection("1"),
+            pdf_tags: Smart::Custom(true),
+            ..Output::new(OutputFormat::Pdf)
         },
     );
     assert!(errors[0].message.contains("tagged PDF"), "{errors:?}");
 
     let errors = rejected(
         "One page",
-        PdfOutput {
-            standards: vec![typst_pdf::PdfStandard::Ua_1],
-            tags: Smart::Custom(false),
-            ..PdfOutput::default()
+        Output {
+            pdf_standards: vec![typst_pdf::PdfStandard::Ua_1],
+            pdf_tags: Smart::Custom(false),
+            ..Output::new(OutputFormat::Pdf)
         },
     );
     assert!(errors[0].message.contains("PDF/UA-1"), "{errors:?}");
@@ -211,10 +212,10 @@ fn pdf_creation_timestamps_are_recorded_as_requested() {
     let creation = |timestamp| {
         let compiled = compile_to(
             pack("Dated"),
-            Output::Pdf(PdfOutput {
-                creation_timestamp: timestamp,
-                ..PdfOutput::default()
-            }),
+            Output {
+                pdf_timestamp: timestamp,
+                ..Output::new(OutputFormat::Pdf)
+            },
         );
         let document = hayro_syntax::Pdf::new(compiled.artifacts[0].bytes.clone()).unwrap();
         document.metadata().creation_date.map(|date| {
@@ -250,21 +251,24 @@ fn pretty_affects_html_svg_and_pdf() {
     let outputs = [
         (
             Output::new(OutputFormat::Html),
-            Output::Html(HtmlOutput { pretty: true }),
+            Output {
+                pretty: true,
+                ..Output::new(OutputFormat::Html)
+            },
         ),
         (
             Output::new(OutputFormat::Svg),
-            Output::Svg(SvgOutput {
+            Output {
                 pretty: true,
-                ..SvgOutput::default()
-            }),
+                ..Output::new(OutputFormat::Svg)
+            },
         ),
         (
             Output::new(OutputFormat::Pdf),
-            Output::Pdf(PdfOutput {
+            Output {
                 pretty: true,
-                ..PdfOutput::default()
-            }),
+                ..Output::new(OutputFormat::Pdf)
+            },
         ),
     ];
     for (compact, pretty) in outputs {
@@ -277,7 +281,7 @@ fn pretty_affects_html_svg_and_pdf() {
 #[test]
 fn string_and_byte_inputs_reach_sys_inputs() {
     let logo = br#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4"/></svg>"#;
-    let mut request = CompileRequest::new(
+    let mut request = compile::Request::new(
         pack(
             "#set page(width: auto, height: auto, margin: 0pt)\n\
              #assert.eq(sys.inputs.name, \"Acme\")\n\
@@ -305,10 +309,10 @@ fn string_and_byte_inputs_reach_sys_inputs() {
 #[test]
 fn document_time_is_explicit() {
     let source = "#datetime.today().display()";
-    let mut request = CompileRequest::new(pack(source), Output::new(OutputFormat::Svg));
+    let mut request = compile::Request::new(pack(source), Output::new(OutputFormat::Svg));
     assert!(matches!(
         compile(&request),
-        Err(CompileError::Failed { .. })
+        Err(compile::Error::Failed { .. })
     ));
 
     request.options.document_time = DocumentTime::UnixTimestamp(946_684_800);
@@ -325,21 +329,23 @@ fn document_time_is_explicit() {
 
 #[test]
 fn invalid_requests_list_every_issue() {
-    let mut request = CompileRequest::new(
+    let mut request = compile::Request::new(
         pack("#panic(\"must not compile\")"),
-        Output::Pdf(PdfOutput {
-            page_selection: PageSelection::new(vec![NonZeroUsize::new(5)..=NonZeroUsize::new(2)]),
-            standards: vec![typst_pdf::PdfStandard::A_1b, typst_pdf::PdfStandard::V_2_0],
-            ..PdfOutput::default()
-        }),
+        Output {
+            pages: PageSelection {
+                ranges: vec![NonZeroUsize::new(5)..=NonZeroUsize::new(2)],
+            },
+            pdf_standards: vec![typst_pdf::PdfStandard::A_1b, typst_pdf::PdfStandard::V_2_0],
+            ..Output::new(OutputFormat::Pdf)
+        },
     );
     request.options.features.push(typst::Feature::Bundle);
     request.options.document_time = DocumentTime::UnixTimestamp(i64::MAX);
 
-    let Err(error @ CompileError::InvalidRequest(_)) = compile(&request) else {
+    let Err(error @ compile::Error::InvalidRequest(_)) = compile(&request) else {
         panic!("expected an invalid request");
     };
-    let CompileError::InvalidRequest(issues) = &error else {
+    let compile::Error::InvalidRequest(issues) = &error else {
         unreachable!()
     };
     assert_eq!(issues.len(), 4, "{issues:?}");
@@ -362,24 +368,24 @@ fn invalid_requests_list_every_issue() {
 
     for ppi in [0.0, -1.0, f64::NAN, f64::INFINITY] {
         assert!(matches!(
-            compile(&CompileRequest::new(pack("Hi"), png(ppi))),
-            Err(CompileError::InvalidRequest(issues)) if issues == [RequestIssue::InvalidPpi]
+            compile(&compile::Request::new(pack("Hi"), png(ppi))),
+            Err(compile::Error::InvalidRequest(issues)) if issues == [RequestIssue::InvalidPpi]
         ));
     }
 }
 
 #[test]
 fn html_output_enables_the_html_feature_itself() {
-    let request = CompileRequest::new(pack("#html.div[Hi]"), Output::new(OutputFormat::Html));
+    let request = compile::Request::new(pack("#html.div[Hi]"), Output::new(OutputFormat::Html));
     assert!(request.options.features.is_empty());
     compiled(&request);
 }
 
 #[test]
 fn failed_compilations_keep_diagnostics_and_sources() {
-    let Err(CompileError::Failed {
+    let Err(compile::Error::Failed {
         errors, sources, ..
-    }) = compile(&CompileRequest::new(
+    }) = compile(&compile::Request::new(
         pack("#unknown-name"),
         Output::new(OutputFormat::Svg),
     ))
@@ -407,7 +413,7 @@ fn empty_page_output_keeps_warnings() {
 fn compilation_reads_nothing_but_the_pack() {
     // No project file outside the pack, no package cache, and no system or
     // Typst-embedded font is reachable.
-    let Err(CompileError::Failed { errors, .. }) = compile(&CompileRequest::new(
+    let Err(compile::Error::Failed { errors, .. }) = compile(&compile::Request::new(
         pack("#read(\"Cargo.toml\")"),
         Output::new(OutputFormat::Svg),
     )) else {
@@ -415,7 +421,7 @@ fn compilation_reads_nothing_but_the_pack() {
     };
     assert!(errors[0].message.contains("not found"), "{errors:?}");
 
-    let Err(CompileError::Failed { errors, .. }) = compile(&CompileRequest::new(
+    let Err(compile::Error::Failed { errors, .. }) = compile(&compile::Request::new(
         pack("#import \"@preview/cetz:0.3.4\": *"),
         Output::new(OutputFormat::Svg),
     )) else {
@@ -447,7 +453,7 @@ fn external_packages_must_be_supplied_exactly() {
     let package = spec("@local/example:1.0.0");
     let manifest = "[package]\nname = \"example\"\nversion = \"1.0.0\"\nentrypoint = \"lib.typ\"";
     let tree = |value: &str| {
-        PackageTree::from_owned_entries([
+        package::Tree::new([
             ("lib.typ", format!("#let value = {value}").into_bytes()),
             ("typst.toml", manifest.as_bytes().to_vec()),
         ])
@@ -462,12 +468,12 @@ fn external_packages_must_be_supplied_exactly() {
         .external_package_file(package.clone(), "typst.toml", manifest.as_bytes().to_vec())
         .build()
         .unwrap();
-    let mut request = CompileRequest::new(pack, Output::new(OutputFormat::Svg));
+    let mut request = compile::Request::new(pack, Output::new(OutputFormat::Svg));
 
     let missing = compile(&request).unwrap_err();
     assert!(matches!(
         &missing,
-        CompileError::Unfulfilled(issues)
+        compile::Error::Unfulfilled(issues)
             if issues == &[Unfulfilled::MissingPackage { spec: package.clone() }]
     ));
     assert!(
@@ -480,7 +486,7 @@ fn external_packages_must_be_supplied_exactly() {
     let mismatched = compile(&request).unwrap_err();
     assert!(matches!(
         &mismatched,
-        CompileError::Unfulfilled(issues)
+        compile::Error::Unfulfilled(issues)
             if matches!(issues.as_slice(), [Unfulfilled::MismatchedPackage { spec, .. }] if *spec == package)
     ));
     assert!(mismatched.to_string().contains("@local/example:1.0.0"));
@@ -517,27 +523,27 @@ fn external_fonts_are_matched_by_digest_and_named_when_missing() {
         .external_font(data.clone())
         .build()
         .unwrap();
-    let mut request = CompileRequest::new(pack, Output::new(OutputFormat::Svg));
+    let mut request = compile::Request::new(pack, Output::new(OutputFormat::Svg));
 
     let missing = compile(&request).unwrap_err();
     assert!(matches!(
         &missing,
-        CompileError::Unfulfilled(issues)
+        compile::Error::Unfulfilled(issues)
             if matches!(issues.as_slice(), [Unfulfilled::MissingFont { .. }])
     ));
     assert!(missing.to_string().contains(&family), "{missing}");
 
     let mut other = data.clone();
     other.push(0);
-    request.fonts = vec![typst_pack::FontContainer::new(other).unwrap()];
+    request.fonts = vec![typst_pack::font::Container::new(other).unwrap()];
     assert!(matches!(
         compile(&request),
-        Err(CompileError::Unfulfilled(_))
+        Err(compile::Error::Unfulfilled(_))
     ));
 
     request
         .fonts
-        .push(typst_pack::FontContainer::new(data).unwrap());
+        .push(typst_pack::font::Container::new(data).unwrap());
     let compiled = compiled(&request);
     assert!(
         compiled.warnings.is_empty(),
@@ -589,14 +595,14 @@ fn vendored_packages_compile_from_the_pack() {
             .unwrap()
     };
     let svg = Output::new(OutputFormat::Svg);
-    assert!(compile(&CompileRequest::new(build("lib.typ"), svg.clone())).is_ok());
-    assert!(compile(&CompileRequest::new(build("missing.typ"), svg)).is_err());
+    assert!(compile(&compile::Request::new(build("lib.typ"), svg.clone())).is_ok());
+    assert!(compile(&compile::Request::new(build("missing.typ"), svg)).is_err());
 }
 
 #[test]
 fn compilation_identity_binds_the_request_but_not_metadata() {
     let identity = |pack: Pack, output: Output, inputs: Vec<(String, Input)>| {
-        let mut request = CompileRequest::new(pack, output);
+        let mut request = compile::Request::new(pack, output);
         request.options.inputs = inputs;
         compiled(&request).identity
     };
@@ -606,9 +612,9 @@ fn compilation_identity_binds_the_request_but_not_metadata() {
 
     let described = Pack::builder("main.typ")
         .file("main.typ", source.as_bytes().to_vec())
-        .metadata(PackMetadata {
+        .metadata(Metadata {
             name: Some("described".into()),
-            ..PackMetadata::default()
+            ..Metadata::default()
         })
         .build()
         .unwrap();
@@ -624,10 +630,10 @@ fn compilation_identity_binds_the_request_but_not_metadata() {
         identity(pack(source), Output::new(OutputFormat::Pdf), vec![]),
         identity(
             pack(source),
-            Output::Svg(SvgOutput {
+            Output {
                 pretty: true,
-                ..SvgOutput::default()
-            }),
+                ..Output::new(OutputFormat::Svg)
+            },
             vec![],
         ),
         identity(
@@ -656,17 +662,17 @@ fn svg_selection(text: &str) -> Output {
 
 #[test]
 fn limits_bound_pages_artifacts_pixels_and_bytes() {
-    let tight = |limits: CompilationLimits| CompilationLimits {
+    let tight = |limits: compile::Limits| compile::Limits {
         export_workers: 1,
         ..limits
     };
-    let defaults = CompilationLimits::default();
+    let defaults = compile::Limits::default();
 
     assert!(
         limited(
             five_page_pack(),
             Output::new(OutputFormat::Svg),
-            tight(CompilationLimits {
+            tight(compile::Limits {
                 max_pages: 5,
                 ..defaults
             })
@@ -677,7 +683,7 @@ fn limits_bound_pages_artifacts_pixels_and_bytes() {
         limit_error(limited(
             five_page_pack(),
             Output::new(OutputFormat::Svg),
-            CompilationLimits {
+            compile::Limits {
                 max_pages: 4,
                 ..defaults
             }
@@ -688,7 +694,7 @@ fn limits_bound_pages_artifacts_pixels_and_bytes() {
         limit_error(limited(
             five_page_pack(),
             Output::new(OutputFormat::Svg),
-            CompilationLimits {
+            compile::Limits {
                 max_artifacts: 4,
                 ..defaults
             }
@@ -701,7 +707,7 @@ fn limits_bound_pages_artifacts_pixels_and_bytes() {
         limited(
             square(),
             png(72.0),
-            CompilationLimits {
+            compile::Limits {
                 max_pixels_per_artifact: 100,
                 ..defaults
             }
@@ -712,7 +718,7 @@ fn limits_bound_pages_artifacts_pixels_and_bytes() {
         limit_error(limited(
             square(),
             png(72.0),
-            CompilationLimits {
+            compile::Limits {
                 max_pixels_per_artifact: 99,
                 ..defaults
             }
@@ -723,7 +729,7 @@ fn limits_bound_pages_artifacts_pixels_and_bytes() {
         limit_error(limited(
             page_pack(&[10, 10]),
             png(72.0),
-            CompilationLimits {
+            compile::Limits {
                 max_total_pixels: 199,
                 ..defaults
             }
@@ -738,7 +744,7 @@ fn limits_bound_pages_artifacts_pixels_and_bytes() {
         limited(
             square(),
             Output::new(OutputFormat::Svg),
-            CompilationLimits {
+            compile::Limits {
                 max_artifact_bytes: bytes,
                 ..defaults
             }
@@ -749,7 +755,7 @@ fn limits_bound_pages_artifacts_pixels_and_bytes() {
         limit_error(limited(
             square(),
             Output::new(OutputFormat::Svg),
-            CompilationLimits {
+            compile::Limits {
                 max_artifact_bytes: bytes - 1,
                 ..defaults
             }
@@ -765,7 +771,7 @@ fn limits_bound_pages_artifacts_pixels_and_bytes() {
         limit_error(limited(
             page_pack(&[10, 10]),
             Output::new(OutputFormat::Svg),
-            CompilationLimits {
+            compile::Limits {
                 max_total_artifact_bytes: total - 1,
                 ..defaults
             }
@@ -781,9 +787,9 @@ fn export_workers_do_not_change_results() {
         let compiled = limited(
             five_page_pack(),
             png(72.0),
-            CompilationLimits {
+            compile::Limits {
                 export_workers,
-                ..CompilationLimits::default()
+                ..compile::Limits::default()
             },
         )
         .unwrap();

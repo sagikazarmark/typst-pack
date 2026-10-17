@@ -1,91 +1,101 @@
-//! Pack creation: discovering the packages and fonts a project needs by
-//! compiling it.
+//! Creating a pack by compiling a project to discover the packages and fonts
+//! it needs.
 //!
 //! Creation reads nothing. The caller supplies the project, package trees,
-//! and font containers as bytes it already holds, so creation runs wherever
+//! and font containers as values it already holds, so creation runs wherever
 //! the core runs, including a host with no filesystem and no clock.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use typst::World;
 use typst::diag::{SourceDiagnostic, SourceResult, Warned};
 use typst::syntax::VirtualRoot;
 use typst::syntax::package::PackageSpec;
 
-use crate::compile::{CompileOptions, Environment, Input, RequestIssue, list};
-use crate::domain::TypstTarget;
-use crate::font_catalog::FontCatalog;
-use crate::manifest::PackMetadata;
-use crate::pack::{FontInput, Pack, PackInvariantError, PackageContent, PackageInput};
-use crate::package_catalog::PackageCatalog;
-use crate::package_failure::PackageReadFailures;
-use crate::project_snapshot::ProjectSnapshot;
-use crate::world::{Loader, SourceWorld, Sources};
+use crate::compile::{Environment, Input, Options, RequestIssue};
+use crate::pack::{FontInput, PackageContent, PackageInput};
+use crate::world::{Loader, SourceWorld};
+use crate::{Metadata, Pack, PackError, ProjectSnapshot, Sources, font, list, package};
 
-/// Everything one Pack creation compiles over.
+/// The Typst document model creation compiles.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
+pub enum Target {
+    /// A paged document, as PDF and image output use.
+    #[default]
+    Paged,
+    /// An HTML document.
+    Html,
+}
+
+/// Everything one creation compiles over.
 #[derive(Debug, Clone)]
-pub struct CreateRequest {
-    /// The project files and entrypoint; all of them become Pack files.
+pub struct Request {
+    /// The project files and entrypoint; all of them become pack files.
     pub project: ProjectSnapshot,
-    /// Package trees available to discovery, each with its disposition.
-    pub packages: PackageCatalog,
+    /// Package trees available to discovery.
+    pub packages: package::Catalog,
     /// Font containers available to discovery, in selection order.
-    pub fonts: FontCatalog,
-    /// Packages the caller could not supply. Discovery fails at the import
-    /// that needs one, with the recorded reason.
-    pub package_failures: PackageReadFailures,
+    pub fonts: Vec<font::Entry>,
+    /// Packages the caller could not supply. A compile that imports one fails
+    /// at the import with the recorded reason; a cataloged tree takes
+    /// precedence.
+    pub package_failures: HashMap<PackageSpec, package::ReadFailure>,
     /// The document model discovery compiles. HTML enables
     /// [`Feature::Html`](typst::Feature::Html) itself.
-    pub target: TypstTarget,
+    pub target: Target,
     /// Inputs, document time, and features of the discovery compile.
-    pub options: CompileOptions,
+    pub options: Options,
     /// Input overrides for additional discovery compiles. Each variant
     /// compiles `options` with its inputs replacing or adding to the base
     /// inputs, so packages and fonts reached only under other inputs are
     /// discovered too.
     pub variants: Vec<Vec<(String, Input)>>,
-    /// Descriptive metadata, excluded from Pack identity.
-    pub metadata: Option<PackMetadata>,
+    /// Descriptive metadata, excluded from the pack identity.
+    pub metadata: Option<Metadata>,
 }
 
-impl CreateRequest {
+impl Request {
     /// Creation of `project` with no packages, fonts, or variants, the paged
     /// target, and default options.
     pub fn new(project: ProjectSnapshot) -> Self {
         Self {
             project,
-            packages: PackageCatalog::default(),
-            fonts: FontCatalog::default(),
-            package_failures: PackageReadFailures::default(),
-            target: TypstTarget::Paged,
-            options: CompileOptions::default(),
+            packages: package::Catalog::default(),
+            fonts: Vec::new(),
+            package_failures: HashMap::new(),
+            target: Target::Paged,
+            options: Options::default(),
             variants: Vec::new(),
             metadata: None,
         }
     }
 }
 
+/// A created pack.
+#[derive(Debug)]
+pub struct Created {
+    /// The pack.
+    pub pack: Pack,
+    /// Warnings of every discovery compile, without repeats.
+    pub warnings: Vec<SourceDiagnostic>,
+    /// The sources the discovery compiles read.
+    pub sources: Sources,
+}
+
 /// What one creation produced.
 #[derive(Debug)]
-#[allow(clippy::large_enum_variant)] // The common outcome owns its Pack.
-pub enum CreateOutcome {
+pub enum Outcome {
     /// Every discovery compile succeeded.
-    Created {
-        pack: Pack,
-        /// Warnings of every discovery compile, without repeats.
-        warnings: Vec<SourceDiagnostic>,
-        /// The sources the discovery compiles read.
-        sources: Sources,
-    },
+    Created(Created),
     /// Packages discovery reached that no supplied tree covers, deduplicated
     /// and in specification order. Add them to the request's package catalog
     /// (or its package failures) and create again.
     MissingPackages(Vec<PackageSpec>),
 }
 
-/// A creation that produced no Pack.
+/// A creation that produced no pack.
 #[derive(Debug, thiserror::Error)]
-pub enum CreateError {
+pub enum Error {
     /// The request holds invalid values; nothing was compiled.
     #[error("{}", list("invalid create request", .0))]
     InvalidRequest(Vec<RequestIssue>),
@@ -96,18 +106,18 @@ pub enum CreateError {
         warnings: Vec<SourceDiagnostic>,
         sources: Sources,
     },
-    /// The discovered contents violate a Pack invariant.
+    /// The discovered contents do not form a valid pack.
     #[error(transparent)]
-    InvalidPack(#[from] PackInvariantError),
+    InvalidPack(#[from] PackError),
 }
 
-/// Compiles the project once per variant and issues the Pack whose
+/// Compiles the project once per variant and creates the pack whose
 /// requirements are every package and font container those compiles used, or
 /// reports the packages they needed and were not given.
 ///
-/// Project files come from the snapshot alone; compiler observations select
-/// only package and font requirements. Whole package trees travel, not just
-/// the files a compile read.
+/// Project files come from the snapshot alone; the compiles select only
+/// package and font requirements. Whole package trees travel, not just the
+/// files a compile read.
 ///
 /// # Resuming until every package is supplied
 ///
@@ -117,31 +127,29 @@ pub enum CreateError {
 ///
 /// ```no_run
 /// use typst::syntax::package::PackageSpec;
-/// use typst_pack::{
-///     CreateOutcome, CreateRequest, Pack, PackageDisposition, PackageTree, ProjectSnapshot,
-///     create,
-/// };
+/// use typst_pack::create::{Outcome, Request};
+/// use typst_pack::{Pack, ProjectSnapshot, create, package};
 ///
 /// fn assemble(
 ///     project: ProjectSnapshot,
-///     mut read_tree: impl FnMut(&PackageSpec) -> Result<PackageTree, Box<dyn std::error::Error>>,
+///     mut read_tree: impl FnMut(&PackageSpec) -> Result<package::Tree, Box<dyn std::error::Error>>,
 /// ) -> Result<Pack, Box<dyn std::error::Error>> {
-///     let mut request = CreateRequest::new(project);
+///     let mut request = Request::new(project);
 ///     loop {
 ///         match create(&request)? {
-///             CreateOutcome::Created { pack, .. } => return Ok(pack),
-///             CreateOutcome::MissingPackages(missing) => {
+///             Outcome::Created(created) => return Ok(created.pack),
+///             Outcome::MissingPackages(missing) => {
 ///                 for spec in missing {
 ///                     let tree = read_tree(&spec)?;
-///                     request.packages.insert(spec, tree, PackageDisposition::Embedded)?;
+///                     request.packages.insert(spec, tree, true)?;
 ///                 }
 ///             }
 ///         }
 ///     }
 /// }
 /// ```
-pub fn create(request: &CreateRequest) -> Result<CreateOutcome, CreateError> {
-    let html = request.target == TypstTarget::Html;
+pub fn create(request: &Request) -> Result<Outcome, Error> {
+    let html = request.target == Target::Html;
     let mut issues = Vec::new();
     let environments = std::iter::once(request.options.clone())
         .chain(request.variants.iter().map(|inputs| {
@@ -153,7 +161,7 @@ pub fn create(request: &CreateRequest) -> Result<CreateOutcome, CreateError> {
         .collect::<Option<Vec<_>>>();
     issues.dedup();
     let Some(environments) = environments.filter(|_| issues.is_empty()) else {
-        return Err(CreateError::InvalidRequest(issues));
+        return Err(Error::InvalidRequest(issues));
     };
 
     let mut used_packages = BTreeMap::new();
@@ -168,15 +176,14 @@ pub fn create(request: &CreateRequest) -> Result<CreateOutcome, CreateError> {
             packages: request
                 .packages
                 .entries()
-                .map(|entry| (entry.spec().to_string(), entry.tree().clone()))
+                .map(|entry| (entry.spec.to_string(), entry.tree.clone()))
                 .collect(),
             failures: request.package_failures.clone(),
         };
         let fonts = request
             .fonts
-            .entries()
             .iter()
-            .map(|entry| entry.container().fonts().to_vec());
+            .map(|entry| entry.container.fonts().to_vec());
         let mut world = SourceWorld::new(loader, fonts, environment.library, environment.clock);
         let Warned {
             output,
@@ -191,8 +198,8 @@ pub fn create(request: &CreateRequest) -> Result<CreateOutcome, CreateError> {
             };
             if request.packages.get(spec).is_some() {
                 used_packages.insert(spec.to_string(), spec.clone());
-            } else if request.package_failures.get(spec).is_none() {
-                // A specification declared unresolvable already failed the
+            } else if !request.package_failures.contains_key(spec) {
+                // A specification declared unreadable already failed the
                 // compile with the caller's reason; asking for it again would
                 // ask for what the caller said it cannot supply.
                 missing.insert(spec.to_string(), spec.clone());
@@ -208,7 +215,7 @@ pub fn create(request: &CreateRequest) -> Result<CreateOutcome, CreateError> {
         if let Err(errors) = output
             && failure.is_none()
         {
-            failure = Some(CreateError::Failed {
+            failure = Some(Error::Failed {
                 errors: errors.into_iter().collect(),
                 warnings: run_warnings.into_iter().collect(),
                 sources: run_sources.clone(),
@@ -220,9 +227,7 @@ pub fn create(request: &CreateRequest) -> Result<CreateOutcome, CreateError> {
     // Reported before failures, because the import that needed a tree is
     // exactly what failed the compile.
     if !missing.is_empty() {
-        return Ok(CreateOutcome::MissingPackages(
-            missing.into_values().collect(),
-        ));
+        return Ok(Outcome::MissingPackages(missing.into_values().collect()));
     }
     if let Some(failure) = failure {
         return Err(failure);
@@ -236,8 +241,8 @@ pub fn create(request: &CreateRequest) -> Result<CreateOutcome, CreateError> {
                 .get(&spec)
                 .expect("a used package is cataloged");
             PackageInput {
-                embedded: entry.disposition().is_embedded(),
-                content: PackageContent::Tree(entry.tree().clone()),
+                embedded: entry.embedded,
+                content: PackageContent::Tree(entry.tree.clone()),
                 spec,
             }
         })
@@ -245,10 +250,10 @@ pub fn create(request: &CreateRequest) -> Result<CreateOutcome, CreateError> {
     let fonts = used_fonts
         .into_iter()
         .map(|position| {
-            let entry = &request.fonts.entries()[position];
+            let entry = &request.fonts[position];
             FontInput::Container {
-                container: entry.container().clone(),
-                embedded: entry.disposition().is_embedded(),
+                container: entry.container.clone(),
+                embedded: entry.embedded,
             }
         })
         .collect();
@@ -258,24 +263,24 @@ pub fn create(request: &CreateRequest) -> Result<CreateOutcome, CreateError> {
         packages,
         fonts,
     )?;
-    Ok(CreateOutcome::Created {
+    Ok(Outcome::Created(Created {
         pack,
         warnings,
         sources: sources.expect("the base options always compile"),
-    })
+    }))
 }
 
 /// Compiles the target's document model, keeping only whether it succeeded.
-fn compile_target(world: &dyn World, target: TypstTarget) -> Warned<SourceResult<()>> {
+fn compile_target(world: &dyn World, target: Target) -> Warned<SourceResult<()>> {
     match target {
-        TypstTarget::Paged => {
+        Target::Paged => {
             let Warned { output, warnings } = typst::compile::<typst_layout::PagedDocument>(world);
             Warned {
                 output: output.map(drop),
                 warnings,
             }
         }
-        TypstTarget::Html => {
+        Target::Html => {
             let Warned { output, warnings } = typst::compile::<typst_html::HtmlDocument>(world);
             Warned {
                 output: output.map(drop),

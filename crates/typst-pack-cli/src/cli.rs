@@ -6,7 +6,8 @@ use std::path::PathBuf;
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use typst::Feature;
 use typst_kit::diagnostics::DiagnosticFormat;
-use typst_pack::{OutputFormat, PageRange, TypstTarget, parse_page_selection};
+use typst_pack::compile::{OutputFormat, PageSelection};
+use typst_pack::create::Target;
 use typst_pdf::PdfStandard;
 
 const ENV_PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
@@ -147,7 +148,7 @@ pub struct CreateArgs {
 
     /// Target for the creation compile [default: paged].
     #[arg(long, value_name = "TARGET", value_parser = one_of(TARGETS), help_heading = "Creation")]
-    pub target: Option<TypstTarget>,
+    pub target: Option<Target>,
 
     /// Also discover dependencies with these string inputs replacing or adding
     /// to `--input`. Repeat for several variants.
@@ -275,8 +276,8 @@ pub struct CompileArgs {
     /// Page numbers are one-indexed and correspond to physical page numbers in
     /// the document (therefore not being affected by the document's page
     /// counter).
-    #[arg(long, value_delimiter = ',', value_parser = parse_page_range, help_heading = "Output")]
-    pub pages: Vec<PageRange>,
+    #[arg(long, value_delimiter = ',', help_heading = "Output")]
+    pub pages: Vec<PageSelection>,
 
     /// The PPI (pixels per inch) to use for PNG export.
     #[arg(long, default_value_t = 144.0, help_heading = "Output")]
@@ -366,8 +367,7 @@ const FEATURES: &[(&str, Feature)] = &[
     ("a11y-extras", Feature::A11yExtras),
 ];
 
-const TARGETS: &[(&str, TypstTarget)] =
-    &[("paged", TypstTarget::Paged), ("html", TypstTarget::Html)];
+const TARGETS: &[(&str, Target)] = &[("paged", Target::Paged), ("html", Target::Html)];
 
 const FORMATS: &[(&str, OutputFormat)] = &[
     ("pdf", OutputFormat::Pdf),
@@ -438,9 +438,4 @@ fn parse_variant(variant: &str) -> Result<Variant, String> {
         .map(parse_input)
         .collect::<Result<_, _>>()
         .map(Variant)
-}
-
-fn parse_page_range(value: &str) -> Result<PageRange, String> {
-    let selection = parse_page_selection(value)?;
-    Ok(selection.ranges()[0].clone())
 }

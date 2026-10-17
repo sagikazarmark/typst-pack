@@ -3,7 +3,7 @@
 //! Every test here runs on a build with no crate feature enabled.
 
 use proptest::prelude::*;
-use typst_pack::{Pack, PackInvariantIssue, ProjectSnapshot};
+use typst_pack::{Pack, PackIssue, ProjectSnapshot};
 
 #[test]
 fn a_snapshot_is_assembled_from_path_and_bytes_entries() {
@@ -61,7 +61,7 @@ fn assembly_rejects_entries_that_cannot_name_a_root_relative_project_file() {
         .unwrap_err();
 
         assert!(
-            matches!(error.issues(), [PackInvariantIssue::InvalidPath { path: reported, .. }] if reported == path),
+            matches!(error.issues.as_slice(), [PackIssue::InvalidPath { path: reported, .. }] if reported == path),
             "`{path}`: {error}"
         );
     }
@@ -71,8 +71,8 @@ fn assembly_rejects_entries_that_cannot_name_a_root_relative_project_file() {
 fn assembly_requires_the_selected_entrypoint() {
     let error = ProjectSnapshot::new("main.typ", [("other.typ", b"Hello".to_vec())]).unwrap_err();
     assert_eq!(
-        error.issues(),
-        [PackInvariantIssue::MissingEntrypoint {
+        error.issues.as_slice(),
+        [PackIssue::MissingEntrypoint {
             path: "main.typ".to_owned(),
         }]
     );
@@ -93,7 +93,7 @@ fn assembly_rejects_every_pack_path() {
         .unwrap_err();
 
         assert!(
-            matches!(error.issues(), [PackInvariantIssue::InvalidPath { path: reported, .. }] if reported == path),
+            matches!(error.issues.as_slice(), [PackIssue::InvalidPath { path: reported, .. }] if reported == path),
             "`{path}`: {error}"
         );
     }
@@ -113,17 +113,17 @@ fn snapshots_report_every_independent_issue() {
     )
     .unwrap_err();
 
-    let issues = error.issues();
+    let issues = &error.issues;
     assert_eq!(issues.len(), 4, "{error}");
     for path in ["/absolute.typ", "z\\escape.typ"] {
         assert!(issues.iter().any(
-            |issue| matches!(issue, PackInvariantIssue::InvalidPath { path: reported, .. } if reported == path)
+            |issue| matches!(issue, PackIssue::InvalidPath { path: reported, .. } if reported == path)
         ));
     }
-    assert!(issues.contains(&PackInvariantIssue::DuplicateProjectPath {
+    assert!(issues.contains(&PackIssue::DuplicatePath {
         path: "duplicate.typ".to_owned()
     }));
-    assert!(issues.contains(&PackInvariantIssue::MissingEntrypoint {
+    assert!(issues.contains(&PackIssue::MissingEntrypoint {
         path: "main.typ".to_owned()
     }));
     // The error lists every issue.
@@ -195,8 +195,8 @@ proptest! {
             .unwrap_err();
 
         prop_assert_eq!(
-            error.issues(),
-            [PackInvariantIssue::DuplicateProjectPath { path: canonical }],
+            error.issues.as_slice(),
+            [PackIssue::DuplicatePath { path: canonical }],
         );
     }
 
@@ -209,8 +209,8 @@ proptest! {
             .unwrap_err();
 
         prop_assert_eq!(
-            error.issues(),
-            [PackInvariantIssue::MissingEntrypoint {
+            error.issues.as_slice(),
+            [PackIssue::MissingEntrypoint {
                 path: "main.typ".to_owned(),
             }],
         );
@@ -230,8 +230,8 @@ proptest! {
             .unwrap_err();
 
         let rejected = matches!(
-            error.issues(),
-            [PackInvariantIssue::InvalidPath { path: reported, .. }] if reported == path.as_str()
+            error.issues.as_slice(),
+            [PackIssue::InvalidPath { path: reported, .. }] if reported == path.as_str()
         );
         prop_assert!(rejected);
     }
@@ -245,7 +245,7 @@ fn canonical_project_path_validation_rejects_pack_paths() {
         .build()
         .unwrap_err();
     assert!(
-        matches!(error.issues(), [PackInvariantIssue::InvalidPath { .. }]),
+        matches!(error.issues.as_slice(), [PackIssue::InvalidPath { .. }]),
         "{error}"
     );
 
@@ -255,8 +255,8 @@ fn canonical_project_path_validation_rejects_pack_paths() {
         .unwrap_err();
     assert!(
         matches!(
-            error.issues(),
-            [PackInvariantIssue::InvalidEntrypoint { .. }]
+            error.issues.as_slice(),
+            [PackIssue::InvalidEntrypoint { .. }]
         ),
         "{error}"
     );

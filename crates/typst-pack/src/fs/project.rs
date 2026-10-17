@@ -1,28 +1,29 @@
-//! Project reading for the reference filesystem source.
+//! Reading a project directory.
 
 use std::path::Path;
 
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 
-use crate::fs_read::{FilesystemReadError, Kind, Root, Walker, utf8_path};
-use crate::limits::ReadLimits;
+use super::Error;
+use super::walk::{Kind, Root, Walker, utf8_path};
 use crate::pack::names_pack_path;
-use crate::project_snapshot::ProjectSnapshot;
+use crate::{ProjectSnapshot, ReadLimits};
 
-/// The root-relative path of the filesystem Project Ignore Policy file.
+/// The root-relative path of the file listing which project files to leave
+/// out.
 pub const IGNORE_FILE: &str = ".typkignore";
 
-/// Reads one Project Snapshot from a project directory.
+/// Reads a project snapshot from a project directory.
 ///
 /// The root [`IGNORE_FILE`] is read first and applied with gitignore syntax;
 /// its bytes join the snapshot. Excluded directories are not descended.
 /// Symbolic links are followed when they resolve beneath `root`; an escaping
 /// link, a FIFO, socket, or device that is not excluded fails the read.
-pub fn read_filesystem_project(
+pub fn read_project(
     root: impl AsRef<Path>,
     entrypoint: impl Into<String>,
     limits: ReadLimits,
-) -> Result<ProjectSnapshot, FilesystemReadError> {
+) -> Result<ProjectSnapshot, Error> {
     let root_path = root.as_ref();
     let root = Root::open(root_path)?;
     let mut walker = Walker::strict(limits);
@@ -30,12 +31,11 @@ pub fn read_filesystem_project(
 
     let policy = match walker.read_root_file(&root, IGNORE_FILE)? {
         Some(bytes) => {
-            let policy = IgnorePolicy::parse(&bytes).map_err(|message| {
-                FilesystemReadError::InvalidIgnoreFile {
+            let policy =
+                IgnorePolicy::parse(&bytes).map_err(|message| Error::InvalidIgnoreFile {
                     path: root_path.join(IGNORE_FILE),
                     message,
-                }
-            })?;
+                })?;
             entries.push((IGNORE_FILE.to_owned(), bytes));
             policy
         }
@@ -44,17 +44,17 @@ pub fn read_filesystem_project(
 
     walker.walk(
         &root,
-        &mut |relative, kind| {
+        |relative, kind| {
             let path = utf8_path(root_path, relative)?;
             Ok(path != IGNORE_FILE && !policy.excludes(&path, kind == Kind::Dir))
         },
-        &mut |relative, bytes| {
+        |relative, bytes| {
             entries.push((utf8_path(root_path, &relative)?, bytes));
             Ok(())
         },
     )?;
 
-    ProjectSnapshot::new(entrypoint, entries).map_err(FilesystemReadError::Project)
+    Ok(ProjectSnapshot::new(entrypoint, entries)?)
 }
 
 /// The parsed root ignore file.
@@ -89,7 +89,7 @@ impl IgnorePolicy {
         Ok(Self { rules })
     }
 
-    /// Whether a root-relative path is excluded. A path naming a Pack is
+    /// Whether a root-relative path is excluded. A path naming a pack is
     /// always excluded; any excluded ancestor excludes its descendants.
     fn excludes(&self, path: &str, is_directory: bool) -> bool {
         if names_pack_path(path) {

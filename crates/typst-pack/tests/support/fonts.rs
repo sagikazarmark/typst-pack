@@ -7,7 +7,7 @@
 
 /// The exact bytes of the first Font Container Typst ships.
 pub fn typst_container() -> Vec<u8> {
-    typst_pack::typst_embedded_font_containers()
+    typst_pack::font::embedded()
         .next()
         .expect("Typst ships an embedded font container")
         .data()

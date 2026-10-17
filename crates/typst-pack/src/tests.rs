@@ -2,6 +2,7 @@
 
 use typst::syntax::package::PackageSpec;
 
+use crate::compile::PageSelection;
 use crate::*;
 
 fn tiny_png() -> Vec<u8> {
@@ -12,8 +13,8 @@ fn spec(value: &str) -> PackageSpec {
     value.parse().unwrap()
 }
 
-fn issues(result: Result<Pack, PackInvariantError>) -> Vec<PackInvariantIssue> {
-    result.unwrap_err().issues().to_vec()
+fn issues(result: Result<Pack, PackError>) -> Vec<PackIssue> {
+    result.unwrap_err().issues
 }
 
 #[cfg(feature = "embedded-fonts")]
@@ -30,7 +31,7 @@ fn embedded_font_data() -> Vec<u8> {
 fn pack_construction_requires_a_contained_entrypoint() {
     assert_eq!(
         issues(Pack::builder("main.typ").build()),
-        [PackInvariantIssue::MissingEntrypoint {
+        [PackIssue::MissingEntrypoint {
             path: "main.typ".to_owned()
         }]
     );
@@ -41,7 +42,7 @@ fn pack_builder_rejects_paths_that_cannot_name_root_relative_files() {
     for entrypoint in ["", "main\0.typ", "../main.typ"] {
         assert!(matches!(
             issues(Pack::builder(entrypoint).build()).as_slice(),
-            [PackInvariantIssue::InvalidEntrypoint { .. }]
+            [PackIssue::InvalidEntrypoint { .. }]
         ));
     }
     for path in [
@@ -57,10 +58,7 @@ fn pack_builder_rejects_paths_that_cannot_name_root_relative_files() {
             .file(path, Vec::new())
             .build();
         assert!(
-            matches!(
-                issues(result).as_slice(),
-                [PackInvariantIssue::InvalidPath { .. }]
-            ),
+            matches!(issues(result).as_slice(), [PackIssue::InvalidPath { .. }]),
             "{path}"
         );
     }
@@ -77,11 +75,11 @@ fn pack_construction_rejects_conflicting_project_paths() {
     assert_eq!(
         issues(result),
         [
-            PackInvariantIssue::PathTreeConflict {
+            PackIssue::PathTreeConflict {
                 ancestor: "assets".to_owned(),
                 descendant: "assets/logo.png".to_owned()
             },
-            PackInvariantIssue::DuplicateProjectPath {
+            PackIssue::DuplicatePath {
                 path: "main.typ".to_owned()
             },
         ]
@@ -105,15 +103,15 @@ fn pack_construction_rejects_invalid_packages() {
     assert!(
         issues
             .iter()
-            .any(|issue| matches!(issue, PackInvariantIssue::InvalidPackageSpec { .. }))
+            .any(|issue| matches!(issue, PackIssue::InvalidPackageSpec { .. }))
     );
     assert!(issues.iter().any(|issue| matches!(
         issue,
-        PackInvariantIssue::InvalidPackageTree { spec, .. } if spec.name == "tree"
+        PackIssue::InvalidPackage { spec, .. } if spec.name == "tree"
     )));
     assert!(issues.iter().any(|issue| matches!(
         issue,
-        PackInvariantIssue::DuplicatePackage { spec } if spec.name == "both"
+        PackIssue::DuplicatePackage { spec } if spec.name == "both"
     )));
 }
 
@@ -146,10 +144,7 @@ fn pack_construction_rejects_unreadable_and_duplicate_fonts() {
         .file("main.typ", Vec::new())
         .font(b"not a font".to_vec())
         .build();
-    assert_eq!(
-        issues(result),
-        [PackInvariantIssue::InvalidFontData { position: 0 }]
-    );
+    assert_eq!(issues(result), [PackIssue::InvalidFontData { position: 0 }]);
 
     #[cfg(feature = "embedded-fonts")]
     {
@@ -161,7 +156,7 @@ fn pack_construction_rejects_unreadable_and_duplicate_fonts() {
             .build();
         assert_eq!(
             issues(result),
-            [PackInvariantIssue::DuplicateFont {
+            [PackIssue::DuplicateFont {
                 digest: Digest::of(&data)
             }]
         );
@@ -169,22 +164,23 @@ fn pack_construction_rejects_unreadable_and_duplicate_fonts() {
 }
 
 #[test]
-fn parse_page_selection_understands_ranges() {
+fn page_selections_parse_ranges() {
     use std::num::NonZeroUsize;
     let one = NonZeroUsize::new(1);
     let three = NonZeroUsize::new(3);
     let five = NonZeroUsize::new(5);
     let nine = NonZeroUsize::new(9);
     assert_eq!(
-        parse_page_selection("1,3-5,9-").unwrap().ranges(),
-        &[one..=one, three..=five, nine..=None]
+        "1,3-5,9-".parse::<PageSelection>().unwrap().ranges,
+        [one..=one, three..=five, nine..=None]
     );
-    assert!(parse_page_selection("nope").is_err());
+    assert!("nope".parse::<PageSelection>().is_err());
 }
 
 #[cfg(feature = "fs")]
 mod fs {
     use super::*;
+    use crate::extract::{self, Selection};
     use std::fs;
     use std::path::Path;
 
@@ -236,12 +232,14 @@ Rows: #csv("data.csv").len()
         (project, packages)
     }
 
-    fn assemble(project: &Path, packages: &Path) -> Packed {
-        FilesystemPacker::new()
-            .system_fonts(false)
-            .package_path(packages)
-            .pack(project, "main.typ")
-            .unwrap()
+    fn assemble(project: &Path, packages: &Path) -> crate::fs::Packed {
+        crate::fs::Packer {
+            system_fonts: false,
+            package_path: Some(packages.to_owned()),
+            ..crate::fs::Packer::default()
+        }
+        .pack(project, "main.typ")
+        .unwrap()
     }
 
     #[test]
@@ -252,17 +250,23 @@ Rows: #csv("data.csv").len()
         let packed = assemble(&project, &packages);
 
         let target = root.join("extracted");
-        let plan =
-            plan_pack_extraction(&packed.pack, PackExtractionSelection::new(true, true)).unwrap();
-        write_pack_extraction_plan_to_filesystem(&plan, &target, WritePolicy::CreateNew).unwrap();
+        let plan = extract::plan(
+            &packed.pack,
+            Selection {
+                packages: true,
+                fonts: true,
+            },
+        )
+        .unwrap();
+        crate::fs::write_extraction(&plan, &target, crate::fs::WritePolicy::CreateNew).unwrap();
         assert!(target.join("main.typ").exists());
         assert!(target.join("assets/logo.png").exists());
         assert!(target.join("packages/local/greet/0.1.0/lib.typ").exists());
 
         assert!(matches!(
-            write_pack_extraction_plan_to_filesystem(&plan, &target, WritePolicy::CreateNew),
-            Err(FilesystemWriteError::Rejected { issues })
-                if matches!(issues.as_slice(), [WriteIssue::ExistingTarget { .. }, ..])
+            crate::fs::write_extraction(&plan, &target, crate::fs::WritePolicy::CreateNew),
+            Err(crate::fs::WriteError::Rejected { issues })
+                if matches!(issues.as_slice(), [crate::fs::WriteIssue::ExistingTarget { .. }, ..])
         ));
     }
 
@@ -277,7 +281,14 @@ Rows: #csv("data.csv").len()
                 .build()
                 .unwrap();
             assert!(
-                plan_pack_extraction(&pack, PackExtractionSelection::new(true, false)).is_err()
+                extract::plan(
+                    &pack,
+                    Selection {
+                        packages: true,
+                        fonts: false
+                    }
+                )
+                .is_err()
             );
         }
     }
@@ -295,16 +306,16 @@ Rows: #csv("data.csv").len()
         fs::create_dir(&target).unwrap();
         fs::write(target.join("z.txt"), b"external").unwrap();
 
-        let plan = plan_pack_extraction(&pack, PackExtractionSelection::default()).unwrap();
+        let plan = extract::plan(&pack, Selection::default()).unwrap();
         assert!(matches!(
-            write_pack_extraction_plan_to_filesystem(&plan, &target, WritePolicy::CreateNew),
-            Err(FilesystemWriteError::Rejected { issues })
-                if matches!(issues.as_slice(), [WriteIssue::ExistingTarget { .. }])
+            crate::fs::write_extraction(&plan, &target, crate::fs::WritePolicy::CreateNew),
+            Err(crate::fs::WriteError::Rejected { issues })
+                if matches!(issues.as_slice(), [crate::fs::WriteIssue::ExistingTarget { .. }])
         ));
         assert!(!target.join("main.typ").exists());
         assert_eq!(fs::read(target.join("z.txt")).unwrap(), b"external");
 
-        write_pack_extraction_plan_to_filesystem(&plan, &target, WritePolicy::Overwrite).unwrap();
+        crate::fs::write_extraction(&plan, &target, crate::fs::WritePolicy::Overwrite).unwrap();
         assert_eq!(fs::read(target.join("main.typ")).unwrap(), b"main");
         assert_eq!(fs::read(target.join("z.txt")).unwrap(), b"packed");
 
@@ -316,16 +327,15 @@ Rows: #csv("data.csv").len()
             .file("tree/nested.txt", b"nested".to_vec())
             .build()
             .unwrap();
-        let nested_plan =
-            plan_pack_extraction(&nested_pack, PackExtractionSelection::default()).unwrap();
+        let nested_plan = extract::plan(&nested_pack, Selection::default()).unwrap();
         assert!(matches!(
-            write_pack_extraction_plan_to_filesystem(
+            crate::fs::write_extraction(
                 &nested_plan,
                 &blocked_target,
-                WritePolicy::Overwrite,
+                crate::fs::WritePolicy::Overwrite,
             ),
-            Err(FilesystemWriteError::Rejected { issues })
-                if matches!(issues.as_slice(), [WriteIssue::ConflictingAncestor { .. }])
+            Err(crate::fs::WriteError::Rejected { issues })
+                if matches!(issues.as_slice(), [crate::fs::WriteIssue::ConflictingAncestor { .. }])
         ));
         assert!(!blocked_target.join("main.typ").exists());
         assert_eq!(fs::read(blocked_target.join("tree")).unwrap(), b"external");
@@ -349,11 +359,11 @@ Rows: #csv("data.csv").len()
         fs::create_dir(&outside).unwrap();
         symlink(&outside, target.join("assets")).unwrap();
 
-        let plan = plan_pack_extraction(&pack, PackExtractionSelection::default()).unwrap();
+        let plan = extract::plan(&pack, Selection::default()).unwrap();
         assert!(matches!(
-            write_pack_extraction_plan_to_filesystem(&plan, &target, WritePolicy::Overwrite),
-            Err(FilesystemWriteError::Rejected { issues })
-                if matches!(issues.as_slice(), [WriteIssue::ConflictingAncestor { .. }])
+            crate::fs::write_extraction(&plan, &target, crate::fs::WritePolicy::Overwrite),
+            Err(crate::fs::WriteError::Rejected { issues })
+                if matches!(issues.as_slice(), [crate::fs::WriteIssue::ConflictingAncestor { .. }])
         ));
         assert!(!target.join("main.typ").exists());
         assert!(!outside.join("logo.txt").exists());
@@ -369,7 +379,7 @@ Rows: #csv("data.csv").len()
             .build()
             .unwrap();
         let font_path =
-            crate::pack_archive::font_member_name(&font_pack.font_requirements()[0].digest, &data);
+            crate::archive::font_member_name(&font_pack.font_requirements()[0].digest, &data);
 
         let conflicting = Pack::builder("main.typ")
             .file("main.typ", Vec::new())
@@ -378,14 +388,27 @@ Rows: #csv("data.csv").len()
             .build()
             .unwrap();
         assert!(
-            plan_pack_extraction(&conflicting, PackExtractionSelection::new(false, true)).is_err()
+            extract::plan(
+                &conflicting,
+                Selection {
+                    packages: false,
+                    fonts: true
+                }
+            )
+            .is_err()
         );
 
         let dir = tempfile::tempdir().unwrap();
         let target = temp_path(&dir).join("extracted");
-        let plan =
-            plan_pack_extraction(&font_pack, PackExtractionSelection::new(false, true)).unwrap();
-        write_pack_extraction_plan_to_filesystem(&plan, &target, WritePolicy::CreateNew).unwrap();
+        let plan = extract::plan(
+            &font_pack,
+            Selection {
+                packages: false,
+                fonts: true,
+            },
+        )
+        .unwrap();
+        crate::fs::write_extraction(&plan, &target, crate::fs::WritePolicy::CreateNew).unwrap();
         assert_eq!(plan.entries().len(), 2);
         assert!(target.join(font_path).is_file());
     }

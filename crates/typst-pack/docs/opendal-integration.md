@@ -1,8 +1,8 @@
 # OpenDAL integration
 
-The optional `opendal` feature reads Pack Assembly inputs, reads and writes
-Pack Archives, and writes extraction plans and compilation artifacts through
-caller-supplied OpenDAL [`Operator`]s. The application chooses the backend,
+The optional `opendal` feature reads projects, fonts, and packages, reads and
+writes pack archives, and writes extraction plans and compiled artifacts
+through caller-supplied OpenDAL [`Operator`]s. The application chooses the backend,
 credentials, transport, layers, retry policy, and async runtime; every
 function returns a caller-polled future and typst-pack owns no runtime.
 
@@ -26,45 +26,43 @@ with [`Error::InvalidPath`].
 
 ## Reading and assembling
 
-[`OpenDalPackAssembler`] (with `package-reading`) runs the whole Pack creation
-loop: it reads the project and fonts, calls [`create`](crate::create), reads
-each missing package from the configured [`PackageSource`]s, inserts it, and
-resumes until a Pack is created. Its public `target`, `options`, and
-`variants` fields are the discovery controls of
-[`CreateRequest`](crate::CreateRequest).
+[`Assembler`] (with `package-reading`) runs the whole creation loop: it reads
+the project and fonts, calls [`create()`](crate::create()), reads each missing
+package from the configured [`PackageSource`]s, inserts it, and resumes until a
+pack is created. Its public `target`, `options`, and `variants` fields are the
+discovery controls of [`create::Request`](crate::create::Request).
 
 ```rust,no_run
 # #[cfg(feature = "package-reading")]
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-use typst_pack::opendal::{FontSource, OpenDalPackAssembler, Operator, PackageSource};
-use typst_pack::FontDisposition;
+use typst_pack::opendal::{Assembler, FontSource, Operator, PackageSource};
 
 let operator = Operator::new(opendal::services::Memory::default())?;
-let mut assembler = OpenDalPackAssembler::new(operator.clone(), "projects/report/", "main.typ");
+let mut assembler = Assembler::new(operator.clone(), "projects/report/", "main.typ");
 assembler.fonts.push(FontSource {
     prefix: "fonts/".into(),
-    disposition: FontDisposition::Embedded,
+    embedded: true,
 });
 assembler.packages = vec![
     PackageSource::Trees { operator: operator.clone(), prefix: "packages/".into() },
     PackageSource::ArchiveCache { operator, prefix: "cache/".into() },
 ];
-let assembled = assembler.assemble().await?;
-println!("{} warning(s)", assembled.warnings.len());
+let created = assembler.assemble().await?;
+println!("{} warning(s)", created.warnings.len());
 # Ok(())
 # }
 ```
 
 The building blocks are public for callers that need their own loop (for
-example per-package dispositions):
+example to embed only some packages):
 
 | Function | Result |
 | --- | --- |
 | [`read_project`] | A [`ProjectSnapshot`](crate::ProjectSnapshot) of every file below a prefix. `.typkignore` is an ordinary file here; ignore rules belong to filesystem reading. |
-| [`read_fonts`] | A [`FontCatalog`](crate::FontCatalog) of `.ttf`/`.ttc`/`.otf`/`.otc` objects below each [`FontSource`], in source then path order. |
+| [`read_fonts`] | The [`font::Entry`](crate::font::Entry) values of `.ttf`/`.ttc`/`.otf`/`.otc` objects below each [`FontSource`], in source then path order. |
 | [`read_package`] | A [`PackageRead`]: a tree's files, cached or registry archive bytes, or `Unavailable`. Sources are tried in order; only definite absence advances. |
-| [`insert_package`] | Builds or expands the tree, inserts it, and keeps [`PackageReadFailures`](crate::PackageReadFailures) in step. |
-| [`read_pack_archive`] | The exact archive bytes; decode with [`pack_archive::decode`](crate::pack_archive::decode). |
+| [`insert_package`] | Builds or expands the tree, adds it to a [`create::Request`](crate::create::Request), and keeps its package failures in step. |
+| [`read_archive`] | The exact pack archive bytes; decode with [`archive::decode`](crate::archive::decode). |
 
 A listing is one observation, not a storage snapshot: objects may change
 between listing and reading. An object that vanishes in between fails the
@@ -77,7 +75,7 @@ counts toward `max_entries`, and each object's length is checked against
 `max_file_bytes` and the remaining `max_total_bytes` before it is downloaded,
 so an oversized object is never transferred. A raw package archive is bounded
 by `max_file_bytes` and expanded under the same `ReadLimits`;
-[`read_pack_archive`] takes an explicit byte ceiling.
+[`read_archive`] takes an explicit byte ceiling.
 Exceeding a limit fails with [`Error::Limit`]. Limits do not bound memory
 inside OpenDAL or its transport.
 
@@ -85,10 +83,10 @@ inside OpenDAL or its transport.
 
 | Function | Writes |
 | --- | --- |
-| [`write_pack_archive`] | One Pack Archive object. |
+| [`write_archive`] | One pack archive object. |
 | [`write_package_archive`] | Validated registry archive bytes into an archive cache (always `CreateOrVerify`). |
-| [`write_pack_extraction_plan`] | Every extraction entry below a prefix. |
-| [`write_compilation_artifacts`] | Each compiled artifact at `prefix + key`. |
+| [`write_extraction`] | Every extraction entry below a prefix. |
+| [`write_artifacts`] | Each compiled artifact at `prefix + key`. |
 
 [`WritePolicy::CreateOrVerify`] checks every key first: an existing object
 with a different length is a conflict without being downloaded, and an
@@ -121,17 +119,16 @@ OpenDAL error, which may carry backend context, is the error's `source`.
 ## External compilation dependencies
 
 There is no OpenDAL compilation API. Read external packages and fonts with
-the same functions, put them in a [`CompileRequest`](crate::CompileRequest),
-and call [`compile`](crate::compile), which matches every external
+the same functions, put them in a [`compile::Request`](crate::compile::Request),
+and call [`compile()`](crate::compile()), which matches every external
 requirement by digest before running Typst:
 
 ```rust,no_run
+use typst_pack::compile::{Compiled, Output, Request};
 use typst_pack::opendal::{
     FontSource, Operator, PackageRead, PackageSource, read_fonts, read_package,
 };
-use typst_pack::{
-    CompileRequest, Compiled, FontDisposition, Output, Pack, PackageTree, ReadLimits,
-};
+use typst_pack::{Pack, ReadLimits, package};
 
 async fn compile_with_external_inputs(
     operator: &Operator,
@@ -143,27 +140,23 @@ async fn compile_with_external_inputs(
         operator: operator.clone(),
         prefix: "packages/".into(),
     }];
-    let mut request = CompileRequest::new(pack.clone(), output);
+    let mut request = Request::new(pack.clone(), output);
     for requirement in pack.package_requirements().iter().filter(|r| !r.embedded) {
         let PackageRead::Tree(files) = read_package(&sources, &requirement.spec, &limits).await?
         else {
             return Err(format!("no tree for {}", requirement.spec).into());
         };
-        let tree = PackageTree::from_owned_entries(files)?;
+        let tree = package::Tree::new(files)?;
         request.packages.push((requirement.spec.clone(), tree));
     }
 
     // Containers the pack does not require are ignored.
     let font_source = FontSource {
         prefix: "fonts/".into(),
-        disposition: FontDisposition::External,
+        embedded: false,
     };
-    let catalog = read_fonts(operator, &[font_source], &limits).await?;
-    request.fonts = catalog
-        .entries()
-        .iter()
-        .map(|entry| entry.container().clone())
-        .collect();
+    let fonts = read_fonts(operator, &[font_source], &limits).await?;
+    request.fonts = fonts.into_iter().map(|entry| entry.container).collect();
     Ok(typst_pack::compile(&request)?)
 }
 ```

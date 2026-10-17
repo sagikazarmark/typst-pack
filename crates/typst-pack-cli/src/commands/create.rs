@@ -2,11 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
-use typst_pack::pack_archive::{save_pack, write_pack};
-use typst_pack::{
-    CreateError, DocumentTime, FILE_EXTENSION, FilesystemPackError, Input, PackMetadata,
-    WritePolicy,
-};
+use typst_pack::compile::{DocumentTime, Input};
+use typst_pack::{FILE_EXTENSION, Metadata, archive, create, fs};
 
 use super::{
     CommandResult, Failure, Terminal, Timings, check_timestamp, compile_options, initialize_jobs,
@@ -44,41 +41,42 @@ pub fn run(args: CreateArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comma
         .creation_timestamp
         .unwrap_or_else(|| now().0);
     let (options, _) = compile_options(&args.compilation, DocumentTime::UnixTimestamp(timestamp))?;
-    let mut packer = packer(&args.fonts, &args.packages, cert)
-        .vendor_packages(!args.no_vendor_packages)
-        .embed_fonts(args.embed_fonts)
-        .include_typst_embedded_fonts(args.include_typst_embedded_fonts)
-        .options(options);
-    if let Some(target) = args.target {
-        packer = packer.target(target);
-    }
-    for variant in args.variants {
-        let inputs = variant.0.into_iter();
-        packer = packer.variant(
-            inputs
-                .map(|(key, value)| (key, Input::Str(value)))
-                .collect(),
-        );
-    }
-    if args.name.is_some() || args.description.is_some() || !args.authors.is_empty() {
-        packer = packer.metadata(PackMetadata {
-            name: args.name,
-            description: args.description,
-            authors: args.authors,
-        });
-    }
+    let metadata = Metadata {
+        name: args.name,
+        description: args.description,
+        authors: args.authors,
+    };
+    let packer = fs::Packer {
+        vendor_packages: !args.no_vendor_packages,
+        embed_fonts: args.embed_fonts,
+        include_typst_embedded_fonts: args.include_typst_embedded_fonts,
+        options,
+        target: args.target.unwrap_or_default(),
+        variants: args
+            .variants
+            .into_iter()
+            .map(|variant| {
+                let inputs = variant.0.into_iter();
+                inputs
+                    .map(|(key, value)| (key, Input::Str(value)))
+                    .collect()
+            })
+            .collect(),
+        metadata: (metadata != Metadata::default()).then_some(metadata),
+        ..packer(&args.fonts, &args.packages, cert)
+    };
 
     let timings = Timings::start(args.automation.timings);
     let packed = packer.pack(&root, &input);
     let sources = match &packed {
         Ok(packed) => Some(&packed.sources),
-        Err(FilesystemPackError::Create(CreateError::Failed { sources, .. })) => Some(sources),
+        Err(fs::Error::Create(create::Error::Failed { sources, .. })) => Some(sources),
         Err(_) => None,
     };
     let timing_error = timings.finish(sources);
     let packed = match packed {
         Ok(packed) => packed,
-        Err(FilesystemPackError::Create(CreateError::Failed {
+        Err(fs::Error::Create(create::Error::Failed {
             errors,
             warnings,
             sources,
@@ -105,11 +103,11 @@ pub fn run(args: CreateArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comma
 
     let pack = &packed.pack;
     if output == Path::new("-") {
-        write_pack(std::io::stdout().lock(), pack)
+        archive::write(std::io::stdout().lock(), pack)
             .map_err(|error| format!("cannot write Pack to stdout: {error}"))?;
         return Ok(());
     }
-    save_pack(&output, pack, WritePolicy::Overwrite)?;
+    archive::save(&output, pack, fs::WritePolicy::Overwrite)?;
 
     let requirements = pack.package_requirements();
     let (vendored, unvendored): (Vec<_>, Vec<_>) = requirements

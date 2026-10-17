@@ -1,14 +1,11 @@
-//! Bounded reads of Pack Assembly inputs and Pack Archives.
+//! Bounded reads of projects, fonts, packages, and pack archives.
 
 use ::opendal::{EntryMode, ErrorKind, Operator};
 use futures_util::TryStreamExt;
 use typst::syntax::package::PackageSpec;
 
 use super::{Error, check_key, check_prefix, storage};
-use crate::{
-    FontCatalog, FontCatalogEntry, FontContainer, FontDisposition, LimitExceeded, ProjectSnapshot,
-    ReadLimits, read_layout,
-};
+use crate::{LimitExceeded, ProjectSnapshot, ReadLimits, font, package};
 
 /// Running totals charged against one operation's [`ReadLimits`].
 struct Budget {
@@ -169,25 +166,24 @@ pub async fn read_project(
     Ok(ProjectSnapshot::new(entrypoint, files)?)
 }
 
-/// One storage prefix of Font Containers and the disposition its fonts get.
+/// One storage prefix of font files.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FontSource {
     /// A prefix (`""` or ending in `/`) holding font files.
     pub prefix: String,
-    /// Whether the Pack embeds fonts from this source.
-    pub disposition: FontDisposition,
+    /// Whether created packs embed fonts from this source.
+    pub embedded: bool,
 }
 
 /// Reads `.ttf`, `.ttc`, `.otf`, and `.otc` objects (case-insensitive) below
-/// each source in order and validates each as a [`FontContainer`].
+/// each source as font containers, in source order, then path order.
 ///
-/// Entries are cataloged in source order, then path order. `limits` is
-/// shared across all sources.
+/// `limits` is shared across all sources.
 pub async fn read_fonts(
     op: &Operator,
     sources: &[FontSource],
     limits: &ReadLimits,
-) -> Result<FontCatalog, Error> {
+) -> Result<Vec<font::Entry>, Error> {
     for source in sources {
         check_prefix(&source.prefix)?;
     }
@@ -195,30 +191,26 @@ pub async fn read_fonts(
         require_listing(op)?;
     }
     let mut budget = Budget::new(limits);
-    let mut catalog = FontCatalog::new();
+    let mut entries = Vec::new();
     for source in sources {
-        let files = read_tree(
-            op,
-            &source.prefix,
-            read_layout::is_font_container_key,
-            &mut budget,
-        )
-        .await?;
+        let files = read_tree(op, &source.prefix, font::is_container_key, &mut budget).await?;
         for (relative, bytes) in files {
-            let container = FontContainer::new(bytes).map_err(|source_error| Error::Font {
+            let container = font::Container::new(bytes).ok_or_else(|| Error::Font {
                 path: format!("{}{relative}", source.prefix),
-                source: source_error,
             })?;
-            catalog.push(FontCatalogEntry::new(container, source.disposition));
+            entries.push(font::Entry {
+                container,
+                embedded: source.embedded,
+            });
         }
     }
-    Ok(catalog)
+    Ok(entries)
 }
 
 /// One place a package may be read from, with the storage layout it uses.
 #[derive(Clone, Debug)]
 pub enum PackageSource {
-    /// Package Trees at `{prefix}{namespace}/{name}/{version}/`, Typst's
+    /// Package trees at `{prefix}{namespace}/{name}/{version}/`, Typst's
     /// package directory layout.
     Trees { operator: Operator, prefix: String },
     /// Raw `.tar.gz` archives at `{prefix}{namespace}/{name}/{version}.tar.gz`.
@@ -232,7 +224,7 @@ pub enum PackageSource {
 /// What [`read_package`] found for one specification.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum PackageRead {
-    /// A Package Tree's files, with package-relative paths.
+    /// A package tree's files, with package-relative paths.
     Tree(Vec<(String, Vec<u8>)>),
     /// Raw archive bytes from an [`PackageSource::ArchiveCache`].
     CachedArchive(Vec<u8>),
@@ -261,7 +253,7 @@ pub async fn read_package(
             PackageSource::Trees { operator, prefix } => {
                 check_prefix(prefix)?;
                 require_listing(operator)?;
-                let tree = format!("{prefix}{}/", read_layout::package_tree_key(spec));
+                let tree = format!("{prefix}{}/", package::tree_key(spec));
                 let files = read_tree(operator, &tree, |_| true, &mut budget).await?;
                 if !files.is_empty() {
                     return Ok(PackageRead::Tree(files));
@@ -270,7 +262,7 @@ pub async fn read_package(
             PackageSource::ArchiveCache { operator, prefix } => {
                 check_prefix(prefix)?;
                 require_read(operator)?;
-                let key = read_layout::package_archive_cache_key(spec);
+                let key = package::archive_cache_key(spec);
                 if let Some(bytes) =
                     read_object(operator, &format!("{prefix}{key}"), &mut budget).await?
                 {
@@ -279,7 +271,7 @@ pub async fn read_package(
             }
             PackageSource::Registry { operator, prefix } => {
                 check_prefix(prefix)?;
-                let Some(key) = read_layout::official_registry_archive_key(spec) else {
+                let Some(key) = package::registry_archive_key(spec) else {
                     continue;
                 };
                 require_read(operator)?;
@@ -294,73 +286,66 @@ pub async fn read_package(
     Ok(PackageRead::Unavailable)
 }
 
-/// Turns a [`PackageRead`] into a cataloged Package Tree, keeping
-/// `failures` in step for resumed Pack Creation.
+/// Adds what [`read_package`] found to a creation request's packages,
+/// keeping its package failures in step.
 ///
-/// On success the tree is inserted and any earlier failure for `spec` is
+/// On success the tree is cataloged and any earlier failure for `spec` is
 /// removed. `Unavailable` records a `NotFound` failure and returns `Ok`. A
 /// tree, archive, or catalog rejection records a failure (`MalformedArchive`
 /// for malformed archive contents, otherwise `Other`) and returns the error;
-/// resuming Pack Creation then attaches the failure to the import.
+/// resumed creation then reports the failure at the import.
 #[cfg(feature = "package-reading")]
 pub fn insert_package(
-    catalog: &mut crate::PackageCatalog,
-    failures: &mut crate::PackageReadFailures,
+    request: &mut crate::create::Request,
     spec: &PackageSpec,
     read: PackageRead,
-    disposition: crate::PackageDisposition,
+    embedded: bool,
     limits: ReadLimits,
 ) -> Result<(), Error> {
-    use crate::{PackageReadError, PackageReadFailure, PackageReadFailureReason};
+    use crate::package::ReadFailure;
+    use crate::package::registry::{ExpandError, expand_archive};
 
     let tree = match read {
-        PackageRead::Tree(files) => {
-            crate::PackageTree::from_owned_entries(files).map_err(Error::from)
-        }
+        PackageRead::Tree(files) => package::Tree::new(files).map_err(Error::from),
         PackageRead::CachedArchive(bytes) | PackageRead::RegistryArchive(bytes) => {
-            crate::expand_package_archive(spec.clone(), &bytes, limits).map_err(Error::from)
+            expand_archive(&bytes, limits).map_err(Error::from)
         }
         PackageRead::Unavailable => {
-            failures.insert(PackageReadFailure::new(
-                spec.clone(),
-                PackageReadFailureReason::NotFound,
-            ));
+            request
+                .package_failures
+                .insert(spec.clone(), ReadFailure::NotFound);
             return Ok(());
         }
     };
     let result = tree.and_then(|tree| {
-        catalog
-            .insert(spec.clone(), tree, disposition)
+        request
+            .packages
+            .insert(spec.clone(), tree, embedded)
             .map_err(Error::from)
     });
     match result {
         Ok(()) => {
-            failures.remove(spec);
+            request.package_failures.remove(spec);
             Ok(())
         }
         Err(error) => {
             let reason = match &error {
-                Error::PackageArchive(
-                    PackageReadError::MalformedArchive { .. }
-                    | PackageReadError::InvalidPackageTree { .. },
-                ) => PackageReadFailureReason::MalformedArchive { detail: None },
-                _ => PackageReadFailureReason::Other { detail: None },
+                Error::PackageArchive(ExpandError::Malformed(_) | ExpandError::Invalid(_)) => {
+                    ReadFailure::MalformedArchive(None)
+                }
+                _ => ReadFailure::Other(None),
             };
-            failures.insert(PackageReadFailure::new(spec.clone(), reason));
+            request.package_failures.insert(spec.clone(), reason);
             Err(error)
         }
     }
 }
 
-/// Reads the exact bytes of one Pack Archive object of at most `max_bytes`.
+/// Reads the exact bytes of one pack archive object of at most `max_bytes`.
 ///
-/// Decode the result with [`crate::pack_archive::decode`]; decoding borrows
-/// the bytes, so they stay available if decoding fails.
-pub async fn read_pack_archive(
-    op: &Operator,
-    path: &str,
-    max_bytes: u64,
-) -> Result<Vec<u8>, Error> {
+/// Decode the result with [`archive::decode`](crate::archive::decode);
+/// decoding borrows the bytes, so they stay available if decoding fails.
+pub async fn read_archive(op: &Operator, path: &str, max_bytes: u64) -> Result<Vec<u8>, Error> {
     check_key(path)?;
     require_read(op)?;
     let mut budget = Budget::new(&ReadLimits {
@@ -371,7 +356,7 @@ pub async fn read_pack_archive(
     let bytes = read_object(op, path, &mut budget).await?.ok_or_else(|| {
         storage(path, "read")(::opendal::Error::new(
             ErrorKind::NotFound,
-            "the Pack Archive object is absent",
+            "the pack archive object is absent",
         ))
     })?;
     Ok(bytes)

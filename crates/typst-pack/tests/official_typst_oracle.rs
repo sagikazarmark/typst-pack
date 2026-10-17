@@ -1,12 +1,8 @@
 mod support;
 
-#[path = "support/archive.rs"]
-mod archive_support;
-
 use std::collections::BTreeSet;
 use std::num::NonZeroUsize;
 
-use archive_support::{decode_reference, encode_reference};
 #[cfg(feature = "embedded-fonts")]
 use support::official_typst::select_font;
 use support::official_typst::{
@@ -19,11 +15,10 @@ use typst::diag::{Severity, SourceDiagnostic, Tracepoint};
 use typst::foundations::Bytes;
 use typst::foundations::{Datetime, Dict, Smart, Value};
 use typst::syntax::{FileId, VirtualRoot};
-use typst_pack::{
-    Artifact, CompileError, CompileRequest, CreationTimestamp, Digest, DocumentTime, HtmlOutput,
-    Input, Output, OutputFormat, Pack, PackageTree, PdfOutput, PngOutput, RequestIssue, Sources,
-    SvgOutput, parse_page_selection,
+use typst_pack::compile::{
+    self, Artifact, CreationTimestamp, DocumentTime, Input, Output, OutputFormat, RequestIssue,
 };
+use typst_pack::{Digest, Pack, Sources, package};
 use typst_pdf::PdfStandard;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -62,7 +57,7 @@ impl Observed {
     }
 }
 
-fn compile(request: CompileRequest) -> Result<Observed, CompileError> {
+fn compile(request: compile::Request) -> Result<Observed, compile::Error> {
     match typst_pack::compile(&request) {
         Ok(compiled) => Ok(Observed {
             status: CompilationStatus::Succeeded,
@@ -72,7 +67,7 @@ fn compile(request: CompileRequest) -> Result<Observed, CompileError> {
             identity: Some(compiled.identity),
             sources: compiled.sources,
         }),
-        Err(CompileError::Failed {
+        Err(compile::Error::Failed {
             errors,
             warnings,
             sources,
@@ -95,11 +90,11 @@ trait Requested {
     fn feature(self, feature: typst::Feature) -> Self;
     fn with_packages(
         self,
-        packages: Vec<(typst::syntax::package::PackageSpec, PackageTree)>,
+        packages: Vec<(typst::syntax::package::PackageSpec, package::Tree)>,
     ) -> Self;
 }
 
-impl Requested for CompileRequest {
+impl Requested for compile::Request {
     fn inputs(mut self, inputs: Dict) -> Self {
         self.options.inputs = inputs
             .into_iter()
@@ -127,7 +122,7 @@ impl Requested for CompileRequest {
 
     fn with_packages(
         mut self,
-        packages: Vec<(typst::syntax::package::PackageSpec, PackageTree)>,
+        packages: Vec<(typst::syntax::package::PackageSpec, package::Tree)>,
     ) -> Self {
         self.packages = packages;
         self
@@ -159,7 +154,7 @@ fn stabilized_pack(fixture: &Fixture) -> Pack {
         builder = builder.font(data.clone());
     }
     let pack = builder.build().unwrap();
-    decode_reference(encode_reference(&pack).unwrap()).unwrap()
+    typst_pack::archive::decode(&typst_pack::archive::encode(&pack), Default::default()).unwrap()
 }
 
 #[test]
@@ -177,7 +172,7 @@ fn embedded_and_external_complete_package_trees_match_the_independent_oracle() {
     };
     let expected = observe(&fixture, &reference_request);
     let embedded = compile(
-        CompileRequest::new(stabilized_pack(&fixture), output(OutputFormat::Svg))
+        compile::Request::new(stabilized_pack(&fixture), output(OutputFormat::Svg))
             .inputs(string_inputs([("width", "24")]))
             .document_time(DocumentTime::Fixed(Datetime::from_ymd(2024, 2, 3).unwrap())),
     )
@@ -193,12 +188,12 @@ fn embedded_and_external_complete_package_trees_match_the_independent_oracle() {
     }
     let external_pack = builder.build().unwrap();
     let external = compile(
-        CompileRequest::new(external_pack, output(OutputFormat::Svg))
+        compile::Request::new(external_pack, output(OutputFormat::Svg))
             .inputs(string_inputs([("width", "24")]))
             .document_time(DocumentTime::Fixed(Datetime::from_ymd(2024, 2, 3).unwrap()))
             .with_packages(vec![(
                 spec,
-                PackageTree::from_owned_entries(
+                package::Tree::new(
                     fixture
                         .packages()
                         .iter()
@@ -258,7 +253,7 @@ fn exact_pack_font_catalog_matches_the_independent_oracle_and_external_fulfillme
         embedded_pack.font_data(&requirement.digest),
         Some(expected.font_catalog[0].1.as_ref())
     );
-    let embedded = compile(CompileRequest::new(
+    let embedded = compile(compile::Request::new(
         embedded_pack,
         output(OutputFormat::Svg),
     ))
@@ -270,8 +265,8 @@ fn exact_pack_font_catalog_matches_the_independent_oracle_and_external_fulfillme
         .external_font(data.clone())
         .build()
         .unwrap();
-    let mut request = CompileRequest::new(external_pack, output(OutputFormat::Svg));
-    request.fonts = vec![typst_pack::FontContainer::new(data).unwrap()];
+    let mut request = compile::Request::new(external_pack, output(OutputFormat::Svg));
+    request.fonts = vec![typst_pack::font::Container::new(data).unwrap()];
     let external = compile(request).unwrap();
     assert_eq!(external.artifacts()[0].bytes, expected.artifacts[0].bytes);
     assert_eq!(external.diagnostics.len(), expected.diagnostics.len());
@@ -314,7 +309,7 @@ fn catalog_order_drives_the_same_official_font_selection_on_every_path() {
                 },
             },
         );
-        let embedded = compile(CompileRequest::new(
+        let embedded = compile(compile::Request::new(
             stabilized_pack(&fixture),
             output(OutputFormat::Svg),
         ))
@@ -330,10 +325,10 @@ fn catalog_order_drives_the_same_official_font_selection_on_every_path() {
             .external_font(ordered[1].clone())
             .build()
             .unwrap();
-        let mut request = CompileRequest::new(external_pack, output(OutputFormat::Svg));
+        let mut request = compile::Request::new(external_pack, output(OutputFormat::Svg));
         request.fonts = ordered
             .into_iter()
-            .map(|data| typst_pack::FontContainer::new(data).unwrap())
+            .map(|data| typst_pack::font::Container::new(data).unwrap())
             .collect();
         let external = compile(request).unwrap();
         assert_eq!(
@@ -454,13 +449,15 @@ fn stabilized_project_round_trips_and_matches_pack_svg_compilation() {
     let mut inputs = Dict::new();
     inputs.insert("width".into(), Value::Str("24".into()));
     let created = stabilized_pack(&fixture);
-    let pack = decode_reference(encode_reference(&created).unwrap()).unwrap();
-    let output_specification = Output::Svg(SvgOutput {
-        page_selection: parse_page_selection("2,1").unwrap(),
+    let pack =
+        typst_pack::archive::decode(&typst_pack::archive::encode(&created), Default::default())
+            .unwrap();
+    let output_specification = Output {
+        pages: "2,1".parse::<compile::PageSelection>().unwrap(),
         pretty: true,
-        ..SvgOutput::default()
-    });
-    let request = CompileRequest::new(pack, output_specification)
+        ..Output::new(OutputFormat::Svg)
+    };
+    let request = compile::Request::new(pack, output_specification)
         .inputs(inputs)
         .document_time(DocumentTime::Fixed(Datetime::from_ymd(2024, 2, 3).unwrap()));
 
@@ -521,7 +518,7 @@ fn string_and_byte_inputs_match_the_independent_oracle() {
     };
     let expected = observe(&fixture, &reference_request);
     let actual = compile(
-        CompileRequest::new(stabilized_pack(&fixture), output(OutputFormat::Svg)).inputs(inputs),
+        compile::Request::new(stabilized_pack(&fixture), output(OutputFormat::Svg)).inputs(inputs),
     )
     .unwrap();
 
@@ -539,7 +536,7 @@ fn shared_semantic_values_drive_the_same_official_source_behavior() {
     let pack = stabilized_pack(&fixture);
 
     let actual = compile(
-        CompileRequest::new(pack, output(OutputFormat::Svg))
+        compile::Request::new(pack, output(OutputFormat::Svg))
             .inputs(inputs.clone())
             .feature(typst::Feature::A11yExtras)
             .document_time(DocumentTime::Fixed(document_time)),
@@ -605,7 +602,7 @@ fn independent_oracle_and_pack_compilation_ignore_conflicting_ambient_environmen
         },
     );
     let actual = compile(
-        CompileRequest::new(stabilized_pack(&fixture), output(OutputFormat::Svg))
+        compile::Request::new(stabilized_pack(&fixture), output(OutputFormat::Svg))
             .inputs(inputs)
             .feature(typst::Feature::A11yExtras)
             .document_time(DocumentTime::Fixed(document_time)),
@@ -622,21 +619,21 @@ fn independent_oracle_and_pack_compilation_ignore_conflicting_ambient_environmen
 fn html_feature_is_derived_and_bundle_is_rejected() {
     let fixture = Fixture::exporter_rejection();
     let pack = stabilized_pack(&fixture);
-    let result = compile(CompileRequest::new(pack, output(OutputFormat::Html))).unwrap();
+    let result = compile(compile::Request::new(pack, output(OutputFormat::Html))).unwrap();
     assert_eq!(result.status(), CompilationStatus::Succeeded);
 
     let explicit = compile(
-        CompileRequest::new(stabilized_pack(&fixture), output(OutputFormat::Html))
+        compile::Request::new(stabilized_pack(&fixture), output(OutputFormat::Html))
             .feature(typst::Feature::Html),
     )
     .unwrap();
     assert_eq!(result.identity(), explicit.identity());
 
     let rejected = compile(
-        CompileRequest::new(stabilized_pack(&fixture), output(OutputFormat::Html))
+        compile::Request::new(stabilized_pack(&fixture), output(OutputFormat::Html))
             .feature(typst::Feature::Bundle),
     );
-    let Err(CompileError::InvalidRequest(issues)) = rejected else {
+    let Err(compile::Error::InvalidRequest(issues)) = rejected else {
         panic!("the unsupported Bundle feature must be rejected before compiling");
     };
     assert_eq!(issues, [RequestIssue::UnsupportedBundleFeature]);
@@ -655,18 +652,19 @@ fn unobserved_shared_values_still_change_compilation_identity() {
     second_inputs.insert("unused".into(), Value::Str("second".into()));
 
     let first =
-        compile(CompileRequest::new(first_pack, output(OutputFormat::Svg)).inputs(first_inputs))
+        compile(compile::Request::new(first_pack, output(OutputFormat::Svg)).inputs(first_inputs))
             .unwrap();
-    let second =
-        compile(CompileRequest::new(second_pack, output(OutputFormat::Svg)).inputs(second_inputs))
-            .unwrap();
+    let second = compile(
+        compile::Request::new(second_pack, output(OutputFormat::Svg)).inputs(second_inputs),
+    )
+    .unwrap();
     let feature = compile(
-        CompileRequest::new(feature_pack, output(OutputFormat::Svg))
+        compile::Request::new(feature_pack, output(OutputFormat::Svg))
             .feature(typst::Feature::A11yExtras),
     )
     .unwrap();
     let document_time = compile(
-        CompileRequest::new(time_pack, output(OutputFormat::Svg))
+        compile::Request::new(time_pack, output(OutputFormat::Svg))
             .document_time(DocumentTime::Fixed(Datetime::from_ymd(2024, 2, 3).unwrap())),
     )
     .unwrap();
@@ -689,7 +687,7 @@ fn pack_rejection_matches_official_diagnostics_and_remains_a_result() {
     inputs.insert("width".into(), Value::Str("24".into()));
     let pack = stabilized_pack(&fixture);
 
-    let actual = compile(CompileRequest::new(pack, output(OutputFormat::Svg)).inputs(inputs))
+    let actual = compile(compile::Request::new(pack, output(OutputFormat::Svg)).inputs(inputs))
         .expect("the accepted Pack request must produce a Compilation Result");
     let expected = observe(
         &fixture,
@@ -717,7 +715,7 @@ fn pack_exporter_rejection_matches_official_diagnostics() {
     let fixture = Fixture::exporter_rejection();
     let pack = stabilized_pack(&fixture);
 
-    let actual = compile(CompileRequest::new(pack, output(OutputFormat::Pdf))).unwrap();
+    let actual = compile(compile::Request::new(pack, output(OutputFormat::Pdf))).unwrap();
     let expected = observe(
         &fixture,
         &ReferenceRequest {
@@ -747,13 +745,13 @@ fn pack_pdf_option_conflict_matches_official_exporter_rejection() {
     let fixture = Fixture::static_shape();
     let pack = stabilized_pack(&fixture);
     let source_page = NonZeroUsize::new(1).unwrap();
-    let actual = compile(CompileRequest::new(
+    let actual = compile(compile::Request::new(
         pack,
-        Output::Pdf(PdfOutput {
-            page_selection: parse_page_selection("1").unwrap(),
-            tags: Smart::Custom(true),
-            ..PdfOutput::default()
-        }),
+        Output {
+            pages: "1".parse::<compile::PageSelection>().unwrap(),
+            pdf_tags: Smart::Custom(true),
+            ..Output::new(OutputFormat::Pdf)
+        },
     ))
     .unwrap();
     let expected = observe(
@@ -831,18 +829,19 @@ fn stabilized_pack_matches_official_pdf_export_with_explicit_controls() {
     let mut inputs = Dict::new();
     inputs.insert("width".into(), Value::Str("24".into()));
     let pack = stabilized_pack(&fixture);
-    let output_specification = Output::Pdf(PdfOutput {
-        page_selection: parse_page_selection("2").unwrap(),
+    let output_specification = Output {
+        pages: "2".parse::<compile::PageSelection>().unwrap(),
         pretty: true,
-        identifier: Smart::Custom("official-oracle".to_owned()),
-        creator: Smart::Custom(Some("typst-pack differential oracle".to_owned())),
-        tags: Smart::Custom(false),
-        standards: vec![PdfStandard::A_2b],
-        creation_timestamp: CreationTimestamp::Utc(1_706_933_106),
-    });
+        pdf_identifier: Smart::Custom("official-oracle".to_owned()),
+        pdf_creator: Smart::Custom(Some("typst-pack differential oracle".to_owned())),
+        pdf_tags: Smart::Custom(false),
+        pdf_standards: vec![PdfStandard::A_2b],
+        pdf_timestamp: CreationTimestamp::Utc(1_706_933_106),
+        ..Output::new(OutputFormat::Pdf)
+    };
 
     let actual = compile(
-        CompileRequest::new(pack, output_specification)
+        compile::Request::new(pack, output_specification)
             .inputs(inputs)
             .document_time(DocumentTime::Fixed(document_time)),
     )
@@ -885,7 +884,7 @@ fn stabilized_pack_matches_official_pdf_exporter_defaults() {
     let pack = stabilized_pack(&fixture);
 
     let actual = compile(
-        CompileRequest::new(pack, output(OutputFormat::Pdf))
+        compile::Request::new(pack, output(OutputFormat::Pdf))
             .inputs(inputs)
             .document_time(DocumentTime::Fixed(document_time)),
     )
@@ -920,17 +919,20 @@ fn stabilized_pack_matches_official_pdf_exporter_defaults() {
 fn stabilized_pack_matches_official_html_artifacts_and_pretty_control() {
     let fixture = Fixture::html_success();
     assert_eq!(
-        HtmlOutput::default().pretty,
+        Output::new(OutputFormat::Html).pretty,
         typst_html::HtmlOptions::default().pretty
     );
-    let compact = compile(CompileRequest::new(
+    let compact = compile(compile::Request::new(
         stabilized_pack(&fixture),
         output(OutputFormat::Html),
     ))
     .unwrap();
-    let pretty_result = compile(CompileRequest::new(
+    let pretty_result = compile(compile::Request::new(
         stabilized_pack(&fixture),
-        Output::Html(HtmlOutput { pretty: true }),
+        Output {
+            pretty: true,
+            ..Output::new(OutputFormat::Html)
+        },
     ))
     .unwrap();
     let expected_compact = observe(
@@ -1004,7 +1006,7 @@ fn official_html_target_rejects_a_missing_required_feature() {
 #[test]
 fn html_compiler_rejection_matches_official_diagnostics_and_order() {
     let fixture = Fixture::html_compiler_rejection();
-    let actual = compile(CompileRequest::new(
+    let actual = compile(compile::Request::new(
         stabilized_pack(&fixture),
         output(OutputFormat::Html),
     ))
@@ -1038,7 +1040,7 @@ fn html_compiler_rejection_matches_official_diagnostics_and_order() {
 #[test]
 fn html_exporter_rejection_matches_official_diagnostics_and_order() {
     let fixture = Fixture::html_exporter_rejection();
-    let actual = compile(CompileRequest::new(
+    let actual = compile(compile::Request::new(
         stabilized_pack(&fixture),
         output(OutputFormat::Html),
     ))
@@ -1073,7 +1075,7 @@ fn html_exporter_rejection_matches_official_diagnostics_and_order() {
 #[test]
 fn pack_png_defaults_match_the_pinned_official_exporter() {
     let fixture = Fixture::static_shape();
-    let actual = compile(CompileRequest::new(
+    let actual = compile(compile::Request::new(
         stabilized_pack(&fixture),
         output(OutputFormat::Png),
     ))
@@ -1114,26 +1116,28 @@ fn stabilized_pack_matches_complete_official_png_page_artifacts() {
     let document_time = Datetime::from_ymd(2024, 2, 3).unwrap();
     let mut inputs = Dict::new();
     inputs.insert("width".into(), Value::Str("24".into()));
-    let output_specification = Output::Png(PngOutput {
-        page_selection: parse_page_selection("2,1,2").unwrap(),
-        pixels_per_inch: Some(216.0),
+    let output_specification = Output {
+        pages: "2,1,2".parse::<compile::PageSelection>().unwrap(),
+        ppi: Some(216.0),
         render_bleed: true,
-    });
+        ..Output::new(OutputFormat::Png)
+    };
 
     let actual = compile(
-        CompileRequest::new(stabilized_pack(&fixture), output_specification)
+        compile::Request::new(stabilized_pack(&fixture), output_specification)
             .inputs(inputs)
             .document_time(DocumentTime::Fixed(document_time)),
     )
     .unwrap();
     let repeated = compile(
-        CompileRequest::new(
+        compile::Request::new(
             stabilized_pack(&fixture),
-            Output::Png(PngOutput {
-                page_selection: parse_page_selection("1-2").unwrap(),
-                pixels_per_inch: Some(216.0),
+            Output {
+                pages: "1-2".parse::<compile::PageSelection>().unwrap(),
+                ppi: Some(216.0),
                 render_bleed: true,
-            }),
+                ..Output::new(OutputFormat::Png)
+            },
         )
         .inputs(string_inputs([("width", "24")]))
         .document_time(DocumentTime::Fixed(document_time)),
@@ -1190,11 +1194,11 @@ fn stabilized_pack_matches_complete_official_png_page_artifacts() {
 #[test]
 fn valid_png_selection_matching_no_page_matches_the_official_oracle() {
     let fixture = Fixture::static_shape();
-    let output_specification = Output::Png(PngOutput {
-        page_selection: parse_page_selection("9").unwrap(),
-        ..PngOutput::default()
-    });
-    let actual = compile(CompileRequest::new(
+    let output_specification = Output {
+        pages: "9".parse::<compile::PageSelection>().unwrap(),
+        ..Output::new(OutputFormat::Png)
+    };
+    let actual = compile(compile::Request::new(
         stabilized_pack(&fixture),
         output_specification,
     ))
