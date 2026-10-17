@@ -312,6 +312,11 @@ type TypstPack {
     """
     sysInputs: [String!]! = [],
     """
+    Additional dependency discovery compiles, each KEY=VALUE[,KEY=VALUE...]
+    replacing or adding to sysInputs.
+    """
+    variants: [String!]! = [],
+    """
     Target for the representative creation compilation.
     """
     target: TypstTarget,
@@ -372,6 +377,7 @@ type TypstPack {
     if (embedFonts) { args += ["--embed-fonts"] }
     if (includeTypstEmbeddedFonts) { args += ["--include-typst-embedded-fonts"] }
     sysInputs.each { input => args += ["--input", input] }
+    variants.each { variant => args += ["--variant", variant] }
     if (target != null) { args += ["--target", typstTargetName(target)] }
     features.each { feature => args += ["--features", featureName(feature)] }
     if (creationTimestamp != null) {
@@ -423,8 +429,8 @@ type TypstPack {
   ): String! {
     self
       .container(ws)
+      .withMountedFile("/work/src/project.typk", pack)
       .withWorkdir("/work/src")
-      .withMountedFile("project.typk", pack)
       .withExec(["typst-pack", "inspect", "project.typk"])
       .stdout
   }
@@ -459,8 +465,8 @@ type TypstPack {
 
     self
       .container(ws)
+      .withMountedFile("/work/src/project.typk", pack)
       .withWorkdir("/work/src")
-      .withMountedFile("project.typk", pack)
       .withExec(["mkdir", "-p", "/work/out"])
       .withExec(args)
       .directory("/work/out")
@@ -499,13 +505,15 @@ type TypstPack {
     """
     sysInputs: [String!]! = [],
     """
-    Project-shaped directory containing Pack Override source files.
+    Directory holding the files passed through inputFiles; it is the working
+    directory of the compilation.
     """
-    overrideDir: Directory,
+    inputDir: Directory,
     """
-    Root-relative contained project paths to replace from overrideDir.
+    KEY=PATH pairs whose file bytes, relative to inputDir, are visible
+    through sys.inputs as Typst bytes.
     """
-    overridePaths: [String!]! = [],
+    inputFiles: [String!]! = [],
     """
     Optional font directory mounted at /work/fonts and added to the font search path.
     """
@@ -543,8 +551,8 @@ type TypstPack {
     """
     certificate: File,
   ): Directory! {
-    if (overrideDir == null and overridePaths.length > 0) {
-      raise "overrideDir is required when overridePaths are supplied"
+    if (inputDir == null and inputFiles.length > 0) {
+      raise "inputDir is required when inputFiles are supplied"
     }
     let outputPath = "/work/out/output." + outputFormatName(format)
     if (format == OutputFormat.PNG or format == OutputFormat.SVG) {
@@ -555,7 +563,7 @@ type TypstPack {
       args += ["--cert", "/work/certificate.pem"]
     }
     args += [
-      "compile", "project.typk", outputPath,
+      "compile", "/work/src/project.typk", outputPath,
       "--format", outputFormatName(format),
     ]
 
@@ -568,11 +576,7 @@ type TypstPack {
     }
     if (ppi != null) { args += ["--ppi", ppi] }
     sysInputs.each { input => args += ["--input", input] }
-    if (overrideDir != null) {
-      overridePaths.each { path =>
-        args += ["--override", path, "/work/overrides/" + path]
-      }
-    }
+    inputFiles.each { input => args += ["--input-file", input] }
     if (ignoreEmbeddedFonts) { args += ["--ignore-embedded-fonts"] }
     if (pretty) { args += ["--pretty"] }
     pdfStandards.each { standard => args += ["--pdf-standard", pdfStandardName(standard)] }
@@ -587,14 +591,16 @@ type TypstPack {
 
     let container = self
       .container(ws)
+      .withMountedFile("/work/src/project.typk", pack)
       .withWorkdir("/work/src")
-      .withMountedFile("project.typk", pack)
 
     if (fontDir != null) {
       container = container.withMountedDirectory("/work/fonts", fontDir)
     }
-    if (overrideDir != null) {
-      container = container.withMountedDirectory("/work/overrides", overrideDir)
+    if (inputDir != null) {
+      container = container
+        .withMountedDirectory("/work/inputs", inputDir)
+        .withWorkdir("/work/inputs")
     }
     if (packageDir != null) {
       container = container.withMountedDirectory("/work/packages", packageDir)

@@ -3,15 +3,14 @@
 use std::collections::HashSet;
 
 use ::opendal::Operator;
-use ecow::EcoVec;
 use typst::diag::SourceDiagnostic;
 
 use super::{
     Error, FontSource, PackageSource, insert_package, read_fonts, read_package, read_project,
 };
 use crate::{
-    DiscoverySpecification, Pack, PackCreationInput, PackCreationOutcome, PackMetadata,
-    PackageCatalog, PackageDisposition, PackageReadFailures, ReadLimits, create,
+    CompileOptions, CreateOutcome, CreateRequest, Input, Pack, PackMetadata, PackageDisposition,
+    ReadLimits, Sources, TypstTarget, create,
 };
 
 /// Assembles a Pack from a project, fonts, and packages held in OpenDAL
@@ -39,8 +38,12 @@ pub struct OpenDalPackAssembler {
     pub packages: Vec<PackageSource>,
     /// The disposition of every read package.
     pub package_disposition: PackageDisposition,
-    /// The Dependency Discovery controls.
-    pub discovery: DiscoverySpecification,
+    /// The document model discovery compiles.
+    pub target: TypstTarget,
+    /// Inputs, document time, and features of the discovery compile.
+    pub options: CompileOptions,
+    /// Input overrides for additional discovery compiles.
+    pub variants: Vec<Vec<(String, Input)>>,
     /// Optional Pack metadata.
     pub metadata: Option<PackMetadata>,
     /// Limits for reading the project, the fonts, and each package, and for
@@ -52,18 +55,19 @@ pub struct OpenDalPackAssembler {
 #[derive(Debug)]
 pub struct AssembledPack {
     pub pack: Pack,
-    /// Dependency Discovery warnings.
-    pub warnings: EcoVec<SourceDiagnostic>,
+    /// Discovery warnings.
+    pub warnings: Vec<SourceDiagnostic>,
+    /// The sources the discovery compiles read.
+    pub sources: Sources,
 }
 
 impl OpenDalPackAssembler {
     /// An assembler with no fonts or package sources, embedded packages,
-    /// and default limits.
+    /// default options, and default limits.
     pub fn new(
         operator: Operator,
         project: impl Into<String>,
         entrypoint: impl Into<String>,
-        discovery: DiscoverySpecification,
     ) -> Self {
         Self {
             operator,
@@ -72,7 +76,9 @@ impl OpenDalPackAssembler {
             fonts: Vec::new(),
             packages: Vec::new(),
             package_disposition: PackageDisposition::Embedded,
-            discovery,
+            target: TypstTarget::Paged,
+            options: CompileOptions::default(),
+            variants: Vec::new(),
             metadata: None,
             limits: ReadLimits::default(),
         }
@@ -87,25 +93,28 @@ impl OpenDalPackAssembler {
             &self.limits,
         )
         .await?;
-        let fonts = read_fonts(&self.operator, &self.fonts, &self.limits).await?;
-        let mut packages = PackageCatalog::new();
-        let mut failures = PackageReadFailures::new();
+        let mut request = CreateRequest::new(project);
+        request.fonts = read_fonts(&self.operator, &self.fonts, &self.limits).await?;
+        request.target = self.target;
+        request.options = self.options.clone();
+        request.variants = self.variants.clone();
+        request.metadata = self.metadata.clone();
         let mut attempted = HashSet::new();
         loop {
-            let outcome = create(PackCreationInput {
-                project: &project,
-                packages: &packages,
-                fonts: &fonts,
-                package_failures: &failures,
-                discovery: &self.discovery,
-                metadata: self.metadata.as_ref(),
-            })
-            .map_err(|error| Error::Creation(Box::new(error)))?;
+            let outcome = create(&request).map_err(|error| Error::Creation(Box::new(error)))?;
             let missing = match outcome {
-                PackCreationOutcome::Created { pack, warnings } => {
-                    return Ok(AssembledPack { pack, warnings });
+                CreateOutcome::Created {
+                    pack,
+                    warnings,
+                    sources,
+                } => {
+                    return Ok(AssembledPack {
+                        pack,
+                        warnings,
+                        sources,
+                    });
                 }
-                PackCreationOutcome::MissingPackageSpecifications(missing) => missing,
+                CreateOutcome::MissingPackages(missing) => missing,
             };
             for spec in missing {
                 if !attempted.insert(spec.to_string()) {
@@ -115,8 +124,8 @@ impl OpenDalPackAssembler {
                 // A rejected package is recorded in `failures`; resuming
                 // creation reports it at the importing source span.
                 let _ = insert_package(
-                    &mut packages,
-                    &mut failures,
+                    &mut request.packages,
+                    &mut request.package_failures,
                     &spec,
                     read,
                     self.package_disposition,

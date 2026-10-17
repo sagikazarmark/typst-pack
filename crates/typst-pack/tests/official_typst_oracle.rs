@@ -11,40 +11,139 @@ use archive_support::{decode_reference, encode_reference};
 use support::official_typst::select_font;
 use support::official_typst::{
     ArtifactRole, DiagnosticObservation, DiagnosticSeverity, Fixture, ObservationStatus,
-    OutputRequest, ReferenceRequest, Target, TraceKind, observe, observe_with_project_overrides,
+    OutputRequest, ReferenceRequest, Target, TraceKind, observe,
 };
+use typst::WorldExt;
+use typst::diag::{Severity, SourceDiagnostic, Tracepoint};
 #[cfg(feature = "embedded-fonts")]
 use typst::foundations::Bytes;
 use typst::foundations::{Datetime, Dict, Smart, Value};
+use typst::syntax::{FileId, VirtualRoot};
 use typst_pack::{
-    CompilationAccessKind, CompilationDiagnostic, CompilationFulfillmentSet, CompilationLimits,
-    CompilationOutputSpecification, CompilationRequestIssue, CompilationRequestRejection,
-    CompilationResult, CompilationStatus, CreationTimestamp, DiagnosticPhase, DiagnosticProducer,
-    DiagnosticSeverity as PackDiagnosticSeverity, DocumentTime, HtmlOutputSpecification,
-    OutputFormat, Pack, PackCompilationRequest, PackOverrideSet, PackageTree,
-    PackageTreeFulfillment, PdfOutputSpecification, PngOutputSpecification, SvgOutputSpecification,
-    TracepointKind, compile_with_limits as compile_to_report, parse_page_selection,
+    Artifact, CompileError, CompileRequest, CreationTimestamp, Digest, DocumentTime, HtmlOutput,
+    Input, Output, OutputFormat, Pack, PackageTree, PdfOutput, PngOutput, RequestIssue, Sources,
+    SvgOutput, parse_page_selection,
 };
 use typst_pdf::PdfStandard;
 
-fn compile(
-    request: PackCompilationRequest,
-) -> Result<CompilationResult, CompilationRequestRejection> {
-    let report = compile_to_report(request, CompilationLimits::DEFAULT)?;
-    Ok(report
-        .result()
-        .expect("expected a semantic Compilation Result")
-        .clone())
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompilationStatus {
+    Succeeded,
+    Rejected,
 }
 
-fn output(format: OutputFormat) -> CompilationOutputSpecification {
-    match format {
-        OutputFormat::Pdf => CompilationOutputSpecification::Pdf(PdfOutputSpecification::default()),
-        OutputFormat::Png => CompilationOutputSpecification::Png(PngOutputSpecification::default()),
-        OutputFormat::Svg => CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
-        OutputFormat::Html => {
-            CompilationOutputSpecification::Html(HtmlOutputSpecification::default())
-        }
+/// One compilation as the oracle observes it: a success or a failed compile,
+/// with warnings before errors.
+struct Observed {
+    status: CompilationStatus,
+    artifacts: Vec<Artifact>,
+    diagnostics: Vec<SourceDiagnostic>,
+    page_count: Option<usize>,
+    identity: Option<Digest>,
+    sources: Sources,
+}
+
+impl Observed {
+    fn status(&self) -> CompilationStatus {
+        self.status
+    }
+
+    fn artifacts(&self) -> &[Artifact] {
+        &self.artifacts
+    }
+
+    fn source_page_count(&self) -> Option<usize> {
+        self.page_count
+    }
+
+    fn identity(&self) -> Digest {
+        self.identity
+            .expect("a succeeded compilation has an identity")
+    }
+}
+
+fn compile(request: CompileRequest) -> Result<Observed, CompileError> {
+    match typst_pack::compile(&request) {
+        Ok(compiled) => Ok(Observed {
+            status: CompilationStatus::Succeeded,
+            artifacts: compiled.artifacts,
+            diagnostics: compiled.warnings,
+            page_count: compiled.page_count,
+            identity: Some(compiled.identity),
+            sources: compiled.sources,
+        }),
+        Err(CompileError::Failed {
+            errors,
+            warnings,
+            sources,
+        }) => Ok(Observed {
+            status: CompilationStatus::Rejected,
+            artifacts: Vec::new(),
+            diagnostics: warnings.into_iter().chain(errors).collect(),
+            page_count: None,
+            identity: None,
+            sources,
+        }),
+        Err(error) => Err(error),
+    }
+}
+
+/// Request setup in the shape the oracle requests use.
+trait Requested {
+    fn inputs(self, inputs: Dict) -> Self;
+    fn document_time(self, time: DocumentTime) -> Self;
+    fn feature(self, feature: typst::Feature) -> Self;
+    fn with_packages(
+        self,
+        packages: Vec<(typst::syntax::package::PackageSpec, PackageTree)>,
+    ) -> Self;
+}
+
+impl Requested for CompileRequest {
+    fn inputs(mut self, inputs: Dict) -> Self {
+        self.options.inputs = inputs
+            .into_iter()
+            .map(|(key, value)| {
+                let value = match value {
+                    Value::Str(text) => Input::Str(text.into()),
+                    Value::Bytes(bytes) => Input::Bytes(bytes.to_vec()),
+                    other => panic!("a pack input is a string or bytes, not {other:?}"),
+                };
+                (key.into(), value)
+            })
+            .collect();
+        self
+    }
+
+    fn document_time(mut self, time: DocumentTime) -> Self {
+        self.options.document_time = time;
+        self
+    }
+
+    fn feature(mut self, feature: typst::Feature) -> Self {
+        self.options.features.push(feature);
+        self
+    }
+
+    fn with_packages(
+        mut self,
+        packages: Vec<(typst::syntax::package::PackageSpec, PackageTree)>,
+    ) -> Self {
+        self.packages = packages;
+        self
+    }
+}
+
+fn output(format: OutputFormat) -> Output {
+    Output::new(format)
+}
+
+/// The logical name the oracle gives a file.
+fn logical_path(id: FileId) -> String {
+    let path = id.vpath().get_without_slash();
+    match id.root() {
+        VirtualRoot::Project => format!("project:{path}"),
+        VirtualRoot::Package(spec) => format!("package:{spec}/{path}"),
     }
 }
 
@@ -78,7 +177,7 @@ fn embedded_and_external_complete_package_trees_match_the_independent_oracle() {
     };
     let expected = observe(&fixture, &reference_request);
     let embedded = compile(
-        PackCompilationRequest::new(stabilized_pack(&fixture), output(OutputFormat::Svg))
+        CompileRequest::new(stabilized_pack(&fixture), output(OutputFormat::Svg))
             .inputs(string_inputs([("width", "24")]))
             .document_time(DocumentTime::Fixed(Datetime::from_ymd(2024, 2, 3).unwrap())),
     )
@@ -94,39 +193,33 @@ fn embedded_and_external_complete_package_trees_match_the_independent_oracle() {
     }
     let external_pack = builder.build().unwrap();
     let external = compile(
-        PackCompilationRequest::new(external_pack, output(OutputFormat::Svg))
+        CompileRequest::new(external_pack, output(OutputFormat::Svg))
             .inputs(string_inputs([("width", "24")]))
             .document_time(DocumentTime::Fixed(Datetime::from_ymd(2024, 2, 3).unwrap()))
-            .fulfillments(
-                CompilationFulfillmentSet::new(
-                    [PackageTreeFulfillment::new(
-                        spec,
-                        PackageTree::from_owned_entries(
-                            fixture
-                                .packages()
-                                .iter()
-                                .map(|&(_, path, text)| (path, text.as_bytes().to_vec())),
-                        )
-                        .unwrap(),
-                    )],
-                    [],
+            .with_packages(vec![(
+                spec,
+                PackageTree::from_owned_entries(
+                    fixture
+                        .packages()
+                        .iter()
+                        .map(|&(_, path, text)| (path, text.as_bytes().to_vec())),
                 )
                 .unwrap(),
-            ),
+            )]),
     )
     .unwrap();
 
     assert_eq!(embedded.status(), CompilationStatus::Succeeded);
     assert_eq!(external.status(), embedded.status());
-    assert_diagnostics_match(embedded.diagnostics(), &expected.diagnostics);
-    assert_eq!(external.diagnostics(), embedded.diagnostics());
+    assert_diagnostics_match(&embedded, &expected.diagnostics);
+    assert_eq!(external.diagnostics, embedded.diagnostics);
     assert_eq!(external.artifacts().len(), expected.artifacts.len());
     assert!(
         external
             .artifacts()
             .iter()
             .zip(embedded.artifacts())
-            .all(|(external, embedded)| external.bytes() == embedded.bytes())
+            .all(|(external, embedded)| external.bytes == embedded.bytes)
     );
 }
 
@@ -165,34 +258,23 @@ fn exact_pack_font_catalog_matches_the_independent_oracle_and_external_fulfillme
         embedded_pack.font_data(&requirement.digest),
         Some(expected.font_catalog[0].1.as_ref())
     );
-    let embedded = compile(PackCompilationRequest::new(
+    let embedded = compile(CompileRequest::new(
         embedded_pack,
         output(OutputFormat::Svg),
     ))
     .unwrap();
-    assert_eq!(embedded.artifacts()[0].bytes(), expected.artifacts[0].bytes);
+    assert_eq!(embedded.artifacts()[0].bytes, expected.artifacts[0].bytes);
 
     let external_pack = Pack::builder("main.typ")
         .file("main.typ", fixture.project()[0].1.as_bytes().to_vec())
         .external_font(data.clone())
         .build()
         .unwrap();
-    let identity = external_pack.font_requirements()[0].digest;
-    let external = compile(
-        PackCompilationRequest::new(external_pack, output(OutputFormat::Svg)).fulfillments(
-            CompilationFulfillmentSet::new(
-                [],
-                [typst_pack::FontContainerFulfillment::new(
-                    identity,
-                    typst_pack::FontContainer::new(data).unwrap(),
-                )],
-            )
-            .unwrap(),
-        ),
-    )
-    .unwrap();
-    assert_eq!(external.artifacts()[0].bytes(), expected.artifacts[0].bytes);
-    assert_eq!(external.diagnostics().len(), expected.diagnostics.len());
+    let mut request = CompileRequest::new(external_pack, output(OutputFormat::Svg));
+    request.fonts = vec![typst_pack::FontContainer::new(data).unwrap()];
+    let external = compile(request).unwrap();
+    assert_eq!(external.artifacts()[0].bytes, expected.artifacts[0].bytes);
+    assert_eq!(external.diagnostics.len(), expected.diagnostics.len());
 }
 
 #[cfg(feature = "embedded-fonts")]
@@ -232,13 +314,13 @@ fn catalog_order_drives_the_same_official_font_selection_on_every_path() {
                 },
             },
         );
-        let embedded = compile(PackCompilationRequest::new(
+        let embedded = compile(CompileRequest::new(
             stabilized_pack(&fixture),
             output(OutputFormat::Svg),
         ))
         .unwrap();
         assert_eq!(
-            embedded.artifacts()[0].bytes(),
+            embedded.artifacts()[0].bytes,
             expected_output.artifacts[0].bytes
         );
 
@@ -248,22 +330,14 @@ fn catalog_order_drives_the_same_official_font_selection_on_every_path() {
             .external_font(ordered[1].clone())
             .build()
             .unwrap();
-        let fulfillments = external_pack
-            .font_requirements()
-            .iter()
-            .zip(ordered)
-            .map(|(requirement, data)| {
-                typst_pack::FontContainerFulfillment::new(
-                    requirement.digest,
-                    typst_pack::FontContainer::new(data).unwrap(),
-                )
-            })
-            .collect::<Vec<_>>();
-        let request = PackCompilationRequest::new(external_pack, output(OutputFormat::Svg))
-            .fulfillments(CompilationFulfillmentSet::new([], fulfillments).unwrap());
+        let mut request = CompileRequest::new(external_pack, output(OutputFormat::Svg));
+        request.fonts = ordered
+            .into_iter()
+            .map(|data| typst_pack::FontContainer::new(data).unwrap())
+            .collect();
         let external = compile(request).unwrap();
         assert_eq!(
-            external.artifacts()[0].bytes(),
+            external.artifacts()[0].bytes,
             expected_output.artifacts[0].bytes
         );
     }
@@ -276,59 +350,42 @@ fn string_inputs<const N: usize>(entries: [(&str, &str); N]) -> Dict {
         .collect()
 }
 
-fn assert_diagnostics_match(actual: &[CompilationDiagnostic], expected: &[DiagnosticObservation]) {
-    assert_eq!(actual.len(), expected.len());
-    for (actual, expected) in actual.iter().zip(expected) {
+fn assert_diagnostics_match(actual: &Observed, expected: &[DiagnosticObservation]) {
+    let sources = &actual.sources;
+    let span = |span: typst::syntax::DiagSpan| (span.id().map(logical_path), sources.range(span));
+    let expected_span = |span: &support::official_typst::LogicalSpan| {
+        (span.logical_path.clone(), span.byte_range.clone())
+    };
+    assert_eq!(actual.diagnostics.len(), expected.len());
+    for (actual, expected) in actual.diagnostics.iter().zip(expected) {
         assert_eq!(
-            actual.severity(),
+            actual.severity,
             match expected.severity {
-                DiagnosticSeverity::Error => PackDiagnosticSeverity::Error,
-                DiagnosticSeverity::Warning => PackDiagnosticSeverity::Warning,
+                DiagnosticSeverity::Error => Severity::Error,
+                DiagnosticSeverity::Warning => Severity::Warning,
             }
         );
-        assert_eq!(actual.message(), expected.message);
-        assert_eq!(
-            actual.span().logical_path(),
-            expected.span.logical_path.as_deref()
-        );
-        assert_eq!(
-            actual.span().byte_range(),
-            expected.span.byte_range.as_ref()
-        );
-        assert_eq!(actual.hints().len(), expected.hints.len());
-        for (actual, expected) in actual.hints().iter().zip(&expected.hints) {
-            assert_eq!(actual.message(), expected.message);
-            assert_eq!(
-                actual.span().logical_path(),
-                expected.span.logical_path.as_deref()
-            );
-            assert_eq!(
-                actual.span().byte_range(),
-                expected.span.byte_range.as_ref()
-            );
+        assert_eq!(actual.message, expected.message);
+        assert_eq!(span(actual.span), expected_span(&expected.span));
+        assert_eq!(actual.hints.len(), expected.hints.len());
+        for (actual, expected) in actual.hints.iter().zip(&expected.hints) {
+            assert_eq!(actual.v, expected.message);
+            assert_eq!(span(actual.span), expected_span(&expected.span));
         }
-        assert_eq!(actual.trace().len(), expected.trace.len());
-        for (actual, expected) in actual.trace().iter().zip(&expected.trace) {
-            assert_eq!(
-                actual.kind(),
-                match expected.kind {
-                    TraceKind::Call => TracepointKind::Call,
-                    TraceKind::Show => TracepointKind::Show,
-                    TraceKind::Import => TracepointKind::Import,
-                    TraceKind::Include => TracepointKind::Include,
+        assert_eq!(actual.trace.len(), expected.trace.len());
+        for (actual, expected) in actual.trace.iter().zip(&expected.trace) {
+            let (kind, value) = match &actual.v {
+                Tracepoint::Call(value) => {
+                    (TraceKind::Call, value.as_ref().map(ToString::to_string))
                 }
-            );
-            assert_eq!(actual.value(), expected.value.as_deref());
-            assert_eq!(
-                actual.span().logical_path(),
-                expected.span.logical_path.as_deref()
-            );
-            assert_eq!(
-                actual.span().byte_range(),
-                expected.span.byte_range.as_ref()
-            );
+                Tracepoint::Show(value) => (TraceKind::Show, Some(value.to_string())),
+                Tracepoint::Import(value) => (TraceKind::Import, Some(value.to_string())),
+                Tracepoint::Include(value) => (TraceKind::Include, Some(value.to_string())),
+            };
+            assert_eq!(kind, expected.kind);
+            assert_eq!(value, expected.value);
+            assert_eq!(span(actual.span.into()), expected_span(&expected.span));
         }
-        assert_eq!(actual.source_page_number(), None);
     }
 }
 
@@ -398,12 +455,12 @@ fn stabilized_project_round_trips_and_matches_pack_svg_compilation() {
     inputs.insert("width".into(), Value::Str("24".into()));
     let created = stabilized_pack(&fixture);
     let pack = decode_reference(encode_reference(&created).unwrap()).unwrap();
-    let output_specification = CompilationOutputSpecification::Svg(SvgOutputSpecification {
+    let output_specification = Output::Svg(SvgOutput {
         page_selection: parse_page_selection("2,1").unwrap(),
         pretty: true,
-        ..SvgOutputSpecification::default()
+        ..SvgOutput::default()
     });
-    let request = PackCompilationRequest::new(pack, output_specification)
+    let request = CompileRequest::new(pack, output_specification)
         .inputs(inputs)
         .document_time(DocumentTime::Fixed(Datetime::from_ymd(2024, 2, 3).unwrap()));
 
@@ -424,47 +481,36 @@ fn stabilized_project_round_trips_and_matches_pack_svg_compilation() {
 
     assert_eq!(actual.source_page_count(), expected.source_page_count);
     assert_eq!(actual.status(), CompilationStatus::Succeeded);
-    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
-    assert!(actual.diagnostics().iter().all(|diagnostic| {
-        diagnostic.phase() == DiagnosticPhase::Compilation
-            && diagnostic.producer() == DiagnosticProducer::new(actual.engine_identity())
-    }));
+    assert_diagnostics_match(&actual, &expected.diagnostics);
     assert_eq!(actual.artifacts().len(), expected.artifacts.len());
     for (actual, expected) in actual.artifacts().iter().zip(&expected.artifacts) {
         let ArtifactRole::Svg { source_page_number } = expected.role else {
             panic!("oracle produced a non-SVG artifact");
         };
-        assert_eq!(actual.format(), OutputFormat::Svg);
-        assert_eq!(actual.source_page_number(), Some(source_page_number));
-        assert_eq!(actual.bytes(), expected.bytes);
+        assert_eq!(actual.format, OutputFormat::Svg);
+        assert_eq!(actual.page, Some(source_page_number));
+        assert_eq!(actual.bytes, expected.bytes);
     }
     let actual_dependencies = actual
-        .access_trace()
-        .observations()
-        .filter(|observation| {
-            matches!(
-                observation.kind(),
-                CompilationAccessKind::Source | CompilationAccessKind::File
-            )
-        })
-        .map(|observation| observation.logical_path().to_owned())
+        .sources
+        .files()
+        .iter()
+        .map(|id| logical_path(*id))
         .collect::<BTreeSet<_>>();
     assert_eq!(actual_dependencies, expected.dependencies);
-    assert_eq!(actual.engine_identity().implementation(), "typst");
-    assert_eq!(actual.engine_identity().version(), "0.15.1");
-    assert!(!actual.engine_identity().source_checksum().is_empty());
-    assert!(!actual.engine_identity().target().is_empty());
-    assert_eq!(actual.exporter_identity().implementation(), "typst-svg");
-    assert_eq!(actual.exporter_identity().version(), "0.15.1");
-    assert!(!actual.exporter_identity().source_checksum().is_empty());
-    assert!(!actual.exporter_identity().target().is_empty());
 }
 
 #[test]
-fn pack_source_and_non_source_overrides_match_the_independent_oracle() {
-    let fixture = Fixture::override_behavior();
+fn string_and_byte_inputs_match_the_independent_oracle() {
+    let fixture = Fixture::byte_input();
+    let mut inputs = Dict::new();
+    inputs.insert("label".into(), Value::Str("text".into()));
+    inputs.insert(
+        "data".into(),
+        Value::Bytes(typst::foundations::Bytes::new(b"bytes".to_vec())),
+    );
     let reference_request = ReferenceRequest {
-        inputs: Dict::new(),
+        inputs: inputs.clone(),
         features: vec![],
         document_time: None,
         output: OutputRequest::Svg {
@@ -473,60 +519,27 @@ fn pack_source_and_non_source_overrides_match_the_independent_oracle() {
             pretty: false,
         },
     };
-    let baseline = observe(&fixture, &reference_request);
-    let source_only = observe_with_project_overrides(
-        &fixture,
-        &reference_request,
-        &[("chapter.typ", "#let source-width = 20")],
-    );
-    let data_only =
-        observe_with_project_overrides(&fixture, &reference_request, &[("data.txt", "20")]);
-    let unused_only = observe_with_project_overrides(
-        &fixture,
-        &reference_request,
-        &[("unused.txt", "replacement unused")],
-    );
-    assert_ne!(source_only.artifacts[0].bytes, baseline.artifacts[0].bytes);
-    assert_ne!(data_only.artifacts[0].bytes, baseline.artifacts[0].bytes);
-    assert_eq!(unused_only.artifacts[0].bytes, baseline.artifacts[0].bytes);
+    let expected = observe(&fixture, &reference_request);
+    let actual = compile(
+        CompileRequest::new(stabilized_pack(&fixture), output(OutputFormat::Svg)).inputs(inputs),
+    )
+    .unwrap();
 
-    let pack = stabilized_pack(&fixture);
-    let overrides = PackOverrideSet::new(&pack)
-        .replace("chapter.typ", b"#let source-width = 20".to_vec())
-        .unwrap()
-        .replace("data.txt", b"20".to_vec())
-        .unwrap()
-        .replace("unused.txt", b"replacement unused".to_vec())
-        .unwrap();
-    let actual =
-        compile(PackCompilationRequest::new(pack, output(OutputFormat::Svg)).overrides(overrides))
-            .unwrap();
-    let expected = observe_with_project_overrides(
-        &fixture,
-        &reference_request,
-        &[
-            ("chapter.typ", "#let source-width = 20"),
-            ("data.txt", "20"),
-            ("unused.txt", "replacement unused"),
-        ],
-    );
-
+    assert_eq!(expected.status, ObservationStatus::Accepted);
     assert_eq!(actual.status(), CompilationStatus::Succeeded);
-    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
-    assert_eq!(actual.artifacts().len(), expected.artifacts.len());
-    assert_eq!(actual.artifacts()[0].bytes(), expected.artifacts[0].bytes);
+    assert_diagnostics_match(&actual, &expected.diagnostics);
+    assert_eq!(actual.artifacts()[0].bytes, expected.artifacts[0].bytes);
 }
 
 #[test]
 fn shared_semantic_values_drive_the_same_official_source_behavior() {
     let fixture = Fixture::semantic_request();
     let document_time = Datetime::from_ymd(2024, 2, 3).unwrap();
-    let mut inputs = Dict::new();
-    inputs.insert("width".into(), Value::Int(24));
+    let inputs = string_inputs([("width", "24")]);
     let pack = stabilized_pack(&fixture);
 
     let actual = compile(
-        PackCompilationRequest::new(pack, output(OutputFormat::Svg))
+        CompileRequest::new(pack, output(OutputFormat::Svg))
             .inputs(inputs.clone())
             .feature(typst::Feature::A11yExtras)
             .document_time(DocumentTime::Fixed(document_time)),
@@ -547,7 +560,7 @@ fn shared_semantic_values_drive_the_same_official_source_behavior() {
     );
 
     assert_eq!(actual.status(), CompilationStatus::Succeeded);
-    assert_eq!(actual.artifacts()[0].bytes(), expected.artifacts[0].bytes);
+    assert_eq!(actual.artifacts()[0].bytes, expected.artifacts[0].bytes);
 }
 
 #[test]
@@ -592,7 +605,7 @@ fn independent_oracle_and_pack_compilation_ignore_conflicting_ambient_environmen
         },
     );
     let actual = compile(
-        PackCompilationRequest::new(stabilized_pack(&fixture), output(OutputFormat::Svg))
+        CompileRequest::new(stabilized_pack(&fixture), output(OutputFormat::Svg))
             .inputs(inputs)
             .feature(typst::Feature::A11yExtras)
             .document_time(DocumentTime::Fixed(document_time)),
@@ -601,43 +614,32 @@ fn independent_oracle_and_pack_compilation_ignore_conflicting_ambient_environmen
 
     assert_eq!(expected.status, ObservationStatus::Accepted);
     assert_eq!(actual.status(), CompilationStatus::Succeeded);
-    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
-    assert_eq!(actual.artifacts()[0].bytes(), expected.artifacts[0].bytes);
+    assert_diagnostics_match(&actual, &expected.diagnostics);
+    assert_eq!(actual.artifacts()[0].bytes, expected.artifacts[0].bytes);
 }
 
 #[test]
 fn html_feature_is_derived_and_bundle_is_rejected() {
     let fixture = Fixture::exporter_rejection();
     let pack = stabilized_pack(&fixture);
-    let result = compile(PackCompilationRequest::new(
-        pack,
-        output(OutputFormat::Html),
-    ))
-    .unwrap();
+    let result = compile(CompileRequest::new(pack, output(OutputFormat::Html))).unwrap();
     assert_eq!(result.status(), CompilationStatus::Succeeded);
 
     let explicit = compile(
-        PackCompilationRequest::new(stabilized_pack(&fixture), output(OutputFormat::Html))
+        CompileRequest::new(stabilized_pack(&fixture), output(OutputFormat::Html))
             .feature(typst::Feature::Html),
     )
     .unwrap();
-    assert_eq!(
-        result.compilation_identity(),
-        explicit.compilation_identity()
-    );
+    assert_eq!(result.identity(), explicit.identity());
 
     let rejected = compile(
-        PackCompilationRequest::new(stabilized_pack(&fixture), output(OutputFormat::Html))
+        CompileRequest::new(stabilized_pack(&fixture), output(OutputFormat::Html))
             .feature(typst::Feature::Bundle),
     );
-    let Err(rejection) = rejected else {
-        panic!("the unsupported Bundle feature must be rejected by Pack preparation");
+    let Err(CompileError::InvalidRequest(issues)) = rejected else {
+        panic!("the unsupported Bundle feature must be rejected before compiling");
     };
-    assert_eq!(rejection.issues().len(), 1);
-    assert!(matches!(
-        rejection.issues()[0],
-        CompilationRequestIssue::UnsupportedBundleFeature
-    ));
+    assert_eq!(issues, [RequestIssue::UnsupportedBundleFeature]);
 }
 
 #[test]
@@ -652,36 +654,31 @@ fn unobserved_shared_values_still_change_compilation_identity() {
     let mut second_inputs = Dict::new();
     second_inputs.insert("unused".into(), Value::Str("second".into()));
 
-    let first = compile(
-        PackCompilationRequest::new(first_pack, output(OutputFormat::Svg)).inputs(first_inputs),
-    )
-    .unwrap();
-    let second = compile(
-        PackCompilationRequest::new(second_pack, output(OutputFormat::Svg)).inputs(second_inputs),
-    )
-    .unwrap();
+    let first =
+        compile(CompileRequest::new(first_pack, output(OutputFormat::Svg)).inputs(first_inputs))
+            .unwrap();
+    let second =
+        compile(CompileRequest::new(second_pack, output(OutputFormat::Svg)).inputs(second_inputs))
+            .unwrap();
     let feature = compile(
-        PackCompilationRequest::new(feature_pack, output(OutputFormat::Svg))
+        CompileRequest::new(feature_pack, output(OutputFormat::Svg))
             .feature(typst::Feature::A11yExtras),
     )
     .unwrap();
     let document_time = compile(
-        PackCompilationRequest::new(time_pack, output(OutputFormat::Svg))
+        CompileRequest::new(time_pack, output(OutputFormat::Svg))
             .document_time(DocumentTime::Fixed(Datetime::from_ymd(2024, 2, 3).unwrap())),
     )
     .unwrap();
 
-    assert_ne!(first.compilation_identity(), second.compilation_identity());
-    assert_ne!(first.compilation_identity(), feature.compilation_identity());
-    assert_ne!(
-        first.compilation_identity(),
-        document_time.compilation_identity()
-    );
-    assert_eq!(first.artifacts()[0].bytes(), second.artifacts()[0].bytes());
-    assert_eq!(first.artifacts()[0].bytes(), feature.artifacts()[0].bytes());
+    assert_ne!(first.identity(), second.identity());
+    assert_ne!(first.identity(), feature.identity());
+    assert_ne!(first.identity(), document_time.identity());
+    assert_eq!(first.artifacts()[0].bytes, second.artifacts()[0].bytes);
+    assert_eq!(first.artifacts()[0].bytes, feature.artifacts()[0].bytes);
     assert_eq!(
-        first.artifacts()[0].bytes(),
-        document_time.artifacts()[0].bytes()
+        first.artifacts()[0].bytes,
+        document_time.artifacts()[0].bytes
     );
 }
 
@@ -692,9 +689,8 @@ fn pack_rejection_matches_official_diagnostics_and_remains_a_result() {
     inputs.insert("width".into(), Value::Str("24".into()));
     let pack = stabilized_pack(&fixture);
 
-    let actual =
-        compile(PackCompilationRequest::new(pack, output(OutputFormat::Svg)).inputs(inputs))
-            .expect("the accepted Pack request must produce a Compilation Result");
+    let actual = compile(CompileRequest::new(pack, output(OutputFormat::Svg)).inputs(inputs))
+        .expect("the accepted Pack request must produce a Compilation Result");
     let expected = observe(
         &fixture,
         &ReferenceRequest {
@@ -713,11 +709,7 @@ fn pack_rejection_matches_official_diagnostics_and_remains_a_result() {
     assert_eq!(actual.status(), CompilationStatus::Rejected);
     assert!(actual.artifacts().is_empty());
     assert_eq!(actual.source_page_count(), None);
-    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
-    assert!(actual.diagnostics().iter().all(|diagnostic| {
-        diagnostic.phase() == DiagnosticPhase::Compilation
-            && diagnostic.producer() == DiagnosticProducer::new(actual.engine_identity())
-    }));
+    assert_diagnostics_match(&actual, &expected.diagnostics);
 }
 
 #[test]
@@ -725,7 +717,7 @@ fn pack_exporter_rejection_matches_official_diagnostics() {
     let fixture = Fixture::exporter_rejection();
     let pack = stabilized_pack(&fixture);
 
-    let actual = compile(PackCompilationRequest::new(pack, output(OutputFormat::Pdf))).unwrap();
+    let actual = compile(CompileRequest::new(pack, output(OutputFormat::Pdf))).unwrap();
     let expected = observe(
         &fixture,
         &ReferenceRequest {
@@ -747,12 +739,7 @@ fn pack_exporter_rejection_matches_official_diagnostics() {
     assert_eq!(expected.status, ObservationStatus::Rejected);
     assert_eq!(actual.status(), CompilationStatus::Rejected);
     assert!(actual.artifacts().is_empty());
-    assert_eq!(actual.source_page_count(), expected.source_page_count);
-    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
-    assert!(actual.diagnostics().iter().all(|diagnostic| {
-        diagnostic.phase() == DiagnosticPhase::Export
-            && diagnostic.producer() == DiagnosticProducer::new(actual.exporter_identity())
-    }));
+    assert_diagnostics_match(&actual, &expected.diagnostics);
 }
 
 #[test]
@@ -760,12 +747,12 @@ fn pack_pdf_option_conflict_matches_official_exporter_rejection() {
     let fixture = Fixture::static_shape();
     let pack = stabilized_pack(&fixture);
     let source_page = NonZeroUsize::new(1).unwrap();
-    let actual = compile(PackCompilationRequest::new(
+    let actual = compile(CompileRequest::new(
         pack,
-        CompilationOutputSpecification::Pdf(PdfOutputSpecification {
+        Output::Pdf(PdfOutput {
             page_selection: parse_page_selection("1").unwrap(),
             tags: Smart::Custom(true),
-            ..PdfOutputSpecification::default()
+            ..PdfOutput::default()
         }),
     ))
     .unwrap();
@@ -790,12 +777,7 @@ fn pack_pdf_option_conflict_matches_official_exporter_rejection() {
     assert_eq!(expected.status, ObservationStatus::Rejected);
     assert_eq!(actual.status(), CompilationStatus::Rejected);
     assert!(actual.artifacts().is_empty());
-    assert_eq!(actual.source_page_count(), expected.source_page_count);
-    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
-    assert!(actual.diagnostics().iter().all(|diagnostic| {
-        diagnostic.phase() == DiagnosticPhase::Export
-            && diagnostic.producer() == DiagnosticProducer::new(actual.exporter_identity())
-    }));
+    assert_diagnostics_match(&actual, &expected.diagnostics);
 }
 
 #[test]
@@ -849,18 +831,18 @@ fn stabilized_pack_matches_official_pdf_export_with_explicit_controls() {
     let mut inputs = Dict::new();
     inputs.insert("width".into(), Value::Str("24".into()));
     let pack = stabilized_pack(&fixture);
-    let output_specification = CompilationOutputSpecification::Pdf(PdfOutputSpecification {
+    let output_specification = Output::Pdf(PdfOutput {
         page_selection: parse_page_selection("2").unwrap(),
         pretty: true,
         identifier: Smart::Custom("official-oracle".to_owned()),
         creator: Smart::Custom(Some("typst-pack differential oracle".to_owned())),
         tags: Smart::Custom(false),
         standards: vec![PdfStandard::A_2b],
-        creation_timestamp: CreationTimestamp::Explicit(creation_time),
+        creation_timestamp: CreationTimestamp::Utc(1_706_933_106),
     });
 
     let actual = compile(
-        PackCompilationRequest::new(pack, output_specification)
+        CompileRequest::new(pack, output_specification)
             .inputs(inputs)
             .document_time(DocumentTime::Fixed(document_time)),
     )
@@ -885,19 +867,13 @@ fn stabilized_pack_matches_official_pdf_export_with_explicit_controls() {
 
     assert_eq!(actual.status(), CompilationStatus::Succeeded);
     assert_eq!(actual.source_page_count(), expected.source_page_count);
-    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
-    assert!(actual.pack_warnings().is_empty());
+    assert_diagnostics_match(&actual, &expected.diagnostics);
     assert_eq!(actual.artifacts().len(), 1);
     assert_eq!(expected.artifacts.len(), 1);
     assert_eq!(expected.artifacts[0].role, ArtifactRole::Pdf);
-    assert_eq!(actual.artifacts()[0].format(), OutputFormat::Pdf);
-    assert_eq!(actual.artifacts()[0].source_page_number(), None);
-    assert_eq!(actual.artifacts()[0].bytes(), expected.artifacts[0].bytes);
-    let mut destination_bytes = actual.artifacts()[0].bytes().to_vec();
-    destination_bytes.clear();
-    assert_eq!(actual.artifacts()[0].bytes(), expected.artifacts[0].bytes);
-    assert_eq!(actual.exporter_identity().implementation(), "typst-pdf");
-    assert_eq!(actual.exporter_identity().version(), "0.15.1");
+    assert_eq!(actual.artifacts()[0].format, OutputFormat::Pdf);
+    assert_eq!(actual.artifacts()[0].page, None);
+    assert_eq!(actual.artifacts()[0].bytes, expected.artifacts[0].bytes);
 }
 
 #[test]
@@ -909,7 +885,7 @@ fn stabilized_pack_matches_official_pdf_exporter_defaults() {
     let pack = stabilized_pack(&fixture);
 
     let actual = compile(
-        PackCompilationRequest::new(pack, output(OutputFormat::Pdf))
+        CompileRequest::new(pack, output(OutputFormat::Pdf))
             .inputs(inputs)
             .document_time(DocumentTime::Fixed(document_time)),
     )
@@ -934,27 +910,27 @@ fn stabilized_pack_matches_official_pdf_exporter_defaults() {
 
     assert_eq!(actual.status(), CompilationStatus::Succeeded);
     assert_eq!(actual.source_page_count(), expected.source_page_count);
-    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
+    assert_diagnostics_match(&actual, &expected.diagnostics);
     assert_eq!(actual.artifacts().len(), 1);
-    assert_eq!(actual.artifacts()[0].source_page_number(), None);
-    assert_eq!(actual.artifacts()[0].bytes(), expected.artifacts[0].bytes);
+    assert_eq!(actual.artifacts()[0].page, None);
+    assert_eq!(actual.artifacts()[0].bytes, expected.artifacts[0].bytes);
 }
 
 #[test]
 fn stabilized_pack_matches_official_html_artifacts_and_pretty_control() {
     let fixture = Fixture::html_success();
     assert_eq!(
-        HtmlOutputSpecification::default().pretty,
+        HtmlOutput::default().pretty,
         typst_html::HtmlOptions::default().pretty
     );
-    let compact = compile(PackCompilationRequest::new(
+    let compact = compile(CompileRequest::new(
         stabilized_pack(&fixture),
         output(OutputFormat::Html),
     ))
     .unwrap();
-    let pretty_result = compile(PackCompilationRequest::new(
+    let pretty_result = compile(CompileRequest::new(
         stabilized_pack(&fixture),
-        CompilationOutputSpecification::Html(HtmlOutputSpecification { pretty: true }),
+        Output::Html(HtmlOutput { pretty: true }),
     ))
     .unwrap();
     let expected_compact = observe(
@@ -984,28 +960,19 @@ fn stabilized_pack_matches_official_html_artifacts_and_pretty_control() {
         assert_eq!(expected.target, Target::Html);
         assert_eq!(actual.status(), CompilationStatus::Succeeded);
         assert_eq!(actual.source_page_count(), None);
-        assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
+        assert_diagnostics_match(actual, &expected.diagnostics);
         assert_eq!(actual.artifacts().len(), 1);
         assert_eq!(expected.artifacts.len(), 1);
         assert_eq!(expected.artifacts[0].role, ArtifactRole::Html);
-        assert_eq!(actual.artifacts()[0].format(), OutputFormat::Html);
-        assert_eq!(actual.artifacts()[0].source_page_number(), None);
-        assert_eq!(actual.artifacts()[0].bytes(), expected.artifacts[0].bytes);
-        assert!(actual.diagnostics().iter().all(|diagnostic| {
-            diagnostic.phase() == DiagnosticPhase::Compilation
-                && diagnostic.producer() == DiagnosticProducer::new(actual.engine_identity())
-        }));
-        assert_eq!(actual.exporter_identity().implementation(), "typst-html");
-        assert_eq!(actual.exporter_identity().version(), "0.15.1");
+        assert_eq!(actual.artifacts()[0].format, OutputFormat::Html);
+        assert_eq!(actual.artifacts()[0].page, None);
+        assert_eq!(actual.artifacts()[0].bytes, expected.artifacts[0].bytes);
     }
     assert_ne!(
-        compact.artifacts()[0].bytes(),
-        pretty_result.artifacts()[0].bytes()
+        compact.artifacts()[0].bytes,
+        pretty_result.artifacts()[0].bytes
     );
-    assert_ne!(
-        compact.compilation_identity(),
-        pretty_result.compilation_identity()
-    );
+    assert_ne!(compact.identity(), pretty_result.identity());
 }
 
 #[test]
@@ -1037,7 +1004,7 @@ fn official_html_target_rejects_a_missing_required_feature() {
 #[test]
 fn html_compiler_rejection_matches_official_diagnostics_and_order() {
     let fixture = Fixture::html_compiler_rejection();
-    let actual = compile(PackCompilationRequest::new(
+    let actual = compile(CompileRequest::new(
         stabilized_pack(&fixture),
         output(OutputFormat::Html),
     ))
@@ -1057,25 +1024,21 @@ fn html_compiler_rejection_matches_official_diagnostics_and_order() {
     assert_eq!(actual.status(), CompilationStatus::Rejected);
     assert_eq!(actual.source_page_count(), None);
     assert!(actual.artifacts().is_empty());
-    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
-    let (error, warnings) = actual.diagnostics().split_last().unwrap();
+    assert_diagnostics_match(&actual, &expected.diagnostics);
+    let (error, warnings) = actual.diagnostics.split_last().unwrap();
     assert!(!warnings.is_empty());
     assert!(
         warnings
             .iter()
-            .all(|diagnostic| diagnostic.severity() == PackDiagnosticSeverity::Warning)
+            .all(|diagnostic| diagnostic.severity == Severity::Warning)
     );
-    assert_eq!(error.severity(), PackDiagnosticSeverity::Error);
-    assert!(actual.diagnostics().iter().all(|diagnostic| {
-        diagnostic.phase() == DiagnosticPhase::Compilation
-            && diagnostic.producer() == DiagnosticProducer::new(actual.engine_identity())
-    }));
+    assert_eq!(error.severity, Severity::Error);
 }
 
 #[test]
 fn html_exporter_rejection_matches_official_diagnostics_and_order() {
     let fixture = Fixture::html_exporter_rejection();
-    let actual = compile(PackCompilationRequest::new(
+    let actual = compile(CompileRequest::new(
         stabilized_pack(&fixture),
         output(OutputFormat::Html),
     ))
@@ -1095,27 +1058,22 @@ fn html_exporter_rejection_matches_official_diagnostics_and_order() {
     assert_eq!(actual.status(), CompilationStatus::Rejected);
     assert_eq!(actual.source_page_count(), None);
     assert!(actual.artifacts().is_empty());
-    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
-    let (error, warnings) = actual.diagnostics().split_last().unwrap();
+    assert_diagnostics_match(&actual, &expected.diagnostics);
+    let (error, warnings) = actual.diagnostics.split_last().unwrap();
     assert!(!warnings.is_empty());
-    assert!(warnings.iter().all(|warning| {
-        warning.severity() == PackDiagnosticSeverity::Warning
-            && warning.phase() == DiagnosticPhase::Compilation
-            && warning.producer() == DiagnosticProducer::new(actual.engine_identity())
-    }));
-    assert_eq!(error.severity(), PackDiagnosticSeverity::Error);
-    assert_eq!(error.phase(), DiagnosticPhase::Export);
-    assert_eq!(
-        error.producer(),
-        DiagnosticProducer::new(actual.exporter_identity())
+    assert!(
+        warnings
+            .iter()
+            .all(|warning| warning.severity == Severity::Warning)
     );
-    assert_eq!(error.hints().len(), 1);
+    assert_eq!(error.severity, Severity::Error);
+    assert_eq!(error.hints.len(), 1);
 }
 
 #[test]
 fn pack_png_defaults_match_the_pinned_official_exporter() {
     let fixture = Fixture::static_shape();
-    let actual = compile(PackCompilationRequest::new(
+    let actual = compile(CompileRequest::new(
         stabilized_pack(&fixture),
         output(OutputFormat::Png),
     ))
@@ -1136,7 +1094,7 @@ fn pack_png_defaults_match_the_pinned_official_exporter() {
 
     assert_eq!(actual.status(), CompilationStatus::Succeeded);
     assert_eq!(actual.source_page_count(), expected.source_page_count);
-    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
+    assert_diagnostics_match(&actual, &expected.diagnostics);
     assert_eq!(actual.artifacts().len(), expected.artifacts.len());
     assert_eq!(expected.artifacts.len(), 1);
     assert_eq!(
@@ -1145,14 +1103,9 @@ fn pack_png_defaults_match_the_pinned_official_exporter() {
             source_page_number: NonZeroUsize::new(1).unwrap(),
         }
     );
-    assert_eq!(actual.artifacts()[0].format(), OutputFormat::Png);
-    assert_eq!(
-        actual.artifacts()[0].source_page_number(),
-        NonZeroUsize::new(1)
-    );
-    assert_eq!(actual.artifacts()[0].bytes(), expected.artifacts[0].bytes);
-    assert_eq!(actual.exporter_identity().implementation(), "typst-render");
-    assert_eq!(actual.exporter_identity().version(), "0.15.1");
+    assert_eq!(actual.artifacts()[0].format, OutputFormat::Png);
+    assert_eq!(actual.artifacts()[0].page, NonZeroUsize::new(1));
+    assert_eq!(actual.artifacts()[0].bytes, expected.artifacts[0].bytes);
 }
 
 #[test]
@@ -1161,22 +1114,22 @@ fn stabilized_pack_matches_complete_official_png_page_artifacts() {
     let document_time = Datetime::from_ymd(2024, 2, 3).unwrap();
     let mut inputs = Dict::new();
     inputs.insert("width".into(), Value::Str("24".into()));
-    let output_specification = CompilationOutputSpecification::Png(PngOutputSpecification {
+    let output_specification = Output::Png(PngOutput {
         page_selection: parse_page_selection("2,1,2").unwrap(),
         pixels_per_inch: Some(216.0),
         render_bleed: true,
     });
 
     let actual = compile(
-        PackCompilationRequest::new(stabilized_pack(&fixture), output_specification)
+        CompileRequest::new(stabilized_pack(&fixture), output_specification)
             .inputs(inputs)
             .document_time(DocumentTime::Fixed(document_time)),
     )
     .unwrap();
     let repeated = compile(
-        PackCompilationRequest::new(
+        CompileRequest::new(
             stabilized_pack(&fixture),
-            CompilationOutputSpecification::Png(PngOutputSpecification {
+            Output::Png(PngOutput {
                 page_selection: parse_page_selection("1-2").unwrap(),
                 pixels_per_inch: Some(216.0),
                 render_bleed: true,
@@ -1206,49 +1159,42 @@ fn stabilized_pack_matches_complete_official_png_page_artifacts() {
 
     assert_eq!(actual.status(), CompilationStatus::Succeeded);
     assert_eq!(actual.source_page_count(), expected.source_page_count);
-    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
-    assert!(actual.diagnostics().iter().all(|diagnostic| {
-        diagnostic.phase() == DiagnosticPhase::Compilation
-            && diagnostic.producer() == DiagnosticProducer::new(actual.engine_identity())
-    }));
+    assert_diagnostics_match(&actual, &expected.diagnostics);
     assert_eq!(actual.artifacts().len(), expected.artifacts.len());
     for (actual, expected) in actual.artifacts().iter().zip(&expected.artifacts) {
         let ArtifactRole::Png { source_page_number } = expected.role else {
             panic!("oracle produced a non-PNG artifact");
         };
-        assert_eq!(actual.format(), OutputFormat::Png);
-        assert_eq!(actual.source_page_number(), Some(source_page_number));
-        assert_eq!(actual.bytes(), expected.bytes);
+        assert_eq!(actual.format, OutputFormat::Png);
+        assert_eq!(actual.page, Some(source_page_number));
+        assert_eq!(actual.bytes, expected.bytes);
     }
     assert_eq!(
         actual
             .artifacts()
             .iter()
-            .map(|artifact| artifact.source_page_number().unwrap().get())
+            .map(|artifact| artifact.page.unwrap().get())
             .collect::<Vec<_>>(),
         [1, 2]
     );
-    assert!(actual.pack_warnings().is_empty());
-    assert_eq!(actual.exporter_identity().implementation(), "typst-render");
-    assert_eq!(actual.exporter_identity().version(), "0.15.1");
     assert_eq!(actual.artifacts().len(), repeated.artifacts().len());
     assert!(
         actual
             .artifacts()
             .iter()
             .zip(repeated.artifacts())
-            .all(|(actual, repeated)| actual.bytes() == repeated.bytes())
+            .all(|(actual, repeated)| actual.bytes == repeated.bytes)
     );
 }
 
 #[test]
 fn valid_png_selection_matching_no_page_matches_the_official_oracle() {
     let fixture = Fixture::static_shape();
-    let output_specification = CompilationOutputSpecification::Png(PngOutputSpecification {
+    let output_specification = Output::Png(PngOutput {
         page_selection: parse_page_selection("9").unwrap(),
-        ..PngOutputSpecification::default()
+        ..PngOutput::default()
     });
-    let actual = compile(PackCompilationRequest::new(
+    let actual = compile(CompileRequest::new(
         stabilized_pack(&fixture),
         output_specification,
     ))
@@ -1270,7 +1216,7 @@ fn valid_png_selection_matching_no_page_matches_the_official_oracle() {
     assert_eq!(expected.status, ObservationStatus::Accepted);
     assert_eq!(actual.status(), CompilationStatus::Succeeded);
     assert_eq!(actual.source_page_count(), expected.source_page_count);
-    assert_diagnostics_match(actual.diagnostics(), &expected.diagnostics);
+    assert_diagnostics_match(&actual, &expected.diagnostics);
     assert_eq!(actual.artifacts().len(), expected.artifacts.len());
     assert!(actual.artifacts().is_empty());
 }

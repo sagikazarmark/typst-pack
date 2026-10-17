@@ -197,7 +197,8 @@ pub fn plan_pack_extraction(
             &mut entries,
             path.to_owned(),
             PackExtractionEntryRole::ProjectFile,
-            pack.shared_file(path)
+            pack.project()
+                .shared_file(path)
                 .expect("a Pack project file has shared bytes")
                 .clone(),
             &mut issues,

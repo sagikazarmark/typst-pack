@@ -21,46 +21,60 @@ required container to Typst, so text the representative compile did not render
 uses the same fonts. External containers are matched by exact digest, and
 fulfillment failures name the families the pack expects.
 
-Compilation and result identities also include the semantic request and exact
-embedded implementation identities, including the enabled typst-pack crate
-features. Their preimages are not a documented format; use them only as cache
-keys within one build configuration.
+A compilation identity covers the Pack Identity, the normalized output and
+its controls, the `sys.inputs` strings and byte digests, document time,
+features, the digests of the externally supplied packages and font containers
+the pack requires, and the implementation string `typst_pack::VERSION`. Its
+preimage is documented in the README's "Compilation identity". Crate features,
+target, build profile, limits, and export workers do not contribute, so the
+identity is a cache key across build configurations of one release.
 
 ## Creation and fulfillment
 
-`create` borrows a completed `ProjectSnapshot`, `PackageCatalog`, `FontCatalog`,
-failed package reads, and a `DiscoverySpecification`. It reads no files, uses no
-network, and consults no wall clock. Compiler observations select package and
-font requirements; project membership comes only from the snapshot.
+`create` reads one `CreateRequest`: a validated `ProjectSnapshot`, a
+`PackageCatalog` and `FontCatalog` whose entries carry their embedded or
+external disposition, failed package reads, the discovery target, options
+(inputs, document time, features), and input variants. It reads no files, uses
+no network, and consults no wall clock. It compiles the base options and then
+each variant with its inputs replacing or adding to the base inputs; the
+packages and font containers any of those compiles used become requirements.
+Project membership comes only from the snapshot, which the Pack carries without
+validating it again. The HTML target enables Typst's HTML feature itself.
 
-Creation may return `MissingPackageSpecifications`. This is a normal resumable
-state: add exact trees to the package catalog and invoke the stateless operation
-again. A Pack Assembler owns the source-specific reading and retry loop.
+Creation may return `MissingPackages`. This is a normal resumable state: add
+exact trees to the package catalog (or record a failed read) and invoke the
+stateless operation again; a package any variant reached is reported. A
+creation whose compiles succeeded returns the Pack, the warnings of all of them
+without repeats, and the `Sources` they read. A Pack assembler, such as
+`FilesystemPacker::pack` or `opendal::OpenDalPackAssembler`, owns the
+source-specific reading and retry loop.
 
-Compilation accepts external dependencies only through a
-`CompilationFulfillmentSet`. Before Typst runs, the library rejects missing,
-undeclared, unexpectedly external, or digest-mismatched package trees and font
-containers. Fulfillment provenance, cache-hit,
-and licensing fields are operational report data; they do not change compilation
-or result identity.
+Compilation receives external dependencies as `CompileRequest::packages`
+(trees under their specifications) and `CompileRequest::fonts` (containers).
+Each external requirement uses the supplied tree or container whose digest
+matches; others are ignored and never reach Typst. A requirement with no
+match, or whose specification was supplied only with other bytes, is a
+`CompileError::Unfulfilled` naming the package specification or the font
+families. `FilesystemPacker::resolve` finds them in the configured package
+directories and font sources.
 
 ## Environment independence
 
-Once a Pack, compilation request, implementation identities, and verified
-external fulfillment bytes are fixed, compilation does not fall back to ambient
+Once a `CompileRequest` is fixed, compilation does not fall back to ambient
 project files, package caches, fonts, environment variables, wall-clock time, or
-the network. `DocumentTime`, Typst inputs, features, output controls, and Pack
-Overrides are explicit request values.
-
-`PackOverrideSet` is bound to one Pack Identity. It can replace bytes only at an
-existing project path and cannot add paths, remove paths, or change package or
-font authority.
+the network. `DocumentTime`, `sys.inputs`, features, and output controls are
+explicit request values. A project file of the pack never changes between
+compilations; per-recipient data is an input instead. `Input::Str` values
+appear in `sys.inputs` as Typst strings and `Input::Bytes` values as Typst
+`bytes`, which `image`, the data loaders, and `str` accept directly. Inputs do
+not add project paths or change package or font requirements.
 
 ## Limits
 
-Operations over caller-controlled values, `compile(request)` and
-`pack_archive::encode(pack)`, need no limits; `compile_with_limits` accepts a
-`CompilationLimits` value. Operations that cross a byte trust boundary take
+Operations over caller-controlled values need no read limits;
+`CompileRequest::limits` bounds compiled output with `CompilationLimits`
+(pages, artifacts, pixels, and bytes), and an exceeded one is
+`CompileError::Limit`. Operations that cross a byte trust boundary take
 explicit limits: `pack_archive::DecodeLimits` for archive reading and decoding,
 and `ReadLimits` for package archive expansion, filesystem source reading, and
 OpenDAL reads. Every limits type is a plain struct with public fields and a

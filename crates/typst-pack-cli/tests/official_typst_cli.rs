@@ -6,19 +6,14 @@ use std::process::{Command, Output};
 
 use official_typst_cli::OfficialTypstCli;
 use typst_pack::pack_archive::encode;
-use typst_pack::{
-    CompilationOutputSpecification, CompilationRequestRejection, CompilationResult, Pack,
-    PackCompilationRequest, SvgOutputSpecification, compile as compile_to_report,
-};
+use typst_pack::{CompileRequest, OutputFormat, Pack, compile};
 
-fn compile(
-    request: PackCompilationRequest,
-) -> Result<CompilationResult, CompilationRequestRejection> {
-    let report = compile_to_report(request)?;
-    Ok(report
-        .result()
-        .expect("expected a semantic Compilation Result")
-        .clone())
+/// The embedded Typst release, from `typst_pack::VERSION` ("X (Typst Y)").
+fn engine_version() -> &'static str {
+    typst_pack::VERSION
+        .rsplit_once("(Typst ")
+        .and_then(|(_, version)| version.strip_suffix(')'))
+        .expect("VERSION names the embedded Typst release")
 }
 
 const PAGED_SOURCE: &str =
@@ -116,19 +111,12 @@ fn official_typst_compile_is_the_process_level_parity_baseline() {
     let pack_path = directory.path().join("project.typk");
     let pack = write_pack(&pack_path, PAGED_SOURCE);
 
-    let public_result = compile(PackCompilationRequest::new(
-        pack.clone(),
-        CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
-    ))
-    .expect("public Pack compilation must establish the embedded Engine baseline");
-    official.require_version(public_result.engine_identity().version());
+    official.require_version(engine_version());
     let pack_version = pack_run(directory.path(), ["--version"], &[]);
     assert_success(&pack_version);
     assert!(
-        String::from_utf8_lossy(&pack_version.stdout).contains(&format!(
-            "(Typst {})",
-            public_result.engine_identity().version()
-        )),
+        String::from_utf8_lossy(&pack_version.stdout)
+            .contains(&format!("(Typst {})", engine_version())),
         "{TEST_BINARY_ENV} must report the exact embedded Engine baseline"
     );
 
@@ -199,13 +187,13 @@ fn official_typst_compile_is_the_process_level_parity_baseline() {
         "HTML artifact differs from official Typst"
     );
 
-    let public_svg = compile(PackCompilationRequest::new(
+    let public_svg = compile(&CompileRequest::new(
         pack,
-        CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
+        typst_pack::Output::new(OutputFormat::Svg),
     ))
     .unwrap();
     assert_eq!(
-        public_svg.artifacts()[0].bytes(),
+        public_svg.artifacts[0].bytes,
         std::fs::read(directory.path().join("official.svg")).unwrap(),
         "CLI parity fixture must also traverse the proven public Pack compilation seam"
     );
@@ -498,69 +486,6 @@ fn official_typst_compile_gates_package_font_and_offline_request_routing() {
         std::fs::read(pack_pdf).unwrap(),
         std::fs::read(official_pdf).unwrap(),
         "verified package and font fulfillment drifted from official Typst"
-    );
-}
-
-#[test]
-fn official_typst_compile_gates_pack_source_and_data_overrides() {
-    let Some(official) = OfficialTypstCli::from_environment() else {
-        eprintln!("skipping official CLI parity outside its pinned Dagger gate");
-        return;
-    };
-    let directory = tempfile::tempdir().unwrap();
-    let source = "#import \"chapter.typ\": source-width\n\
-                  #let data-width = int(read(\"data.txt\"))\n\
-                  #set page(width: 100pt, height: 20pt, margin: 0pt)\n\
-                  #rect(width: (source-width + data-width) * 1pt, height: 5pt)";
-    let project = write_project(directory.path(), source);
-    std::fs::write(project.join("chapter.typ"), "#let source-width = 20").unwrap();
-    std::fs::write(project.join("data.txt"), "30").unwrap();
-
-    let pack = Pack::builder("main.typ")
-        .file("main.typ", source.as_bytes().to_vec())
-        .file("chapter.typ", b"#let source-width = 10".to_vec())
-        .file("data.txt", b"10".to_vec())
-        .build()
-        .unwrap();
-    let pack_path = directory.path().join("overrides.typk");
-    std::fs::write(&pack_path, encode(&pack).unwrap()).unwrap();
-    let source_replacement = directory.path().join("chapter-replacement.typ");
-    let data_replacement = directory.path().join("data-replacement.txt");
-    std::fs::write(&source_replacement, "#let source-width = 20").unwrap();
-    std::fs::write(&data_replacement, "30").unwrap();
-    let official_svg = directory.path().join("overrides-official.svg");
-    let pack_svg = directory.path().join("overrides-pack.svg");
-
-    let official_result = official.compile(
-        &project,
-        [
-            "main.typ",
-            official_svg.to_str().unwrap(),
-            "--ignore-system-fonts",
-        ],
-    );
-    let pack_result = pack_command(
-        directory.path(),
-        &[
-            pack_path.to_str().unwrap(),
-            pack_svg.to_str().unwrap(),
-            "--override",
-            "chapter.typ",
-            source_replacement.to_str().unwrap(),
-            "--override",
-            "data.txt",
-            data_replacement.to_str().unwrap(),
-            "--ignore-system-fonts",
-        ],
-    );
-
-    assert_success(&official_result);
-    assert_success(&pack_result);
-    assert_eq!(pack_result.stderr, official_result.stderr);
-    assert_eq!(
-        std::fs::read(pack_svg).unwrap(),
-        std::fs::read(official_svg).unwrap(),
-        "Pack Override output differs from direct official Typst input"
     );
 }
 

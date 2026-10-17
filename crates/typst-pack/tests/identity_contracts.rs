@@ -1,32 +1,16 @@
-//! Pack identity vectors over the documented preimages, and the invariance
-//! contracts of Pack, Compilation, and Compilation Result identities.
+//! Pack and compilation identity vectors over the documented preimages, and
+//! what each identity binds and excludes.
 
 use proptest::prelude::*;
 use sha2::{Digest as _, Sha256};
-use typst::foundations::{Datetime, Dict, Smart, Value};
+use typst::foundations::{Datetime, Smart};
 use typst::syntax::package::PackageSpec;
 use typst_pack::pack_archive::{DecodeLimits, decode, encode};
 use typst_pack::{
-    CompilationLimits, CompilationOutputSpecification, CompilationRequestRejection,
-    CompilationResult, CreationTimestamp, Digest, DocumentTime, HtmlOutputSpecification, Pack,
-    PackCompilationRequest, PackMetadata, PackOverrideSet, PackageDisposition, PackageTree,
-    PdfOutputSpecification, PngOutputSpecification, SvgOutputSpecification,
-    compile_with_limits as compile_to_report, parse_page_selection,
+    CompileOptions, CompileRequest, CreationTimestamp, Digest, DocumentTime, HtmlOutput, Input,
+    Output, OutputFormat, Pack, PackMetadata, PackageDisposition, PackageTree, PdfOutput,
+    PngOutput, SvgOutput, compile, parse_page_selection,
 };
-
-fn svg_output() -> CompilationOutputSpecification {
-    CompilationOutputSpecification::Svg(SvgOutputSpecification::default())
-}
-
-fn compile(
-    request: PackCompilationRequest,
-) -> Result<CompilationResult, CompilationRequestRejection> {
-    let report = compile_to_report(request, CompilationLimits::DEFAULT)?;
-    Ok(report
-        .result()
-        .expect("expected a semantic Compilation Result")
-        .clone())
-}
 
 fn identity_pack() -> Pack {
     Pack::builder("main.typ")
@@ -95,6 +79,11 @@ impl Preimage {
 
     fn digest(&mut self, value: [u8; 32]) -> &mut Self {
         self.0.update(value);
+        self
+    }
+
+    fn int(&mut self, value: i64) -> &mut Self {
+        self.0.update(value.to_be_bytes());
         self
     }
 
@@ -353,279 +342,232 @@ fn pack_identity_binds_every_project_and_package_semantic() {
 }
 
 #[test]
-fn compilation_identity_binds_every_effective_output_control() {
-    let compile_output = |output| {
-        compile(PackCompilationRequest::new(identity_pack(), output))
-            .unwrap()
-            .compilation_identity()
-    };
-    let timestamp =
-        typst_pdf::Timestamp::new_utc(Datetime::from_ymd_hms(2024, 2, 3, 4, 5, 6).unwrap());
-
-    let pdf_baseline = compile_output(CompilationOutputSpecification::Pdf(
-        PdfOutputSpecification::default(),
-    ));
-    let png_baseline = compile_output(CompilationOutputSpecification::Png(
-        PngOutputSpecification::default(),
-    ));
-    let svg_baseline = compile_output(svg_output());
-    let html_baseline = compile_output(CompilationOutputSpecification::Html(
-        HtmlOutputSpecification::default(),
-    ));
-    assert_eq!(
-        [pdf_baseline, png_baseline, svg_baseline, html_baseline]
-            .into_iter()
-            .collect::<std::collections::HashSet<_>>()
-            .len(),
-        4
+fn frozen_compilation_identity_vector() {
+    let spec: PackageSpec = "@local/example:1.0.0".parse().unwrap();
+    let manifest = b"[package]\nname = \"example\"\nversion = \"1.0.0\"\nentrypoint = \"lib.typ\"";
+    let tree = PackageTree::copy_from_entries([
+        ("lib.typ", b"#let value = 1".as_slice()),
+        ("typst.toml", manifest),
+    ])
+    .unwrap();
+    let pack = Pack::builder("main.typ")
+        .file(
+            "main.typ",
+            b"#import \"@local/example:1.0.0\": value\n#value".to_vec(),
+        )
+        .external_package_file(spec.clone(), "lib.typ", b"#let value = 1".to_vec())
+        .external_package_file(spec.clone(), "typst.toml", manifest.to_vec())
+        .build()
+        .unwrap();
+    let mut request = CompileRequest::new(
+        pack.clone(),
+        Output::Svg(SvgOutput {
+            page_selection: parse_page_selection("2-3,1,5-").unwrap(),
+            ..SvgOutput::default()
+        }),
     );
+    request.packages = vec![(spec, tree.clone())];
+    request.options = CompileOptions {
+        inputs: vec![
+            ("a".into(), Input::from("x")),
+            ("b".into(), Input::Bytes(b"y".to_vec())),
+            ("a".into(), Input::from("z")),
+        ],
+        document_time: DocumentTime::UnixTimestamp(946_684_800),
+        features: vec![typst::Feature::A11yExtras],
+    };
 
-    let pdf_mutations = [
-        CompilationOutputSpecification::Pdf(PdfOutputSpecification {
+    let expected = Preimage::new("typst-pack/compilation/v1")
+        .str(typst_pack::VERSION)
+        .digest(*pack.identity().as_bytes())
+        // Output: SVG, ranges 1-3 and 5- (open end), no bleed, not pretty.
+        .str("svg")
+        .count(2)
+        .count(1)
+        .int(3)
+        .count(5)
+        .int(-1)
+        .bool(false)
+        .bool(false)
+        // Inputs in effective order; a repeated key replaces in place.
+        .count(2)
+        .str("a")
+        .str("str")
+        .str("z")
+        .str("b")
+        .str("bytes")
+        .digest(sha256(b"y"))
+        .str("unix")
+        .int(946_684_800)
+        .count(1)
+        .str("a11y-extras")
+        // External packages by specification, then external fonts.
+        .count(1)
+        .str("@local/example:1.0.0")
+        .digest(*tree.digest().as_bytes())
+        .count(0)
+        .finish();
+    assert_eq!(compile(&request).unwrap().identity.to_string(), expected);
+}
+
+#[test]
+fn compilation_identity_binds_every_effective_output_control() {
+    let identity = |output| {
+        compile(&CompileRequest::new(identity_pack(), output))
+            .unwrap()
+            .identity
+    };
+    let distinct = |identities: Vec<Digest>| {
+        let count = identities.len();
+        let unique = identities
+            .into_iter()
+            .collect::<std::collections::HashSet<_>>();
+        assert_eq!(unique.len(), count);
+    };
+
+    distinct(vec![
+        identity(Output::new(OutputFormat::Pdf)),
+        identity(Output::Pdf(PdfOutput {
             page_selection: parse_page_selection("1").unwrap(),
-            ..PdfOutputSpecification::default()
-        }),
-        CompilationOutputSpecification::Pdf(PdfOutputSpecification {
-            standards: vec![typst_pdf::PdfStandard::A_2b],
-            ..PdfOutputSpecification::default()
-        }),
-        CompilationOutputSpecification::Pdf(PdfOutputSpecification {
+            ..PdfOutput::default()
+        })),
+        identity(Output::Pdf(PdfOutput {
+            standards: vec![typst_pdf::PdfStandard::V_1_7],
+            ..PdfOutput::default()
+        })),
+        identity(Output::Pdf(PdfOutput {
             identifier: Smart::Custom("identity".to_owned()),
-            ..PdfOutputSpecification::default()
-        }),
-        CompilationOutputSpecification::Pdf(PdfOutputSpecification {
+            ..PdfOutput::default()
+        })),
+        identity(Output::Pdf(PdfOutput {
             creator: Smart::Custom(Some("identity".to_owned())),
-            ..PdfOutputSpecification::default()
-        }),
-        CompilationOutputSpecification::Pdf(PdfOutputSpecification {
+            ..PdfOutput::default()
+        })),
+        identity(Output::Pdf(PdfOutput {
+            creator: Smart::Custom(None),
+            ..PdfOutput::default()
+        })),
+        identity(Output::Pdf(PdfOutput {
             tags: Smart::Custom(false),
-            ..PdfOutputSpecification::default()
-        }),
-        CompilationOutputSpecification::Pdf(PdfOutputSpecification {
-            creation_timestamp: CreationTimestamp::Explicit(timestamp),
-            ..PdfOutputSpecification::default()
-        }),
-        CompilationOutputSpecification::Pdf(PdfOutputSpecification {
+            ..PdfOutput::default()
+        })),
+        identity(Output::Pdf(PdfOutput {
+            creation_timestamp: CreationTimestamp::Utc(1_700_000_000),
+            ..PdfOutput::default()
+        })),
+        identity(Output::Pdf(PdfOutput {
+            creation_timestamp: CreationTimestamp::Local {
+                unix: 1_700_000_000,
+                offset_minutes: 60,
+            },
+            ..PdfOutput::default()
+        })),
+        identity(Output::Pdf(PdfOutput {
             pretty: true,
-            ..PdfOutputSpecification::default()
-        }),
-    ];
-    for output in pdf_mutations {
-        assert_ne!(compile_output(output), pdf_baseline);
-    }
-
-    let png_mutations = [
-        CompilationOutputSpecification::Png(PngOutputSpecification {
+            ..PdfOutput::default()
+        })),
+        identity(Output::new(OutputFormat::Png)),
+        identity(Output::Png(PngOutput {
             page_selection: parse_page_selection("1").unwrap(),
-            ..PngOutputSpecification::default()
-        }),
-        CompilationOutputSpecification::Png(PngOutputSpecification {
+            ..PngOutput::default()
+        })),
+        identity(Output::Png(PngOutput {
             pixels_per_inch: Some(216.0),
-            ..PngOutputSpecification::default()
-        }),
-        CompilationOutputSpecification::Png(PngOutputSpecification {
+            ..PngOutput::default()
+        })),
+        identity(Output::Png(PngOutput {
             render_bleed: true,
-            ..PngOutputSpecification::default()
-        }),
-    ];
-    for output in png_mutations {
-        assert_ne!(compile_output(output), png_baseline);
-    }
-
-    let svg_mutations = [
-        CompilationOutputSpecification::Svg(SvgOutputSpecification {
-            page_selection: parse_page_selection("1").unwrap(),
-            ..SvgOutputSpecification::default()
-        }),
-        CompilationOutputSpecification::Svg(SvgOutputSpecification {
+            ..PngOutput::default()
+        })),
+        identity(Output::new(OutputFormat::Svg)),
+        identity(Output::Svg(SvgOutput {
             render_bleed: true,
-            ..SvgOutputSpecification::default()
-        }),
-        CompilationOutputSpecification::Svg(SvgOutputSpecification {
-            pretty: true,
-            ..SvgOutputSpecification::default()
-        }),
-    ];
-    for output in svg_mutations {
-        assert_ne!(compile_output(output), svg_baseline);
-    }
+            ..SvgOutput::default()
+        })),
+        identity(Output::new(OutputFormat::Html)),
+        identity(Output::Html(HtmlOutput { pretty: true })),
+    ]);
 
-    assert_ne!(
-        compile_output(CompilationOutputSpecification::Html(
-            HtmlOutputSpecification { pretty: true }
-        )),
-        html_baseline
+    // Defaults and their explicit values are one request.
+    assert_eq!(
+        identity(Output::new(OutputFormat::Png)),
+        identity(Output::Png(PngOutput {
+            pixels_per_inch: Some(144.0),
+            ..PngOutput::default()
+        }))
+    );
+    assert_eq!(
+        identity(Output::new(OutputFormat::Pdf)),
+        identity(Output::Pdf(PdfOutput {
+            tags: Smart::Custom(true),
+            ..PdfOutput::default()
+        }))
     );
 }
 
 #[test]
-fn compilation_identity_binds_pack_inputs_overrides_features_and_document_time() {
-    let baseline_pack = identity_pack();
-    let baseline = compile(PackCompilationRequest::new(
-        baseline_pack.clone(),
-        svg_output(),
-    ))
-    .unwrap();
-    let baseline_identity = baseline.compilation_identity();
-    let mut inputs = Dict::new();
-    inputs.insert("unused".into(), Value::Str("value".into()));
-    let main_override = PackOverrideSet::new(&baseline_pack)
-        .replace("main.typ", b"aaaaaaaa".to_vec())
-        .unwrap();
-    let path_override = PackOverrideSet::new(&baseline_pack)
-        .replace("unused.txt", b"aaaaaaaa".to_vec())
-        .unwrap();
-    let length_override = PackOverrideSet::new(&baseline_pack)
-        .replace("unused.txt", b"short".to_vec())
-        .unwrap();
-    let byte_override = PackOverrideSet::new(&baseline_pack)
-        .replace("unused.txt", b"bbbbbbbb".to_vec())
-        .unwrap();
-    let changed_pack = Pack::builder("main.typ")
+fn compilation_identity_binds_pack_inputs_features_and_document_time() {
+    let identity = |pack: Pack, options: CompileOptions| {
+        let mut request = CompileRequest::new(pack, Output::new(OutputFormat::Svg));
+        request.options = options;
+        compile(&request).unwrap().identity
+    };
+    let baseline = identity(identity_pack(), CompileOptions::default());
+    let input = |value: Input| CompileOptions {
+        inputs: vec![("unused".into(), value)],
+        ..CompileOptions::default()
+    };
+    let changed = Pack::builder("main.typ")
         .file("main.typ", b"changed pack".to_vec())
         .build()
         .unwrap();
-    let main_override = compile(
-        PackCompilationRequest::new(baseline_pack.clone(), svg_output()).overrides(main_override),
-    )
-    .unwrap()
-    .compilation_identity();
-    let path_override = compile(
-        PackCompilationRequest::new(baseline_pack.clone(), svg_output()).overrides(path_override),
-    )
-    .unwrap()
-    .compilation_identity();
-    let length_override = compile(
-        PackCompilationRequest::new(baseline_pack.clone(), svg_output()).overrides(length_override),
-    )
-    .unwrap()
-    .compilation_identity();
-    let byte_override = compile(
-        PackCompilationRequest::new(baseline_pack.clone(), svg_output()).overrides(byte_override),
-    )
-    .unwrap()
-    .compilation_identity();
-    assert_ne!(main_override, path_override);
-    assert_ne!(path_override, length_override);
-    assert_ne!(path_override, byte_override);
 
-    let requests = [
-        PackCompilationRequest::new(changed_pack, svg_output()),
-        PackCompilationRequest::new(baseline_pack.clone(), svg_output()).inputs(inputs),
-        PackCompilationRequest::new(baseline_pack.clone(), svg_output())
-            .feature(typst::Feature::A11yExtras),
-        PackCompilationRequest::new(baseline_pack.clone(), svg_output())
-            .document_time(DocumentTime::Fixed(Datetime::from_ymd(2024, 2, 3).unwrap())),
-        PackCompilationRequest::new(baseline_pack, svg_output())
-            .document_time(DocumentTime::UnixTimestamp(1_700_000_000)),
+    let identities = vec![
+        baseline,
+        identity(changed, CompileOptions::default()),
+        identity(identity_pack(), input(Input::from("value"))),
+        identity(identity_pack(), input(Input::Bytes(b"value".to_vec()))),
+        identity(identity_pack(), input(Input::Bytes(b"other".to_vec()))),
+        identity(
+            identity_pack(),
+            CompileOptions {
+                features: vec![typst::Feature::A11yExtras],
+                ..CompileOptions::default()
+            },
+        ),
+        identity(
+            identity_pack(),
+            CompileOptions {
+                document_time: DocumentTime::Fixed(Datetime::from_ymd(2024, 2, 3).unwrap()),
+                ..CompileOptions::default()
+            },
+        ),
+        identity(
+            identity_pack(),
+            CompileOptions {
+                document_time: DocumentTime::UnixTimestamp(1_700_000_000),
+                ..CompileOptions::default()
+            },
+        ),
     ];
+    let count = identities.len();
+    let unique = identities
+        .into_iter()
+        .collect::<std::collections::HashSet<_>>();
+    assert_eq!(unique.len(), count);
 
-    for request in requests {
-        assert_ne!(
-            compile(request).unwrap().compilation_identity(),
-            baseline_identity
-        );
-    }
-}
-
-#[test]
-fn identities_exclude_metadata_and_normalize_equivalent_request_values() {
-    let metadata = PackMetadata {
-        name: Some("Named Pack".to_owned()),
-        description: Some("Operational description".to_owned()),
-        authors: vec!["Pack Author".to_owned()],
-    };
-    let plain_pack = identity_pack();
-    let metadata_pack = Pack::builder("main.typ")
+    let described = Pack::builder("main.typ")
         .file(
             "main.typ",
-            b"#set page(width: 20pt, height: 10pt, margin: 0pt)\n#rect(width: 1pt, height: 1pt)"
-                .to_vec(),
+            identity_pack().file("main.typ").unwrap().to_vec(),
         )
         .file("unused.txt", b"baseline".to_vec())
-        .metadata(metadata)
+        .metadata(PackMetadata {
+            name: Some("Named Pack".to_owned()),
+            description: Some("Operational description".to_owned()),
+            authors: vec!["Pack Author".to_owned()],
+        })
         .build()
         .unwrap();
-    assert_eq!(plain_pack.identity(), metadata_pack.identity());
-
-    let mut inputs = Dict::new();
-    inputs.insert("unused".into(), Value::Str("value".into()));
-    let time = DocumentTime::Fixed(Datetime::from_ymd(2024, 2, 3).unwrap());
-    let caller = compile(
-        PackCompilationRequest::new(plain_pack.clone(), svg_output())
-            .inputs(inputs.clone())
-            .feature(typst::Feature::A11yExtras)
-            .document_time(time),
-    )
-    .unwrap();
-    let described = compile(
-        PackCompilationRequest::new(metadata_pack, svg_output())
-            .inputs(inputs)
-            .feature(typst::Feature::A11yExtras)
-            .document_time(time),
-    )
-    .unwrap();
-    assert_eq!(
-        caller.compilation_identity(),
-        described.compilation_identity()
-    );
-    assert_eq!(caller.result_identity(), described.result_identity());
-
-    let default_png = compile(PackCompilationRequest::new(
-        plain_pack.clone(),
-        CompilationOutputSpecification::Png(PngOutputSpecification::default()),
-    ))
-    .unwrap();
-    let explicit_png = compile(PackCompilationRequest::new(
-        plain_pack.clone(),
-        CompilationOutputSpecification::Png(PngOutputSpecification {
-            pixels_per_inch: Some(144.0),
-            ..PngOutputSpecification::default()
-        }),
-    ))
-    .unwrap();
-    assert_eq!(
-        default_png.compilation_identity(),
-        explicit_png.compilation_identity()
-    );
-    assert_eq!(
-        default_png.result_identity(),
-        explicit_png.result_identity()
-    );
-
-    let caller_empty_overrides = compile(
-        PackCompilationRequest::new(plain_pack.clone(), svg_output())
-            .overrides(PackOverrideSet::new(&plain_pack)),
-    )
-    .unwrap();
-    let default_empty_overrides =
-        compile(PackCompilationRequest::new(plain_pack, svg_output())).unwrap();
-    assert_eq!(
-        default_empty_overrides.compilation_identity(),
-        caller_empty_overrides.compilation_identity()
-    );
-    assert_eq!(
-        default_empty_overrides.result_identity(),
-        caller_empty_overrides.result_identity()
-    );
-}
-
-#[test]
-fn compilation_and_result_identities_exclude_destination_facts() {
-    let first = compile(PackCompilationRequest::new(identity_pack(), svg_output())).unwrap();
-    let second = compile(PackCompilationRequest::new(identity_pack(), svg_output())).unwrap();
-    let directory = tempfile::tempdir().unwrap();
-    let first_destination = directory.path().join("first.svg");
-    let second_destination = directory.path().join("nested/second.svg");
-    std::fs::create_dir(second_destination.parent().unwrap()).unwrap();
-    std::fs::write(&first_destination, first.artifacts()[0].bytes()).unwrap();
-    std::fs::write(&second_destination, second.artifacts()[0].bytes()).unwrap();
-
-    assert_ne!(first_destination, second_destination);
-    assert_eq!(first.compilation_identity(), second.compilation_identity());
-    assert_eq!(first.result_identity(), second.result_identity());
-    assert_eq!(
-        std::fs::read(first_destination).unwrap(),
-        std::fs::read(second_destination).unwrap()
-    );
+    assert_eq!(identity(described, CompileOptions::default()), baseline);
 }

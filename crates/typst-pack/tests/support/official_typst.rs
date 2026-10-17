@@ -34,10 +34,9 @@ const STATIC_SHAPE: &str =
 #[cfg(feature = "embedded-fonts")]
 const FONT_SELECTION: &str = "#set page(width: 100pt, height: 20pt, margin: 0pt)\n\
                               #set text(font: \"Libertinus Serif\", size: 12pt)\nExact font";
-const OVERRIDE_MAIN: &str = "#import \"chapter.typ\": source-width\n\
-                             #let data-width = int(read(\"data.txt\"))\n\
-                             #set page(width: 100pt, height: 20pt, margin: 0pt)\n\
-                             #rect(width: (source-width + data-width) * 1pt, height: 5pt)";
+const BYTE_INPUT: &str = "#set page(width: 100pt, height: 20pt, margin: 0pt)\n\
+                          #assert.eq(type(sys.inputs.data), bytes)\n\
+                          #rect(width: (str(sys.inputs.data).len() + sys.inputs.label.len()) * 1pt)";
 const PACKAGE_MANIFEST: &str =
     include_str!("../fixtures/official-oracle/packages/local/oracle/1.0.0/typst.toml");
 const PACKAGE_ENTRYPOINT: &str =
@@ -128,15 +127,10 @@ impl Fixture {
         }
     }
 
-    pub fn override_behavior() -> Self {
+    pub fn byte_input() -> Self {
         Self {
             entrypoint: "main.typ",
-            project: &[
-                ("main.typ", OVERRIDE_MAIN),
-                ("chapter.typ", "#let source-width = 10"),
-                ("data.txt", "10"),
-                ("unused.txt", "baseline unused"),
-            ],
+            project: &[("main.typ", BYTE_INPUT)],
             packages: &[],
             fonts: vec![],
         }
@@ -287,15 +281,7 @@ pub struct Observation {
 }
 
 pub fn observe(fixture: &Fixture, request: &ReferenceRequest) -> Observation {
-    observe_with_project_overrides(fixture, request, &[])
-}
-
-pub fn observe_with_project_overrides(
-    fixture: &Fixture,
-    request: &ReferenceRequest,
-    overrides: &[(&str, &str)],
-) -> Observation {
-    let world = ReferenceWorld::new(fixture, request, overrides);
+    let world = ReferenceWorld::new(fixture, request);
     let mut observation = match &request.output {
         OutputRequest::Html { pretty } => observe_html(&world, *pretty),
         output => observe_paged(&world, output),
@@ -609,7 +595,7 @@ struct ReferenceWorld {
 }
 
 impl ReferenceWorld {
-    fn new(fixture: &Fixture, request: &ReferenceRequest, overrides: &[(&str, &str)]) -> Self {
+    fn new(fixture: &Fixture, request: &ReferenceRequest) -> Self {
         let features = request.features.iter().copied().collect::<Features>();
         let library = LazyHash::new(
             Library::builder()
@@ -621,10 +607,6 @@ impl ReferenceWorld {
         let mut files = HashMap::new();
 
         for &(path, text) in fixture.project {
-            let text = overrides
-                .iter()
-                .find_map(|(candidate, replacement)| (*candidate == path).then_some(*replacement))
-                .unwrap_or(text);
             insert_file(&mut sources, &mut files, VirtualRoot::Project, path, text);
         }
         for &(spec, path, text) in fixture.packages {

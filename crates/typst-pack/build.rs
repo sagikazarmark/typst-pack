@@ -8,21 +8,6 @@ fn main() {
 
     verify_embedded_typst_baseline();
     stage_readme();
-
-    for variable in ["TARGET", "CARGO_CFG_TARGET_FEATURE"] {
-        println!(
-            "cargo:rustc-env=TYPST_PACK_{variable}={}",
-            std::env::var(variable).unwrap_or_default()
-        );
-    }
-
-    let features = enabled_feature_set();
-    let feature_set = if features.is_empty() {
-        "none".to_owned()
-    } else {
-        features.join(",")
-    };
-    println!("cargo:rustc-env=TYPST_PACK_FEATURE_SET={feature_set}");
 }
 
 fn stage_readme() {
@@ -38,30 +23,6 @@ fn stage_readme() {
     .join("README.md");
     std::fs::copy(readme_path, output)
         .unwrap_or_else(|error| panic!("failed to stage {readme_path}: {error}"));
-}
-
-fn enabled_feature_set() -> Vec<String> {
-    let manifest = parse("Cargo.toml", include_str!("Cargo.toml"));
-    let features = manifest["features"]
-        .as_table()
-        .expect("Cargo.toml must contain features");
-    let mut encoded = BTreeSet::new();
-    let mut enabled = Vec::new();
-    for feature in features.keys() {
-        let environment = format!(
-            "CARGO_FEATURE_{}",
-            feature.to_ascii_uppercase().replace('-', "_")
-        );
-        assert!(
-            encoded.insert(environment.clone()),
-            "Cargo features must have distinct environment encodings"
-        );
-        if std::env::var_os(environment).is_some() {
-            enabled.push(feature.clone());
-        }
-    }
-    enabled.sort();
-    enabled
 }
 
 fn verify_embedded_typst_baseline() {
@@ -214,21 +175,10 @@ fn verify_embedded_typst_baseline() {
         );
     }
 
-    for (identity, declaration) in identities {
-        let prefix = format!("TYPST_PACK_{}", identity.to_ascii_uppercase());
-        println!(
-            "cargo:rustc-env={prefix}_CRATE={}",
-            string(declaration, "name")
-        );
-        println!(
-            "cargo:rustc-env={prefix}_VERSION={}",
-            string(declaration, "version")
-        );
-        println!(
-            "cargo:rustc-env={prefix}_CHECKSUM={}",
-            string(declaration, "checksum")
-        );
-    }
+    println!(
+        "cargo:rustc-env=TYPST_PACK_ENGINE_VERSION={}",
+        string(identities["engine"], "version")
+    );
 }
 
 fn parse(name: &str, source: &str) -> toml::Value {

@@ -6,10 +6,7 @@ use std::task::{Context, Poll, Waker};
 
 use libfuzzer_sys::fuzz_target;
 use typst_pack::opendal::{Error, Operator, WritePolicy, write_compilation_artifacts};
-use typst_pack::{
-    CompilationLimits, CompilationOutputSpecification, CompilationResult, Pack,
-    PackCompilationRequest, SvgOutputSpecification, compile_with_limits,
-};
+use typst_pack::{Artifact, CompileRequest, Output, OutputFormat, Pack, compile};
 
 /// Polls a Memory-service future, which never pends.
 fn ready<F: IntoFuture>(future: F) -> F::Output {
@@ -28,7 +25,7 @@ fuzz_target!(|data: &[u8]| {
     };
     let result = two_page_result();
     let keys = input.split('\0').take(2).collect::<Vec<_>>();
-    if keys.len() != result.artifacts().len() {
+    if keys.len() != result.len() {
         return;
     }
     let policy = if data.first().is_some_and(|byte| byte & 1 == 0) {
@@ -41,9 +38,9 @@ fuzz_target!(|data: &[u8]| {
     match ready(write_compilation_artifacts(&op, "artifacts/", result, &keys, policy)) {
         Ok(written) => {
             assert_eq!(written.len(), keys.len());
-            for (key, artifact) in keys.iter().zip(result.artifacts()) {
+            for (key, artifact) in keys.iter().zip(result) {
                 let stored = ready(op.read(&format!("artifacts/{key}"))).unwrap();
-                assert_eq!(stored.to_vec(), artifact.bytes());
+                assert_eq!(stored.to_vec(), artifact.bytes);
             }
             let listed = ready(op.list_with("").recursive(true))
                 .unwrap()
@@ -59,8 +56,8 @@ fuzz_target!(|data: &[u8]| {
     }
 });
 
-fn two_page_result() -> &'static CompilationResult {
-    static RESULT: OnceLock<CompilationResult> = OnceLock::new();
+fn two_page_result() -> &'static [Artifact] {
+    static RESULT: OnceLock<Vec<Artifact>> = OnceLock::new();
     RESULT.get_or_init(|| {
         let pack = Pack::builder("main.typ")
             .file(
@@ -73,16 +70,8 @@ fn two_page_result() -> &'static CompilationResult {
             )
             .build()
             .unwrap();
-        compile_with_limits(
-            PackCompilationRequest::new(
-                pack,
-                CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
-            ),
-            CompilationLimits::DEFAULT,
-        )
-        .unwrap()
-        .result()
-        .unwrap()
-        .clone()
+        compile(&CompileRequest::new(pack, Output::new(OutputFormat::Svg)))
+            .unwrap()
+            .artifacts
     })
 }

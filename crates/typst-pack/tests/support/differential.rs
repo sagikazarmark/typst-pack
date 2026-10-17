@@ -6,7 +6,7 @@ pub enum DifferentialCategory {
     Fonts,
     Html,
     Packages,
-    PackOverrides,
+    ByteInputs,
     Pdf,
     Png,
     SharedRequests,
@@ -23,7 +23,7 @@ impl DifferentialCategory {
             Self::Fonts => "fonts",
             Self::Html => "html",
             Self::Packages => "packages",
-            Self::PackOverrides => "pack-overrides",
+            Self::ByteInputs => "byte-inputs",
             Self::Pdf => "pdf",
             Self::Png => "png",
             Self::SharedRequests => "shared-requests",
@@ -74,7 +74,7 @@ pub const DIFFERENTIAL_COVERAGE: &[DifferentialCoverage] = &[
         suites: &[Suite::IndependentOracle, Suite::OfficialCli],
     },
     DifferentialCoverage {
-        category: Category::PackOverrides,
+        category: Category::ByteInputs,
         suites: &[Suite::IndependentOracle, Suite::OfficialCli],
     },
     DifferentialCoverage {

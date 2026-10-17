@@ -26,7 +26,7 @@ This is unrelated to Typst's bundle output (`typst-bundle`). A pack is portable
 - Vendor imported Typst Universe packages so compilation works offline.
 - Embed selected fonts so output does not depend on fonts installed elsewhere.
 - Compile to PDF, PNG, SVG, or experimental HTML without reading ambient project files.
-- Replace a contained project file for one compile without changing the pack.
+- Pass strings and file bytes to the document through `sys.inputs` at compile time.
 - Inspect or extract a pack before using it.
 - Build packs from the filesystem, entirely in memory, or with caller-supplied OpenDAL storage.
 - Keep filesystem access and network download support as separate build choices.
@@ -52,8 +52,8 @@ typst-pack inspect project.typk
 # Compile a pack without network access:
 typst-pack compile project.typk output.pdf
 
-# Replace a contained placeholder for one compilation:
-typst-pack compile invoice.typk customer.pdf --override assets/logo.png customer-logo.png
+# Pass a recipient's file to the document as bytes, e.g. for `image(sys.inputs.logo)`:
+typst-pack compile invoice.typk customer.pdf --input-file logo=customer-logo.png
 
 # PNG or SVG output, page selection, reproducible builds:
 typst-pack compile project.typk "page-{0p}.png" --ppi 300 --pages 1-3
@@ -64,7 +64,10 @@ typst-pack compile project.typk --offline
 
 # Experimental HTML export:
 typst-pack compile project.typk out.html
-typst-pack create project/main.typ --target html --features html
+typst-pack create project/main.typ --target html
+
+# Also discover packages and fonts reached only under other inputs:
+typst-pack create report.typ --variant edition=print --variant edition=web,lang=de
 
 # Unpack a pack back into an editable project directory:
 typst-pack extract project.typk -o project/
@@ -76,7 +79,7 @@ Multi-page output needs a page placeholder. All output paths are checked for
 duplicates before anything is written.
 
 See [CLI examples](docs/cli-examples.md) for additional create, compile,
-extraction, and Pack Override commands.
+extraction, input, and discovery-variant commands.
 
 ### Project files
 
@@ -90,8 +93,12 @@ is left out.
 
 The representative compile selects package and font requirements. Its target,
 inputs, date, features, and control flow do not change which project files are
-included. Pack a valid placeholder when a document needs per-recipient data,
-then replace it with `--override PACK_PATH FILE` at compile time.
+included. Each `--variant KEY=VALUE[,KEY=VALUE...]` runs one more discovery
+compile with those inputs replacing or adding to `--input`, so packages and
+fonts reached only under other inputs are required too. Per-recipient data
+reaches a compile through `--input KEY=VALUE` (a string) and
+`--input-file KEY=PATH` (the file's bytes, which `image`, `read`-style
+decoders such as `json`, and `str` accept).
 
 ### Packages and fonts
 
@@ -138,10 +145,11 @@ there is verified against the release you are reading about.
 
 | Task | Start here |
 | --- | --- |
-| Pack a project directory from disk | [`FilesystemPackAssembler`](https://docs.rs/typst-pack/latest/typst_pack/struct.FilesystemPackAssembler.html) |
+| Pack a project directory from disk | [`FilesystemPacker`](https://docs.rs/typst-pack/latest/typst_pack/struct.FilesystemPacker.html) |
 | Pack in-memory bytes with no filesystem | [`Pack::builder`](https://docs.rs/typst-pack/latest/typst_pack/struct.Pack.html#method.builder) |
 | Supply packages yourself and resume creation | [`create`](https://docs.rs/typst-pack/latest/typst_pack/fn.create.html) |
-| Swap a contained file for one compile | [`PackOverrideSet`](https://docs.rs/typst-pack/latest/typst_pack/struct.PackOverrideSet.html) |
+| Compile a pack with inputs | [`compile`](https://docs.rs/typst-pack/latest/typst_pack/fn.compile.html) |
+| Find a pack's external packages and fonts on disk | [`FilesystemPacker::resolve`](https://docs.rs/typst-pack/latest/typst_pack/struct.FilesystemPacker.html#method.resolve) |
 | Read and write packs through object storage | [OpenDAL guide](crates/typst-pack/docs/opendal-integration.md) |
 
 The shortest complete example — build a pack in memory and encode it:
@@ -171,8 +179,34 @@ specification instead of failing; add its tree and call `create` again. The
 bounded `.tar.gz` expansion without choosing an HTTP client, and
 `opendal::OpenDalPackAssembler` runs the same lifecycle over OpenDAL storage.
 
-A Pack Override can replace only a project path already contained in the pack.
-It cannot add a path or change package or font requirements.
+Compilation takes one `CompileRequest`: the pack, the output and its controls,
+`sys.inputs` strings and bytes, document time, features, the packages and font
+containers the pack requires externally, and limits. It returns `Compiled`
+artifacts and warnings, or a `CompileError` whose message names every invalid
+value or unsatisfied requirement. Diagnostics come with the `Sources` they
+point into:
+
+```rust
+use typst_pack::{CompileError, CompileRequest, Input, Output, OutputFormat, Pack, compile};
+
+let pack = Pack::builder("main.typ")
+    .file("main.typ", b"#str(sys.inputs.greeting)".to_vec())
+    .build()?;
+let mut request = CompileRequest::new(pack, Output::new(OutputFormat::Pdf));
+request.options.inputs.push(("greeting".into(), Input::Bytes(b"Hello".to_vec())));
+
+match compile(&request) {
+    Ok(compiled) => assert!(compiled.artifacts[0].bytes.starts_with(b"%PDF")),
+    Err(CompileError::Failed { errors, sources, .. }) => {
+        for error in &errors {
+            let file = error.span.id().map(|id| sources.name(id));
+            eprintln!("{file:?}: {}", error.message);
+        }
+    }
+    Err(error) => return Err(error.into()),
+}
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
 
 ### Feature flags
 
@@ -181,7 +215,7 @@ It cannot add a path or change package or font requirements.
 - `package-reading`: Construct registry URLs, read bounded package archives, and expand them without choosing a transport.
 - `opendal`: Read, assemble, and write packs through caller-supplied OpenDAL operators, with caller-polled futures and no bundled runtime.
 - `embedded-fonts`: Make Typst's bundled fonts available to assembly and external fulfillment.
-- `diagnostics`: Retain source context for first-party diagnostic presentation adapters.
+- `diagnostics`: Implement `typst-kit`'s `DiagnosticWorld` for `Sources`, so `typst_kit::diagnostics::emit` renders diagnostics with source context.
 - `parallel`: Export independent page artifacts in parallel.
 
 All features are opt-in. Featureless creation and compilation remain available
@@ -267,6 +301,44 @@ pack         = str("typst-pack/pack/v1") str(entrypoint)
                count(fonts) { digest(container digest) bool(embedded) }
                                                        in manifest order
 ```
+
+### Compilation identity
+
+`Compiled::identity` is SHA-256 over this preimage, in the same encoding, plus
+`int(n)`, a big-endian two's-complement 64-bit integer:
+
+```text
+compilation = str("typst-pack/compilation/v1") str(implementation)
+              digest(pack identity) output
+              count(inputs) { str(key) input }        in effective order
+              time
+              count(features) { str(feature) }        "html", "a11y-extras"
+              count(packages) { str(spec) digest(tree digest) }
+                                       externally supplied, by spec
+              count(fonts) { digest(container digest) }
+                                       externally supplied, by digest
+input       = str("str") str(value) | str("bytes") digest(SHA-256 of the bytes)
+time        = str("absent") | str("unix") int(seconds)
+            | str("fixed") { bool(present) int(value) }
+                           for year, month, day, hour, minute, second
+output      = str("pdf") pages count(standards) { str(standard) }
+                identifier creator bool(tagged) timestamp bool(pretty)
+            | str("png") pages int(bits of the f64 PPI) bool(render bleed)
+            | str("svg") pages bool(render bleed) bool(pretty)
+            | str("html") bool(pretty)
+pages       = count(ranges) { count(first) int(last or -1 when open) }
+identifier  = str("auto") | str("custom") str(identifier)
+creator     = str("auto") | str("none") | str("custom") str(creator)
+timestamp   = str("omit") | str("utc") int(seconds)
+            | str("local") int(seconds) int(offset minutes)
+```
+
+`implementation` is `typst_pack::VERSION`, for example `0.6.0 (Typst 0.15.1)`.
+Values are normalized first: a repeated input key keeps its first position and
+last value, HTML output adds the `html` feature, page ranges are sorted and
+merged, PDF standards are sorted by name, automatic PDF tagging is resolved,
+and the default PPI is filled in. Metadata, limits, export workers, and
+dependencies the pack does not require do not contribute.
 
 ### Verification
 

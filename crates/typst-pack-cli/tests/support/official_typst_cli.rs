@@ -11,12 +11,23 @@ pub struct OfficialTypstCli {
 }
 
 impl OfficialTypstCli {
+    /// The official binary the environment names, or `None` outside the
+    /// parity gate. A gate that requires the binary, or names one that does
+    /// not exist, fails instead of passing vacuously.
     pub fn from_environment() -> Option<Self> {
+        let required = std::env::var_os(REQUIRE_OFFICIAL_TYPST_ENV)
+            .is_some_and(|value| !value.is_empty() && value != "0");
         match std::env::var_os(OFFICIAL_TYPST_ENV) {
-            Some(executable) => Some(Self {
-                executable: executable.into(),
-            }),
-            None if std::env::var_os(REQUIRE_OFFICIAL_TYPST_ENV).is_some() => {
+            Some(executable) => {
+                let executable = PathBuf::from(executable);
+                assert!(
+                    executable.is_file(),
+                    "{OFFICIAL_TYPST_ENV} names `{}`, which is not a file",
+                    executable.display()
+                );
+                Some(Self { executable })
+            }
+            None if required => {
                 panic!("{OFFICIAL_TYPST_ENV} is required by the official CLI parity gate")
             }
             None => None,

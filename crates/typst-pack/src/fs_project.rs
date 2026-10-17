@@ -7,7 +7,7 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use crate::fs_read::{FilesystemReadError, Kind, Root, Walker, utf8_path};
 use crate::limits::ReadLimits;
 use crate::pack::names_pack_path;
-use crate::project_snapshot::{ProjectSnapshot, ProjectSnapshotAssembly};
+use crate::project_snapshot::ProjectSnapshot;
 
 /// The root-relative path of the filesystem Project Ignore Policy file.
 pub const IGNORE_FILE: &str = ".typkignore";
@@ -54,9 +54,7 @@ pub fn read_filesystem_project(
         },
     )?;
 
-    ProjectSnapshotAssembly::new(entrypoint)
-        .assemble(entries)
-        .map_err(FilesystemReadError::Snapshot)
+    ProjectSnapshot::new(entrypoint, entries).map_err(FilesystemReadError::Project)
 }
 
 /// The parsed root ignore file.

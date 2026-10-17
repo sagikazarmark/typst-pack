@@ -22,8 +22,8 @@ use cap_std::fs::{Dir, File};
 
 use crate::font_catalog::FontContainerError;
 use crate::limits::{LimitExceeded, ReadLimits};
+use crate::pack::PackInvariantError;
 use crate::package_catalog::PackageTreeError;
-use crate::project_snapshot::ProjectSnapshotError;
 
 /// A failure while reading a project, package, or font directory.
 #[derive(Debug, thiserror::Error)]
@@ -60,8 +60,8 @@ pub enum FilesystemReadError {
         #[source]
         source: FontContainerError,
     },
-    #[error("read files do not form a Project Snapshot: {0}")]
-    Snapshot(#[source] ProjectSnapshotError),
+    #[error("read files do not form a valid project: {0}")]
+    Project(#[source] PackInvariantError),
     #[error("read files do not form a Package Tree: {0}")]
     PackageTree(#[source] PackageTreeError),
 }

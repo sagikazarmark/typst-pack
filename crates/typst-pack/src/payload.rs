@@ -26,10 +26,6 @@ impl SharedBytes {
     pub(crate) fn to_typst(&self) -> Bytes {
         self.0.clone()
     }
-
-    pub(crate) fn into_vec(self) -> Vec<u8> {
-        self.0.into_vec()
-    }
 }
 
 impl AsRef<[u8]> for SharedBytes {

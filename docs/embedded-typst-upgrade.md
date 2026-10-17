@@ -34,8 +34,9 @@ issue:
    `typst` and `typst-*` crate.
 2. Update every `[[crate]]` entry in
    `crates/typst-pack/embedded-typst.toml`, including transitive crates,
-   checksums, the engine baseline, and all exporter `ImplementationIdentity`
-   sources.
+   checksums, the engine baseline, and the `identity` classification of the
+   engine and every exporter crate. The engine version is part of
+   `typst_pack::VERSION` and so of every compilation identity.
    Do not add an exception implicitly; explain intentional patch-version splits
    such as `typst-timing` in the upgrade change.
 3. Update `[official-cli]` in `crates/typst-pack/embedded-typst.toml`, the one

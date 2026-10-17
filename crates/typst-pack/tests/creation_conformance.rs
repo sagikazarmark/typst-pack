@@ -31,13 +31,13 @@ mod opendal_faults;
 
 use std::str::FromStr;
 
+use typst::diag::SourceDiagnostic;
 use typst::syntax::package::PackageSpec;
 use typst_pack::{
-    DependencyDiscoveryRejection, Digest, DiscoverySpecification, DocumentTime, FontCatalog,
-    FontCatalogEntry, FontContainer, FontDisposition, Pack, PackCreationError, PackCreationInput,
-    PackCreationOutcome, PackageCatalog, PackageCatalogIssue, PackageDisposition,
+    CreateError, CreateOutcome, CreateRequest, Digest, DocumentTime, FontCatalog, FontCatalogEntry,
+    FontContainer, FontDisposition, Pack, PackageCatalog, PackageCatalogIssue, PackageDisposition,
     PackageReadFailure, PackageReadFailureReason, PackageReadFailures, PackageTree,
-    ProjectSnapshotAssembly, TypstTarget, create,
+    ProjectSnapshot, create,
 };
 
 /// 2023-11-14T22:13:20Z, the Document Time every representative request in the
@@ -317,6 +317,38 @@ struct Created {
     failure_states: Vec<Vec<(String, PackageReadFailureReason)>>,
 }
 
+/// The diagnostics of a discovery compile that failed.
+#[derive(Debug, PartialEq, Eq)]
+struct DependencyDiscoveryRejection {
+    errors: Vec<SourceDiagnostic>,
+    warnings: Vec<SourceDiagnostic>,
+}
+
+/// The rejection a failed creation carries, or a panic for any other error.
+fn rejection(error: CreateError, runner: &str) -> DependencyDiscoveryRejection {
+    match error {
+        CreateError::Failed {
+            errors, warnings, ..
+        } => DependencyDiscoveryRejection { errors, warnings },
+        error => panic!("{runner} creation failed unexpectedly: {error}"),
+    }
+}
+
+/// Creation over values a runner holds, at the corpus's fixed document time.
+fn creation(
+    project: &ProjectSnapshot,
+    packages: &PackageCatalog,
+    fonts: &FontCatalog,
+    package_failures: &PackageReadFailures,
+) -> Result<CreateOutcome, CreateError> {
+    let mut request = CreateRequest::new(project.clone());
+    request.packages = packages.clone();
+    request.fonts = fonts.clone();
+    request.package_failures = package_failures.clone();
+    request.options.document_time = DocumentTime::UnixTimestamp(CREATION_TIMESTAMP);
+    create(&request)
+}
+
 /// The failure kinds the corpus holds adapters to. Each reports in its own
 /// vocabulary, and conformance is that both reach the same kind.
 #[derive(Debug, PartialEq, Eq)]
@@ -337,23 +369,16 @@ enum Failure {
 
 /// Direct core composition from already selected source-neutral values.
 fn create_directly(fixture: &Fixture) -> Result<Created, Failure> {
-    let snapshot = ProjectSnapshotAssembly::new(fixture.entrypoint)
-        .assemble(
-            fixture
-                .project
-                .iter()
-                .map(|(path, data)| (*path, data.clone())),
-        )
-        .unwrap();
-    let catalog = fixture.font_catalog();
-    let mut package_failures = PackageReadFailures::new();
-    let discovery = DiscoverySpecification::new(
-        TypstTarget::Paged,
-        typst::foundations::Dict::new(),
-        DocumentTime::UnixTimestamp(CREATION_TIMESTAMP),
-        [],
+    let snapshot = ProjectSnapshot::new(
+        fixture.entrypoint,
+        fixture
+            .project
+            .iter()
+            .map(|(path, data)| (*path, data.clone())),
     )
     .unwrap();
+    let catalog = fixture.font_catalog();
+    let mut package_failures = PackageReadFailures::new();
 
     let mut resolved: Vec<(PackageSpec, PackageTree, PackageDisposition)> = Vec::new();
     let mut missing_rounds = Vec::new();
@@ -384,23 +409,16 @@ fn create_directly(fixture: &Fixture) -> Result<Created, Failure> {
                 PackageCatalog::new()
             }
         };
-        match create(PackCreationInput {
-            project: &snapshot,
-            packages: &packages,
-            fonts: &catalog,
-            package_failures: &package_failures,
-            discovery: &discovery,
-            metadata: None,
-        }) {
-            Ok(PackCreationOutcome::Created { pack, warnings }) => {
+        match creation(&snapshot, &packages, &catalog, &package_failures) {
+            Ok(CreateOutcome::Created { pack, warnings, .. }) => {
                 return Ok(Created {
                     pack,
-                    warnings: warnings.to_vec(),
+                    warnings,
                     missing_rounds,
                     failure_states,
                 });
             }
-            Ok(PackCreationOutcome::MissingPackageSpecifications(missing)) => {
+            Ok(CreateOutcome::MissingPackages(missing)) => {
                 assert!(
                     !missing.is_empty(),
                     "a missing outcome names a specification"
@@ -439,7 +457,8 @@ fn create_directly(fixture: &Fixture) -> Result<Created, Failure> {
                     }
                 }
             }
-            Err(PackCreationError::DependencyDiscoveryRejected(rejection)) => {
+            Err(error) => {
+                let rejection = rejection(error, "core");
                 return Err(match terminal_package_failure {
                     Some((spec, reason)) => Failure::PackageRead {
                         spec,
@@ -449,7 +468,6 @@ fn create_directly(fixture: &Fixture) -> Result<Created, Failure> {
                     None => Failure::Compile(rejection),
                 });
             }
-            Err(error) => panic!("direct creation failed unexpectedly: {error}"),
         }
     }
     panic!("direct creation issued no Pack within {RESUME_BOUND} resume rounds");
@@ -571,13 +589,6 @@ fn create_on_opendal(
         },
     ];
 
-    let discovery = DiscoverySpecification::new(
-        TypstTarget::Paged,
-        typst::foundations::Dict::new(),
-        DocumentTime::UnixTimestamp(CREATION_TIMESTAMP),
-        [],
-    )
-    .unwrap();
     let mut packages = PackageCatalog::new();
     let mut package_failures = PackageReadFailures::new();
     let mut missing_rounds = Vec::new();
@@ -585,23 +596,16 @@ fn create_on_opendal(
     let mut terminal_package_failure = None;
 
     for _ in 0..RESUME_BOUND {
-        match create(PackCreationInput {
-            project: &snapshot,
-            packages: &packages,
-            fonts: &fonts,
-            package_failures: &package_failures,
-            discovery: &discovery,
-            metadata: None,
-        }) {
-            Ok(PackCreationOutcome::Created { pack, warnings }) => {
+        match creation(&snapshot, &packages, &fonts, &package_failures) {
+            Ok(CreateOutcome::Created { pack, warnings, .. }) => {
                 return Ok(Created {
                     pack,
-                    warnings: warnings.to_vec(),
+                    warnings,
                     missing_rounds,
                     failure_states,
                 });
             }
-            Ok(PackCreationOutcome::MissingPackageSpecifications(missing)) => {
+            Ok(CreateOutcome::MissingPackages(missing)) => {
                 missing_rounds.push(missing.iter().map(ToString::to_string).collect());
                 let mut pending = missing.into_iter().collect::<Vec<_>>();
                 if reverse_declaration_order {
@@ -645,7 +649,8 @@ fn create_on_opendal(
                     }
                 }
             }
-            Err(PackCreationError::DependencyDiscoveryRejected(rejection)) => {
+            Err(error) => {
+                let rejection = rejection(error, "core");
                 return Err(match terminal_package_failure {
                     Some((spec, reason)) => Failure::PackageRead {
                         spec,
@@ -655,7 +660,6 @@ fn create_on_opendal(
                     None => Failure::Compile(rejection),
                 });
             }
-            Err(error) => panic!("OpenDAL creation failed unexpectedly: {error}"),
         }
     }
     panic!("OpenDAL creation issued no Pack within {RESUME_BOUND} resume rounds");
@@ -770,12 +774,7 @@ impl Fixture {
 /// font container, and the reference adapter reads them from there.
 #[cfg(feature = "fs")]
 fn create_on_filesystem(fixture: &Fixture, plan: &FilesystemPlan) -> Result<Created, Failure> {
-    use std::path::Path;
-
-    use typst_pack::{
-        FilesystemPackAssembler, FilesystemPackAssemblerConfig, FilesystemPackAssemblyError,
-        FilesystemPackAssemblyRequest,
-    };
+    use typst_pack::{CompileOptions, FilesystemPackError, FilesystemPacker};
 
     let dir = tempfile::tempdir().expect("a temporary directory for the fixture");
     let project = dir.path().join("project");
@@ -798,57 +797,48 @@ fn create_on_filesystem(fixture: &Fixture, plan: &FilesystemPlan) -> Result<Crea
         }
     }
 
-    let mut config = FilesystemPackAssemblerConfig::new()
+    let mut packer = FilesystemPacker::new()
         .package_path(&packages)
         // No ambient source participates: the fixture's bytes are the catalog.
         .system_fonts(false)
-        .typst_embedded_fonts(plan.typst_embedded_fonts);
-    let request = FilesystemPackAssemblyRequest::new(&project, Path::new(fixture.entrypoint))
-        .document_time(DocumentTime::UnixTimestamp(CREATION_TIMESTAMP))
+        .typst_embedded_fonts(plan.typst_embedded_fonts)
+        .options(CompileOptions {
+            document_time: DocumentTime::UnixTimestamp(CREATION_TIMESTAMP),
+            ..CompileOptions::default()
+        })
         .vendor_packages(plan.vendor_packages)
         .include_typst_embedded_fonts(plan.include_typst_embedded_fonts)
         .embed_fonts(plan.embed_fonts);
     for (position, data) in plan.scanned_fonts.iter().enumerate() {
         let directory = dir.path().join(format!("fonts/{position}"));
         write_file(&directory.join(font_file_name(data)), data);
-        config = config.font_path(directory);
+        packer = packer.font_path(directory);
     }
 
-    let assembler = FilesystemPackAssembler::new(config);
-    match assembler.assemble(request) {
-        Ok(report) => {
-            let (pack, warnings) = report.into_parts();
-            Ok(Created {
-                pack,
-                warnings: warnings.to_vec(),
-                missing_rounds: Vec::new(),
-                failure_states: Vec::new(),
-            })
-        }
-        Err(FilesystemPackAssemblyError::Package { spec, .. }) => Err(Failure::PackageRead {
-            spec: spec.to_string(),
-            reason: PackageReadFailureReason::Other { detail: None },
-            rejection: None,
+    match packer.pack(&project, fixture.entrypoint) {
+        Ok(packed) => Ok(Created {
+            pack: packed.pack,
+            warnings: packed.warnings,
+            missing_rounds: Vec::new(),
+            failure_states: Vec::new(),
         }),
-        Err(FilesystemPackAssemblyError::InvalidPackageCatalog(_)) => {
-            let spec = fixture
-                .packages
-                .first()
-                .expect("an invalid Package Catalog contains a fixture package")
-                .spec
-                .to_string();
-            Err(Failure::PackageRead {
-                spec,
-                reason: PackageReadFailureReason::Other { detail: None },
-                rejection: None,
+        Err(FilesystemPackError::Create(error)) => {
+            let rejection = rejection(error, "filesystem");
+            // A tree the packer read but could not catalog fails the import
+            // that needed it.
+            let unloadable = rejection
+                .errors
+                .iter()
+                .any(|error| error.message.starts_with("failed to load package"));
+            Err(match fixture.packages.first() {
+                Some(package) if unloadable => Failure::PackageRead {
+                    spec: package.spec.to_string(),
+                    reason: PackageReadFailureReason::Other { detail: None },
+                    rejection: Some(rejection),
+                },
+                _ => Failure::Compile(rejection),
             })
         }
-        Err(FilesystemPackAssemblyError::Creation(error)) => match error.error() {
-            PackCreationError::DependencyDiscoveryRejected(rejection) => {
-                Err(Failure::Compile(rejection.clone()))
-            }
-            error => panic!("filesystem creation failed unexpectedly: {error}"),
-        },
         Err(error) => panic!("filesystem creation failed unexpectedly: {error}"),
     }
 }
@@ -1005,11 +995,11 @@ fn assert_package_reading_failure(
     assert_eq!(reason, expected_reason);
     assert!(
         rejection
-            .diagnostics()
+            .errors
             .iter()
-            .any(|diagnostic| diagnostic.message == "failed to load package"),
+            .any(|diagnostic| diagnostic.message.starts_with("failed to load package")),
         "{:#?}",
-        rejection.diagnostics()
+        rejection.errors
     );
 }
 

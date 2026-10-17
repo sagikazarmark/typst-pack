@@ -10,8 +10,8 @@ use typst::text::{Font, FontStretch, FontStyle, FontWeight};
 
 use crate::identity::Preimage;
 use crate::manifest::PackMetadata;
-use crate::paths::{CanonicalPath, canonical_relative_path, path_tree_conflicts};
 use crate::payload::SharedBytes;
+use crate::project_snapshot::ProjectSnapshot;
 use crate::{Digest, FontContainer, PackageTree, PackageTreeError};
 
 /// The conventional file extension for packs.
@@ -36,9 +36,8 @@ pub(crate) fn names_pack_path(path: &str) -> bool {
 #[derive(Debug, Clone)]
 pub struct Pack {
     identity: Digest,
-    entrypoint: CanonicalPath,
+    project: ProjectSnapshot,
     metadata: Option<PackMetadata>,
-    files: BTreeMap<CanonicalPath, (SharedBytes, Digest)>,
     /// Embedded package trees, keyed by spec string.
     packages: BTreeMap<String, PackageTree>,
     package_requirements: Vec<PackageRequirement>,
@@ -129,13 +128,6 @@ impl FontRequirement {
     }
 }
 
-/// Exact verified dependencies accepted by the synchronous Compilation Kernel.
-pub(crate) struct CompilationDependencySnapshot {
-    pub(crate) pack_identity: Digest,
-    pub(crate) packages: BTreeMap<String, PackageTree>,
-    pub(crate) fonts: Vec<Font>,
-}
-
 /// The unvalidated content of a Pack, shared by the builder, creation, and
 /// the archive decoder.
 #[derive(Debug, Default)]
@@ -157,6 +149,8 @@ pub(crate) struct PackageInput {
 #[derive(Debug)]
 pub(crate) enum PackageContent {
     Files(Vec<(String, SharedBytes)>),
+    /// An already validated tree.
+    Tree(PackageTree),
     /// A tree digest declared without its files; only for external packages.
     Declared(Digest),
 }
@@ -165,6 +159,11 @@ pub(crate) enum PackageContent {
 pub(crate) enum FontInput {
     Bytes {
         data: SharedBytes,
+        embedded: bool,
+    },
+    /// An already validated container.
+    Container {
+        container: FontContainer,
         embedded: bool,
     },
     /// An external container declared without its bytes.
@@ -208,25 +207,37 @@ impl Pack {
     /// by the builder, creation, and the archive decoder.
     pub(crate) fn construct(input: PackInput) -> Result<Self, PackInvariantError> {
         let mut issues = Vec::new();
-        let files = validate_project(input.files, &mut issues);
-        let entrypoint = validate_entrypoint(&input.entrypoint, &files, &mut issues);
-        let (packages, package_requirements) = validate_packages(input.packages, &mut issues);
-        let (font_requirements, font_data) = validate_fonts(input.fonts, &mut issues);
-        let Some(entrypoint) = entrypoint.filter(|_| issues.is_empty()) else {
+        let project = ProjectSnapshot::validate(&input.entrypoint, input.files, &mut issues);
+        Self::assemble(project, input.metadata, input.packages, input.fonts, issues)
+    }
+
+    /// Adds validated dependencies to an already validated project.
+    pub(crate) fn with_dependencies(
+        project: ProjectSnapshot,
+        metadata: Option<PackMetadata>,
+        packages: Vec<PackageInput>,
+        fonts: Vec<FontInput>,
+    ) -> Result<Self, PackInvariantError> {
+        Self::assemble(Some(project), metadata, packages, fonts, Vec::new())
+    }
+
+    fn assemble(
+        project: Option<ProjectSnapshot>,
+        metadata: Option<PackMetadata>,
+        packages: Vec<PackageInput>,
+        fonts: Vec<FontInput>,
+        mut issues: Vec<PackInvariantIssue>,
+    ) -> Result<Self, PackInvariantError> {
+        let (packages, package_requirements) = validate_packages(packages, &mut issues);
+        let (font_requirements, font_data) = validate_fonts(fonts, &mut issues);
+        let Some(project) = project.filter(|_| issues.is_empty()) else {
             return Err(PackInvariantError { issues });
         };
-
-        let identity = pack_identity(
-            &entrypoint,
-            &files,
-            &package_requirements,
-            &font_requirements,
-        );
+        let identity = pack_identity(&project, &package_requirements, &font_requirements);
         Ok(Self {
             identity,
-            entrypoint,
-            metadata: input.metadata,
-            files,
+            project,
+            metadata,
             packages,
             package_requirements,
             font_requirements,
@@ -241,7 +252,7 @@ impl Pack {
 
     /// The root-relative path of the entrypoint file.
     pub fn entrypoint(&self) -> &str {
-        self.entrypoint.as_str()
+        self.project.entrypoint()
     }
 
     /// Optional descriptive metadata, excluded from Pack Identity.
@@ -251,30 +262,21 @@ impl Pack {
 
     /// The project files, in root-relative path order.
     pub fn files(&self) -> impl Iterator<Item = (&str, &[u8])> {
-        self.files
-            .iter()
-            .map(|(path, (data, _))| (path.as_str(), data.as_slice()))
+        self.project.files()
     }
 
     /// Looks up a project file by root-relative path.
     pub fn file(&self, path: &str) -> Option<&[u8]> {
-        self.files.get(path).map(|(data, _)| data.as_slice())
+        self.project.file(path)
     }
 
-    pub(crate) fn shared_file(&self, path: &str) -> Option<&SharedBytes> {
-        self.files.get(path).map(|(data, _)| data)
+    /// The validated project: entrypoint and project files.
+    pub fn project(&self) -> &ProjectSnapshot {
+        &self.project
     }
 
     pub(crate) fn file_digests(&self) -> impl Iterator<Item = (&str, Digest)> {
-        self.files
-            .iter()
-            .map(|(path, (_, digest))| (path.as_str(), *digest))
-    }
-
-    pub(crate) fn canonical_project_path(path: &str) -> Result<String, String> {
-        project_path(path)
-            .map(CanonicalPath::into_string)
-            .map_err(|message| message.to_string())
+        self.project.file_digests()
     }
 
     /// The embedded packages and their files.
@@ -324,108 +326,9 @@ impl Pack {
         self.font_data.get(digest)
     }
 
-    /// Combines the Pack's embedded dependencies with verified external
-    /// fulfillments. Every face of every required container is exposed, in
-    /// requirement order.
-    pub(crate) fn materialize_compilation_dependency_snapshot(
-        &self,
-        mut package_fulfillments: BTreeMap<String, PackageTree>,
-        font_fulfillments: BTreeMap<Digest, FontContainer>,
-    ) -> CompilationDependencySnapshot {
-        let mut packages = self.packages.clone();
-        for requirement in self.package_requirements.iter().filter(|r| !r.embedded) {
-            let key = requirement.spec.to_string();
-            let tree = package_fulfillments
-                .remove(&key)
-                .expect("exact fulfillment verification supplies every external package");
-            packages.insert(key, tree);
-        }
-        let fonts = self
-            .font_requirements
-            .iter()
-            .flat_map(
-                |requirement| match self.font_data.get(&requirement.digest) {
-                    Some(data) => Font::iter(data.to_typst()).collect::<Vec<_>>(),
-                    None => font_fulfillments[&requirement.digest].fonts().to_vec(),
-                },
-            )
-            .collect();
-        CompilationDependencySnapshot {
-            pack_identity: self.identity,
-            packages,
-            fonts,
-        }
-    }
-}
-
-fn project_path(path: &str) -> Result<CanonicalPath, String> {
-    let canonical = canonical_relative_path(path).map_err(|error| error.to_string())?;
-    // No route into a Pack can name a Pack as a project file.
-    if names_pack_path(canonical.as_str()) {
-        return Err(format!(
-            "`.{FILE_EXTENSION}` paths are excluded from project membership"
-        ));
-    }
-    Ok(canonical)
-}
-
-fn validate_project(
-    files: Vec<(String, SharedBytes)>,
-    issues: &mut Vec<PackInvariantIssue>,
-) -> BTreeMap<CanonicalPath, (SharedBytes, Digest)> {
-    let mut pass = Vec::new();
-    let mut canonical = BTreeMap::new();
-    let mut duplicates = BTreeSet::new();
-    for (path, data) in files {
-        match project_path(&path) {
-            Ok(path) => {
-                let digest = Digest::of(&data);
-                if canonical.insert(path.clone(), (data, digest)).is_some() {
-                    duplicates.insert(path);
-                }
-            }
-            Err(message) => pass.push(PackInvariantIssue::InvalidPath { path, message }),
-        }
-    }
-    pass.extend(
-        duplicates
-            .into_iter()
-            .map(|path| PackInvariantIssue::DuplicateProjectPath {
-                path: path.into_string(),
-            }),
-    );
-    pass.extend(
-        path_tree_conflicts(canonical.keys().map(|path| (path, ())))
-            .into_iter()
-            .map(|conflict| PackInvariantIssue::PathTreeConflict {
-                ancestor: conflict.ancestor.to_string(),
-                descendant: conflict.descendant.to_string(),
-            }),
-    );
-    push_sorted(issues, pass);
-    canonical
-}
-
-fn validate_entrypoint(
-    entrypoint: &str,
-    files: &BTreeMap<CanonicalPath, (SharedBytes, Digest)>,
-    issues: &mut Vec<PackInvariantIssue>,
-) -> Option<CanonicalPath> {
-    match project_path(entrypoint) {
-        Ok(path) if files.contains_key(&path) => Some(path),
-        Ok(path) => {
-            issues.push(PackInvariantIssue::MissingEntrypoint {
-                path: path.into_string(),
-            });
-            None
-        }
-        Err(message) => {
-            issues.push(PackInvariantIssue::InvalidEntrypoint {
-                path: entrypoint.to_owned(),
-                message,
-            });
-            None
-        }
+    /// The embedded package trees, keyed by specification text.
+    pub(crate) fn embedded_packages(&self) -> &BTreeMap<String, PackageTree> {
+        &self.packages
     }
 }
 
@@ -468,6 +371,13 @@ fn validate_packages(
                     continue;
                 }
             },
+            PackageContent::Tree(tree) => {
+                let digest = tree.digest();
+                if input.embedded {
+                    embedded.insert(key, tree);
+                }
+                digest
+            }
         };
         requirements.push(PackageRequirement {
             spec: input.spec,
@@ -515,6 +425,19 @@ fn validate_fonts(
                     faces,
                 }
             }
+            FontInput::Container {
+                container,
+                embedded,
+            } => {
+                if embedded {
+                    font_data.insert(container.digest(), container.shared_data().clone());
+                }
+                FontRequirement {
+                    digest: container.digest(),
+                    embedded,
+                    faces: container.faces().to_vec(),
+                }
+            }
             FontInput::Declared { digest, faces } => FontRequirement {
                 digest,
                 embedded: false,
@@ -539,15 +462,15 @@ fn push_sorted(issues: &mut Vec<PackInvariantIssue>, mut pass: Vec<PackInvariant
 
 /// The documented Pack Identity preimage; see the README's "Pack format".
 fn pack_identity(
-    entrypoint: &CanonicalPath,
-    files: &BTreeMap<CanonicalPath, (SharedBytes, Digest)>,
+    project: &ProjectSnapshot,
     packages: &[PackageRequirement],
     fonts: &[FontRequirement],
 ) -> Digest {
+    let files = project.file_digests();
     let mut preimage = Preimage::new("typst-pack/pack/v1");
-    preimage.str(entrypoint.as_str()).count(files.len());
-    for (path, (_, digest)) in files {
-        preimage.str(path.as_str()).digest(digest);
+    preimage.str(project.entrypoint()).count(files.len());
+    for (path, digest) in files {
+        preimage.str(path).digest(&digest);
     }
     preimage.count(packages.len());
     for package in packages {
@@ -567,7 +490,7 @@ fn pack_identity(
 ///
 /// This is the constructor to use when the project does not live on a file
 /// system, for example in a web editor. For packing a project directory, use
-/// `FilesystemPackAssembler` instead (requires the `fs` feature). Every
+/// `FilesystemPacker` instead (requires the `fs` feature). Every
 /// invariant is checked once, by [`build`](Self::build).
 #[derive(Debug)]
 pub struct PackBuilder {
@@ -717,7 +640,7 @@ pub enum PackInvariantIssue {
 #[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
 #[error("invalid pack: {}", display_issues(.issues))]
 pub struct PackInvariantError {
-    issues: Vec<PackInvariantIssue>,
+    pub(crate) issues: Vec<PackInvariantIssue>,
 }
 
 impl PackInvariantError {

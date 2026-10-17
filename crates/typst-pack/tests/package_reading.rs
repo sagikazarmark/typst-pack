@@ -15,29 +15,13 @@ use std::str::FromStr;
 
 use typst::syntax::package::PackageSpec;
 use typst_pack::{
-    DiscoverySpecification, DocumentTime, FontCatalog, LimitExceeded, PackCreationInput,
-    PackCreationOutcome, PackageArchiveReadError, PackageCatalog, PackageDisposition,
-    PackageReadError, PackageReadFailures, PackageTree, PackageTreeIssue, ProjectSnapshotAssembly,
-    ReadLimits, TypstTarget, create, expand_package_archive, package_archive_url,
-    read_package_archive,
+    CreateOutcome, CreateRequest, LimitExceeded, PackageArchiveReadError, PackageDisposition,
+    PackageReadError, PackageTree, PackageTreeIssue, ProjectSnapshot, ReadLimits, create,
+    expand_package_archive, package_archive_url, read_package_archive,
 };
 
 fn spec(text: &str) -> PackageSpec {
     PackageSpec::from_str(text).unwrap()
-}
-
-/// 2023-11-14T22:13:20Z, the Document Time the representative request here is
-/// fixed to.
-const CREATION_TIMESTAMP: i64 = 1_700_000_000;
-
-fn discovery() -> DiscoverySpecification {
-    DiscoverySpecification::new(
-        TypstTarget::Paged,
-        typst::foundations::Dict::new(),
-        DocumentTime::UnixTimestamp(CREATION_TIMESTAMP),
-        [],
-    )
-    .unwrap()
 }
 
 /// The declaration a tree for `@preview/example:1.0.0` carries.
@@ -425,44 +409,36 @@ fn fetch(url: &str) -> Option<Vec<u8>> {
 
 #[test]
 fn a_resume_loop_fetches_and_expands_what_creation_reported() {
-    let project = ProjectSnapshotAssembly::new("main.typ")
-        .assemble([(
+    let project = ProjectSnapshot::new(
+        "main.typ",
+        [(
             "main.typ",
             b"#import \"@preview/example:1.0.0\": value\n\
               #rect(width: value * 1pt, height: 1pt)"
                 .to_vec(),
-        )])
-        .unwrap();
+        )],
+    )
+    .unwrap();
 
-    let mut resolved: Vec<(PackageSpec, PackageTree, PackageDisposition)> = Vec::new();
-    let fonts = FontCatalog::new();
-    let package_failures = PackageReadFailures::new();
-    let discovery = discovery();
+    let mut request = CreateRequest::new(project);
     // Bounded so that a loop making no progress fails instead of hanging; the
     // number of rounds it actually takes is not asserted.
     let mut issued = None;
     for _ in 0..8 {
-        let catalog = PackageCatalog::from_entries(resolved.iter().cloned()).unwrap();
-        match create(PackCreationInput {
-            project: &project,
-            packages: &catalog,
-            fonts: &fonts,
-            package_failures: &package_failures,
-            discovery: &discovery,
-            metadata: None,
-        })
-        .unwrap()
-        {
-            PackCreationOutcome::Created { pack, .. } => {
+        match create(&request).unwrap() {
+            CreateOutcome::Created { pack, .. } => {
                 issued = Some(pack);
                 break;
             }
-            PackCreationOutcome::MissingPackageSpecifications(missing) => {
+            CreateOutcome::MissingPackages(missing) => {
                 for spec in missing {
                     let url = package_archive_url(&spec).unwrap();
                     let bytes = fetch(&url).expect("the registry serves the reported package");
                     let tree = expand_package_archive(spec.clone(), &bytes, LIMITS).unwrap();
-                    resolved.push((spec, tree, PackageDisposition::Embedded));
+                    request
+                        .packages
+                        .insert(spec, tree, PackageDisposition::Embedded)
+                        .unwrap();
                 }
             }
         }

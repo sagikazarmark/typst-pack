@@ -36,7 +36,7 @@ impl PackageReadFailures {
     }
 
     /// Removes an older failed attempt after the specification is read.
-    #[cfg(any(feature = "fs", all(feature = "opendal", feature = "package-reading")))]
+    #[cfg(all(feature = "opendal", feature = "package-reading"))]
     pub(crate) fn remove(&mut self, spec: &PackageSpec) -> Option<PackageReadFailure> {
         self.failures.remove(&spec.to_string())
     }

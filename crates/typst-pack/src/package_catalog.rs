@@ -123,10 +123,6 @@ impl PackageTree {
         self.digest
     }
 
-    pub(crate) fn shared_files(&self) -> impl Iterator<Item = (&str, &SharedBytes)> {
-        self.files.iter().map(|(path, data)| (path.as_str(), data))
-    }
-
     pub(crate) fn shared_file(&self, path: &str) -> Option<&SharedBytes> {
         self.files.get(path)
     }

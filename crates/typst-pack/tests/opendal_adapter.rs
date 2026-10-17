@@ -18,9 +18,8 @@ use typst_pack::opendal::{
 };
 use typst_pack::pack_archive::{DecodeLimits, decode, encode};
 use typst_pack::{
-    CompilationLimits, CompilationOutputSpecification, CompilationResult, FontDisposition, Pack,
-    PackCompilationRequest, PackExtractionSelection, ReadLimits, SvgOutputSpecification,
-    compile_with_limits, plan_pack_extraction,
+    Artifact, CompileRequest, FontDisposition, Output, OutputFormat, Pack, PackExtractionSelection,
+    ReadLimits, compile, plan_pack_extraction,
 };
 
 fn memory() -> Operator {
@@ -668,7 +667,7 @@ fn compilation_artifacts_are_written_at_validated_keys() {
 
     let written = write(&["one.svg", "nested/two.svg"]).unwrap();
     assert_eq!(written[1].0, "pages/nested/two.svg");
-    assert_eq!(get(&op, "pages/one.svg"), result.artifacts()[0].bytes());
+    assert_eq!(get(&op, "pages/one.svg"), result[0].bytes);
 
     let error = |keys: &[&str]| write(keys).unwrap_err().error;
     assert!(matches!(
@@ -688,20 +687,9 @@ fn compilation_artifacts_are_written_at_validated_keys() {
             "{bad:?}"
         );
     }
-
-    let rejected = compilation_result("#let =");
-    let error = block_on(write_compilation_artifacts(
-        &op,
-        "pages/",
-        &rejected,
-        &[],
-        WritePolicy::Overwrite,
-    ))
-    .unwrap_err();
-    assert!(matches!(error.error, Error::ResultNotSucceeded));
 }
 
-fn two_page_result() -> CompilationResult {
+fn two_page_result() -> Vec<Artifact> {
     compilation_result(
         "#set page(width: 10pt, height: 10pt, margin: 0pt)\n\
          #rect(width: 1pt, height: 1pt)\n\
@@ -710,39 +698,27 @@ fn two_page_result() -> CompilationResult {
     )
 }
 
-fn compilation_result(source: &str) -> CompilationResult {
+fn compilation_result(source: &str) -> Vec<Artifact> {
     let pack = Pack::builder("main.typ")
         .file("main.typ", source.as_bytes().to_vec())
         .build()
         .unwrap();
-    compile_with_limits(
-        PackCompilationRequest::new(
-            pack,
-            CompilationOutputSpecification::Svg(SvgOutputSpecification::default()),
-        ),
-        CompilationLimits::DEFAULT,
-    )
-    .unwrap()
-    .result()
-    .unwrap()
-    .clone()
+    compile(&CompileRequest::new(pack, Output::new(OutputFormat::Svg)))
+        .unwrap()
+        .artifacts
 }
 
 // --- Assembly ------------------------------------------------------------
 
 #[cfg(feature = "package-reading")]
 mod assembly {
-    use typst::foundations::Dict;
+    use typst_pack::CreateError;
     use typst_pack::opendal::{Error, OpenDalPackAssembler, Operator, PackageSource};
-    use typst_pack::{DiscoverySpecification, DocumentTime, PackCreationError, TypstTarget};
 
     use super::{block_on, memory, package_manifest, put};
 
     fn assembler(op: &Operator) -> OpenDalPackAssembler {
-        let discovery =
-            DiscoverySpecification::new(TypstTarget::Paged, Dict::new(), DocumentTime::Absent, [])
-                .unwrap();
-        let mut assembler = OpenDalPackAssembler::new(op.clone(), "doc/", "main.typ", discovery);
+        let mut assembler = OpenDalPackAssembler::new(op.clone(), "doc/", "main.typ");
         assembler.packages = vec![
             PackageSource::Trees {
                 operator: op.clone(),
@@ -827,9 +803,7 @@ mod assembly {
 
         match error {
             Error::Creation(error) => match *error {
-                PackCreationError::DependencyDiscoveryRejected(rejection) => {
-                    assert!(!rejection.diagnostics().is_empty());
-                }
+                CreateError::Failed { errors, .. } => assert!(!errors.is_empty()),
                 other => panic!("unexpected {other:?}"),
             },
             other => panic!("unexpected {other:?}"),

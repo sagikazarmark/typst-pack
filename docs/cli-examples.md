@@ -24,6 +24,18 @@ Embed the fonts used by the document:
 typst-pack create project/main.typ project.typk --embed-fonts
 ```
 
+Run additional discovery compiles for inputs that reach other packages or
+fonts. Each `--variant` takes comma-separated `KEY=VALUE` pairs that replace or
+add to the `--input` values for one more compile; the pack requires everything
+any compile used. Values cannot contain commas:
+
+```console
+typst-pack create report.typ report.typk \
+  --input edition=print \
+  --variant edition=web \
+  --variant edition=web,lang=de
+```
+
 Inspect the resulting pack:
 
 ```console
@@ -60,24 +72,26 @@ Extract the project, vendored packages, and embedded fonts:
 typst-pack extract project.typk --all --output extracted/
 ```
 
-## Overrides
+## Inputs
 
-`--override PACK_PATH FILE` replaces an existing project path inside the pack
-for one compilation. `PACK_PATH` must exactly name a contained project file;
-`FILE` is the local replacement. The operation does not modify the pack, add a
-new project path, or replace package and font authority.
+`--input KEY=VALUE` passes a string and `--input-file KEY=PATH` passes the
+bytes of a local file through `sys.inputs`. The pack is not modified: a
+document reads per-recipient data from its inputs instead of from a replaced
+project file. Typst functions that take data accept bytes directly:
 
-Replace one contained image:
+```typ
+#image(sys.inputs.logo, width: 2cm)
+#let customer = json(sys.inputs.customer)
+#str(sys.inputs.note)
+```
 
 ```console
 typst-pack compile invoice.typk customer.pdf \
-  --override assets/logo.png customer-logo.png
+  --input-file logo=customer-logo.png \
+  --input-file customer=customers/acme.json \
+  --input locale=en
 ```
 
-Repeat `--override` to replace several contained files:
-
-```console
-typst-pack compile invoice.typk customer.pdf \
-  --override main.typ variants/customer-main.typ \
-  --override data/customer.json customers/acme.json
-```
+Input files are dependencies: `--deps` lists them with the pack. `create`
+accepts `--input` and `--input-file` too, for discovery compiles that read
+them.

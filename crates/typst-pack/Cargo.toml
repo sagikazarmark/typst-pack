@@ -30,7 +30,8 @@ default = []
 # Internal opt-in for controlled package downloader integration tests. It
 # replaces the downloader egress uses, so it implies the capability it probes.
 _test-package-download-probe = ["egress"]
-# Retain the source context needed by diagnostic presentation adapters.
+# Implement typst-kit's `DiagnosticWorld` for `Sources`, so diagnostics render
+# with source context through `typst_kit::diagnostics::emit`.
 diagnostics = ["typst-kit/emit-diagnostics"]
 # Ship Typst's embedded fonts (Libertinus Serif, New Computer Modern, ...) so
 # packs that only use them render without any font embedding.
@@ -54,7 +55,6 @@ fs = [
     "dep:fontconfig-parser",
     "dep:ignore",
     "typst-kit/system-files",
-    "typst-kit/timer",
 ]
 # Network egress: downloading packages from the Typst Universe registry during
 # filesystem creation, with the custom certificate and package cache directory

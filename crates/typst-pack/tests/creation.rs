@@ -1,4 +1,4 @@
-//! Pack Creation over supplied inputs.
+//! Pack creation over supplied inputs.
 //!
 //! Every test here runs on a build with no crate feature enabled: the inputs
 //! are bytes the caller already holds, and creation reads nothing itself.
@@ -9,79 +9,55 @@ use std::str::FromStr;
 
 use typst::syntax::package::PackageSpec;
 use typst_pack::{
-    DiscoverySpecification, DocumentTime, FontCatalog, Pack, PackCreationError, PackCreationInput,
-    PackCreationOutcome, PackMetadata, PackageCatalog, PackageCatalogError, PackageCatalogIssue,
-    PackageDisposition, PackageReadFailure, PackageReadFailureReason, PackageReadFailures,
-    PackageTree, PackageTreeIssue, ProjectSnapshot, ProjectSnapshotAssembly, TypstTarget, create,
+    CreateError, CreateOutcome, CreateRequest, DocumentTime, Input, Pack, PackMetadata,
+    PackageCatalog, PackageCatalogError, PackageCatalogIssue, PackageDisposition,
+    PackageReadFailure, PackageReadFailureReason, PackageTree, PackageTreeIssue, ProjectSnapshot,
+    RequestIssue, TypstTarget, create,
 };
 
 /// 2023-11-14T22:13:20Z, the Document Time every representative request here
 /// is fixed to.
 const CREATION_TIMESTAMP: i64 = 1_700_000_000;
 
-/// Assembles a project whose entrypoint is `main.typ`.
+/// A project whose entrypoint is `main.typ`.
 fn project(entries: impl IntoIterator<Item = (&'static str, Vec<u8>)>) -> ProjectSnapshot {
-    ProjectSnapshotAssembly::new("main.typ")
-        .assemble(entries)
-        .unwrap()
+    ProjectSnapshot::new("main.typ", entries).unwrap()
 }
 
 fn document(source: &str) -> ProjectSnapshot {
     project([("main.typ", source.as_bytes().to_vec())])
 }
 
-struct TestCreation {
-    project: ProjectSnapshot,
-    packages: PackageCatalog,
-    fonts: FontCatalog,
-    package_failures: PackageReadFailures,
-    discovery: DiscoverySpecification,
-    metadata: Option<PackMetadata>,
+/// Creation of `project` at a fixed document time.
+fn request(project: ProjectSnapshot) -> CreateRequest {
+    let mut request = CreateRequest::new(project);
+    request.options.document_time = DocumentTime::UnixTimestamp(CREATION_TIMESTAMP);
+    request
 }
 
-impl TestCreation {
-    fn new(project: ProjectSnapshot, timestamp: i64) -> Self {
-        Self {
-            project,
-            packages: PackageCatalog::new(),
-            fonts: FontCatalog::new(),
-            package_failures: PackageReadFailures::new(),
-            discovery: DiscoverySpecification::new(
-                TypstTarget::Paged,
-                typst::foundations::Dict::new(),
-                DocumentTime::UnixTimestamp(timestamp),
-                [],
-            )
-            .unwrap(),
-            metadata: None,
-        }
-    }
+/// Chained request setup for the tests below.
+trait Setup {
+    fn packages(self, packages: PackageCatalog) -> Self;
+    #[cfg(feature = "embedded-fonts")]
+    fn fonts(self, fonts: typst_pack::FontCatalog) -> Self;
+    fn failure(self, failure: PackageReadFailure) -> Self;
+    fn metadata(self, metadata: PackMetadata) -> Self;
+}
 
-    fn package_catalog(mut self, packages: PackageCatalog) -> Self {
+impl Setup for CreateRequest {
+    fn packages(mut self, packages: PackageCatalog) -> Self {
         self.packages = packages;
         self
     }
 
     #[cfg(feature = "embedded-fonts")]
-    fn font_catalog(mut self, fonts: FontCatalog) -> Self {
+    fn fonts(mut self, fonts: typst_pack::FontCatalog) -> Self {
         self.fonts = fonts;
         self
     }
 
-    fn package_failure(mut self, failure: PackageReadFailure) -> Self {
+    fn failure(mut self, failure: PackageReadFailure) -> Self {
         self.package_failures.insert(failure);
-        self
-    }
-
-    fn discovery(
-        mut self,
-        target: TypstTarget,
-        inputs: typst::foundations::Dict,
-        features: impl IntoIterator<Item = typst::Feature>,
-    ) -> Self {
-        self.discovery =
-            DiscoverySpecification::new(target, inputs, self.discovery.document_time(), features)
-                .unwrap();
         self
     }
 
@@ -89,29 +65,26 @@ impl TestCreation {
         self.metadata = Some(metadata);
         self
     }
-
-    fn input(&self) -> PackCreationInput<'_> {
-        PackCreationInput {
-            project: &self.project,
-            packages: &self.packages,
-            fonts: &self.fonts,
-            package_failures: &self.package_failures,
-            discovery: &self.discovery,
-            metadata: self.metadata.as_ref(),
-        }
-    }
 }
 
 struct Created {
     pack: Pack,
-    warnings: ecow::EcoVec<typst::diag::SourceDiagnostic>,
+    warnings: Vec<typst::diag::SourceDiagnostic>,
+}
+
+/// The errors of a creation whose discovery failed.
+fn failed(request: &CreateRequest) -> Vec<typst::diag::SourceDiagnostic> {
+    match create(request) {
+        Err(CreateError::Failed { errors, .. }) => errors,
+        other => panic!("expected a failed discovery, got {other:?}"),
+    }
 }
 
 /// The Pack of an invocation every tree of which is already supplied.
-fn issue(request: &TestCreation) -> Created {
-    match create(request.input()).unwrap() {
-        PackCreationOutcome::Created { pack, warnings } => Created { pack, warnings },
-        PackCreationOutcome::MissingPackageSpecifications(missing) => {
+fn issue(request: &CreateRequest) -> Created {
+    match create(request).unwrap() {
+        CreateOutcome::Created { pack, warnings, .. } => Created { pack, warnings },
+        CreateOutcome::MissingPackages(missing) => {
             panic!("every tree was supplied, yet creation reported {missing:?} as missing")
         }
     }
@@ -164,7 +137,7 @@ fn a_pack_is_created_from_supplied_bytes_alone() {
         ("data/notes.txt", b"notes".to_vec()),
     ]);
 
-    let created = issue(&TestCreation::new(snapshot, CREATION_TIMESTAMP));
+    let created = issue(&request(snapshot));
 
     assert_eq!(created.pack.entrypoint(), "main.typ");
     // Project files come from the snapshot, never from compiler observations:
@@ -185,7 +158,7 @@ fn a_pack_is_created_from_supplied_bytes_alone() {
 fn representative_compile_warnings_are_returned_with_the_pack() {
     let snapshot = document("#set text(font: \"Definitely Missing\")\nWarning");
 
-    let issued = issue(&TestCreation::new(snapshot, CREATION_TIMESTAMP));
+    let issued = issue(&request(snapshot));
 
     assert!(
         issued
@@ -201,13 +174,7 @@ fn representative_compile_warnings_are_returned_with_the_pack() {
 fn a_representative_request_that_does_not_compile_issues_no_pack() {
     let snapshot = document("#import \"missing.typ\": value\n#value");
 
-    let request = TestCreation::new(snapshot, CREATION_TIMESTAMP);
-    let error = create(request.input()).unwrap_err();
-
-    assert!(
-        matches!(&error, PackCreationError::DependencyDiscoveryRejected(rejection) if !rejection.diagnostics().is_empty()),
-        "{error}"
-    );
+    assert!(!failed(&request(snapshot)).is_empty());
 }
 
 #[test]
@@ -218,17 +185,15 @@ fn discovery_rejection_retains_complete_diagnostics_and_warnings() {
          #context { assert(false, message: \"first rejection\") }\n\
          #context { assert(false, message: \"second rejection\") }",
     );
-    let request = TestCreation::new(snapshot, CREATION_TIMESTAMP);
-
-    let PackCreationError::DependencyDiscoveryRejected(rejection) =
-        create(request.input()).unwrap_err()
+    let Err(CreateError::Failed {
+        errors, warnings, ..
+    }) = create(&request(snapshot))
     else {
         panic!("the rejected discovery must retain its compiler evidence");
     };
 
     assert_eq!(
-        rejection
-            .diagnostics()
+        errors
             .iter()
             .map(|diagnostic| diagnostic.message.as_str())
             .collect::<Vec<_>>(),
@@ -238,12 +203,10 @@ fn discovery_rejection_retains_complete_diagnostics_and_warnings() {
         ]
     );
     assert!(
-        rejection
-            .warnings()
+        warnings
             .iter()
             .any(|warning| warning.message.contains("unknown font family")),
-        "{:?}",
-        rejection.warnings()
+        "{warnings:?}"
     );
 }
 
@@ -256,32 +219,33 @@ fn the_creation_timestamp_fixes_the_representative_document_time() {
          #assert.eq(today.day(), 14)\n",
     );
 
-    issue(&TestCreation::new(snapshot, CREATION_TIMESTAMP));
+    issue(&request(snapshot));
 }
 
 #[test]
 fn an_out_of_range_creation_timestamp_is_rejected() {
-    let error = DiscoverySpecification::new(
-        TypstTarget::Paged,
-        typst::foundations::Dict::new(),
-        DocumentTime::UnixTimestamp(i64::MAX),
-        [],
-    )
-    .unwrap_err();
+    let mut request = request(document("Hello"));
+    request.options.document_time = DocumentTime::UnixTimestamp(i64::MAX);
+    request.options.features.push(typst::Feature::Bundle);
 
-    assert!(matches!(
-        error,
-        typst_pack::DiscoverySpecificationError::InvalidDocumentTimestamp
-    ));
+    let Err(CreateError::InvalidRequest(issues)) = create(&request) else {
+        panic!("an invalid request was compiled");
+    };
+    assert_eq!(
+        issues,
+        [
+            RequestIssue::InvalidDocumentTimestamp,
+            RequestIssue::UnsupportedBundleFeature
+        ]
+    );
 }
 
 #[test]
 fn the_request_is_reusable_and_creation_retains_nothing() {
-    let request =
-        TestCreation::new(document("#rect(width: 5pt, height: 5pt)"), 0).metadata(PackMetadata {
-            name: Some("Reused".into()),
-            ..PackMetadata::default()
-        });
+    let request = request(document("#rect(width: 5pt, height: 5pt)")).metadata(PackMetadata {
+        name: Some("Reused".into()),
+        ..PackMetadata::default()
+    });
 
     let first = issue(&request);
     let second = issue(&request);
@@ -298,45 +262,68 @@ fn the_request_is_reusable_and_creation_retains_nothing() {
 
 #[test]
 fn typst_inputs_reach_the_representative_request() {
-    let snapshot = document("#assert.eq(sys.inputs.at(\"key\"), \"value\")");
-    let mut inputs = typst::foundations::Dict::new();
-    inputs.insert("key".into(), typst::foundations::Value::Str("value".into()));
+    let source = "#assert.eq(sys.inputs.at(\"key\"), \"value\")\n\
+                  #assert.eq(sys.inputs.data, bytes((1, 2)))";
+    let mut with_inputs = request(document(source));
+    with_inputs.options.inputs = vec![
+        ("key".into(), Input::from("value")),
+        ("data".into(), Input::Bytes(vec![1, 2])),
+    ];
+    issue(&with_inputs);
 
-    issue(&TestCreation::new(snapshot, CREATION_TIMESTAMP).discovery(
-        TypstTarget::Paged,
-        inputs,
-        [],
-    ));
-
-    let snapshot = document("#assert.eq(sys.inputs.at(\"key\"), \"value\")");
-    let request = TestCreation::new(snapshot, CREATION_TIMESTAMP);
-    let error = create(request.input()).unwrap_err();
-    assert!(
-        matches!(error, PackCreationError::DependencyDiscoveryRejected(_)),
-        "{error}"
-    );
+    assert!(!failed(&request(document(source))).is_empty());
 }
 
 #[test]
-fn the_target_and_engine_features_belong_to_the_representative_request() {
-    let snapshot = document("#html.elem(\"p\")[Paragraph]");
+fn the_html_target_enables_the_html_feature_itself() {
+    let source = "#html.elem(\"p\")[Paragraph]";
+    assert!(!failed(&request(document(source))).is_empty());
 
-    let request = TestCreation::new(snapshot, CREATION_TIMESTAMP);
-    let error = create(request.input()).unwrap_err();
-    assert!(
-        matches!(error, PackCreationError::DependencyDiscoveryRejected(_)),
-        "{error}"
-    );
+    let mut html = request(document(source));
+    html.target = TypstTarget::Html;
+    let issued = issue(&html);
 
-    let snapshot = document("#html.elem(\"p\")[Paragraph]");
-    let issued = issue(&TestCreation::new(snapshot, CREATION_TIMESTAMP).discovery(
-        TypstTarget::Html,
-        typst::foundations::Dict::new(),
-        [typst::Feature::Html],
+    // The target fixes the discovery run only; it does not become Pack state.
+    assert_eq!(issued.pack.entrypoint(), "main.typ");
+}
+
+#[test]
+fn variants_union_the_packages_and_fonts_every_input_set_reaches() {
+    let source = "#let edition = sys.inputs.at(\"edition\", default: \"alpha\")\n\
+                  #if edition == \"alpha\" { import \"@local/alpha:1.0.0\": value; value }\n\
+                  #if edition == \"beta\" { import \"@local/beta:1.0.0\": value; value }";
+    let catalog = || {
+        package_catalog([
+            embedded_package(spec("alpha"), package_files("alpha", "#let value = 1")),
+            embedded_package(spec("beta"), package_files("beta", "#let value = 2")),
+        ])
+    };
+    let required = |request: &CreateRequest| {
+        let pack = issue(request).pack;
+        let specs = pack.package_requirements().iter();
+        specs
+            .map(|requirement| requirement.spec.name.to_string())
+            .collect::<Vec<_>>()
+    };
+
+    let mut base = request(document(source)).packages(catalog());
+    assert_eq!(required(&base), ["alpha"]);
+    base.variants = vec![vec![("edition".into(), Input::from("beta"))]];
+    assert_eq!(required(&base), ["alpha", "beta"]);
+
+    // A package only one variant reaches is reported missing like any other.
+    base.packages = PackageCatalog::new();
+    assert!(matches!(
+        create(&base).unwrap(),
+        CreateOutcome::MissingPackages(missing) if missing == [spec("alpha"), spec("beta")]
     ));
 
-    // The target fixes that one run only; it does not become Pack state.
-    assert_eq!(issued.pack.entrypoint(), "main.typ");
+    // A variant that does not compile fails creation.
+    let mut broken = request(document(
+        "#assert.eq(sys.inputs.at(\"ok\", default: \"yes\"), \"yes\")",
+    ));
+    broken.variants = vec![vec![("ok".into(), Input::from("no"))]];
+    assert!(!failed(&broken).is_empty());
 }
 
 #[test]
@@ -350,20 +337,18 @@ fn package_trees_are_supplied_per_specification_with_their_own_disposition() {
          #rect(width: (value + other) * 1pt, height: 1pt)",
     );
 
-    let issued = issue(
-        &TestCreation::new(snapshot, CREATION_TIMESTAMP).package_catalog(package_catalog([
-            embedded_package(
-                embedded.clone(),
-                package_files("embedded", "#let value = 3"),
-            ),
-            package_entry(
-                external.clone(),
-                package_files("external", "#let other = 4"),
-                PackageDisposition::External,
-            ),
-            embedded_package(unused.clone(), package_files("unused", "#let unused = 5")),
-        ])),
-    );
+    let issued = issue(&request(snapshot).packages(package_catalog([
+        embedded_package(
+            embedded.clone(),
+            package_files("embedded", "#let value = 3"),
+        ),
+        package_entry(
+            external.clone(),
+            package_files("external", "#let other = 4"),
+            PackageDisposition::External,
+        ),
+        embedded_package(unused.clone(), package_files("unused", "#let unused = 5")),
+    ])));
 
     // Compiler observations select package requirements: the supplied tree the
     // document never imported is not one.
@@ -389,13 +374,13 @@ fn package_trees_are_supplied_per_specification_with_their_own_disposition() {
 fn a_package_no_supplied_tree_covers_is_reported_as_a_resumable_outcome() {
     let snapshot = document("#import \"@local/absent:1.0.0\": value\n#value");
 
-    let request = TestCreation::new(snapshot, CREATION_TIMESTAMP);
-    let outcome = create(request.input()).unwrap();
+    let request = request(snapshot);
+    let outcome = create(&request).unwrap();
 
     // A normal outcome, not a failure, and no Pack: the caller resolves what it
     // names and invokes creation again. The specification is the one the
     // compiler asked for, fully versioned, so no diagnostic text is parsed.
-    let PackCreationOutcome::MissingPackageSpecifications(missing) = outcome else {
+    let CreateOutcome::MissingPackages(missing) = outcome else {
         panic!("the package no tree covers is reported, not packed");
     };
     assert_eq!(
@@ -414,11 +399,9 @@ fn missing_package_specifications_are_nonempty_deduplicated_and_canonical() {
          #context { import \"@local/alpha:1.0.0\": value; value }\n\
          #context { import \"@local/zeta:1.0.0\": value; value }",
     );
-    let request = TestCreation::new(snapshot, CREATION_TIMESTAMP);
+    let request = request(snapshot);
 
-    let PackCreationOutcome::MissingPackageSpecifications(missing) =
-        create(request.input()).unwrap()
-    else {
+    let CreateOutcome::MissingPackages(missing) = create(&request).unwrap() else {
         panic!("missing package trees must produce a resumable outcome");
     };
 
@@ -453,14 +436,13 @@ fn resume(source: &str) -> (Created, Vec<CatalogEntry>) {
     // Bounded so that a loop making no progress fails instead of hanging; the
     // number of rounds it actually takes is not asserted.
     for _ in 0..8 {
-        let request = TestCreation::new(document(source), CREATION_TIMESTAMP)
-            .package_catalog(package_catalog(resolved.iter().cloned()));
-        let outcome = create(request.input()).unwrap();
+        let request = request(document(source)).packages(package_catalog(resolved.iter().cloned()));
+        let outcome = create(&request).unwrap();
         match outcome {
-            PackCreationOutcome::Created { pack, warnings } => {
+            CreateOutcome::Created { pack, warnings, .. } => {
                 return (Created { pack, warnings }, resolved);
             }
-            PackCreationOutcome::MissingPackageSpecifications(missing) => {
+            CreateOutcome::MissingPackages(missing) => {
                 assert!(
                     !missing.is_empty(),
                     "a missing outcome names a specification"
@@ -498,10 +480,7 @@ fn a_project_needing_several_packages_completes_through_repeated_invocation() {
 fn a_resumed_creation_issues_the_pack_one_invocation_would_have() {
     let (resumed, resolved) = resume(CHAINED_PACKAGES);
 
-    let single = issue(
-        &TestCreation::new(document(CHAINED_PACKAGES), CREATION_TIMESTAMP)
-            .package_catalog(package_catalog(resolved)),
-    );
+    let single = issue(&request(document(CHAINED_PACKAGES)).packages(package_catalog(resolved)));
 
     assert_eq!(resumed.pack.identity(), single.pack.identity());
 }
@@ -515,15 +494,10 @@ fn a_specification_declared_unresolvable_fails_the_request_that_needed_it() {
             detail: Some("connection refused".to_owned()),
         },
     );
-    let request = TestCreation::new(document(source), CREATION_TIMESTAMP).package_failure(failure);
-    let error = create(request.input()).unwrap_err();
+    let errors = failed(&request(document(source)).failure(failure));
 
     // The caller's own reason reaches the import that asked for the package,
     // which is the only place it and a source location can meet.
-    let PackCreationError::DependencyDiscoveryRejected(rejection) = error else {
-        panic!("a declared-unresolvable specification did not fail the request: {error}");
-    };
-    let errors = rejection.diagnostics();
     assert_eq!(
         errors
             .iter()
@@ -537,28 +511,26 @@ fn a_specification_declared_unresolvable_fails_the_request_that_needed_it() {
 #[test]
 fn a_declared_specification_is_no_longer_reported_as_missing() {
     let source = "#import \"@local/first:1.0.0\": first\n#first";
-    let request = TestCreation::new(document(source), CREATION_TIMESTAMP).package_failure(
-        PackageReadFailure::new(spec("first"), PackageReadFailureReason::NotFound),
-    );
+    let request = request(document(source)).failure(PackageReadFailure::new(
+        spec("first"),
+        PackageReadFailureReason::NotFound,
+    ));
 
     // Reporting it again would ask the caller for what it said it cannot
     // supply, which is a loop that never progresses.
-    assert!(matches!(
-        create(request.input()).unwrap_err(),
-        PackCreationError::DependencyDiscoveryRejected(_)
-    ));
+    assert!(!failed(&request).is_empty());
 }
 
 #[test]
 fn a_tree_supplied_for_a_declared_specification_takes_precedence() {
     let source = "#import \"@local/first:1.0.0\": first\n#rect(width: first * 1pt, height: 1pt)";
     let issued = issue(
-        &TestCreation::new(document(source), CREATION_TIMESTAMP)
-            .package_failure(PackageReadFailure::new(
+        &request(document(source))
+            .failure(PackageReadFailure::new(
                 spec("first"),
                 PackageReadFailureReason::NotFound,
             ))
-            .package_catalog(package_catalog([embedded_package(
+            .packages(package_catalog([embedded_package(
                 spec("first"),
                 package_files("first", "#let first = 1"),
             )])),
@@ -661,8 +633,7 @@ fn a_tree_declaring_its_specification_is_accepted_whatever_else_it_declares() {
     ];
 
     let issued = issue(
-        &TestCreation::new(snapshot, CREATION_TIMESTAMP)
-            .package_catalog(package_catalog([embedded_package(declared.clone(), files)])),
+        &request(snapshot).packages(package_catalog([embedded_package(declared.clone(), files)])),
     );
 
     assert!(issued.pack.has_package(&declared));
@@ -698,13 +669,13 @@ fn a_supplied_tree_path_that_cannot_name_a_package_file_is_rejected() {
 #[cfg(feature = "embedded-fonts")]
 mod fonts {
     use typst_pack::{
-        Digest, FontCatalog, FontCatalogEntry, FontContainer, FontDisposition, PackCreationOutcome,
+        CreateOutcome, Digest, FontCatalog, FontCatalogEntry, FontContainer, FontDisposition,
         create,
     };
 
     use crate::{
-        CREATION_TIMESTAMP, CatalogEntry, Created, TestCreation, document, embedded_package, issue,
-        package_catalog, package_files, spec,
+        CatalogEntry, Created, Setup, document, embedded_package, issue, package_catalog,
+        package_files, request, spec,
     };
 
     /// The exact bytes of the Font Container Typst ships the given family in.
@@ -731,7 +702,7 @@ mod fonts {
             ),
         ]);
 
-        let issued = issue(&TestCreation::new(snapshot, CREATION_TIMESTAMP).font_catalog(catalog));
+        let issued = issue(&request(snapshot).fonts(catalog));
 
         let requirements = issued.pack.font_requirements();
         let disposition = |data: &[u8]| {
@@ -766,7 +737,7 @@ mod fonts {
             FontCatalogEntry::new(FontContainer::new(mono).unwrap(), FontDisposition::Embedded),
         ]);
 
-        let issued = issue(&TestCreation::new(snapshot, CREATION_TIMESTAMP).font_catalog(catalog));
+        let issued = issue(&request(snapshot).fonts(catalog));
 
         let requirements = issued.pack.font_requirements();
         assert_eq!(requirements.len(), 1);
@@ -781,9 +752,7 @@ mod fonts {
             FontCatalogEntry::new(serif, FontDisposition::Embedded),
         ]);
 
-        let issued = issue(
-            &TestCreation::new(document("Selected text"), CREATION_TIMESTAMP).font_catalog(catalog),
-        );
+        let issued = issue(&request(document("Selected text")).fonts(catalog));
 
         assert_eq!(issued.pack.font_requirements().len(), 1);
         assert!(!issued.pack.font_requirements()[0].embedded);
@@ -807,14 +776,14 @@ mod fonts {
 
         let mut resolved: Vec<CatalogEntry> = Vec::new();
         let resumed = loop {
-            let request = TestCreation::new(document(source), CREATION_TIMESTAMP)
-                .font_catalog(catalog.clone())
-                .package_catalog(package_catalog(resolved.iter().cloned()));
-            match create(request.input()).unwrap() {
-                PackCreationOutcome::Created { pack, warnings } => {
+            let request = request(document(source))
+                .fonts(catalog.clone())
+                .packages(package_catalog(resolved.iter().cloned()));
+            match create(&request).unwrap() {
+                CreateOutcome::Created { pack, warnings, .. } => {
                     break Created { pack, warnings };
                 }
-                PackCreationOutcome::MissingPackageSpecifications(missing) => {
+                CreateOutcome::MissingPackages(missing) => {
                     resolved.extend(missing.iter().map(|missing| {
                         embedded_package(
                             missing.clone(),
@@ -826,9 +795,9 @@ mod fonts {
         };
 
         let single = issue(
-            &TestCreation::new(document(source), CREATION_TIMESTAMP)
-                .font_catalog(catalog)
-                .package_catalog(package_catalog(resolved)),
+            &request(document(source))
+                .fonts(catalog)
+                .packages(package_catalog(resolved)),
         );
 
         assert_eq!(

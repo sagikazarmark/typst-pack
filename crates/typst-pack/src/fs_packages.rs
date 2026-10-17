@@ -1,16 +1,9 @@
-//! The package-reading half of Pack Assembly for the reference filesystem
-//! Pack Assembler.
-//!
-//! Reading is resume-driven: the core reports the exact specifications its
-//! representative request read and was not given, and the adapter obtains each
-//! of them through the configured Package Authority — local package
-//! directories, then the package cache, then a download unless creation is
-//! offline or the build has no egress compiled in to download with.
+//! Package reading for the filesystem packer: the local package directory,
+//! then the package cache, then, only when downloads were enabled in a build
+//! with `egress`, the Typst Universe registry.
 
 use std::path::{Path, PathBuf};
-use std::sync::Mutex;
 
-use typst::foundations::Bytes;
 use typst::syntax::package::PackageSpec;
 use typst_kit::packages::FsPackages;
 
@@ -42,172 +35,58 @@ pub fn read_filesystem_package(
     PackageTree::from_owned_entries(entries).map_err(FilesystemReadError::PackageTree)
 }
 
-/// A typed failure from the concrete filesystem Package Authority.
-///
-/// The stable Package Read Failure remains available through
-/// [`Self::failure`], while adapter and transformation failures retain their
-/// authoritative lower-module source.
-#[derive(Debug, thiserror::Error)]
-#[non_exhaustive]
-pub enum FilesystemPackageAuthorityReadError {
-    #[error(transparent)]
-    Unavailable(PackageReadFailure),
-    #[error("{failure}: {source}")]
-    Filesystem {
-        failure: PackageReadFailure,
-        #[source]
-        source: Box<FilesystemReadError>,
-    },
-    #[cfg(feature = "egress")]
-    #[error("{failure}: {source}")]
-    Download {
-        failure: PackageReadFailure,
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-}
-
-impl FilesystemPackageAuthorityReadError {
-    /// The stable exact-specification failure represented by this adapter error.
-    pub fn failure(&self) -> &PackageReadFailure {
-        match self {
-            Self::Unavailable(failure) | Self::Filesystem { failure, .. } => failure,
-            #[cfg(feature = "egress")]
-            Self::Download { failure, .. } => failure,
-        }
-    }
-}
-
-/// The concrete Package Authority used by the reference filesystem workflows.
-///
-/// Local package data, package cache, offline policy, and registry read
-/// remain explicit here rather than being fallback behavior in Pack Creation.
-#[derive(Debug)]
-pub struct FilesystemPackageAuthority {
+/// Where filesystem packing and resolution read packages from: the local
+/// package directory, then the package cache, then, when configured, the
+/// official registry.
+#[derive(Clone, Debug)]
+pub(crate) struct PackageDirs {
     data: Option<FsPackages>,
     cache: Option<FsPackages>,
-    offline: bool,
+    pub(crate) registry: Option<Registry>,
     limits: ReadLimits,
-    #[cfg(feature = "egress")]
-    certificate: Option<PathBuf>,
 }
 
-impl FilesystemPackageAuthority {
-    /// Configures local and cache package directories plus offline policy.
-    pub fn new(
-        package_path: Option<&Path>,
-        package_cache_path: Option<&Path>,
-        offline: bool,
-    ) -> Self {
-        Self::with_limits(
-            package_path,
-            package_cache_path,
-            offline,
-            crate::FilesystemReadLimits::default().packages,
-        )
-    }
+/// A package tree read from the filesystem or registry.
+pub(crate) struct Found {
+    pub(crate) tree: PackageTree,
+    /// The directory the tree was read from or cached to.
+    pub(crate) root: Option<PathBuf>,
+}
 
-    pub(crate) fn with_limits(
+impl PackageDirs {
+    pub(crate) fn new(
         package_path: Option<&Path>,
         package_cache_path: Option<&Path>,
-        offline: bool,
+        registry: Option<Registry>,
         limits: ReadLimits,
     ) -> Self {
-        let data = match package_path {
-            Some(path) => Some(FsPackages::new(path)),
-            None => FsPackages::system_data(),
-        };
-        let cache = match package_cache_path {
-            Some(path) => Some(FsPackages::new(path)),
-            None => FsPackages::system_cache(),
-        };
         Self {
-            data,
-            cache,
-            offline,
+            data: package_path
+                .map_or_else(FsPackages::system_data, |path| Some(FsPackages::new(path))),
+            cache: package_cache_path
+                .map_or_else(FsPackages::system_cache, |path| Some(FsPackages::new(path))),
+            registry,
             limits,
-            #[cfg(feature = "egress")]
-            certificate: None,
         }
     }
 
-    /// Configures a custom CA certificate for registry downloads.
-    #[cfg(feature = "egress")]
-    pub fn certificate(mut self, certificate: Option<PathBuf>) -> Self {
-        self.certificate = certificate;
-        self
-    }
-
-    /// Reads one exact validated tree and identifies its filesystem root
-    /// when the bytes came from or were written to one.
-    pub fn read(
-        &self,
-        spec: &PackageSpec,
-    ) -> Result<ReadPackage, FilesystemPackageAuthorityReadError> {
-        if let Some(read) = self.read_from(&self.data, spec)? {
-            return Ok(read);
+    /// Reads one exact package tree.
+    pub(crate) fn read(&self, spec: &PackageSpec) -> Result<Found, PackageReadFailure> {
+        for packages in [&self.data, &self.cache].into_iter().flatten() {
+            let Some(root) = packages.obtain(spec) else {
+                continue;
+            };
+            let tree = read_filesystem_package(root.path(), self.limits)
+                .map_err(|error| other_failure(spec, error.to_string()))?;
+            return Ok(Found {
+                tree,
+                root: Some(root.path().to_owned()),
+            });
         }
-        if let Some(read) = self.read_from(&self.cache, spec)? {
-            return Ok(read);
+        match &self.registry {
+            Some(registry) => registry.read(spec, self.cache.as_ref(), self.limits),
+            None => Err(not_found(spec)),
         }
-        // A build without egress has no transport, so it behaves as offline.
-        if self.offline || cfg!(not(feature = "egress")) {
-            return Err(FilesystemPackageAuthorityReadError::Unavailable(not_found(
-                spec,
-            )));
-        }
-        #[cfg(feature = "egress")]
-        {
-            egress::read_from_registry(self, spec)
-        }
-        #[cfg(not(feature = "egress"))]
-        {
-            unreachable!("a build without egress behaves as offline")
-        }
-    }
-
-    fn read_from(
-        &self,
-        packages: &Option<FsPackages>,
-        spec: &PackageSpec,
-    ) -> Result<Option<ReadPackage>, FilesystemPackageAuthorityReadError> {
-        let Some(root) = packages.as_ref().and_then(|packages| packages.obtain(spec)) else {
-            return Ok(None);
-        };
-        let tree = read_filesystem_package(root.path(), self.limits).map_err(|source| {
-            FilesystemPackageAuthorityReadError::Filesystem {
-                failure: other_failure(spec, source.to_string()),
-                source: Box::new(source),
-            }
-        })?;
-        Ok(Some(ReadPackage {
-            tree,
-            root: Some(root.path().to_owned()),
-        }))
-    }
-}
-
-/// One successful read from the concrete filesystem Package Authority.
-#[derive(Debug)]
-pub struct ReadPackage {
-    tree: PackageTree,
-    root: Option<PathBuf>,
-}
-
-impl ReadPackage {
-    /// The validated Package Tree produced by this read.
-    pub fn tree(&self) -> &PackageTree {
-        &self.tree
-    }
-
-    /// The package's filesystem root, when one backs dependency reporting.
-    pub fn root(&self) -> Option<&Path> {
-        self.root.as_deref()
-    }
-
-    /// Separates the validated tree from optional filesystem source evidence.
-    pub fn into_parts(self) -> (PackageTree, Option<PathBuf>) {
-        (self.tree, self.root)
     }
 }
 
@@ -224,38 +103,25 @@ fn other_failure(spec: &PackageSpec, detail: impl Into<String>) -> PackageReadFa
     )
 }
 
-/// Exact Package Trees retained for representative-compile diagnostics.
-pub(crate) struct ReadPackages {
-    trees: Mutex<Vec<(PackageSpec, PackageTree)>>,
-}
+/// Registry downloads are not compiled into a build without `egress`.
+#[cfg(not(feature = "egress"))]
+#[derive(Clone, Debug)]
+pub(crate) enum Registry {}
 
-impl ReadPackages {
-    pub(crate) fn new() -> Self {
-        Self {
-            trees: Mutex::new(Vec::new()),
-        }
-    }
-
-    pub(crate) fn record(&self, spec: PackageSpec, tree: PackageTree) {
-        self.trees
-            .lock()
-            .expect("read package lock poisoned")
-            .push((spec, tree));
-    }
-
-    /// The exact bytes read for one package file, which is all creation
-    /// diagnostics and timing spans may still resolve a package source from.
-    pub(crate) fn file(&self, spec: &PackageSpec, path: &str) -> Option<Bytes> {
-        self.trees
-            .lock()
-            .expect("read package lock poisoned")
-            .iter()
-            .find(|(candidate, _)| candidate == spec)?
-            .1
-            .shared_file(path)
-            .map(|data| data.to_typst())
+#[cfg(not(feature = "egress"))]
+impl Registry {
+    fn read(
+        &self,
+        _: &PackageSpec,
+        _: Option<&FsPackages>,
+        _: ReadLimits,
+    ) -> Result<Found, PackageReadFailure> {
+        match *self {}
     }
 }
+
+#[cfg(feature = "egress")]
+pub(crate) use egress::Registry;
 
 /// Registry downloads, compiled only into builds with network egress.
 #[cfg(feature = "egress")]
@@ -268,72 +134,71 @@ mod egress {
     use typst::syntax::package::PackageSpec;
     use typst_kit::downloader::Downloader;
 
-    use super::{
-        FilesystemPackageAuthority, FilesystemPackageAuthorityReadError, ReadPackage, not_found,
-        other_failure,
-    };
+    use super::{Found, not_found, other_failure};
     use crate::package_catalog::PackageTree;
     use crate::package_failure::{PackageReadFailure, PackageReadFailureReason};
     use crate::{
         PackageArchiveReadError, PackageReadError, ReadLimits, expand_package_archive,
         package_archive_url, read_package_archive,
     };
+    use typst_kit::packages::FsPackages;
 
     const USER_AGENT: &str = concat!("typst-pack/", env!("CARGO_PKG_VERSION"));
 
     #[cfg(all(feature = "_test-package-download-probe", debug_assertions))]
     const PACKAGE_DOWNLOAD_PROBE_ENV: &str = "TYPST_PACK_TEST_PACKAGE_DOWNLOAD_PROBE";
 
-    pub(super) fn read_from_registry(
-        authority: &FilesystemPackageAuthority,
-        spec: &PackageSpec,
-    ) -> Result<ReadPackage, FilesystemPackageAuthorityReadError> {
-        let failed = |failure, source: Box<dyn std::error::Error + Send + Sync>| {
-            FilesystemPackageAuthorityReadError::Download { failure, source }
-        };
-        let url =
-            package_archive_url(spec).map_err(|source| failed(not_found(spec), source.into()))?;
-        let downloader = RustlsDownloader::new(USER_AGENT, authority.certificate.clone());
-        let (known_size, reader) = downloader.stream(spec, &url).map_err(|source| {
-            // Do not turn a bounded archive request into an unprofiled package
-            // index download merely to refine NotFound into VersionNotFound.
-            let failure = if source.kind() == std::io::ErrorKind::NotFound {
-                not_found(spec)
-            } else {
-                PackageReadFailure::new(
-                    spec.clone(),
-                    PackageReadFailureReason::NetworkFailed {
-                        detail: Some(source.to_string()),
-                    },
-                )
-            };
-            failed(failure, source.into())
-        })?;
-        let tree = read_registry_tree(
-            spec,
-            reader,
-            known_size.map(|size| size as u64),
-            authority.limits,
-        )?;
+    /// Downloads from the official registry over TLS.
+    #[derive(Clone, Debug)]
+    pub(crate) struct Registry {
+        pub(crate) certificate: Option<PathBuf>,
+    }
 
-        // typst-kit stages the tree in a temporary sibling directory and
-        // renames it into place, so a failed or concurrent download never
-        // leaves a partial package in the cache.
-        let root = if let Some(cache) = &authority.cache {
-            cache
-                .store(spec, |directory| write_tree(directory, &tree))
-                .map_err(|source| {
-                    failed(other_failure(spec, source.to_string()), Box::new(source))
-                })?;
-            Some(
-                cache
-                    .path()
-                    .join(crate::read_layout::package_tree_key(spec)),
-            )
-        } else {
-            None
-        };
-        Ok(ReadPackage { tree, root })
+    impl Registry {
+        pub(super) fn read(
+            &self,
+            spec: &PackageSpec,
+            cache: Option<&FsPackages>,
+            limits: ReadLimits,
+        ) -> Result<Found, PackageReadFailure> {
+            let url = package_archive_url(spec).map_err(|_| not_found(spec))?;
+            let downloader = RustlsDownloader::new(USER_AGENT, self.certificate.clone());
+            let (known_size, reader) = downloader.stream(spec, &url).map_err(|source| {
+                // Do not turn a bounded archive request into an unprofiled
+                // package index download merely to refine NotFound into
+                // VersionNotFound.
+                if source.kind() == std::io::ErrorKind::NotFound {
+                    not_found(spec)
+                } else {
+                    PackageReadFailure::new(
+                        spec.clone(),
+                        PackageReadFailureReason::NetworkFailed {
+                            detail: Some(source.to_string()),
+                        },
+                    )
+                }
+            })?;
+            let tree =
+                read_registry_tree(spec, reader, known_size.map(|size| size as u64), limits)?;
+
+            // typst-kit stages the tree in a temporary sibling directory and
+            // renames it into place, so a failed or concurrent download never
+            // leaves a partial package in the cache.
+            let root = match cache {
+                Some(cache) => {
+                    cache
+                        .store(spec, |directory| write_tree(directory, &tree))
+                        .map_err(|source| other_failure(spec, source.to_string()))?;
+                    Some(
+                        cache
+                            .path()
+                            .join(crate::read_layout::package_tree_key(spec)),
+                    )
+                }
+                None => None,
+            };
+            Ok(Found { tree, root })
+        }
     }
 
     pub(super) fn read_registry_tree(
@@ -341,13 +206,10 @@ mod egress {
         reader: impl Read,
         known_size: Option<u64>,
         limits: ReadLimits,
-    ) -> Result<PackageTree, FilesystemPackageAuthorityReadError> {
-        let failed = |failure, source: Box<dyn std::error::Error + Send + Sync>| {
-            FilesystemPackageAuthorityReadError::Download { failure, source }
-        };
+    ) -> Result<PackageTree, PackageReadFailure> {
         let archive =
             read_package_archive(reader, known_size, limits.max_file_bytes).map_err(|source| {
-                let failure = match &source {
+                match &source {
                     PackageArchiveReadError::Read(error) => PackageReadFailure::new(
                         spec.clone(),
                         PackageReadFailureReason::NetworkFailed {
@@ -355,22 +217,18 @@ mod egress {
                         },
                     ),
                     PackageArchiveReadError::Limit(error) => other_failure(spec, error.to_string()),
-                };
-                failed(failure, Box::new(source))
+                }
             })?;
-        expand_package_archive(spec.clone(), &archive, limits).map_err(|source| {
-            let failure = match &source {
-                PackageReadError::UnservedNamespace { .. } => not_found(spec),
-                PackageReadError::Limit { .. } => other_failure(spec, source.to_string()),
-                PackageReadError::MalformedArchive { .. }
-                | PackageReadError::InvalidPackageTree { .. } => PackageReadFailure::new(
-                    spec.clone(),
-                    PackageReadFailureReason::MalformedArchive {
-                        detail: Some(source.to_string()),
-                    },
-                ),
-            };
-            failed(failure, Box::new(source))
+        expand_package_archive(spec.clone(), &archive, limits).map_err(|source| match &source {
+            PackageReadError::UnservedNamespace { .. } => not_found(spec),
+            PackageReadError::Limit { .. } => other_failure(spec, source.to_string()),
+            PackageReadError::MalformedArchive { .. }
+            | PackageReadError::InvalidPackageTree { .. } => PackageReadFailure::new(
+                spec.clone(),
+                PackageReadFailureReason::MalformedArchive {
+                    detail: Some(source.to_string()),
+                },
+            ),
         })
     }
 
@@ -624,15 +482,8 @@ D/11HiutermQt0RJByBT1FPDdLyRtRPwY1PoAi2/OlAb\n\
             .unwrap_err();
 
             assert!(matches!(
-                error.failure().reason(),
+                error.reason(),
                 PackageReadFailureReason::Other { .. }
-            ));
-            let FilesystemPackageAuthorityReadError::Download { source, .. } = error else {
-                panic!("expected a download failure");
-            };
-            assert!(matches!(
-                source.downcast_ref::<PackageReadError>(),
-                Some(PackageReadError::Limit { .. })
             ));
         }
     }

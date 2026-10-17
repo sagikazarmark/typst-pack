@@ -53,15 +53,12 @@ pub enum Error {
     /// A caller-supplied or listed path is not usable as a storage path.
     #[error("invalid storage path {path:?}: {reason}")]
     InvalidPath { path: String, reason: &'static str },
-    /// A compilation result that did not succeed has no artifacts to write.
-    #[error("only a succeeded compilation result can be written")]
-    ResultNotSucceeded,
     /// The number of artifact keys does not match the number of artifacts.
     #[error("expected {expected} artifact key(s), got {actual}")]
     ArtifactKeyCount { expected: usize, actual: usize },
-    /// The read project files do not form a valid project snapshot.
+    /// The read project files do not form a valid project.
     #[error(transparent)]
-    Project(#[from] crate::ProjectSnapshotError),
+    Project(#[from] crate::PackInvariantError),
     /// A selected font object is not a valid Font Container.
     #[error("font object {path:?} is not a valid font container")]
     Font {
@@ -79,10 +76,10 @@ pub enum Error {
     /// The Package Catalog rejected a read package.
     #[error(transparent)]
     PackageCatalog(#[from] crate::PackageCatalogError),
-    /// Pack Creation failed.
+    /// Pack creation failed.
     #[cfg(feature = "package-reading")]
     #[error(transparent)]
-    Creation(Box<crate::PackCreationError>),
+    Creation(Box<crate::CreateError>),
     /// Pack Creation reported a package missing again after it was read.
     #[cfg(feature = "package-reading")]
     #[error("Pack Creation requested package {spec} again after it was read")]

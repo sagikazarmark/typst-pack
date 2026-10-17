@@ -8,7 +8,7 @@ use futures_util::TryStreamExt;
 use typst::syntax::package::PackageSpec;
 
 use super::{Error, check_key, check_prefix, storage};
-use crate::{CompilationResult, CompilationStatus, PackExtractionPlan, read_layout};
+use crate::{Artifact, PackExtractionPlan, read_layout};
 
 /// How a write treats objects that already exist.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -257,24 +257,21 @@ pub async fn write_pack_extraction_plan(
     write_keys(op, policy, &entries).await
 }
 
-/// Writes each artifact of a succeeded compilation result at
-/// `{prefix}{key}`, pairing `keys` with the artifacts in order.
+/// Writes each compiled artifact at `{prefix}{key}`, pairing `keys` with the
+/// artifacts in order.
 ///
 /// Keys must be relative, normalized, and distinct.
 pub async fn write_compilation_artifacts(
     op: &Operator,
     prefix: &str,
-    result: &CompilationResult,
+    artifacts: &[Artifact],
     keys: &[&str],
     policy: WritePolicy,
 ) -> Result<Vec<(String, WriteOutcome)>, WriteError> {
     check_prefix(prefix)?;
-    if result.status() != CompilationStatus::Succeeded {
-        return Err(Error::ResultNotSucceeded.into());
-    }
-    if keys.len() != result.artifacts().len() {
+    if keys.len() != artifacts.len() {
         return Err(Error::ArtifactKeyCount {
-            expected: result.artifacts().len(),
+            expected: artifacts.len(),
             actual: keys.len(),
         }
         .into());
@@ -292,8 +289,8 @@ pub async fn write_compilation_artifacts(
     }
     let entries = keys
         .iter()
-        .zip(result.artifacts())
-        .map(|(key, artifact)| (format!("{prefix}{key}"), artifact.bytes()))
+        .zip(artifacts)
+        .map(|(key, artifact)| (format!("{prefix}{key}"), artifact.bytes.as_slice()))
         .collect::<Vec<_>>();
     write_keys(op, policy, &entries).await
 }

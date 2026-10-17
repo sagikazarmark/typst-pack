@@ -43,23 +43,6 @@ fn pdf_has_accessibility_tags(bytes: Vec<u8>) -> bool {
         && mark_info.get::<bool>(b"Marked") == Some(true)
 }
 
-fn help_section<'a>(help: &'a str, heading: &str, next_heading: Option<&str>) -> &'a str {
-    let marker = format!("\n{heading}\n");
-    let section = help
-        .split_once(&marker)
-        .unwrap_or_else(|| panic!("missing help heading {heading}\n{help}"))
-        .1;
-    match next_heading {
-        Some(next) => {
-            section
-                .split_once(&format!("\n{next}\n"))
-                .unwrap_or_else(|| panic!("missing help heading {next}\n{help}"))
-                .0
-        }
-        None => section,
-    }
-}
-
 fn write_distinct_embedded_fonts(directory: &std::path::Path) -> Vec<(std::path::PathBuf, String)> {
     let mut selected: Vec<(String, Vec<u8>)> = Vec::new();
     for (font, info) in typst_kit::fonts::embedded() {
@@ -187,95 +170,31 @@ fn create_rejects_stdin_input() {
 }
 
 #[test]
-fn create_validates_creation_timestamp_before_input_and_root_io() {
+fn html_create_enables_the_html_feature_itself() {
     let directory = tempfile::tempdir().unwrap();
     let project = write_minimal_project(directory.path());
     let input = project.join("main.typ");
-    let missing_input = directory.path().join("missing.typ");
-    let missing_root = directory.path().join("missing-root");
+    let output = directory.path().join("html.typk");
 
-    for arguments in [
-        vec![
-            "create",
-            missing_input.to_str().unwrap(),
-            "missing-input.typk",
-            "--creation-timestamp",
-            "9223372036854775807",
-        ],
-        vec![
-            "create",
-            input.to_str().unwrap(),
-            "missing-root.typk",
-            "--root",
-            missing_root.to_str().unwrap(),
-            "--creation-timestamp",
-            "9223372036854775807",
-        ],
-    ] {
-        let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-            .current_dir(directory.path())
-            .args(arguments)
-            .output()
-            .unwrap();
-
-        assert!(!result.status.success());
-        assert_eq!(
-            String::from_utf8_lossy(&result.stderr),
-            "error: creation timestamp is out of range\n"
-        );
-    }
-}
-
-#[test]
-fn standalone_html_create_requires_and_accepts_the_html_feature() {
-    let directory = tempfile::tempdir().unwrap();
-    let project = write_minimal_project(directory.path());
-    let input = project.join("main.typ");
-    let rejected_output = directory.path().join("rejected.typk");
-
-    let rejected = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
+    let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
         .current_dir(directory.path())
         .env_remove("TYPST_FEATURES")
         .args([
             "create",
             input.to_str().unwrap(),
-            rejected_output.to_str().unwrap(),
+            output.to_str().unwrap(),
             "--target",
             "html",
             "--ignore-system-fonts",
         ])
         .output()
         .unwrap();
-    assert!(!rejected.status.success());
-    assert!(!rejected_output.exists());
     assert!(
-        String::from_utf8_lossy(&rejected.stderr).contains("html"),
+        result.status.success(),
         "{}",
-        String::from_utf8_lossy(&rejected.stderr)
+        String::from_utf8_lossy(&result.stderr)
     );
-
-    let accepted_output = directory.path().join("accepted.typk");
-    let accepted = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-        .current_dir(directory.path())
-        .env_remove("TYPST_FEATURES")
-        .args([
-            "create",
-            input.to_str().unwrap(),
-            accepted_output.to_str().unwrap(),
-            "--target",
-            "html",
-            "--features",
-            "html",
-            "--ignore-system-fonts",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        accepted.status.success(),
-        "{}",
-        String::from_utf8_lossy(&accepted.stderr)
-    );
-    let _ = decode_reference(std::fs::read(accepted_output).unwrap());
+    let _ = decode_reference(std::fs::read(output).unwrap());
 }
 
 #[cfg(unix)]
@@ -339,12 +258,11 @@ fn create_rejects_multiple_creation_targets() {
 }
 
 #[test]
-fn create_rejects_legacy_input_and_option_shapes() {
+fn create_rejects_a_directory_input() {
     let directory = tempfile::tempdir().unwrap();
     let project = write_minimal_project(directory.path());
-    let input = project.join("main.typ");
 
-    let directory_input = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
+    let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
         .current_dir(directory.path())
         .args([
             "create",
@@ -354,36 +272,8 @@ fn create_rejects_legacy_input_and_option_shapes() {
         ])
         .output()
         .unwrap();
-    assert!(!directory_input.status.success());
-    assert!(String::from_utf8_lossy(&directory_input.stderr).contains("Typst source file"));
-
-    for arguments in [
-        vec![
-            "create",
-            input.to_str().unwrap(),
-            "entrypoint.typk",
-            "--entrypoint",
-            "main.typ",
-        ],
-        vec![
-            "create",
-            input.to_str().unwrap(),
-            "packages.typk",
-            "--no-packages",
-        ],
-    ] {
-        let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-            .current_dir(directory.path())
-            .args(arguments)
-            .output()
-            .unwrap();
-        assert!(!result.status.success());
-        assert!(
-            String::from_utf8_lossy(&result.stderr).contains("unexpected argument"),
-            "{}",
-            String::from_utf8_lossy(&result.stderr)
-        );
-    }
+    assert!(!result.status.success());
+    assert!(String::from_utf8_lossy(&result.stderr).contains("Typst source file"));
 }
 
 #[test]
@@ -539,165 +429,92 @@ fn create_rejects_unignored_symlinks_escaping_the_project() {
 }
 
 #[test]
-fn legacy_resource_options_are_rejected() {
+fn compile_passes_string_and_file_inputs_to_sys_inputs() {
     let directory = tempfile::tempdir().unwrap();
-    let project = write_minimal_project(directory.path());
-
-    for (option, value) in [
-        ("--source-reference", "resources"),
-        ("--external-resource", "resource.bin"),
-        ("--include", "extra.txt"),
-        ("--resource-path", "resources"),
-        ("--resource-slot", "resource.bin"),
-    ] {
-        let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-            .current_dir(directory.path())
-            .args([
-                "create",
-                project.to_str().unwrap(),
-                "output.typk",
-                option,
-                value,
-            ])
-            .output()
-            .unwrap();
-        let stderr = String::from_utf8_lossy(&result.stderr);
-
-        assert!(!result.status.success(), "{option} was accepted");
-        assert!(stderr.contains("unexpected argument"), "{stderr}");
-    }
-}
-
-#[test]
-fn compile_applies_pack_overrides_without_mutating_the_pack() {
-    let directory = tempfile::tempdir().unwrap();
-    let project = write_minimal_project(directory.path());
-    let input = project.join("main=final.typ");
-    std::fs::rename(project.join("main.typ"), &input).unwrap();
-    let pack = directory.path().join("project.typk");
-    let baseline = directory.path().join("baseline.svg");
-    let overridden = directory.path().join("overridden.svg");
-    let dependencies = directory.path().join("dependencies.json");
-    let repeated = directory.path().join("repeated.svg");
-    let replacement = directory.path().join("replacement.typ");
-    std::fs::write(&replacement, "#rect(width: 20pt, height: 1pt, fill: red)").unwrap();
-
-    let created = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-        .args([
-            "create",
-            input.to_str().unwrap(),
-            pack.to_str().unwrap(),
-            "--ignore-system-fonts",
-            "--ignore-embedded-fonts",
-        ])
-        .output()
+    let pack = Pack::builder("main.typ")
+        .file(
+            "main.typ",
+            b"#set page(width: auto, height: auto, margin: 0pt)\n\
+              #assert(type(sys.inputs.logo) == bytes)\n\
+              #image(sys.inputs.logo, width: int(sys.inputs.width) * 1pt)"
+                .to_vec(),
+        )
+        .build()
         .unwrap();
-    assert!(
-        created.status.success(),
-        "{}",
-        String::from_utf8_lossy(&created.stderr)
-    );
+    let pack_path = directory.path().join("logo.typk");
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
+    let logo = directory.path().join("logo.svg");
+    std::fs::write(
+        &logo,
+        r#"<svg xmlns="http://www.w3.org/2000/svg" width="4" height="4"><rect width="4" height="4"/></svg>"#,
+    )
+    .unwrap();
+    let dependencies = directory.path().join("dependencies.json");
 
-    for output in [&baseline, &repeated] {
-        let compiled = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
+    let compile = |output: &std::path::Path, width: &str| {
+        Command::new(env!("CARGO_BIN_EXE_typst-pack"))
             .args([
                 "compile",
-                pack.to_str().unwrap(),
+                pack_path.to_str().unwrap(),
                 output.to_str().unwrap(),
-                "--format",
-                "svg",
-                "--ignore-system-fonts",
-                "--ignore-embedded-fonts",
             ])
+            .arg(format!("--input-file=logo={}", logo.display()))
+            .args(["--input", &format!("width={width}")])
+            .args(["--deps", dependencies.to_str().unwrap()])
+            .args(["--ignore-system-fonts", "--ignore-embedded-fonts"])
             .output()
-            .unwrap();
+            .unwrap()
+    };
+    let narrow = directory.path().join("narrow.svg");
+    let wide = directory.path().join("wide.svg");
+    for (output, width) in [(&narrow, "4"), (&wide, "8")] {
+        let result = compile(output, width);
         assert!(
-            compiled.status.success(),
+            result.status.success(),
             "{}",
-            String::from_utf8_lossy(&compiled.stderr)
+            String::from_utf8_lossy(&result.stderr)
         );
     }
 
-    let compiled = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-        .args([
-            "compile",
-            pack.to_str().unwrap(),
-            overridden.to_str().unwrap(),
-            "--format",
-            "svg",
-            "--override",
-            "main=final.typ",
-            replacement.to_str().unwrap(),
-            "--deps",
-            dependencies.to_str().unwrap(),
-            "--ignore-system-fonts",
-            "--ignore-embedded-fonts",
-        ])
-        .output()
-        .unwrap();
-    assert!(
-        compiled.status.success(),
-        "{}",
-        String::from_utf8_lossy(&compiled.stderr)
-    );
-
-    assert_eq!(
-        std::fs::read(&baseline).unwrap(),
-        std::fs::read(&repeated).unwrap()
-    );
     assert_ne!(
-        std::fs::read(&baseline).unwrap(),
-        std::fs::read(&overridden).unwrap()
+        std::fs::read(&narrow).unwrap(),
+        std::fs::read(&wide).unwrap()
     );
+    let dependencies = std::fs::read_to_string(dependencies).unwrap();
     assert!(
-        std::fs::read_to_string(dependencies)
-            .unwrap()
-            .contains(replacement.to_str().unwrap())
+        dependencies.contains(logo.to_str().unwrap()),
+        "{dependencies}"
     );
+    assert!(dependencies.contains("logo.typk"), "{dependencies}");
 }
 
 #[cfg(all(unix, not(target_vendor = "apple")))]
 #[test]
-fn compile_accepts_a_non_unicode_pack_override_source_path() {
+fn compile_accepts_a_non_unicode_input_file_path() {
     use std::os::unix::ffi::OsStringExt as _;
 
     let directory = tempfile::tempdir().unwrap();
-    let project = write_minimal_project(directory.path());
-    let input = project.join("main.typ");
-    let pack = directory.path().join("project.typk");
-    let output = directory.path().join("output.svg");
-    let replacement = directory.path().join(std::ffi::OsString::from_vec(
-        b"replacement-\xff.typ".to_vec(),
-    ));
-    std::fs::write(&replacement, "#rect(width: 20pt, height: 1pt)").unwrap();
-
-    let created = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-        .args([
-            "create",
-            input.to_str().unwrap(),
-            pack.to_str().unwrap(),
-            "--ignore-system-fonts",
-            "--ignore-embedded-fonts",
-        ])
-        .output()
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"#str(sys.inputs.data)".to_vec())
+        .build()
         .unwrap();
-    assert!(
-        created.status.success(),
-        "{}",
-        String::from_utf8_lossy(&created.stderr)
-    );
+    let pack_path = directory.path().join("project.typk");
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
+    let output = directory.path().join("output.svg");
+    let data = directory
+        .path()
+        .join(std::ffi::OsString::from_vec(b"data-\xff.txt".to_vec()));
+    std::fs::write(&data, "text").unwrap();
+    let mut argument = std::ffi::OsString::from("--input-file=data=");
+    argument.push(&data);
 
     let compiled = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
         .args([
             "compile",
-            pack.to_str().unwrap(),
+            pack_path.to_str().unwrap(),
             output.to_str().unwrap(),
-            "--format",
-            "svg",
-            "--override",
-            "main.typ",
         ])
-        .arg(&replacement)
+        .arg(argument)
         .args(["--ignore-system-fonts", "--ignore-embedded-fonts"])
         .output()
         .unwrap();
@@ -710,36 +527,33 @@ fn compile_accepts_a_non_unicode_pack_override_source_path() {
 }
 
 #[test]
-fn compile_preserves_pack_override_preflight_error_output() {
+fn compile_reports_an_unreadable_input_file() {
     let directory = tempfile::tempdir().unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"Hello".to_vec())
         .build()
         .unwrap();
     let pack_path = directory.path().join("project.typk");
-    let output = directory.path().join("output.svg");
     std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
+    let output = directory.path().join("output.svg");
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
         .args([
             "compile",
             pack_path.to_str().unwrap(),
             output.to_str().unwrap(),
-            "--format",
-            "svg",
-            "--override",
-            "missing.typ",
-            "missing-source.typ",
-            "--ignore-system-fonts",
-            "--ignore-embedded-fonts",
+            "--input-file",
+            "data=missing.bin",
         ])
         .output()
         .unwrap();
 
     assert!(!result.status.success());
-    assert_eq!(
-        String::from_utf8_lossy(&result.stderr),
-        "error: Pack Override path `missing.typ` is not a contained project file\n"
+    assert!(
+        String::from_utf8_lossy(&result.stderr)
+            .starts_with("error: cannot read input file `missing.bin`"),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
     );
     assert!(!output.exists());
 }
@@ -914,109 +728,6 @@ fn compile_reads_pack_from_stdin_and_writes_one_artifact_to_stdout() {
         String::from_utf8_lossy(&result.stderr)
     );
     assert!(result.stdout.starts_with(b"<svg"));
-}
-
-#[test]
-fn compile_validates_input_independent_options_before_pack_io_in_typst_order() {
-    let directory = tempfile::tempdir().unwrap();
-    let missing = directory.path().join("missing.typk");
-    let invalid_extension = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-        .current_dir(directory.path())
-        .args([
-            "compile",
-            missing.to_str().unwrap(),
-            "output.unknown",
-            "--pdf-standard",
-            "a-4,ua-1",
-        ])
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&invalid_extension.stderr);
-    assert!(!invalid_extension.status.success());
-    assert!(stderr.contains("cannot infer output format"), "{stderr}");
-    assert!(!stderr.contains("cannot open"), "{stderr}");
-
-    let corrupt = directory.path().join("corrupt.typk");
-    std::fs::write(&corrupt, b"not a Pack").unwrap();
-    let inaccessible = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-        .current_dir(directory.path())
-        .args([
-            "compile",
-            corrupt.to_str().unwrap(),
-            "output.pdf",
-            "--pages",
-            "1",
-            "--pdf-standard",
-            "ua-1",
-        ])
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&inaccessible.stderr);
-    assert!(!inaccessible.status.success());
-    assert!(stderr.contains("cannot disable PDF tags"), "{stderr}");
-    assert!(!stderr.contains("zip"), "{stderr}");
-
-    let incompatible = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-        .current_dir(directory.path())
-        .args([
-            "compile",
-            "-",
-            "-",
-            "--pdf-standard",
-            "a-4,ua-1",
-            "--deps",
-            "-",
-            "--creation-timestamp",
-            "9223372036854775807",
-        ])
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&incompatible.stderr);
-    assert!(!incompatible.status.success());
-    assert!(stderr.contains("mutually incompatible"), "{stderr}");
-    assert!(!stderr.contains("both output and dependencies"), "{stderr}");
-    assert!(!stderr.contains("timestamp"), "{stderr}");
-
-    let stdout_conflict = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-        .current_dir(directory.path())
-        .args([
-            "compile",
-            "-",
-            "-",
-            "--deps",
-            "-",
-            "--creation-timestamp",
-            "9223372036854775807",
-        ])
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&stdout_conflict.stderr);
-    assert!(!stdout_conflict.status.success());
-    assert!(
-        stderr.contains("cannot write both output and dependencies to stdout"),
-        "{stderr}"
-    );
-    assert!(!stderr.contains("timestamp"), "{stderr}");
-
-    let invalid_timestamp = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-        .current_dir(directory.path())
-        .args([
-            "compile",
-            "-",
-            "output.pdf",
-            "--creation-timestamp",
-            "9223372036854775807",
-        ])
-        .stdin(Stdio::null())
-        .output()
-        .unwrap();
-    let stderr = String::from_utf8_lossy(&invalid_timestamp.stderr);
-    assert!(!invalid_timestamp.status.success());
-    assert!(stderr.contains("timestamp"), "{stderr}");
-    assert!(stderr.contains("out of range"), "{stderr}");
-    assert!(!stderr.contains("zip"), "{stderr}");
 }
 
 #[test]
@@ -2477,7 +2188,7 @@ fn compile_writes_valid_perfetto_timings_json() {
         .iter()
         .filter_map(|entry| entry["name"].as_str())
         .collect::<std::collections::BTreeSet<_>>();
-    for name in ["typst-pack compilation", "Pack", "export"] {
+    for name in ["typst-pack compilation", "load file", "export"] {
         assert!(
             names.contains(name),
             "missing `{name}` timing span: {names:?}"
@@ -3184,7 +2895,10 @@ fn compile_offline_missing_package_does_not_activate_download_probe() {
 
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(!result.status.success(), "{stderr}");
-    assert!(stderr.contains("package not found"), "{stderr}");
+    assert!(
+        stderr.contains("required package @preview/offline-probe:0.1.0 was not supplied"),
+        "{stderr}"
+    );
     assert!(result.stdout.is_empty(), "{:?}", result.stdout);
     assert!(!probe.exists());
     assert!(!output.exists());
@@ -3233,298 +2947,6 @@ fn ordinary_debug_build_ignores_package_download_probe_environment() {
     assert!(result.stdout.is_empty(), "{:?}", result.stdout);
     assert!(!probe.exists());
     assert!(!output.exists());
-}
-
-#[test]
-fn command_help_is_task_grouped_and_documents_intentional_differences() {
-    let global = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-        .arg("--help")
-        .output()
-        .unwrap();
-    let global = String::from_utf8_lossy(&global.stdout);
-    let global_flat = global.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(global_flat.contains(
-        "--color [<COLOR>] Whether to use color. When set to `auto` if the terminal to supports it [default:"
-    ));
-    assert!(global_flat.contains(
-        "--cert <PATH> Path to a custom CA certificate to use when making network requests [env:"
-    ));
-    assert!(
-        !global.contains("Whether to use color in diagnostics."),
-        "{global}"
-    );
-    assert!(!global.contains("used for package downloads"), "{global}");
-
-    for (command, headings) in [
-        (
-            "compile",
-            [
-                "Compilation:",
-                "Output:",
-                "Overrides:",
-                "PDF:",
-                "Fonts:",
-                "Packages:",
-                "Diagnostics & Automation:",
-                "",
-            ],
-        ),
-        (
-            "create",
-            [
-                "Project:",
-                "Creation:",
-                "Pack Contents:",
-                "Fonts:",
-                "Packages:",
-                "Metadata:",
-                "Diagnostics & Automation:",
-                "",
-            ],
-        ),
-    ] {
-        let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-            .args([command, "--help"])
-            .output()
-            .unwrap();
-        let help = String::from_utf8_lossy(&result.stdout);
-        assert!(result.status.success());
-        let mut position = 0;
-        for heading in headings {
-            if heading.is_empty() {
-                continue;
-            }
-            let needle = format!("\n{heading}\n");
-            let Some(offset) = help[position..].find(&needle) else {
-                panic!("{command}: missing or out-of-order {heading}\n{help}");
-            };
-            position += offset + needle.len();
-        }
-        assert!(!help.contains("--source-reference"), "{help}");
-        assert!(!help.contains("--external-resource"), "{help}");
-    }
-
-    let compile = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-        .args(["compile", "--help"])
-        .output()
-        .unwrap();
-    let compile = String::from_utf8_lossy(&compile.stdout);
-    let compile_flat = compile.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(compile.contains("Usage: typst-pack compile [OPTIONS] <PACK> [OUTPUT]"));
-    assert!(!compile.contains("--root"));
-    assert!(!compile.contains("bundle"));
-    assert!(compile.contains("{p}"));
-    assert!(compile.contains("{0p}"));
-    assert!(compile.contains("{t}"));
-    assert!(compile_flat.contains(
-        "--format <FORMAT> The format of the output file, inferred from the extension by default [possible values:"
-    ));
-    assert!(
-        !compile.contains("HTML is experimental and additionally requires"),
-        "{compile}"
-    );
-    for wording in [
-        "Path to output file (PDF, PNG, SVG, or HTML).",
-        "page-01-of-10.png",
-        "This formats the output in a more human-readable",
-        "Which pages to export. When unspecified, all pages are exported.",
-        "page 8 and any pages after it",
-        "The PPI (pixels per inch) to use for PNG export",
-        "Add a string key-value pair visible through `sys.inputs`",
-        "Number of parallel jobs spawned during compilation.",
-        "Enables in-development features that may be changed or removed",
-        "Adds additional directories that are recursively searched for fonts",
-        "Ensures system fonts won't be searched",
-        "Ensures fonts embedded into Typst won't be considered",
-        "Use `-` to write to stdout",
-        "Ignored if output is stdout",
-        "Produces performance timings of the compilation process. (experimental)",
-        "trying to reduce the size of a document",
-    ] {
-        assert!(compile.contains(wording), "missing `{wording}`\n{compile}");
-    }
-    for (heading, next, options) in [
-        (
-            "Compilation:",
-            Some("Output:"),
-            ["<PACK>", "--input", "--features"].as_slice(),
-        ),
-        (
-            "Output:",
-            Some("Overrides:"),
-            ["[OUTPUT]", "--format", "--pretty", "--pages", "--ppi"].as_slice(),
-        ),
-        ("Overrides:", Some("PDF:"), ["--override"].as_slice()),
-        (
-            "Fonts:",
-            Some("Packages:"),
-            [
-                "--font-path",
-                "--ignore-system-fonts",
-                "--ignore-embedded-fonts",
-            ]
-            .as_slice(),
-        ),
-        (
-            "Packages:",
-            Some("Diagnostics & Automation:"),
-            ["--package-path", "--package-cache-path", "--offline"].as_slice(),
-        ),
-        (
-            "Diagnostics & Automation:",
-            None,
-            [
-                "--jobs",
-                "--creation-timestamp",
-                "--diagnostic-format",
-                "--timings",
-                "--deps",
-                "--deps-format",
-                "--open",
-            ]
-            .as_slice(),
-        ),
-    ] {
-        let section = help_section(&compile, heading, next);
-        for option in options {
-            assert!(
-                section.contains(option),
-                "{option} is not under {heading}\n{compile}"
-            );
-        }
-    }
-
-    let create = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-        .args(["create", "--help"])
-        .output()
-        .unwrap();
-    let create = String::from_utf8_lossy(&create.stdout);
-    assert!(create.contains("Usage: typst-pack create [OPTIONS] <INPUT> [OUTPUT]"));
-    assert!(!create.contains("--entrypoint"));
-    for (heading, next, options) in [
-        (
-            "Project:",
-            Some("Creation:"),
-            ["<INPUT>", "--root"].as_slice(),
-        ),
-        (
-            "Creation:",
-            Some("Pack Contents:"),
-            ["--target", "--input", "--features"].as_slice(),
-        ),
-        (
-            "Pack Contents:",
-            Some("Fonts:"),
-            ["[OUTPUT]", "--embed-fonts"].as_slice(),
-        ),
-        (
-            "Fonts:",
-            Some("Packages:"),
-            [
-                "--font-path",
-                "--ignore-system-fonts",
-                "--ignore-embedded-fonts",
-            ]
-            .as_slice(),
-        ),
-        (
-            "Packages:",
-            Some("Metadata:"),
-            [
-                "--no-vendor-packages",
-                "--package-path",
-                "--package-cache-path",
-                "--offline",
-            ]
-            .as_slice(),
-        ),
-        (
-            "Diagnostics & Automation:",
-            None,
-            [
-                "--jobs",
-                "--creation-timestamp",
-                "--diagnostic-format",
-                "--timings",
-            ]
-            .as_slice(),
-        ),
-    ] {
-        let section = help_section(&create, heading, next);
-        for option in options {
-            assert!(
-                section.contains(option),
-                "{option} is not under {heading}\n{create}"
-            );
-        }
-    }
-}
-
-#[test]
-fn typst_015_value_help_uses_expected_metavars_and_descriptions() {
-    let help = |command| {
-        let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
-            .args([command, "--help"])
-            .output()
-            .unwrap();
-        assert!(result.status.success());
-        String::from_utf8(result.stdout)
-            .unwrap()
-            .split_whitespace()
-            .collect::<Vec<_>>()
-            .join(" ")
-    };
-
-    let create = help("create");
-    assert!(create.contains("--features <FEATURES>"), "{create}");
-
-    let compile = help("compile");
-    assert!(compile.contains("--features <FEATURES>"), "{compile}");
-    assert!(
-        compile.contains("--pdf-standard <PDF_STANDARD>"),
-        "{compile}"
-    );
-
-    for (value, description) in [
-        ("json", "Encodes as JSON, failing for non-Unicode paths"),
-        (
-            "zero",
-            "Separates paths with NULL bytes and can express all paths",
-        ),
-        ("make", "Emits in Make format, omitting inexpressible paths"),
-    ] {
-        let expected = format!("- {value}: {description}");
-        assert!(
-            compile.contains(&expected),
-            "missing `{expected}`\n{compile}"
-        );
-    }
-
-    for (value, description) in [
-        ("1.4", "PDF 1.4"),
-        ("1.5", "PDF 1.5"),
-        ("1.6", "PDF 1.6"),
-        ("1.7", "PDF 1.7"),
-        ("2.0", "PDF 2.0"),
-        ("a-1b", "PDF/A-1b"),
-        ("a-1a", "PDF/A-1a"),
-        ("a-2b", "PDF/A-2b"),
-        ("a-2u", "PDF/A-2u"),
-        ("a-2a", "PDF/A-2a"),
-        ("a-3b", "PDF/A-3b"),
-        ("a-3u", "PDF/A-3u"),
-        ("a-3a", "PDF/A-3a"),
-        ("a-4", "PDF/A-4"),
-        ("a-4f", "PDF/A-4f"),
-        ("a-4e", "PDF/A-4e"),
-        ("ua-1", "PDF/UA-1"),
-    ] {
-        let expected = format!("- {value}: {description}");
-        assert!(
-            compile.contains(&expected),
-            "missing `{expected}`\n{compile}"
-        );
-    }
 }
 
 #[test]
@@ -4173,4 +3595,108 @@ fn padded_page_placeholders_use_total_source_page_width() {
     assert!(directory.path().join("page-02-02.svg").is_file());
     assert!(directory.path().join("page-11-11.svg").is_file());
     assert!(!directory.path().join("page-01.svg").exists());
+}
+
+#[test]
+fn create_variants_discover_packages_of_every_input_branch() {
+    let directory = tempfile::tempdir().unwrap();
+    let project = directory.path().join("project");
+    std::fs::create_dir(&project).unwrap();
+    std::fs::write(
+        project.join("main.typ"),
+        "#if sys.inputs.at(\"edition\", default: \"a\") == \"a\" {\n\
+           import \"@preview/alpha:0.1.0\": mark\n\
+           mark\n\
+         } else {\n\
+           import \"@preview/beta:0.1.0\": mark\n\
+           mark\n\
+         }",
+    )
+    .unwrap();
+    let packages = directory.path().join("packages");
+    for name in ["alpha", "beta"] {
+        write_cached_package(&packages, name);
+    }
+
+    let create = |output: &str, variant: Option<&str>| {
+        let mut command = Command::new(env!("CARGO_BIN_EXE_typst-pack"));
+        command.current_dir(directory.path()).args([
+            "create",
+            project.join("main.typ").to_str().unwrap(),
+            output,
+            "--package-path",
+            packages.to_str().unwrap(),
+            "--offline",
+            "--ignore-system-fonts",
+        ]);
+        if let Some(variant) = variant {
+            command.args(["--variant", variant]);
+        }
+        let result = command.output().unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+        let pack = decode_reference(std::fs::read(directory.path().join(output)).unwrap());
+        pack.package_requirements()
+            .iter()
+            .map(|requirement| requirement.spec.name.to_string())
+            .collect::<Vec<_>>()
+    };
+
+    assert_eq!(create("base.typk", None), ["alpha"]);
+    assert_eq!(
+        create("variants.typk", Some("edition=b,unused=1")),
+        ["alpha", "beta"]
+    );
+}
+
+#[test]
+fn compile_names_unsupplied_external_fonts_and_uses_supplied_ones() {
+    let directory = tempfile::tempdir().unwrap();
+    let font = typst_kit::fonts::embedded().next().unwrap().0;
+    let family = font.info().family.clone();
+    let pack = Pack::builder("main.typ")
+        .file(
+            "main.typ",
+            format!("#set text(font: \"{family}\")\nExternal").into_bytes(),
+        )
+        .external_font(font.data().to_vec())
+        .build()
+        .unwrap();
+    let pack_path = directory.path().join("fonts.typk");
+    std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
+    let fonts = directory.path().join("fonts");
+    std::fs::create_dir(&fonts).unwrap();
+    std::fs::write(fonts.join("font.ttf"), font.data()).unwrap();
+
+    let compile = |extra: &[&str]| {
+        Command::new(env!("CARGO_BIN_EXE_typst-pack"))
+            .current_dir(directory.path())
+            .args(["compile", pack_path.to_str().unwrap(), "out.pdf"])
+            .args(["--ignore-system-fonts", "--ignore-embedded-fonts"])
+            .args(extra)
+            .output()
+            .unwrap()
+    };
+
+    let missing = compile(&[]);
+    let stderr = String::from_utf8_lossy(&missing.stderr);
+    assert!(!missing.status.success());
+    assert!(
+        stderr.starts_with("error: required font container sha256:"),
+        "{stderr}"
+    );
+    assert!(stderr.contains(&family), "{stderr}");
+    assert!(stderr.contains("hint: `typst-pack inspect"), "{stderr}");
+    assert!(!directory.path().join("out.pdf").exists());
+
+    let supplied = compile(&["--font-path", fonts.to_str().unwrap()]);
+    assert!(
+        supplied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&supplied.stderr)
+    );
+    assert!(directory.path().join("out.pdf").is_file());
 }

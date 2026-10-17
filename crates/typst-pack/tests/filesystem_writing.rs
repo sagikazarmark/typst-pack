@@ -3,9 +3,8 @@
 use std::path::{Path, PathBuf};
 
 use typst_pack::{
-    CompilationLimits, CompilationOutputSpecification, FilesystemWriteError, Pack,
-    PackCompilationRequest, PackExtractionSelection, PdfOutputSpecification,
-    SvgOutputSpecification, WriteIssue, WritePolicy, compile_with_limits, plan_pack_extraction,
+    Artifact, CompileRequest, FilesystemWriteError, Output, OutputFormat, Pack,
+    PackExtractionSelection, WriteIssue, WritePolicy, compile, plan_pack_extraction,
     write_compilation_artifacts_to_filesystem_paths, write_pack_extraction_plan_to_filesystem,
 };
 
@@ -58,22 +57,19 @@ fn rejected(result: Result<(), FilesystemWriteError>) -> Vec<WriteIssue> {
     }
 }
 
-fn compilation_result(source: &[u8], svg: bool) -> typst_pack::CompilationResult {
+fn compilation_result(source: &[u8], svg: bool) -> Vec<Artifact> {
     let pack = Pack::builder("main.typ")
         .file("main.typ", source.to_vec())
         .build()
         .unwrap();
-    let output = if svg {
-        CompilationOutputSpecification::Svg(SvgOutputSpecification::default())
+    let format = if svg {
+        OutputFormat::Svg
     } else {
-        CompilationOutputSpecification::Pdf(PdfOutputSpecification::default())
+        OutputFormat::Pdf
     };
-    let report = compile_with_limits(
-        PackCompilationRequest::new(pack, output),
-        CompilationLimits::DEFAULT,
-    )
-    .unwrap();
-    report.result().unwrap().clone()
+    compile(&CompileRequest::new(pack, Output::new(format)))
+        .unwrap()
+        .artifacts
 }
 
 #[test]
@@ -327,8 +323,8 @@ fn artifacts_are_written_to_their_paths_and_replaced_on_overwrite() {
 
     write_compilation_artifacts_to_filesystem_paths(&result, &paths, WritePolicy::Overwrite)
         .unwrap();
-    for (artifact, path) in result.artifacts().iter().zip(&paths) {
-        assert_eq!(std::fs::read(path).unwrap(), artifact.bytes());
+    for (artifact, path) in result.iter().zip(&paths) {
+        assert_eq!(std::fs::read(path).unwrap(), artifact.bytes);
     }
     assert_eq!(tree(&root), ["page-1.svg", "pages", "pages/page-2.svg"]);
 }
@@ -362,22 +358,6 @@ fn artifact_writes_reject_count_conflicts_and_failed_results_before_writing() {
         ]
     );
 
-    let failed = compilation_result(b"#unknown-function()", false);
-    let issues = rejected(write_compilation_artifacts_to_filesystem_paths(
-        &failed,
-        &[root.join("output.pdf")],
-        WritePolicy::Overwrite,
-    ));
-    assert_eq!(
-        issues,
-        [
-            WriteIssue::FailedCompilation,
-            WriteIssue::PathCountMismatch {
-                artifacts: 0,
-                paths: 1
-            },
-        ]
-    );
     assert!(tree(&root).is_empty());
 }
 
@@ -420,7 +400,7 @@ fn artifact_paths_resolve_symlinks_and_parent_components_natively() {
 
     assert_eq!(
         std::fs::read(root.join("actual/output.pdf")).unwrap(),
-        result.artifacts()[0].bytes()
+        result[0].bytes
     );
 }
 
@@ -446,5 +426,5 @@ fn artifact_paths_need_not_be_unicode() {
     )
     .unwrap();
 
-    assert_eq!(std::fs::read(&path).unwrap(), result.artifacts()[0].bytes());
+    assert_eq!(std::fs::read(&path).unwrap(), result[0].bytes);
 }

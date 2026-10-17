@@ -4,9 +4,9 @@ use std::num::NonZeroUsize;
 
 use typst_pack::pack_archive::{DecodeError, DecodeLimits, decode};
 use typst_pack::{
-    CompilationLimits, CompilationOutputSpecification, CompilationRequestIssue, FontContainer,
-    FontContainerError, Pack, PackCompilationRequest, PackageTree, PackageTreeIssue, PageSelection,
-    PngOutputSpecification, ProjectSnapshotAssembly, ProjectSnapshotIssue, compile_with_limits,
+    CompileError, CompileRequest, FontContainer, FontContainerError, Output, OutputFormat, Pack,
+    PackInvariantIssue, PackageTree, PackageTreeIssue, PageSelection, PngOutput, ProjectSnapshot,
+    RequestIssue, compile,
 };
 
 /// Resolves a temporary directory to a destination the write preflight accepts.
@@ -28,17 +28,9 @@ fn compilation_artifact_key_regressions_store_exactly_at_the_given_key() {
         .file("main.typ", b"#pagebreak()".to_vec())
         .build()
         .unwrap();
-    let result = compile_with_limits(
-        PackCompilationRequest::new(
-            pack,
-            CompilationOutputSpecification::Svg(Default::default()),
-        ),
-        CompilationLimits::DEFAULT,
-    )
-    .unwrap()
-    .result()
-    .unwrap()
-    .clone();
+    let result = compile(&CompileRequest::new(pack, Output::new(OutputFormat::Svg)))
+        .unwrap()
+        .artifacts;
     let write = |op: &Operator, keys: &[&str]| {
         let mut future = std::pin::pin!(write_compilation_artifacts(
             op,
@@ -143,29 +135,33 @@ fn font_and_semantic_constructor_regressions_replay_without_partial_values() {
         );
     }
 
-    let duplicate_project = ProjectSnapshotAssembly::new("main.typ")
-        .assemble([
+    let duplicate_project = ProjectSnapshot::new(
+        "main.typ",
+        [
             ("main.typ", b"main".to_vec()),
             ("./same.typ", b"first".to_vec()),
             ("same.typ", b"second".to_vec()),
-        ])
-        .unwrap_err();
+        ],
+    )
+    .unwrap_err();
     assert_eq!(
         duplicate_project.issues(),
-        [ProjectSnapshotIssue::DuplicatePath {
+        [PackInvariantIssue::DuplicateProjectPath {
             path: "same.typ".to_owned(),
         }]
     );
     let pack_path = "nested/archive.typk/file.typ";
-    let invalid_project = ProjectSnapshotAssembly::new("main.typ")
-        .assemble([
+    let invalid_project = ProjectSnapshot::new(
+        "main.typ",
+        [
             ("main.typ", b"main".to_vec()),
             (pack_path, b"archive".to_vec()),
-        ])
-        .unwrap_err();
+        ],
+    )
+    .unwrap_err();
     assert!(matches!(
         invalid_project.issues(),
-        [ProjectSnapshotIssue::InvalidPath { path, .. }] if path == pack_path
+        [PackInvariantIssue::InvalidPath { path, .. }] if path == pack_path
     ));
 
     let duplicate_package = PackageTree::from_owned_entries([
@@ -196,33 +192,26 @@ fn compilation_request_regressions_replay_both_acceptance_and_rejection() {
         .file("main.typ", b"accepted request fuzz regression".to_vec())
         .build()
         .unwrap();
-    let accepted = compile_with_limits(
-        PackCompilationRequest::new(
-            pack.clone(),
-            CompilationOutputSpecification::Svg(Default::default()),
-        ),
-        CompilationLimits::DEFAULT,
-    )
+    compile(&CompileRequest::new(
+        pack.clone(),
+        Output::new(OutputFormat::Svg),
+    ))
     .unwrap();
-    assert!(accepted.result().is_some());
 
-    let rejected = compile_with_limits(
-        PackCompilationRequest::new(
-            pack,
-            CompilationOutputSpecification::Png(PngOutputSpecification {
-                page_selection: PageSelection::new(vec![
-                    Some(NonZeroUsize::new(2).unwrap())..=Some(NonZeroUsize::new(1).unwrap()),
-                ]),
-                ..PngOutputSpecification::default()
-            }),
-        ),
-        CompilationLimits::DEFAULT,
-    );
-    let rejection = rejected.unwrap_err();
+    let rejected = compile(&CompileRequest::new(
+        pack,
+        Output::Png(PngOutput {
+            page_selection: PageSelection::new(vec![
+                Some(NonZeroUsize::new(2).unwrap())..=Some(NonZeroUsize::new(1).unwrap()),
+            ]),
+            ..PngOutput::default()
+        }),
+    ));
     assert!(matches!(
-        rejection.issues(),
-        [CompilationRequestIssue::InvalidPageRange { start, end }]
-            if start.get() == 2 && end.get() == 1
+        rejected,
+        Err(CompileError::InvalidRequest(issues))
+            if matches!(issues.as_slice(), [RequestIssue::InvalidPageRange { start, end }]
+                if start.get() == 2 && end.get() == 1)
     ));
 }
 

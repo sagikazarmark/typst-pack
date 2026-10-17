@@ -46,35 +46,14 @@ impl Digest {
         }
         Some(Self(bytes))
     }
-
-    /// The SHA-256 of a value's Rust [`Hash`](std::hash::Hash) stream under a
-    /// domain tag.
-    ///
-    /// Only for operational compilation identities, whose preimage is not a
-    /// documented format.
-    pub(crate) fn of_hash(domain: &str, value: &impl std::hash::Hash) -> Self {
-        struct Hasher(Sha256);
-        impl std::hash::Hasher for Hasher {
-            fn finish(&self) -> u64 {
-                unreachable!("only the SHA-256 output is used")
-            }
-            fn write(&mut self, bytes: &[u8]) {
-                self.0.update(bytes);
-            }
-        }
-        let mut hasher = Hasher(Sha256::new());
-        hasher.0.update(domain.as_bytes());
-        value.hash(&mut hasher);
-        Self(hasher.0.finalize().into())
-    }
 }
 
 /// Builds a documented digest preimage from length-prefixed fields.
 ///
 /// `str` writes the UTF-8 byte length as a big-endian `u64` and then the bytes;
 /// `digest` writes the 32 raw digest bytes; `count` writes a big-endian `u64`;
-/// `bool` writes one byte, `0` or `1`. Every preimage starts with a domain tag
-/// written by `str`.
+/// `int` writes a two's-complement big-endian `i64`; `bool` writes one byte,
+/// `0` or `1`. Every preimage starts with a domain tag written by `str`.
 pub(crate) struct Preimage(Sha256);
 
 impl Preimage {
@@ -97,6 +76,11 @@ impl Preimage {
 
     pub(crate) fn count(&mut self, value: usize) -> &mut Self {
         self.0.update((value as u64).to_be_bytes());
+        self
+    }
+
+    pub(crate) fn int(&mut self, value: i64) -> &mut Self {
+        self.0.update(value.to_be_bytes());
         self
     }
 

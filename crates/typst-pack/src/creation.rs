@@ -1,533 +1,284 @@
-//! Pack Creation: one representative Typst request over supplied inputs.
+//! Pack creation: discovering the packages and fonts a project needs by
+//! compiling it.
 //!
-//! Creation reads nothing. The caller supplies a [`ProjectSnapshot`], a
-//! [`FontCatalog`], and the Package Trees resolved for the
-//! document, all as bytes it already holds, so the operation runs wherever the
-//! core runs — including a host with no filesystem and no clock. Obtaining
-//! those inputs belongs to Pack Assembly and a Pack Assembler.
+//! Creation reads nothing. The caller supplies the project, package trees,
+//! and font containers as bytes it already holds, so creation runs wherever
+//! the core runs, including a host with no filesystem and no clock.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Mutex;
 
-use ecow::EcoVec;
-use typst::diag::{FileError, FileResult, PackageError, SourceDiagnostic, Warned};
-use typst::foundations::{Bytes, Datetime, Dict, Duration};
+use typst::World;
+use typst::diag::{SourceDiagnostic, SourceResult, Warned};
+use typst::syntax::VirtualRoot;
 use typst::syntax::package::PackageSpec;
-use typst::syntax::{FileId, RootedPath, Source, VirtualPath, VirtualRoot};
-use typst::text::{Font, FontBook};
-use typst::utils::LazyHash;
-use typst::{Feature, Library, LibraryExt, World};
-use typst_kit::datetime::Time;
-use typst_kit::files::{FileLoader, FileStore};
 
-use crate::domain::{DocumentTime, TypstTarget};
-use crate::embedded::EmbeddedTypst;
-use crate::font_catalog::{CatalogFonts, FontCatalog};
+use crate::compile::{CompileOptions, Environment, Input, RequestIssue, list};
+use crate::domain::TypstTarget;
+use crate::font_catalog::FontCatalog;
 use crate::manifest::PackMetadata;
-use crate::pack::{FontInput, Pack, PackInput, PackInvariantError, PackageContent, PackageInput};
+use crate::pack::{FontInput, Pack, PackInvariantError, PackageContent, PackageInput};
 use crate::package_catalog::PackageCatalog;
-use crate::package_failure::{PackageReadFailure, PackageReadFailureReason, PackageReadFailures};
-use crate::payload::SharedBytes;
+use crate::package_failure::PackageReadFailures;
 use crate::project_snapshot::ProjectSnapshot;
+use crate::world::{Loader, SourceWorld, Sources};
 
-/// The semantic controls for one Dependency Discovery run.
-///
-/// These values select dependencies for one Pack Creation invocation. They do
-/// not become Pack state and do not restrict later Pack compilation requests.
-#[derive(Clone, Debug)]
-pub struct DiscoverySpecification {
-    target: TypstTarget,
-    inputs: Dict,
-    document_time: DocumentTime,
-    features: Vec<Feature>,
+/// Everything one Pack creation compiles over.
+#[derive(Debug, Clone)]
+pub struct CreateRequest {
+    /// The project files and entrypoint; all of them become Pack files.
+    pub project: ProjectSnapshot,
+    /// Package trees available to discovery, each with its disposition.
+    pub packages: PackageCatalog,
+    /// Font containers available to discovery, in selection order.
+    pub fonts: FontCatalog,
+    /// Packages the caller could not supply. Discovery fails at the import
+    /// that needs one, with the recorded reason.
+    pub package_failures: PackageReadFailures,
+    /// The document model discovery compiles. HTML enables
+    /// [`Feature::Html`](typst::Feature::Html) itself.
+    pub target: TypstTarget,
+    /// Inputs, document time, and features of the discovery compile.
+    pub options: CompileOptions,
+    /// Input overrides for additional discovery compiles. Each variant
+    /// compiles `options` with its inputs replacing or adding to the base
+    /// inputs, so packages and fonts reached only under other inputs are
+    /// discovered too.
+    pub variants: Vec<Vec<(String, Input)>>,
+    /// Descriptive metadata, excluded from Pack identity.
+    pub metadata: Option<PackMetadata>,
 }
 
-impl DiscoverySpecification {
-    /// Validates and groups every semantic control for one discovery run.
-    pub fn new(
-        target: TypstTarget,
-        inputs: Dict,
-        document_time: DocumentTime,
-        features: impl IntoIterator<Item = Feature>,
-    ) -> Result<Self, DiscoverySpecificationError> {
-        if let DocumentTime::UnixTimestamp(timestamp) = document_time
-            && Time::fixed_timestamp(timestamp).is_err()
-        {
-            return Err(DiscoverySpecificationError::InvalidDocumentTimestamp);
+impl CreateRequest {
+    /// Creation of `project` with no packages, fonts, or variants, the paged
+    /// target, and default options.
+    pub fn new(project: ProjectSnapshot) -> Self {
+        Self {
+            project,
+            packages: PackageCatalog::default(),
+            fonts: FontCatalog::default(),
+            package_failures: PackageReadFailures::default(),
+            target: TypstTarget::Paged,
+            options: CompileOptions::default(),
+            variants: Vec::new(),
+            metadata: None,
         }
-        Ok(Self {
-            target,
-            inputs,
-            document_time,
-            features: features.into_iter().collect(),
-        })
-    }
-
-    /// The Typst document model selected for Dependency Discovery.
-    pub fn target(&self) -> TypstTarget {
-        self.target
-    }
-
-    /// Values exposed to document code through `sys.inputs`.
-    pub fn inputs(&self) -> &Dict {
-        &self.inputs
-    }
-
-    /// The exact or explicitly absent Document Time for this run.
-    pub fn document_time(&self) -> DocumentTime {
-        self.document_time
-    }
-
-    /// Typst engine features enabled for this run.
-    pub fn features(&self) -> &[Feature] {
-        &self.features
     }
 }
 
-/// A failure while constructing a [`DiscoverySpecification`].
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum DiscoverySpecificationError {
-    #[error("the discovery document-time UNIX timestamp is out of range")]
-    InvalidDocumentTimestamp,
-}
-
-/// Every value borrowed by one stateless Pack Creation invocation.
-#[derive(Clone, Copy, Debug)]
-pub struct PackCreationInput<'a> {
-    /// The complete, stabilized project tree and selected entrypoint.
-    pub project: &'a ProjectSnapshot,
-    /// Validated Package Trees available to Dependency Discovery.
-    pub packages: &'a PackageCatalog,
-    /// Ordered Font Containers available to Dependency Discovery.
-    pub fonts: &'a FontCatalog,
-    /// Failed package reads to attach at importing source spans.
-    pub package_failures: &'a PackageReadFailures,
-    /// Semantic controls used only for this Dependency Discovery run.
-    pub discovery: &'a DiscoverySpecification,
-    /// Optional descriptive Pack metadata, excluded from Pack Identity.
-    pub metadata: Option<&'a PackMetadata>,
-}
-
-/// What one Pack Creation invocation produced.
+/// What one creation produced.
 #[derive(Debug)]
-#[allow(clippy::large_enum_variant)] // The accepted Created outcome owns its validated Pack.
-pub enum PackCreationOutcome {
-    /// Dependency Discovery succeeded and authoritative validation produced one
-    /// Pack. Discovery warnings remain separate from Pack state.
+#[allow(clippy::large_enum_variant)] // The common outcome owns its Pack.
+pub enum CreateOutcome {
+    /// Every discovery compile succeeded.
     Created {
         pack: Pack,
-        warnings: EcoVec<SourceDiagnostic>,
+        /// Warnings of every discovery compile, without repeats.
+        warnings: Vec<SourceDiagnostic>,
+        /// The sources the discovery compiles read.
+        sources: Sources,
     },
-    /// Exact specifications the caller must add to the Package Catalog before
-    /// invoking creation again. The list is nonempty, deduplicated, and in
-    /// canonical specification order.
-    MissingPackageSpecifications(Vec<PackageSpec>),
+    /// Packages discovery reached that no supplied tree covers, deduplicated
+    /// and in specification order. Add them to the request's package catalog
+    /// (or its package failures) and create again.
+    MissingPackages(Vec<PackageSpec>),
 }
 
-/// Complete compiler evidence from a rejected Dependency Discovery run.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct DependencyDiscoveryRejection {
-    diagnostics: EcoVec<SourceDiagnostic>,
-    warnings: EcoVec<SourceDiagnostic>,
-}
-
-impl DependencyDiscoveryRejection {
-    /// Every rejection diagnostic in compiler order.
-    pub fn diagnostics(&self) -> &[SourceDiagnostic] {
-        &self.diagnostics
-    }
-
-    /// Every discovery warning in compiler order.
-    pub fn warnings(&self) -> &[SourceDiagnostic] {
-        &self.warnings
-    }
-
-    /// Recovers the complete owned compiler evidence.
-    pub fn into_parts(self) -> (EcoVec<SourceDiagnostic>, EcoVec<SourceDiagnostic>) {
-        (self.diagnostics, self.warnings)
-    }
-}
-
-/// A failure that creates no Pack.
-#[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
-#[non_exhaustive]
-pub enum PackCreationError {
-    /// Dependency Discovery did not compile. All diagnostics and warnings from
-    /// the run are retained.
-    #[error(
-        "dependency discovery was rejected with {} diagnostic(s)",
-        .0.diagnostics.len()
-    )]
-    DependencyDiscoveryRejected(DependencyDiscoveryRejection),
-    /// The selected inputs do not satisfy authoritative whole-Pack invariants.
+/// A creation that produced no Pack.
+#[derive(Debug, thiserror::Error)]
+pub enum CreateError {
+    /// The request holds invalid values; nothing was compiled.
+    #[error("{}", list("invalid create request", .0))]
+    InvalidRequest(Vec<RequestIssue>),
+    /// A discovery compile failed.
+    #[error("{}", list("dependency discovery failed", &.errors.iter().map(|error| &error.message).collect::<Vec<_>>()))]
+    Failed {
+        errors: Vec<SourceDiagnostic>,
+        warnings: Vec<SourceDiagnostic>,
+        sources: Sources,
+    },
+    /// The discovered contents violate a Pack invariant.
     #[error(transparent)]
     InvalidPack(#[from] PackInvariantError),
 }
 
-/// Runs one representative Typst request over the supplied inputs and issues
-/// the Pack it selected, or reports the packages it needed and was not given.
+/// Compiles the project once per variant and issues the Pack whose
+/// requirements are every package and font container those compiles used, or
+/// reports the packages they needed and were not given.
 ///
-/// Compiler observations select package and font requirements; project files
-/// come from the Project Snapshot alone. Creation fails rather than issuing an
-/// incomplete Pack when the representative request does not compile.
-///
-/// A request that read a package no supplied tree covers returns
-/// [`PackCreationOutcome::MissingPackageSpecifications`] instead: resolve
-/// those specifications, add their trees to the Package Catalog, and invoke
-/// creation again. Because a
-/// failed import ends module evaluation, one round reports what that round
-/// reached, and a project needing several packages completes over repeated
-/// invocation. A specification the caller cannot resolve is added to
-/// [`PackageReadFailures`], which fails the next round's
-/// Dependency Discovery at the import that needed it.
-///
-/// Creation borrows validated bytes and has nothing to re-read. A Pack represents the
-/// exact values its source adapters read, without guaranteeing that values
-/// from mutable sources all coexisted at one instant.
+/// Project files come from the snapshot alone; compiler observations select
+/// only package and font requirements. Whole package trees travel, not just
+/// the files a compile read.
 ///
 /// # Resuming until every package is supplied
 ///
-/// The caller owns the retry loop, so any source can back it — a registry, a
-/// local directory, an object store, or a test fixture.
+/// A failed import ends evaluation, so one round reports what that round
+/// reached, and a project needing several packages completes over repeated
+/// calls. The caller owns the loop, so any source can back it:
 ///
 /// ```no_run
 /// use typst::syntax::package::PackageSpec;
 /// use typst_pack::{
-///     DiscoverySpecification, FontCatalog, Pack, PackCreationInput, PackCreationOutcome,
-///     PackageCatalog, PackageDisposition, PackageReadFailures, PackageTree, ProjectSnapshot,
+///     CreateOutcome, CreateRequest, Pack, PackageDisposition, PackageTree, ProjectSnapshot,
 ///     create,
 /// };
 ///
 /// fn assemble(
-///     project: &ProjectSnapshot,
-///     fonts: &FontCatalog,
-///     discovery: &DiscoverySpecification,
+///     project: ProjectSnapshot,
 ///     mut read_tree: impl FnMut(&PackageSpec) -> Result<PackageTree, Box<dyn std::error::Error>>,
 /// ) -> Result<Pack, Box<dyn std::error::Error>> {
-///     let mut packages = PackageCatalog::new();
-///     let package_failures = PackageReadFailures::new();
+///     let mut request = CreateRequest::new(project);
 ///     loop {
-///         let outcome = create(PackCreationInput {
-///             project,
-///             packages: &packages,
-///             fonts,
-///             package_failures: &package_failures,
-///             discovery,
-///             metadata: None,
-///         })?;
-///         match outcome {
-///             PackCreationOutcome::Created { pack, .. } => return Ok(pack),
-///             PackCreationOutcome::MissingPackageSpecifications(missing) => {
+///         match create(&request)? {
+///             CreateOutcome::Created { pack, .. } => return Ok(pack),
+///             CreateOutcome::MissingPackages(missing) => {
 ///                 for spec in missing {
 ///                     let tree = read_tree(&spec)?;
-///                     packages.insert(spec, tree, PackageDisposition::Embedded)?;
+///                     request.packages.insert(spec, tree, PackageDisposition::Embedded)?;
 ///                 }
 ///             }
 ///         }
 ///     }
 /// }
 /// ```
-pub fn create(input: PackCreationInput<'_>) -> Result<PackCreationOutcome, PackCreationError> {
-    let entrypoint = VirtualPath::new(input.project.entrypoint())
-        .expect("Project Snapshot entrypoint invariant violated");
-
-    let mut world = SuppliedWorld {
-        library: LazyHash::new(
-            Library::builder()
-                .with_inputs(input.discovery.inputs.clone())
-                .with_features(input.discovery.features.iter().copied().collect())
-                .build(),
-        ),
-        main: RootedPath::new(VirtualRoot::Project, entrypoint).intern(),
-        files: FileStore::new(SuppliedLoader {
-            project: input.project,
-            packages: input.packages,
-            package_failures: input.package_failures,
-        }),
-        fonts: input.fonts.expand(),
-        used_font_indices: Mutex::new(BTreeSet::new()),
-        clock: DiscoveryClock::new(input.discovery.document_time),
+pub fn create(request: &CreateRequest) -> Result<CreateOutcome, CreateError> {
+    let html = request.target == TypstTarget::Html;
+    let mut issues = Vec::new();
+    let environments = std::iter::once(request.options.clone())
+        .chain(request.variants.iter().map(|inputs| {
+            let mut options = request.options.clone();
+            options.inputs.extend(inputs.iter().cloned());
+            options
+        }))
+        .map(|options| Environment::new(&options, html, &mut issues))
+        .collect::<Option<Vec<_>>>();
+    issues.dedup();
+    let Some(environments) = environments.filter(|_| issues.is_empty()) else {
+        return Err(CreateError::InvalidRequest(issues));
     };
 
-    let Warned { output, warnings } = compile_creation_target(&world, input.discovery.target);
-    let observed = world.observed_packages();
+    let mut used_packages = BTreeMap::new();
+    let mut missing = BTreeMap::new();
+    let mut used_fonts = BTreeSet::new();
+    let mut warnings = Vec::<SourceDiagnostic>::new();
+    let mut failure = None;
+    let mut sources = None;
+    for environment in environments {
+        let loader = Loader {
+            project: request.project.clone(),
+            packages: request
+                .packages
+                .entries()
+                .map(|entry| (entry.spec().to_string(), entry.tree().clone()))
+                .collect(),
+            failures: request.package_failures.clone(),
+        };
+        let fonts = request
+            .fonts
+            .entries()
+            .iter()
+            .map(|entry| entry.container().fonts().to_vec());
+        let mut world = SourceWorld::new(loader, fonts, environment.library, environment.clock);
+        let Warned {
+            output,
+            warnings: run_warnings,
+        } = compile_target(&world, request.target);
 
-    // Reported before the compile outcome is inspected, because the import that
-    // needed a tree is exactly what failed the compile. The caller resolves
-    // these and invokes creation again rather than reading diagnostics.
-    if !observed.missing.is_empty() {
-        return Ok(PackCreationOutcome::MissingPackageSpecifications(
-            observed.missing,
-        ));
+        // Observed from the requests the compiler made, not from what its
+        // diagnostics said about them.
+        for id in world.requested_files() {
+            let VirtualRoot::Package(spec) = id.root() else {
+                continue;
+            };
+            if request.packages.get(spec).is_some() {
+                used_packages.insert(spec.to_string(), spec.clone());
+            } else if request.package_failures.get(spec).is_none() {
+                // A specification declared unresolvable already failed the
+                // compile with the caller's reason; asking for it again would
+                // ask for what the caller said it cannot supply.
+                missing.insert(spec.to_string(), spec.clone());
+            }
+        }
+        used_fonts.extend(world.used_containers());
+        for warning in &run_warnings {
+            if !warnings.contains(warning) {
+                warnings.push(warning.clone());
+            }
+        }
+        let run_sources = world.into_sources();
+        if let Err(errors) = output
+            && failure.is_none()
+        {
+            failure = Some(CreateError::Failed {
+                errors: errors.into_iter().collect(),
+                warnings: run_warnings.into_iter().collect(),
+                sources: run_sources.clone(),
+            });
+        }
+        sources.get_or_insert(run_sources);
     }
 
-    if let Err(diagnostics) = output {
-        return Err(PackCreationError::DependencyDiscoveryRejected(
-            DependencyDiscoveryRejection {
-                diagnostics,
-                warnings,
-            },
+    // Reported before failures, because the import that needed a tree is
+    // exactly what failed the compile.
+    if !missing.is_empty() {
+        return Ok(CreateOutcome::MissingPackages(
+            missing.into_values().collect(),
         ));
     }
+    if let Some(failure) = failure {
+        return Err(failure);
+    }
 
-    // Packages, in canonical specification order. The whole Package
-    // Tree travels, not only the files the representative request read.
-    let loader = world.files.loader();
-    let packages = observed
-        .supplied
-        .into_iter()
+    let packages = used_packages
+        .into_values()
         .map(|spec| {
-            let entry = loader
+            let entry = request
                 .packages
                 .get(&spec)
-                .expect("observed package was partitioned as supplied");
+                .expect("a used package is cataloged");
             PackageInput {
                 embedded: entry.disposition().is_embedded(),
-                content: PackageContent::Files(
-                    entry
-                        .tree()
-                        .shared_files()
-                        .map(|(path, data)| (path.to_owned(), data.clone()))
-                        .collect(),
-                ),
+                content: PackageContent::Tree(entry.tree().clone()),
                 spec,
             }
         })
         .collect();
-
-    // Every container a selected face came from, in Font Catalog order,
-    // under the disposition its catalog entry carries.
-    let fonts = world
-        .used_containers()
+    let fonts = used_fonts
         .into_iter()
         .map(|position| {
-            let entry = &input.fonts.entries()[position];
-            FontInput::Bytes {
-                data: entry.container().shared_data().clone(),
+            let entry = &request.fonts.entries()[position];
+            FontInput::Container {
+                container: entry.container().clone(),
                 embedded: entry.disposition().is_embedded(),
             }
         })
         .collect();
-
-    let pack = Pack::construct(PackInput {
-        entrypoint: input.project.entrypoint().to_owned(),
-        metadata: input.metadata.cloned(),
-        files: input
-            .project
-            .shared_files()
-            .map(|(path, data)| (path.to_owned(), data.clone()))
-            .collect(),
+    let pack = Pack::with_dependencies(
+        request.project.clone(),
+        request.metadata.clone(),
         packages,
         fonts,
-    })?;
-    Ok(PackCreationOutcome::Created { pack, warnings })
+    )?;
+    Ok(CreateOutcome::Created {
+        pack,
+        warnings,
+        sources: sources.expect("the base options always compile"),
+    })
 }
 
-/// The package specifications one representative request asked for, split by
-/// whether the supplied trees covered them.
-#[derive(Default)]
-struct ObservedPackages {
-    /// Specifications a supplied tree covers, which become Package
-    /// Requirements.
-    supplied: Vec<PackageSpec>,
-    /// Specifications no supplied tree covers, which creation reports so the
-    /// caller can resolve them and invoke creation again.
-    missing: Vec<PackageSpec>,
-}
-
-/// The world the representative request compiles against: supplied bytes and
-/// nothing else.
-struct SuppliedWorld<'a> {
-    library: LazyHash<Library>,
-    main: FileId,
-    files: FileStore<SuppliedLoader<'a>>,
-    fonts: CatalogFonts,
-    used_font_indices: Mutex<BTreeSet<usize>>,
-    clock: DiscoveryClock,
-}
-
-impl SuppliedWorld<'_> {
-    /// The packages the representative request asked for a file of, split by
-    /// whether a supplied tree covers them, each in canonical specification
-    /// order.
-    ///
-    /// Both halves come from the requests the compiler made, not from what its
-    /// diagnostics said about them.
-    fn observed_packages(&mut self) -> ObservedPackages {
-        let mut specs: BTreeMap<String, PackageSpec> = BTreeMap::new();
-        let (loader, dependencies) = self.files.dependencies();
-        for id in dependencies {
-            if let VirtualRoot::Package(spec) = id.root() {
-                specs.insert(spec.to_string(), spec.clone());
-            }
-        }
-
-        let mut observed = ObservedPackages::default();
-        for spec in specs.into_values() {
-            if loader.packages.get(&spec).is_some() {
-                observed.supplied.push(spec);
-            } else if loader.package_failures.get(&spec).is_none() {
-                observed.missing.push(spec);
-            }
-            // A specification the caller declared unresolvable is neither. The
-            // representative request already failed at it, carrying the
-            // caller's own reason, and reporting it again would ask for what
-            // the caller said it cannot supply.
-        }
-        observed
-    }
-
-    /// The catalog positions of the containers whose faces the request
-    /// loaded, in catalog order.
-    fn used_containers(&self) -> BTreeSet<usize> {
-        self.used_font_indices
-            .lock()
-            .expect("used font index lock poisoned")
-            .iter()
-            .filter_map(|index| self.fonts.container(*index))
-            .collect()
-    }
-}
-
-impl World for SuppliedWorld<'_> {
-    fn library(&self) -> &LazyHash<Library> {
-        &self.library
-    }
-
-    fn book(&self) -> &LazyHash<FontBook> {
-        self.fonts.book()
-    }
-
-    fn main(&self) -> FileId {
-        self.main
-    }
-
-    fn source(&self, id: FileId) -> FileResult<Source> {
-        self.files.source(id)
-    }
-
-    fn file(&self, id: FileId) -> FileResult<Bytes> {
-        self.files.file(id)
-    }
-
-    fn font(&self, index: usize) -> Option<Font> {
-        let font = self.fonts.font(index);
-        if font.is_some() {
-            self.used_font_indices
-                .lock()
-                .expect("used font index lock poisoned")
-                .insert(index);
-        }
-        font
-    }
-
-    fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
-        self.clock.today(offset)
-    }
-}
-
-enum DiscoveryClock {
-    None,
-    Fixed(Datetime),
-    Timestamp(Time),
-}
-
-impl DiscoveryClock {
-    fn new(document_time: DocumentTime) -> Self {
-        match document_time {
-            DocumentTime::Absent => Self::None,
-            DocumentTime::Fixed(datetime) => Self::Fixed(datetime),
-            DocumentTime::UnixTimestamp(timestamp) => Self::Timestamp(
-                Time::fixed_timestamp(timestamp)
-                    .expect("Discovery Specification validated its Document Time"),
-            ),
-        }
-    }
-
-    fn today(&self, offset: Option<Duration>) -> Option<Datetime> {
-        match self {
-            Self::None => None,
-            Self::Fixed(datetime) => Some(*datetime),
-            Self::Timestamp(time) => time.today(offset),
-        }
-    }
-}
-
-/// Serves file requests from the supplied Project Snapshot and package trees.
-struct SuppliedLoader<'a> {
-    project: &'a ProjectSnapshot,
-    packages: &'a PackageCatalog,
-    package_failures: &'a PackageReadFailures,
-}
-
-impl FileLoader for SuppliedLoader<'_> {
-    fn load(&self, id: FileId) -> FileResult<Bytes> {
-        let path = id.vpath().get_without_slash();
-        match id.root() {
-            VirtualRoot::Project => self
-                .project
-                .shared_file(path)
-                .map(|data| data.to_typst())
-                .ok_or_else(|| FileError::NotFound(path.into())),
-            VirtualRoot::Package(spec) => {
-                let Some(entry) = self.packages.get(spec) else {
-                    // A supplied tree first, so a caller that resolved a
-                    // specification it had declared unresolvable is served it.
-                    return Err(FileError::Package(
-                        self.package_failures
-                            .get(spec)
-                            .map(package_failure_for_discovery)
-                            .unwrap_or_else(|| PackageError::NotFound(spec.clone())),
-                    ));
-                };
-                entry
-                    .tree()
-                    .shared_file(path)
-                    .map(SharedBytes::to_typst)
-                    .ok_or_else(|| FileError::NotFound(path.into()))
-            }
-        }
-    }
-}
-
-fn package_failure_for_discovery(failure: &PackageReadFailure) -> PackageError {
-    let spec = failure.spec().clone();
-    match failure.reason() {
-        PackageReadFailureReason::NotFound => PackageError::NotFound(spec),
-        PackageReadFailureReason::VersionNotFound { latest } => {
-            PackageError::VersionNotFound(spec, *latest)
-        }
-        PackageReadFailureReason::NetworkFailed { detail } => {
-            PackageError::NetworkFailed(detail.clone().map(Into::into))
-        }
-        PackageReadFailureReason::MalformedArchive { detail } => {
-            PackageError::MalformedArchive(detail.clone().map(Into::into))
-        }
-        PackageReadFailureReason::Other { detail } => {
-            PackageError::Other(detail.clone().map(Into::into))
-        }
-    }
-}
-
-/// Runs the representative request for the selected Typst Target, keeping only
-/// what selects requirements: whether it compiled, and its warnings.
-fn compile_creation_target(
-    world: &dyn World,
-    target: TypstTarget,
-) -> Warned<Result<(), EcoVec<SourceDiagnostic>>> {
+/// Compiles the target's document model, keeping only whether it succeeded.
+fn compile_target(world: &dyn World, target: TypstTarget) -> Warned<SourceResult<()>> {
     match target {
         TypstTarget::Paged => {
-            let Warned { output, warnings } = EmbeddedTypst::compile_paged(world);
+            let Warned { output, warnings } = typst::compile::<typst_layout::PagedDocument>(world);
             Warned {
-                output: output.map(|_| ()),
+                output: output.map(drop),
                 warnings,
             }
         }
         TypstTarget::Html => {
-            let Warned { output, warnings } = EmbeddedTypst::compile_html(world);
+            let Warned { output, warnings } = typst::compile::<typst_html::HtmlDocument>(world);
             Warned {
-                output: output.map(|_| ()),
+                output: output.map(drop),
                 warnings,
             }
         }

@@ -34,7 +34,7 @@ use cap_std::ambient_authority;
 use cap_std::fs::{Dir, OpenOptions};
 
 use crate::error_display::format_error_list;
-use crate::{CompilationResult, CompilationStatus, PackExtractionPlan};
+use crate::{Artifact, PackExtractionPlan};
 
 /// How a filesystem write treats a target that already exists.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -62,9 +62,7 @@ pub enum WriteIssue {
     ConflictingTarget { path: PathBuf },
     #[error("`{}` is a symbolic link or a file, not a directory", ancestor.display())]
     ConflictingAncestor { path: PathBuf, ancestor: PathBuf },
-    #[error("the Compilation Result did not succeed")]
-    FailedCompilation,
-    #[error("the Compilation Result has {artifacts} artifact(s), but {paths} path(s) were given")]
+    #[error("{artifacts} artifact(s) were given, but {paths} path(s)")]
     PathCountMismatch { artifacts: usize, paths: usize },
 }
 
@@ -132,23 +130,20 @@ pub fn write_pack_extraction_plan_to_filesystem(
     Ok(())
 }
 
-/// Writes each artifact of a succeeded Compilation Result to its path.
+/// Writes each compiled artifact to its path.
 ///
-/// `paths` pairs with the result's artifacts in order. Each path's directory
+/// `paths` pairs with the artifacts in order. Each path's directory
 /// must exist; the path is resolved natively, so it may contain symbolic
 /// links and `..` components.
 pub fn write_compilation_artifacts_to_filesystem_paths(
-    result: &CompilationResult,
+    artifacts: &[Artifact],
     paths: &[PathBuf],
     policy: WritePolicy,
 ) -> Result<(), FilesystemWriteError> {
     let mut issues = Vec::new();
-    if result.status() != CompilationStatus::Succeeded {
-        issues.push(WriteIssue::FailedCompilation);
-    }
-    if result.artifacts().len() != paths.len() {
+    if artifacts.len() != paths.len() {
         issues.push(WriteIssue::PathCountMismatch {
-            artifacts: result.artifacts().len(),
+            artifacts: artifacts.len(),
             paths: paths.len(),
         });
     }
@@ -169,8 +164,8 @@ pub fn write_compilation_artifacts_to_filesystem_paths(
     }
 
     let mut completed = Vec::with_capacity(paths.len());
-    for (artifact, path) in result.artifacts().iter().zip(paths) {
-        write_one(path, artifact.bytes(), policy).map_err(|source| FilesystemWriteError::Io {
+    for (artifact, path) in artifacts.iter().zip(paths) {
+        write_one(path, &artifact.bytes, policy).map_err(|source| FilesystemWriteError::Io {
             path: path.clone(),
             completed: completed.clone(),
             source,

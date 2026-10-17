@@ -2,9 +2,7 @@
 
 #[cfg(feature = "embedded-fonts")]
 use typst::foundations::Bytes;
-use typst::text::{Font, FontBook};
-use typst::utils::LazyHash;
-use typst_kit::fonts::FontStore;
+use typst::text::Font;
 
 use crate::Digest;
 use crate::pack::FontFace;
@@ -171,19 +169,6 @@ impl FontCatalog {
     pub fn entries(&self) -> &[FontCatalogEntry] {
         &self.entries
     }
-
-    /// Expands the catalog into the faces creation compiles against.
-    pub(crate) fn expand(&self) -> CatalogFonts {
-        let mut store = FontStore::new();
-        let mut containers = Vec::new();
-        for (position, entry) in self.entries.iter().enumerate() {
-            for font in entry.container.fonts() {
-                containers.push(position);
-                store.push((font.clone(), font.info().clone()));
-            }
-        }
-        CatalogFonts { store, containers }
-    }
 }
 
 impl Extend<FontCatalogEntry> for FontCatalog {
@@ -197,31 +182,6 @@ impl FromIterator<FontCatalogEntry> for FontCatalog {
         let mut catalog = Self::new();
         catalog.extend(entries);
         catalog
-    }
-}
-
-/// The compile-time projection of one Font Catalog: every face of every
-/// container, in catalog order.
-pub(crate) struct CatalogFonts {
-    store: FontStore,
-    /// The catalog position of each face's container.
-    containers: Vec<usize>,
-}
-
-impl CatalogFonts {
-    /// The selection metadata official Typst chooses faces from.
-    pub(crate) fn book(&self) -> &LazyHash<FontBook> {
-        self.store.book()
-    }
-
-    /// The face at the given book index.
-    pub(crate) fn font(&self, index: usize) -> Option<Font> {
-        self.store.font(index)
-    }
-
-    /// The catalog position of the container holding the face at a book index.
-    pub(crate) fn container(&self, index: usize) -> Option<usize> {
-        self.containers.get(index).copied()
     }
 }
 

@@ -26,23 +26,21 @@ with [`Error::InvalidPath`].
 
 ## Reading and assembling
 
-[`OpenDalPackAssembler`] (with `package-reading`) runs the whole Pack Creation
+[`OpenDalPackAssembler`] (with `package-reading`) runs the whole Pack creation
 loop: it reads the project and fonts, calls [`create`](crate::create), reads
 each missing package from the configured [`PackageSource`]s, inserts it, and
-resumes until a Pack is created.
+resumes until a Pack is created. Its public `target`, `options`, and
+`variants` fields are the discovery controls of
+[`CreateRequest`](crate::CreateRequest).
 
 ```rust,no_run
 # #[cfg(feature = "package-reading")]
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-use typst::foundations::Dict;
 use typst_pack::opendal::{FontSource, OpenDalPackAssembler, Operator, PackageSource};
-use typst_pack::{DiscoverySpecification, DocumentTime, FontDisposition, TypstTarget};
+use typst_pack::FontDisposition;
 
 let operator = Operator::new(opendal::services::Memory::default())?;
-let discovery =
-    DiscoverySpecification::new(TypstTarget::Paged, Dict::new(), DocumentTime::Absent, [])?;
-let mut assembler =
-    OpenDalPackAssembler::new(operator.clone(), "projects/report/", "main.typ", discovery);
+let mut assembler = OpenDalPackAssembler::new(operator.clone(), "projects/report/", "main.typ");
 assembler.fonts.push(FontSource {
     prefix: "fonts/".into(),
     disposition: FontDisposition::Embedded,
@@ -90,7 +88,7 @@ inside OpenDAL or its transport.
 | [`write_pack_archive`] | One Pack Archive object. |
 | [`write_package_archive`] | Validated registry archive bytes into an archive cache (always `CreateOrVerify`). |
 | [`write_pack_extraction_plan`] | Every extraction entry below a prefix. |
-| [`write_compilation_artifacts`] | Each artifact of a succeeded result at `prefix + key`. |
+| [`write_compilation_artifacts`] | Each compiled artifact at `prefix + key`. |
 
 [`WritePolicy::CreateOrVerify`] checks every key first: an existing object
 with a different length is a conflict without being downloaded, and an
@@ -120,61 +118,52 @@ already written complete as [`WriteOutcome::AlreadyMatching`].
 storage operation but not the operator's endpoint or credentials; the native
 OpenDAL error, which may carry backend context, is the error's `source`.
 
-## External compilation fulfillments
+## External compilation dependencies
 
 There is no OpenDAL compilation API. Read external packages and fonts with
-the same functions, build core fulfillment values, and call
-[`compile`](crate::compile), which verifies every digest before running
-Typst:
+the same functions, put them in a [`CompileRequest`](crate::CompileRequest),
+and call [`compile`](crate::compile), which matches every external
+requirement by digest before running Typst:
 
 ```rust,no_run
 use typst_pack::opendal::{
     FontSource, Operator, PackageRead, PackageSource, read_fonts, read_package,
 };
 use typst_pack::{
-    CompilationFulfillmentSet, CompilationOutputSpecification, CompilationReport,
-    FontDisposition, Pack, PackCompilationRequest, PackageTree, PackageTreeFulfillment,
-    ReadLimits, resolve_external_font_requirements,
+    CompileRequest, Compiled, FontDisposition, Output, Pack, PackageTree, ReadLimits,
 };
 
 async fn compile_with_external_inputs(
     operator: &Operator,
     pack: &Pack,
-    output: CompilationOutputSpecification,
-) -> Result<CompilationReport, Box<dyn std::error::Error>> {
+    output: Output,
+) -> Result<Compiled, Box<dyn std::error::Error>> {
     let limits = ReadLimits::default();
     let sources = [PackageSource::Trees {
         operator: operator.clone(),
         prefix: "packages/".into(),
     }];
-    let mut packages = Vec::new();
+    let mut request = CompileRequest::new(pack.clone(), output);
     for requirement in pack.package_requirements().iter().filter(|r| !r.embedded) {
         let PackageRead::Tree(files) = read_package(&sources, &requirement.spec, &limits).await?
         else {
             return Err(format!("no tree for {}", requirement.spec).into());
         };
         let tree = PackageTree::from_owned_entries(files)?;
-        packages.push(PackageTreeFulfillment::new(requirement.spec.clone(), tree));
+        request.packages.push((requirement.spec.clone(), tree));
     }
 
+    // Containers the pack does not require are ignored.
     let font_source = FontSource {
         prefix: "fonts/".into(),
         disposition: FontDisposition::External,
     };
     let catalog = read_fonts(operator, &[font_source], &limits).await?;
-    let fonts = resolve_external_font_requirements(
-        pack,
-        catalog.entries().iter().map(|entry| entry.container().data()),
-    )?;
-
-    let fulfillments = CompilationFulfillmentSet::new(packages, fonts)?;
-    let request = PackCompilationRequest::new(pack.clone(), output).fulfillments(fulfillments);
-    Ok(typst_pack::compile(request)?)
+    request.fonts = catalog
+        .entries()
+        .iter()
+        .map(|entry| entry.container().clone())
+        .collect();
+    Ok(typst_pack::compile(&request)?)
 }
 ```
-
-## Identity
-
-Enabling `opendal` changes implementation-attested compilation and result
-identities, as enabling `fs`, `parallel`, or `diagnostics` does. Include the
-enabled feature set in any identity-keyed cache namespace.

@@ -11,18 +11,17 @@ pub const VERSION: &str = concat!(
 mod compile;
 mod creation;
 mod domain;
-mod embedded;
 #[cfg(feature = "fs")]
 mod error_display;
 #[cfg(feature = "fs")]
 mod filesystem_write;
 mod font_catalog;
 #[cfg(feature = "fs")]
-mod fs_assembly;
-#[cfg(feature = "fs")]
 mod fs_fonts;
 #[cfg(feature = "fs")]
 mod fs_packages;
+#[cfg(feature = "fs")]
+mod fs_packer;
 #[cfg(feature = "fs")]
 mod fs_project;
 #[cfg(feature = "fs")]
@@ -44,32 +43,13 @@ mod payload;
 mod project_snapshot;
 mod read_layout;
 mod world;
-mod world_trace;
-
-#[cfg(all(feature = "diagnostics", feature = "fs"))]
-#[doc(hidden)]
-pub mod cli_support;
 
 pub use compile::{
-    CompilationAccessKind, CompilationAccessObservation, CompilationAccessOutcome,
-    CompilationAccessTrace, CompilationArtifact, CompilationDiagnostic, CompilationDocumentSummary,
-    CompilationFulfillmentIssue, CompilationFulfillmentReport, CompilationFulfillmentSet,
-    CompilationFulfillmentSetError, CompilationFulfillmentSetIssue, CompilationLimits,
-    CompilationOperationOutcome, CompilationOutputSpecification, CompilationReport,
-    CompilationReportOutcome, CompilationRequestIssue, CompilationRequestRejection,
-    CompilationResult, CompilationStatus, CreationTimestamp, DiagnosticHint, DiagnosticPhase,
-    DiagnosticProducer, DiagnosticSeverity, DiagnosticTracepoint, FontContainerFulfillment,
-    FontFulfillmentReport, HtmlOutputSpecification, ImplementationIdentity, ImplementationRole,
-    InvalidCompilationFulfillmentSet, LogicalSpan, OutputFormat, PackCompilationRequest,
-    PackCompilationWarning, PackOverrideSet, PackOverrideSetError, PackageFulfillmentReport,
-    PackageTreeFulfillment, PageRange, PageSelection, PdfOutputSpecification,
-    PdfStandardsValidationError, PngOutputSpecification, SvgOutputSpecification, TracepointKind,
-    compile, compile_with_limits, parse_page_selection, resolve_external_font_requirements,
+    Artifact, CompilationLimits, CompileError, CompileOptions, CompileRequest, Compiled,
+    CreationTimestamp, HtmlOutput, Input, Output, OutputFormat, PageRange, PageSelection,
+    PdfOutput, PngOutput, RequestIssue, SvgOutput, Unfulfilled, compile, parse_page_selection,
 };
-pub use creation::{
-    DependencyDiscoveryRejection, DiscoverySpecification, DiscoverySpecificationError,
-    PackCreationError, PackCreationInput, PackCreationOutcome, create,
-};
+pub use creation::{CreateError, CreateOutcome, CreateRequest, create};
 pub use domain::{DocumentTime, TypstTarget};
 #[cfg(feature = "fs")]
 pub use filesystem_write::{
@@ -82,18 +62,12 @@ pub use font_catalog::{
     FontCatalog, FontCatalogEntry, FontContainer, FontContainerError, FontDisposition,
 };
 #[cfg(feature = "fs")]
-pub use fs_assembly::{
-    FilesystemPackAssembler, FilesystemPackAssemblerConfig, FilesystemPackAssemblyClock,
-    FilesystemPackAssemblyCreationError, FilesystemPackAssemblyDiscoveryError,
-    FilesystemPackAssemblyError, FilesystemPackAssemblyRequest, FilesystemReadLimits,
-    PackAssemblyDiagnosticContext, PackAssemblyReport,
-};
-#[cfg(feature = "fs")]
 pub use fs_fonts::{FilesystemFontSource, FilesystemFonts, read_filesystem_fonts};
 #[cfg(feature = "fs")]
-pub use fs_packages::{
-    FilesystemPackageAuthority, FilesystemPackageAuthorityReadError, ReadPackage,
-    read_filesystem_package,
+pub use fs_packages::read_filesystem_package;
+#[cfg(feature = "fs")]
+pub use fs_packer::{
+    FilesystemPackError, FilesystemPacker, FilesystemReadLimits, Packed, Resolved,
 };
 #[cfg(feature = "fs")]
 pub use fs_project::{IGNORE_FILE, read_filesystem_project};
@@ -120,9 +94,8 @@ pub use package_reading::{
     PACKAGE_REGISTRY_NAMESPACE, PACKAGE_REGISTRY_URL, PackageArchiveReadError, PackageReadError,
     expand_package_archive, package_archive_url, read_package_archive,
 };
-pub use project_snapshot::{
-    ProjectSnapshot, ProjectSnapshotAssembly, ProjectSnapshotError, ProjectSnapshotIssue,
-};
+pub use project_snapshot::ProjectSnapshot;
+pub use world::Sources;
 
 #[cfg(test)]
 mod tests;

@@ -148,8 +148,8 @@ category = "fonts"
 classification = "pack-invariant"
 
 [[matrix]]
-category = "pack-overrides"
-classification = "intentional-pack-difference"
+category = "byte-inputs"
+classification = "upstream-behavior"
 
 [[semantic]]
 name = "pack-backed-world"
@@ -157,8 +157,8 @@ classification = "pack-invariant"
 coverage = ["crates/typst-pack/tests/official_typst_oracle.rs", "crates/typst-pack/tests/compilation.rs"]
 
 [[semantic]]
-name = "pack-overrides"
-classification = "intentional-pack-difference"
+name = "byte-inputs"
+classification = "upstream-behavior"
 coverage = ["crates/typst-pack/tests/official_typst_oracle.rs", "crates/typst-pack/tests/compilation.rs"]
 
 [[semantic]]

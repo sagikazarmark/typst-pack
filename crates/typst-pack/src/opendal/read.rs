@@ -7,7 +7,7 @@ use typst::syntax::package::PackageSpec;
 use super::{Error, check_key, check_prefix, storage};
 use crate::{
     FontCatalog, FontCatalogEntry, FontContainer, FontDisposition, LimitExceeded, ProjectSnapshot,
-    ProjectSnapshotAssembly, ReadLimits, read_layout,
+    ReadLimits, read_layout,
 };
 
 /// Running totals charged against one operation's [`ReadLimits`].
@@ -151,11 +151,11 @@ fn require_read(op: &Operator) -> Result<(), Error> {
     Ok(())
 }
 
-/// Reads every file below `prefix` and assembles a [`ProjectSnapshot`].
+/// Reads every file below `prefix` into a [`ProjectSnapshot`].
 ///
 /// All listed files are selected; `.typkignore` is an ordinary project file
 /// here (ignore rules apply only to filesystem reading). Directory markers
-/// are skipped. Snapshot assembly validates paths, collisions, and the
+/// are skipped. The snapshot validates paths, collisions, and the
 /// entrypoint. The listing is one observation, not a storage snapshot.
 pub async fn read_project(
     op: &Operator,
@@ -166,7 +166,7 @@ pub async fn read_project(
     check_prefix(prefix)?;
     require_listing(op)?;
     let files = read_tree(op, prefix, |_| true, &mut Budget::new(limits)).await?;
-    Ok(ProjectSnapshotAssembly::new(entrypoint).assemble(files)?)
+    Ok(ProjectSnapshot::new(entrypoint, files)?)
 }
 
 /// One storage prefix of Font Containers and the disposition its fonts get.
