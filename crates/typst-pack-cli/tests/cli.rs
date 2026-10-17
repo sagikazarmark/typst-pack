@@ -510,7 +510,7 @@ fn create_rejects_ignored_entrypoints_and_invalid_ignore_policies() {
 
 #[cfg(unix)]
 #[test]
-fn create_rejects_unignored_symlinks() {
+fn create_rejects_unignored_symlinks_escaping_the_project() {
     use std::os::unix::fs::symlink;
 
     let directory = tempfile::tempdir().unwrap();
@@ -536,7 +536,7 @@ fn create_rejects_unignored_symlinks() {
         .unwrap();
     let stderr = String::from_utf8_lossy(&result.stderr);
     assert!(!result.status.success(), "{stderr}");
-    assert!(stderr.contains("unsupported filesystem entry"), "{stderr}");
+    assert!(stderr.contains("linked.txt` resolves outside"), "{stderr}");
 }
 
 #[test]
@@ -747,7 +747,7 @@ fn compile_preserves_pack_override_preflight_error_output() {
 }
 
 #[test]
-fn compile_preserves_write_path_resolution_error_output() {
+fn compile_reports_a_missing_output_directory_natively() {
     let directory = tempfile::tempdir().unwrap();
     let pack = Pack::builder("main.typ")
         .file("main.typ", b"#rect(width: 1pt, height: 1pt)".to_vec())
@@ -756,7 +756,7 @@ fn compile_preserves_write_path_resolution_error_output() {
         .unwrap();
     let pack_path = directory.path().join("project.typk");
     std::fs::write(&pack_path, encode_reference(&pack)).unwrap();
-    let native_error = std::fs::canonicalize(directory.path().join("missing")).unwrap_err();
+    let native_error = std::fs::read_dir(directory.path().join("missing")).unwrap_err();
 
     let result = Command::new(env!("CARGO_BIN_EXE_typst-pack"))
         .current_dir(directory.path())
@@ -775,7 +775,7 @@ fn compile_preserves_write_path_resolution_error_output() {
     assert!(!result.status.success());
     assert_eq!(
         String::from_utf8_lossy(&result.stderr),
-        format!("error: cannot resolve output directory `missing`: {native_error}\n")
+        format!("error: cannot write `missing/output.svg`: {native_error}\n")
     );
     assert!(!directory.path().join("missing").exists());
 }

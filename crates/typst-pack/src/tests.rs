@@ -2271,28 +2271,17 @@ Rows: #csv("data.csv").len()
             PackExtractionSelection::new(true, true),
         )
         .unwrap();
-        let receipt = write_pack_extraction_plan_to_filesystem(
-            &plan,
-            &target,
-            FilesystemMergePolicy::MergeCreateOnly,
-        )
-        .unwrap();
-        assert!(!receipt.completed().is_empty());
+        write_pack_extraction_plan_to_filesystem(&plan, &target, WritePolicy::CreateNew).unwrap();
         assert!(target.join("main.typ").exists());
         assert!(target.join("assets/logo.png").exists());
         assert!(target.join("packages/local/greet/0.1.0/lib.typ").exists());
 
-        let result = write_pack_extraction_plan_to_filesystem(
-            &plan,
-            &target,
-            FilesystemMergePolicy::MergeCreateOnly,
-        );
+        let result =
+            write_pack_extraction_plan_to_filesystem(&plan, &target, WritePolicy::CreateNew);
         assert!(matches!(
             result,
-            Err(error) if matches!(
-                error.preflight_issues(),
-                Some([FilesystemWritePreflightIssue::ExistingTarget { .. }, ..])
-            )
+            Err(FilesystemWriteError::Rejected { issues })
+                if matches!(issues.as_slice(), [WriteIssue::ExistingTarget { .. }, ..])
         ));
     }
 
@@ -2336,29 +2325,19 @@ Rows: #csv("data.csv").len()
         fs::write(target.join("z.txt"), b"external").unwrap();
 
         let plan = plan_pack_extraction(&pack, PackExtractionSelection::default()).unwrap();
-        let result = write_pack_extraction_plan_to_filesystem(
-            &plan,
-            &target,
-            FilesystemMergePolicy::MergeCreateOnly,
-        );
+        let result =
+            write_pack_extraction_plan_to_filesystem(&plan, &target, WritePolicy::CreateNew);
 
         assert!(matches!(
             result,
-            Err(error) if matches!(
-                error.preflight_issues(),
-                Some([FilesystemWritePreflightIssue::ExistingTarget { .. }, ..])
-            )
+            Err(FilesystemWriteError::Rejected { issues })
+                if matches!(issues.as_slice(), [WriteIssue::ExistingTarget { .. }])
         ));
         assert!(!target.join("main.typ").exists());
         assert_eq!(fs::read(target.join("z.txt")).unwrap(), b"external");
 
-        let receipt = write_pack_extraction_plan_to_filesystem(
-            &plan,
-            &target,
-            FilesystemMergePolicy::MergeReplaceExactFiles,
-        )
-        .unwrap();
-        assert_eq!(receipt.completed().len(), 2);
+        write_pack_extraction_plan_to_filesystem(&plan, &target, WritePolicy::Overwrite).unwrap();
+        assert_eq!(fs::read(target.join("main.typ")).unwrap(), b"main");
         assert_eq!(fs::read(target.join("z.txt")).unwrap(), b"packed");
 
         let blocked_target = root.join("blocked");
@@ -2377,15 +2356,13 @@ Rows: #csv("data.csv").len()
         let result = write_pack_extraction_plan_to_filesystem(
             &nested_plan,
             &blocked_target,
-            FilesystemMergePolicy::MergeReplaceExactFiles,
+            WritePolicy::Overwrite,
         );
 
         assert!(matches!(
             result,
-            Err(error) if matches!(
-                error.preflight_issues(),
-                Some([FilesystemWritePreflightIssue::ConflictingAncestor { .. }, ..])
-            )
+            Err(FilesystemWriteError::Rejected { issues })
+                if matches!(issues.as_slice(), [WriteIssue::ConflictingAncestor { .. }])
         ));
         assert!(!blocked_target.join("main.typ").exists());
         assert_eq!(fs::read(blocked_target.join("tree")).unwrap(), b"external");
@@ -2412,18 +2389,13 @@ Rows: #csv("data.csv").len()
         symlink(&outside, target.join("assets")).unwrap();
 
         let plan = plan_pack_extraction(&pack, PackExtractionSelection::default()).unwrap();
-        let result = write_pack_extraction_plan_to_filesystem(
-            &plan,
-            &target,
-            FilesystemMergePolicy::MergeReplaceExactFiles,
-        );
+        let result =
+            write_pack_extraction_plan_to_filesystem(&plan, &target, WritePolicy::Overwrite);
 
         assert!(matches!(
             result,
-            Err(error) if matches!(
-                error.preflight_issues(),
-                Some([FilesystemWritePreflightIssue::ConflictingAncestor { .. }, ..])
-            )
+            Err(FilesystemWriteError::Rejected { issues })
+                if matches!(issues.as_slice(), [WriteIssue::ConflictingAncestor { .. }])
         ));
         assert!(!target.join("main.typ").exists());
         assert!(!outside.join("logo.txt").exists());
@@ -2482,14 +2454,9 @@ Rows: #csv("data.csv").len()
         let target = root.join("extracted");
 
         let plan = plan_pack_extraction(&pack, PackExtractionSelection::new(false, true)).unwrap();
-        let receipt = write_pack_extraction_plan_to_filesystem(
-            &plan,
-            &target,
-            FilesystemMergePolicy::MergeCreateOnly,
-        )
-        .unwrap();
+        write_pack_extraction_plan_to_filesystem(&plan, &target, WritePolicy::CreateNew).unwrap();
 
-        assert_eq!(receipt.completed().len(), 2);
+        assert_eq!(plan.entries().len(), 2);
         assert!(target.join(pack_font_path(&pack.fonts()[0])).is_file());
     }
 }

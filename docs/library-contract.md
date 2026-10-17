@@ -66,48 +66,70 @@ elapsed time, or aggregate concurrency between independent operations.
 
 ## Filesystem adapter
 
-The filesystem readers resolve every component of a selected path beneath its
-root without following a symlink. An entry that is, or lies behind, a symlink is
-refused as an alias issue, and an eligible entry that is not a regular file is
-refused as a typed unsupported-entry issue. These refusals apply when the bytes
-are read, not only when the structure is surveyed, so an entry that becomes an
-alias or an unsupported kind after the survey is still refused.
+Project, package, and font readers share one bounded walker. It lists each
+directory through the handle of its parent and takes `ReadLimits` (entries,
+per-file bytes, total bytes); an exceeded limit is a `LimitExceeded` naming the
+resource. All three report one error type, `FilesystemReadError`.
 
-Font roots are host configuration and are opened as configured, so an aliased
-font root is itself a refusal. Project and package roots are established before
-traversal begins and are opened as given. Project membership comes from the
-reader's root `.typkignore` policy; nested policy files are ordinary project
-files.
+Projects and packages follow symbolic links whose targets resolve beneath the
+root, including directory links, and refuse a link resolving outside it with
+an error naming the link. A link that leads back into a directory on the
+current descent is refused as a cycle. FIFOs, sockets, and devices are refused.
+The root itself may be a link, as `@local` development packages commonly are.
+Project membership comes from the root `.typkignore` policy, applied with
+gitignore semantics before any refusal, so an excluded entry is never examined;
+nested policy files are ordinary project files.
 
-`FilesystemMergePolicy::WriteNewTree` requires an absent destination, stages the
-complete plan, and exposes it through one root commit where the platform
-supports one. A policy the destination cannot honor is reported as
-`FilesystemWriteErrorCause::UnsupportedPolicy` rather than weakened to a merge.
-The adapter makes no crash-durability claim.
+Font directories are host configuration. Links are followed wherever they
+lead, only files with a font extension are considered, and an unreadable
+directory or file, an unsupported entry, or an unparseable font is skipped and
+reported in `FilesystemFonts::skipped` instead of failing the catalog. Only an
+explicitly configured root that cannot be opened, or an exceeded limit, fails
+the read.
 
-These refusals are validation, not confinement. The adapter uses the process's
+These checks are validation, not confinement. The adapter uses the process's
 ambient authority and claims nothing against a filesystem peer acting between
-operations beyond the refusals above. One assembly's read values are each exact
-as observed by their source adapter; the adapter does not establish that they
-coexisted at a single instant.
+operations. One assembly's read values are each exact as observed by their
+source adapter; the adapter does not establish that they coexisted at a single
+instant.
 
 ## Writes and recovery
 
-Write policy is explicit. Filesystem APIs provide policies with their documented
-staging and per-file or whole-tree guarantees. OpenDAL provides
-`WritePolicy::CreateOrVerify` and `WritePolicy::OverwriteExactKeys`; it makes no
-transactional or multi-key atomicity promise.
+Write policy is explicit. Filesystem writes take `WritePolicy::CreateNew`
+(fail when a target exists) or `WritePolicy::Overwrite` (replace or create).
+Each file is written to a temporary sibling and then committed: `Overwrite`
+renames it over the target, so readers see the old or the new content;
+`CreateNew` hard-links it, which fails on an existing target, and falls back to
+an exclusive create and write on filesystems without hard links, where an
+interrupted write can leave a partial file. The temporary file is removed on
+every path, and a failed cleanup after a successful commit is not an error.
+Nothing is flushed to stable storage, so there is no crash-durability claim.
+
+Before writing a Pack Extraction Plan, the adapter checks the plan and the
+destination and writes nothing if any check fails, listing every issue:
+paths must be canonical and portable (no Windows device names, trailing dots
+or spaces, or control characters, on every platform), must not collide when
+case is ignored, and must not conflict with existing destination entries. Under
+`CreateNew` an existing target is an `ExistingTarget` issue. Directories
+beneath the destination are created without following links, so a linked or
+non-directory ancestor beneath the destination is refused; the destination
+path itself may contain links.
+
+OpenDAL provides `WritePolicy::CreateOrVerify` and
+`WritePolicy::OverwriteExactKeys`; it makes no transactional or multi-key
+atomicity promise.
 
 Write inputs are borrowed or returned on composed-operation failure so callers
-retain exact replay material. Successful receipts report completed work. Relevant
-errors retain progress, the failed phase or path, the native cause, and
-`CommitCertainty` when a destination effect may be uncertain.
+retain exact replay material. A filesystem write failure names the failing path
+and the files already committed; OpenDAL errors retain progress, the failed
+phase or path, the native cause, and `CommitCertainty` when a destination
+effect may be uncertain.
 
 Multi-entry writes may leave a completed prefix. There is no general rollback.
-Inspect progress and commit certainty, reconcile destination state where needed,
-then replay the complete immutable plan or result under a policy suitable for
-the application. Cancellation can also leave effects; a dropped future produces
-no receipt or error.
+Inspect what was committed, reconcile destination state where needed, then
+replay the complete immutable plan or result under a policy suitable for the
+application. Cancellation can also leave effects; a dropped future produces no
+receipt or error.
 
 ## Archive representation
 

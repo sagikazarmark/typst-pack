@@ -130,104 +130,51 @@ pub fn read_pack(
     }
 }
 
-/// The filesystem phase in which Pack Archive Read failed.
-#[cfg(feature = "fs")]
-#[derive(Debug, Clone, Copy, Eq, PartialEq)]
-#[non_exhaustive]
-pub enum FileReadPhase {
-    Open,
-    Metadata,
-    Read,
-}
-
 /// A failure while reading exact Pack Archive bytes from a file.
 #[cfg(feature = "fs")]
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum FileReadError {
-    #[error("failed to open Pack Archive {path:?}: {source}")]
-    Open {
+    #[error("cannot read Pack Archive `{}`: {source}", path.display())]
+    Io {
         path: PathBuf,
         #[source]
         source: io::Error,
     },
-    #[error("failed to inspect Pack Archive {path:?}: {source}")]
-    Metadata {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
-    #[error("Pack Archive {path:?} exceeds its read limit: {source}")]
+    #[error("Pack Archive `{}` exceeds its read limit: {source}", path.display())]
     Limit {
         path: PathBuf,
-        phase: FileReadPhase,
         #[source]
         source: ReadLimitError,
     },
-    #[error("failed to read Pack Archive {path:?}: {source}")]
-    Read {
-        path: PathBuf,
-        #[source]
-        source: io::Error,
-    },
 }
 
-#[cfg(feature = "fs")]
-impl FileReadError {
-    pub const fn phase(&self) -> FileReadPhase {
-        match self {
-            Self::Open { .. } => FileReadPhase::Open,
-            Self::Metadata { .. } => FileReadPhase::Metadata,
-            Self::Limit { phase, .. } => *phase,
-            Self::Read { .. } => FileReadPhase::Read,
-        }
-    }
-
-    pub fn path(&self) -> &Path {
-        match self {
-            Self::Open { path, .. }
-            | Self::Metadata { path, .. }
-            | Self::Limit { path, .. }
-            | Self::Read { path, .. } => path,
-        }
-    }
-}
-
-/// Reads exact bytes from one file using known-size preflight and metered reads.
+/// Reads exact bytes from one file, refusing a file whose size exceeds the
+/// limit before reading it.
 #[cfg(feature = "fs")]
 pub fn read_file(
     path: impl AsRef<Path>,
     limits: ReadLimits,
 ) -> Result<PackArchiveBytes, FileReadError> {
     let path = path.as_ref();
-    let file = std::fs::File::open(path).map_err(|source| FileReadError::Open {
+    let io = |source| FileReadError::Io {
         path: path.to_owned(),
         source,
-    })?;
-    let known_size = file
-        .metadata()
-        .map_err(|source| FileReadError::Metadata {
-            path: path.to_owned(),
-            source,
-        })?
-        .len();
-    if known_size > limits.archive_bytes() {
-        return Err(FileReadError::Limit {
-            path: path.to_owned(),
-            phase: FileReadPhase::Metadata,
-            source: ReadLimitError::exceeded(ReadResource::ArchiveBytes, limits.archive_bytes()),
-        });
+    };
+    let limit = |source| FileReadError::Limit {
+        path: path.to_owned(),
+        source,
+    };
+    let file = std::fs::File::open(path).map_err(io)?;
+    if file.metadata().map_err(io)?.len() > limits.archive_bytes() {
+        return Err(limit(ReadLimitError::exceeded(
+            ReadResource::ArchiveBytes,
+            limits.archive_bytes(),
+        )));
     }
     read(file, limits).map_err(|error| match error {
-        ReadError::Limit(source) => FileReadError::Limit {
-            path: path.to_owned(),
-            phase: FileReadPhase::Read,
-            source,
-        },
-        ReadError::Read(source) => FileReadError::Read {
-            path: path.to_owned(),
-            source,
-        },
+        ReadError::Limit(source) => limit(source),
+        ReadError::Read(source) => io(source),
     })
 }
 

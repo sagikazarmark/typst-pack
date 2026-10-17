@@ -154,7 +154,7 @@ fn extract_preflights_collisions_and_force_replaces_only_planned_files() {
     assert!(collided.stdout.is_empty(), "{:?}", collided.stdout);
     assert_eq!(
         String::from_utf8(collided.stderr).unwrap(),
-        "error: `extracted/main.typ` already exists (pass force to overwrite)\n"
+        "error: `extracted/main.typ` already exists (pass --force to overwrite)\n"
     );
     assert_eq!(
         std::fs::read_to_string(destination.join("main.typ")).unwrap(),
@@ -186,6 +186,33 @@ fn extract_preflights_collisions_and_force_replaces_only_planned_files() {
         std::fs::read_to_string(destination.join("unrelated.txt")).unwrap(),
         "keep unrelated"
     );
+}
+
+#[test]
+fn create_replaces_an_existing_pack_without_leaving_temporary_files() {
+    let directory = tempfile::tempdir().unwrap();
+    write_project(directory.path());
+    std::fs::write(directory.path().join("project.typk"), "stale").unwrap();
+
+    for _ in 0..2 {
+        let created = create_pack(directory.path());
+        assert!(
+            created.status.success(),
+            "{}",
+            String::from_utf8_lossy(&created.stderr)
+        );
+    }
+
+    assert_ne!(
+        std::fs::read(directory.path().join("project.typk")).unwrap(),
+        b"stale"
+    );
+    let mut names = std::fs::read_dir(directory.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect::<Vec<_>>();
+    names.sort();
+    assert_eq!(names, ["project", "project.typk"]);
 }
 
 #[test]

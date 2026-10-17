@@ -26,7 +26,7 @@ mod fs_packages;
 #[cfg(feature = "fs")]
 mod fs_project;
 #[cfg(feature = "fs")]
-mod fs_traversal;
+mod fs_read;
 mod identity;
 mod limits;
 mod manifest;
@@ -77,16 +77,8 @@ pub use creation::{
 pub use domain::{DocumentTime, TypstTarget};
 #[cfg(feature = "fs")]
 pub use filesystem_write::{
-    CompilationArtifactPathWriteError, CompilationArtifactWriteError,
-    CompilationArtifactWriteIssue, FilesystemDestinationEntryKind, FilesystemMergePolicy,
-    FilesystemWriteErrorCause, FilesystemWritePathError, FilesystemWritePhase,
-    FilesystemWritePreflightIssue, PackExtractionWriteError, resolve_filesystem_write_paths,
-    write_compilation_artifacts_to_filesystem_paths, write_pack_extraction_plan_to_filesystem,
-};
-#[cfg(all(feature = "fs", fuzzing))]
-#[doc(hidden)]
-pub use filesystem_write::{
-    FilesystemWriteFaultProbe, write_pack_extraction_plan_to_filesystem_with_fault_probe,
+    FilesystemWriteError, WriteIssue, WritePolicy, write_compilation_artifacts_to_filesystem_paths,
+    write_pack_extraction_plan_to_filesystem,
 };
 #[cfg(feature = "embedded-fonts")]
 pub use font_catalog::typst_embedded_font_containers;
@@ -98,32 +90,22 @@ pub use font_catalog::{
 pub use fs_assembly::{
     FilesystemPackAssembler, FilesystemPackAssemblerConfig, FilesystemPackAssemblyClock,
     FilesystemPackAssemblyCreationError, FilesystemPackAssemblyDiscoveryError,
-    FilesystemPackAssemblyError, FilesystemPackAssemblyProfile, FilesystemPackAssemblyRequest,
+    FilesystemPackAssemblyError, FilesystemPackAssemblyRequest, FilesystemReadLimits,
     PackAssemblyDiagnosticContext, PackAssemblyReport,
 };
 #[cfg(feature = "fs")]
-pub use fs_fonts::{
-    FilesystemFontContainerIssue, FilesystemFontEntryKind, FilesystemFontIssue,
-    FilesystemFontLimitError, FilesystemFontLimits, FilesystemFontOperation,
-    FilesystemFontReadError, FilesystemFontResource, FilesystemFontSource,
-    FilesystemFontSurveyError, FilesystemFontValidationError, read_filesystem_fonts,
-};
+pub use fs_fonts::{FilesystemFontSource, FilesystemFonts, read_filesystem_fonts};
 #[cfg(feature = "fs")]
 pub use fs_packages::{
-    FilesystemPackageAuthority, FilesystemPackageAuthorityReadError, FilesystemPackageEntryKind,
-    FilesystemPackageIssue, FilesystemPackageLimitError, FilesystemPackageLimits,
-    FilesystemPackageOperation, FilesystemPackageReadError, FilesystemPackageResource,
-    FilesystemPackageSurveyError, ReadPackage, read_filesystem_package,
+    FilesystemPackageAuthority, FilesystemPackageAuthorityReadError, ReadPackage,
+    read_filesystem_package,
 };
 #[cfg(feature = "fs")]
-pub use fs_project::{
-    FilesystemProjectEntryKind, FilesystemProjectIssue, FilesystemProjectLimitError,
-    FilesystemProjectLimits, FilesystemProjectOperation, FilesystemProjectPolicyError,
-    FilesystemProjectReadError, FilesystemProjectResource, FilesystemProjectSurveyError,
-    IGNORE_FILE, read_filesystem_project,
-};
+pub use fs_project::{IGNORE_FILE, read_filesystem_project};
+#[cfg(feature = "fs")]
+pub use fs_read::FilesystemReadError;
 pub use identity::{CanonicalIdentity, CanonicalIdentityRole};
-pub use limits::{LimitError, Limits, Resource, ResourceKind};
+pub use limits::{LimitError, LimitExceeded, Limits, ReadLimits, Resource, ResourceKind};
 pub use manifest::PackMetadata;
 pub use pack::{
     FILE_EXTENSION, FontFaceIdentity, FontRequirement, Pack, PackBuildError, PackBuilder, PackFont,

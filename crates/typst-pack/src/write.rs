@@ -28,6 +28,7 @@ pub struct PackExtractionWriteEntry {
 }
 
 impl PackExtractionWriteEntry {
+    #[cfg(feature = "opendal")]
     pub(crate) fn new(relative_path: String, outcome: WriteKeyOutcome) -> Self {
         Self {
             relative_path,
@@ -61,11 +62,6 @@ impl PackExtractionWriteProgress {
         &self.completed
     }
 
-    #[cfg(feature = "fs")]
-    pub(crate) fn from_completed(completed: Vec<PackExtractionWriteEntry>) -> Self {
-        Self { completed }
-    }
-
     #[cfg(feature = "opendal")]
     pub(crate) fn clear(&mut self) {
         self.completed.clear();
@@ -85,6 +81,7 @@ pub struct PackExtractionWriteReceipt {
 }
 
 impl PackExtractionWriteReceipt {
+    #[cfg(feature = "opendal")]
     pub(crate) const fn new(
         pack_identity: CanonicalIdentity,
         progress: PackExtractionWriteProgress,
@@ -116,6 +113,7 @@ pub struct CompilationArtifactWriteEntry {
 }
 
 impl CompilationArtifactWriteEntry {
+    #[cfg(feature = "opendal")]
     pub(crate) const fn new(artifact_index: usize, outcome: WriteKeyOutcome) -> Self {
         Self {
             artifact_index,
@@ -149,11 +147,6 @@ impl CompilationArtifactWriteProgress {
         &self.completed
     }
 
-    #[cfg(feature = "fs")]
-    pub(crate) fn from_completed(completed: Vec<CompilationArtifactWriteEntry>) -> Self {
-        Self { completed }
-    }
-
     #[cfg(feature = "opendal")]
     pub(crate) fn clear(&mut self) {
         self.completed.clear();
@@ -173,6 +166,7 @@ pub struct CompilationArtifactWriteReceipt {
 }
 
 impl CompilationArtifactWriteReceipt {
+    #[cfg(feature = "opendal")]
     pub(crate) const fn new(
         compilation_result_identity: CanonicalIdentity,
         progress: CompilationArtifactWriteProgress,

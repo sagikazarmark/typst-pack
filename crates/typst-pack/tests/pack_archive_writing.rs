@@ -68,95 +68,82 @@ fn write_pack_returns_exact_encoded_bytes_for_retry_without_reencoding() {
 }
 
 #[cfg(feature = "fs")]
-#[test]
-fn file_create_new_writes_complete_bytes_and_never_replaces() {
-    use typst_pack::pack_archive::StagingResidueStatus;
-    use typst_pack::pack_archive::{FileWritePhase, FileWritePolicy, write_file};
-
-    let directory = tempfile::tempdir().unwrap();
-    let destination = directory.path().join("archive.typk");
-    let archive = PackArchiveBytes::from_vec(b"new archive".to_vec());
-
-    let receipt = write_file(&destination, &archive, FileWritePolicy::CreateNew).unwrap();
-    assert_eq!(std::fs::read(&destination).unwrap(), archive.as_slice());
-    assert_eq!(receipt.destination(), destination);
-
-    let replacement = PackArchiveBytes::from_vec(b"replacement".to_vec());
-    let error = write_file(&destination, &replacement, FileWritePolicy::CreateNew).unwrap_err();
-    assert_eq!(error.phase(), FileWritePhase::Commit);
-    assert_eq!(error.commit_certainty(), CommitCertainty::NotCommitted);
-    assert_eq!(std::fs::read(&destination).unwrap(), archive.as_slice());
-    let staging = error.staging_residue().expect("retry material on disk");
-    assert_eq!(
-        error.staging_residue_status(),
-        StagingResidueStatus::Present
-    );
-    assert_eq!(staging.parent(), destination.parent());
-    assert_eq!(std::fs::read(staging).unwrap(), replacement.as_slice());
+fn directory_names(directory: &std::path::Path) -> Vec<std::ffi::OsString> {
+    let mut names = std::fs::read_dir(directory)
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect::<Vec<_>>();
+    names.sort();
+    names
 }
 
 #[cfg(feature = "fs")]
 #[test]
-fn file_replace_requires_an_existing_destination_and_commits_atomically() {
-    use typst_pack::pack_archive::{
-        FileWritePhase, FileWritePolicy, SavePackError, StagingResidueStatus,
-        save_pack_with_limits, write_file,
-    };
+fn file_create_new_writes_complete_bytes_and_never_replaces() {
+    use typst_pack::pack_archive::write_file;
+    use typst_pack::{FilesystemWriteError, WritePolicy};
 
     let directory = tempfile::tempdir().unwrap();
     let destination = directory.path().join("archive.typk");
     let archive = PackArchiveBytes::from_vec(b"new archive".to_vec());
 
-    if cfg!(not(any(
-        target_os = "linux",
-        target_os = "android",
-        target_os = "macos",
-        target_os = "ios"
-    ))) {
-        let error =
-            write_file(&destination, &archive, FileWritePolicy::ReplaceExisting).unwrap_err();
-        assert_eq!(error.phase(), FileWritePhase::Policy);
-        assert_eq!(error.commit_certainty(), CommitCertainty::NotCommitted);
-        assert_eq!(error.staging_residue_status(), StagingResidueStatus::Absent);
-        assert_eq!(error.staging_residue(), None);
-        return;
-    }
-
-    let missing = write_file(&destination, &archive, FileWritePolicy::ReplaceExisting).unwrap_err();
-    assert_eq!(missing.phase(), FileWritePhase::Commit);
-    assert_eq!(missing.commit_certainty(), CommitCertainty::NotCommitted);
-    assert_eq!(
-        missing.staging_residue_status(),
-        StagingResidueStatus::Present
-    );
-    assert!(!destination.exists());
-    assert_eq!(
-        std::fs::read(missing.staging_residue().unwrap()).unwrap(),
-        archive.as_slice()
-    );
-
-    std::fs::write(&destination, b"old archive").unwrap();
-    write_file(&destination, &archive, FileWritePolicy::ReplaceExisting).unwrap();
+    write_file(&destination, &archive, WritePolicy::CreateNew).unwrap();
     assert_eq!(std::fs::read(&destination).unwrap(), archive.as_slice());
 
+    let replacement = PackArchiveBytes::from_vec(b"replacement".to_vec());
+    let error = write_file(&destination, &replacement, WritePolicy::CreateNew).unwrap_err();
+    let FilesystemWriteError::Io { path, source, .. } = error else {
+        panic!("expected an I/O failure");
+    };
+    assert_eq!(path, destination);
+    assert_eq!(source.kind(), io::ErrorKind::AlreadyExists);
+    assert_eq!(std::fs::read(&destination).unwrap(), archive.as_slice());
+    // No temporary file is left behind.
+    assert_eq!(directory_names(directory.path()), ["archive.typk"]);
+}
+
+#[cfg(feature = "fs")]
+#[test]
+fn file_overwrite_creates_or_replaces_on_every_platform() {
+    use typst_pack::pack_archive::{SavePackError, save_pack, save_pack_with_limits, write_file};
+    use typst_pack::{FilesystemWriteError, WritePolicy};
+
+    let directory = tempfile::tempdir().unwrap();
+    let destination = directory.path().join("archive.typk");
+    let archive = PackArchiveBytes::from_vec(b"new archive".to_vec());
+
+    write_file(&destination, &archive, WritePolicy::Overwrite).unwrap();
+    assert_eq!(std::fs::read(&destination).unwrap(), archive.as_slice());
+
+    std::fs::write(&destination, b"old archive").unwrap();
     let pack = simple_pack();
+    save_pack(&destination, &pack, WritePolicy::Overwrite).unwrap();
+    let saved = typst_pack::pack_archive::read_file(
+        &destination,
+        typst_pack::pack_archive::ReadLimits::reference_v1(),
+    )
+    .unwrap();
+    let decoded = typst_pack::pack_archive::decode(
+        &saved,
+        typst_pack::pack_archive::DecodeLimits::reference_v1(),
+    )
+    .unwrap();
+    assert_eq!(decoded.identity(), pack.identity());
+    assert_eq!(directory_names(directory.path()), ["archive.typk"]);
+
+    // A failed write keeps the encoded bytes for a retry.
     let error = save_pack_with_limits(
         &destination,
         &pack,
         EncodeLimits::reference_v1(),
-        FileWritePolicy::CreateNew,
+        WritePolicy::CreateNew,
     )
     .unwrap_err();
     let SavePackError::Write { archive, source } = error else {
         panic!("expected a write failure");
     };
-    assert_eq!(source.phase(), FileWritePhase::Commit);
-    let decoded = typst_pack::pack_archive::decode(
-        &archive,
-        typst_pack::pack_archive::DecodeLimits::reference_v1(),
-    )
-    .unwrap();
-    assert_eq!(decoded.identity(), pack.identity());
+    assert!(matches!(source, FilesystemWriteError::Io { .. }));
+    assert_eq!(archive.as_slice(), saved.as_slice());
 }
 
 fn simple_pack() -> typst_pack::Pack {

@@ -19,8 +19,8 @@ use std::path::{Path, PathBuf};
 use archive_support::{decode_reference, encode_reference};
 use typst_pack::{
     DocumentTime, FilesystemPackAssembler, FilesystemPackAssemblerConfig,
-    FilesystemPackAssemblyError, FilesystemPackAssemblyRequest, FilesystemProjectIssue,
-    FilesystemProjectReadError, Pack, PackCreationError, TypstTarget,
+    FilesystemPackAssemblyError, FilesystemPackAssemblyRequest, FilesystemReadError, Pack,
+    PackCreationError, TypstTarget,
 };
 #[cfg(feature = "egress")]
 use typst_pack::{FilesystemPackageAuthorityReadError, PackageReadFailureReason};
@@ -262,7 +262,7 @@ fn structural_creation_prunes_conclusively_ignored_subtrees() {
 
 #[cfg(unix)]
 #[test]
-fn structural_creation_rejects_a_symlinked_root_ignore_policy() {
+fn structural_creation_rejects_a_root_ignore_policy_linked_from_outside() {
     use std::os::unix::fs::symlink;
 
     let dir = tempfile::tempdir().unwrap();
@@ -281,8 +281,8 @@ fn structural_creation_rejects_a_symlinked_root_ignore_policy() {
 
     assert!(matches!(
         result,
-        Err(FilesystemPackAssemblyError::ProjectRead(FilesystemProjectReadError::Survey(ref survey)))
-            if matches!(survey.issues(), [FilesystemProjectIssue::Alias { path }] if path == &policy)
+        Err(FilesystemPackAssemblyError::ProjectRead(FilesystemReadError::EscapingSymlink { ref path, .. }))
+            if path == &policy
     ));
 }
 

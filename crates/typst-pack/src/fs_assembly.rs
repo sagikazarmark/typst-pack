@@ -34,55 +34,53 @@ use crate::creation::{
 };
 use crate::domain::{DocumentTime, TypstTarget};
 use crate::font_catalog::FontDisposition;
-use crate::fs_fonts::{FilesystemFontLimits, FilesystemFontSource, read_filesystem_fonts};
+use crate::fs_fonts::{FilesystemFontSource, read_filesystem_fonts};
 use crate::fs_packages::{
-    FilesystemPackageAuthority, FilesystemPackageAuthorityReadError, FilesystemPackageLimits,
-    ReadPackages,
+    FilesystemPackageAuthority, FilesystemPackageAuthorityReadError, ReadPackages,
 };
 use crate::fs_project;
+use crate::fs_read::FilesystemReadError;
+use crate::limits::ReadLimits;
 use crate::manifest::PackMetadata;
 use crate::pack::Pack;
 use crate::package_catalog::{PackageCatalog, PackageCatalogError, PackageDisposition};
 use crate::package_failure::PackageReadFailures;
 use crate::project_snapshot::ProjectSnapshot;
 
-/// Named finite resource policy for one filesystem Pack Assembly run.
+/// Read limits applied to each filesystem read of one Pack Assembly run.
+///
+/// Font roots get larger defaults than a project because system font
+/// directories routinely hold gigabytes of collections.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub struct FilesystemPackAssemblyProfile {
-    project: fs_project::FilesystemProjectLimits,
-    packages: FilesystemPackageLimits,
-    fonts: FilesystemFontLimits,
-    #[cfg(feature = "egress")]
-    package_expansion: crate::PackageExpansionLimits,
+pub struct FilesystemReadLimits {
+    /// Limits for reading the project directory.
+    pub project: ReadLimits,
+    /// Limits for reading each local or cached Package Tree.
+    pub packages: ReadLimits,
+    /// Limits shared by every font root of one Font Catalog read.
+    pub fonts: ReadLimits,
 }
 
-impl FilesystemPackAssemblyProfile {
-    /// The first-party finite profile used by ordinary filesystem workflows.
-    pub const fn reference_v1() -> Self {
+impl Default for FilesystemReadLimits {
+    fn default() -> Self {
+        const MIB: u64 = 1024 * 1024;
         Self {
-            project: fs_project::FilesystemProjectLimits::reference_v1(),
-            packages: FilesystemPackageLimits::reference_v1(),
-            fonts: FilesystemFontLimits::reference_v1(),
-            #[cfg(feature = "egress")]
-            package_expansion: crate::PackageExpansionLimits::reference_v1(),
+            project: ReadLimits {
+                max_entries: 1_000_000,
+                max_file_bytes: 256 * MIB,
+                max_total_bytes: 2048 * MIB,
+            },
+            packages: ReadLimits {
+                max_entries: 100_000,
+                max_file_bytes: 64 * MIB,
+                max_total_bytes: 512 * MIB,
+            },
+            fonts: ReadLimits {
+                max_entries: 100_000,
+                max_file_bytes: 256 * MIB,
+                max_total_bytes: 2048 * MIB,
+            },
         }
-    }
-
-    pub const fn project(&self) -> fs_project::FilesystemProjectLimits {
-        self.project
-    }
-
-    pub const fn packages(&self) -> FilesystemPackageLimits {
-        self.packages
-    }
-
-    pub const fn fonts(&self) -> FilesystemFontLimits {
-        self.fonts
-    }
-
-    #[cfg(feature = "egress")]
-    pub const fn package_expansion(&self) -> crate::PackageExpansionLimits {
-        self.package_expansion
     }
 }
 
@@ -109,12 +107,11 @@ pub struct FilesystemPackAssemblerConfig {
     #[cfg(feature = "egress")]
     certificate: Option<PathBuf>,
     clock: FilesystemPackAssemblyClock,
-    profile: FilesystemPackAssemblyProfile,
+    limits: FilesystemReadLimits,
 }
 
 impl FilesystemPackAssemblerConfig {
-    /// Starts with ordinary first-party host policy and the reference-v1
-    /// finite profile.
+    /// Starts with ordinary first-party host policy and default read limits.
     pub fn new() -> Self {
         Self {
             font_paths: Vec::new(),
@@ -126,13 +123,13 @@ impl FilesystemPackAssemblerConfig {
             #[cfg(feature = "egress")]
             certificate: None,
             clock: FilesystemPackAssemblyClock::System,
-            profile: FilesystemPackAssemblyProfile::reference_v1(),
+            limits: FilesystemReadLimits::default(),
         }
     }
 
-    /// Selects the finite resource policy applied to every run.
-    pub fn profile(mut self, profile: FilesystemPackAssemblyProfile) -> Self {
-        self.profile = profile;
+    /// Selects the read limits applied to every run.
+    pub fn limits(mut self, limits: FilesystemReadLimits) -> Self {
+        self.limits = limits;
         self
     }
 
@@ -331,22 +328,20 @@ pub struct FilesystemPackAssembler {
     system_fonts: bool,
     typst_embedded_fonts: bool,
     clock: FilesystemPackAssemblyClock,
-    profile: FilesystemPackAssemblyProfile,
+    limits: FilesystemReadLimits,
     #[cfg(test)]
     after_creation_hook: Option<Box<dyn Fn()>>,
 }
 
 impl FilesystemPackAssembler {
-    /// Configures the concrete project, package, font, clock, and finite-profile
+    /// Configures the concrete project, package, font, clock, and read-limit
     /// policy reused by each assembly request.
     pub fn new(config: FilesystemPackAssemblerConfig) -> Self {
         let authority = FilesystemPackageAuthority::with_limits(
             config.package_path.as_deref(),
             config.package_cache_path.as_deref(),
             config.offline,
-            config.profile.packages,
-            #[cfg(feature = "egress")]
-            config.profile.package_expansion,
+            config.limits.packages,
         );
         #[cfg(feature = "egress")]
         let authority = authority.certificate(config.certificate);
@@ -356,7 +351,7 @@ impl FilesystemPackAssembler {
             system_fonts: config.system_fonts,
             typst_embedded_fonts: config.typst_embedded_fonts,
             clock: config.clock,
-            profile: config.profile,
+            limits: config.limits,
             #[cfg(test)]
             after_creation_hook: None,
         }
@@ -409,11 +404,14 @@ impl FilesystemPackAssembler {
             .map_err(|err| FilesystemPackAssemblyError::io("failed to resolve entrypoint", err))?;
         let entrypoint = VirtualPath::virtualize(&root, &entrypoint_abs)
             .map_err(|_| FilesystemPackAssemblyError::OutsideRoot(entrypoint_abs.clone()))?;
-        let snapshot = Arc::new(fs_project::read_filesystem_project(
-            &root,
-            entrypoint.get_without_slash(),
-            self.profile.project,
-        )?);
+        let snapshot = Arc::new(
+            fs_project::read_filesystem_project(
+                &root,
+                entrypoint.get_without_slash(),
+                self.limits.project,
+            )
+            .map_err(FilesystemPackAssemblyError::ProjectRead)?,
+        );
 
         let packages = Arc::new(ReadPackages::new());
 
@@ -440,7 +438,9 @@ impl FilesystemPackAssembler {
                 .iter()
                 .map(|path| FilesystemFontSource::directory(path, scanned_disposition)),
         );
-        let font_catalog = read_filesystem_fonts(font_sources, self.profile.fonts)?;
+        let fonts = read_filesystem_fonts(font_sources, self.limits.fonts)
+            .map_err(FilesystemPackAssemblyError::FontRead)?;
+        let font_catalog = fonts.catalog;
 
         // The core consults no wall clock, so the adapter resolves the
         // representative request's Document Time from the host's.
@@ -516,6 +516,7 @@ impl FilesystemPackAssembler {
         Ok(PackAssemblyReport {
             pack,
             warnings,
+            skipped_fonts: fonts.skipped,
             #[cfg(feature = "diagnostics")]
             world,
         })
@@ -655,6 +656,7 @@ impl From<FilesystemPackAssemblyError> for CreationFailure {
 pub struct PackAssemblyReport {
     pack: Pack,
     warnings: EcoVec<SourceDiagnostic>,
+    skipped_fonts: Vec<FilesystemReadError>,
     #[cfg(feature = "diagnostics")]
     pub(crate) world: ReadWorld,
 }
@@ -668,6 +670,12 @@ impl PackAssemblyReport {
     /// Warnings emitted by the successful Dependency Discovery run.
     pub fn warnings(&self) -> &[SourceDiagnostic] {
         &self.warnings
+    }
+
+    /// Font files and directories that could not be read and were left out
+    /// of the Font Catalog.
+    pub fn skipped_fonts(&self) -> &[FilesystemReadError] {
+        &self.skipped_fonts
     }
 
     /// Recovers the Pack and discovery warnings.
@@ -767,9 +775,9 @@ pub enum FilesystemPackAssemblyError {
     #[error(transparent)]
     InvalidPackageCatalog(PackageCatalogError),
     #[error(transparent)]
-    ProjectRead(#[from] fs_project::FilesystemProjectReadError),
+    ProjectRead(FilesystemReadError),
     #[error(transparent)]
-    FontRead(#[from] crate::fs_fonts::FilesystemFontReadError),
+    FontRead(FilesystemReadError),
 }
 
 impl FilesystemPackAssemblyError {

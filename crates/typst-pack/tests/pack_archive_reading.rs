@@ -85,10 +85,8 @@ fn read_pack_returns_exact_read_bytes_when_decoding_fails() {
 
 #[cfg(feature = "fs")]
 #[test]
-fn file_read_uses_known_size_preflight_and_exact_reads() {
-    use typst_pack::pack_archive::{
-        FileReadError, FileReadPhase, OpenPackError, open_pack, read_file,
-    };
+fn file_read_refuses_an_oversized_file_and_keeps_undecodable_bytes() {
+    use typst_pack::pack_archive::{FileReadError, OpenPackError, open_pack, read_file};
 
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("archive.typk");
@@ -98,18 +96,20 @@ fn file_read_uses_known_size_preflight_and_exact_reads() {
     assert_eq!(archive.as_slice(), b"12345");
 
     let error = read_file(&path, ReadLimits::new(4)).unwrap_err();
-    assert_eq!(error.phase(), FileReadPhase::Metadata);
     assert!(matches!(
         error,
         FileReadError::Limit {
             source: ReadLimitError::Exceeded {
                 resource: ReadResource::ArchiveBytes,
                 ceiling: 4,
-                observed_at_least: 5,
+                ..
             },
             ..
         }
     ));
+
+    let missing = read_file(directory.path().join("missing.typk"), ReadLimits::new(4));
+    assert!(matches!(missing, Err(FileReadError::Io { .. })));
 
     let invalid = b"not a Pack Archive";
     std::fs::write(&path, invalid).unwrap();

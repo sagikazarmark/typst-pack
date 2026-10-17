@@ -83,8 +83,10 @@ extraction, and Pack Override commands.
 `create` includes every eligible regular file beneath the project root, not
 only files reached by the representative compile. A root `.typkignore` uses
 Gitignore-style ordered rules. It is included in the pack; nested
-`.typkignore` files are ordinary files. Symlinks, unsupported entries, and any
-path containing a `.typk` component are rejected.
+`.typkignore` files are ordinary files. Symbolic links are followed when they
+resolve inside the project root. A link leading outside it, a FIFO, socket, or
+device is rejected unless ignored, and any path containing a `.typk` component
+is left out.
 
 The representative compile selects package and font requirements. Its target,
 inputs, date, features, and control flow do not change which project files are
@@ -212,10 +214,7 @@ aliases.
 | `publish_pack_extraction_plan` | `write_pack_extraction_plan` |
 | `publish_compilation_artifacts` | `write_compilation_artifacts` |
 | `publish_pack_extraction_plan_to_filesystem` | `write_pack_extraction_plan_to_filesystem` |
-| `publish_pack_extraction_plan_to_filesystem_with_fault_probe` | `write_pack_extraction_plan_to_filesystem_with_fault_probe` |
 | `publish_compilation_artifacts_to_filesystem_paths` | `write_compilation_artifacts_to_filesystem_paths` |
-| `resolve_filesystem_publication_paths` | `resolve_filesystem_write_paths` |
-| `CompilationArtifactPathPublicationError::publication_error` | `CompilationArtifactPathWriteError::write_error` |
 | `insert_acquired_package` | `insert_read_package` |
 | `pack_archive::acquire` / `acquire_file` | `pack_archive::read` / `read_file` |
 | `pack_archive::publish` / `publish_file` | `pack_archive::write` / `write_file` |
@@ -237,7 +236,6 @@ Type families follow the same mechanical rules:
 | `FilesystemPackageAcquisitionError` | `FilesystemPackageAuthorityReadError` |
 | `PackExtractionPublicationProgress` | `PackExtractionWriteProgress` |
 | `CompilationArtifactPublicationReceipt` | `CompilationArtifactWriteReceipt` |
-| `FilePublicationPolicy` | `FileWritePolicy` |
 
 OpenDAL operation errors are no longer generic over an `OperatorResolver` error
 type. Resolver failures are retained as boxed sources. Match the operation's
@@ -262,10 +260,13 @@ boundaries, including archive decoding, package expansion, stream/file reads,
 and filesystem or OpenDAL read requests. Invalid custom limit configurations
 are programmer errors and panic during construction.
 
-Pack Extraction and Compilation Output Artifact writes now share the crate-root
-`*WriteEntry`, `*WriteProgress`, and `*WriteReceipt` types across filesystem and
-OpenDAL adapters. Write errors retain progress where relevant and expose
-`CommitCertainty`; successful receipts do not make an atomicity claim.
+Filesystem writes take one `WritePolicy` (`CreateNew` or `Overwrite`) and
+report failures through one `FilesystemWriteError`; filesystem reads report
+`FilesystemReadError` and take `ReadLimits`. OpenDAL Pack Extraction and
+Compilation Output Artifact writes share the crate-root `*WriteEntry`,
+`*WriteProgress`, and `*WriteReceipt` types. OpenDAL write errors retain
+progress where relevant and expose `CommitCertainty`; successful receipts do not
+make an atomicity claim.
 
 The request-origin and inventory wrappers were removed:
 `CompilationRequestInventory`, `TypstInputsInventory`, `PackOverridesInventory`,

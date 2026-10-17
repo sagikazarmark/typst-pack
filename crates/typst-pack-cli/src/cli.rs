@@ -24,25 +24,23 @@ use typst_pack::cli_support::{
     emit_creation_warnings, pdf_standard_requiring_tags, validate_pdf_standards,
 };
 use typst_pack::pack_archive::{
-    DecodeLimits, FORMAT_VERSION, FileReadError, FileWritePolicy, OpenPackError, ReadLimits,
+    DecodeLimits, FORMAT_VERSION, FileReadError, OpenPackError, ReadLimits,
     open_pack as open_pack_archive, read_pack as read_pack_archive, save_pack, write_pack,
 };
 use typst_pack::{
-    CompilationArtifact, CompilationArtifactPathWriteError, CompilationArtifactWriteError,
-    CompilationFulfillmentIssue, CompilationFulfillmentSet, CompilationLimits,
+    CompilationArtifact, CompilationFulfillmentIssue, CompilationFulfillmentSet, CompilationLimits,
     CompilationOperationOutcome, CompilationOutputSpecification, CompilationReportOutcome,
     CompilationRequestRejection, CompilationStatus, CreationTimestamp, DocumentTime,
     HtmlOutputSpecification, OutputFormat, PackCompilationRequest, PackOverrideSet,
     PackageTreeFulfillment, PageRange, PageSelection, PdfOutputSpecification,
     PngOutputSpecification, SvgOutputSpecification, TypstTarget, parse_page_selection,
-    resolve_external_font_requirements, resolve_filesystem_write_paths,
-    write_compilation_artifacts_to_filesystem_paths,
+    resolve_external_font_requirements, write_compilation_artifacts_to_filesystem_paths,
 };
 use typst_pack::{
-    FILE_EXTENSION, FilesystemMergePolicy, FilesystemPackAssembler, FilesystemPackAssemblerConfig,
-    FilesystemPackAssemblyError, FilesystemPackAssemblyRequest, FilesystemWritePreflightIssue,
-    Pack, PackCreationError, PackExtractionSelection, PackExtractionWriteError, PackMetadata,
-    plan_pack_extraction, write_pack_extraction_plan_to_filesystem,
+    FILE_EXTENSION, FilesystemPackAssembler, FilesystemPackAssemblerConfig,
+    FilesystemPackAssemblyError, FilesystemPackAssemblyRequest, FilesystemReadError,
+    FilesystemWriteError, Pack, PackCreationError, PackExtractionSelection, PackMetadata,
+    WriteIssue, WritePolicy, plan_pack_extraction, write_pack_extraction_plan_to_filesystem,
 };
 
 const ENV_PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
@@ -678,12 +676,11 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
     let timing_error = timing_error.map(|error| error.to_string());
     let report = match report {
         Ok(report) => report,
-        Err(FilesystemPackAssemblyError::ProjectRead(
-            typst_pack::FilesystemProjectReadError::Snapshot(error),
-        )) if matches!(
-            error.issues(),
-            [typst_pack::ProjectSnapshotIssue::MissingEntrypoint { .. }]
-        ) =>
+        Err(FilesystemPackAssemblyError::ProjectRead(FilesystemReadError::Snapshot(error)))
+            if matches!(
+                error.issues(),
+                [typst_pack::ProjectSnapshotIssue::MissingEntrypoint { .. }]
+            ) =>
         {
             let [typst_pack::ProjectSnapshotIssue::MissingEntrypoint { path }] = error.issues()
             else {
@@ -726,6 +723,9 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
 
     let mut stream = StandardStream::stderr(color);
     emit_creation_warnings(&report, &mut stream, diagnostic_format);
+    for skipped in report.skipped_fonts() {
+        emit_owned_warning(&format!("skipped font: {skipped}"), color);
+    }
     if let Some(error) = timing_error {
         return Err(error.into());
     }
@@ -736,15 +736,7 @@ fn create(args: CreateArgs, color: ColorChoice, cert: Option<&Path>) -> CliResul
         return Ok(());
     }
 
-    let policy = if output
-        .try_exists()
-        .map_err(|error| format!("cannot inspect `{}`: {error}", output.display()))?
-    {
-        FileWritePolicy::ReplaceExisting
-    } else {
-        FileWritePolicy::CreateNew
-    };
-    save_pack(&output, report.pack(), policy).map_err(|error| error.to_string())?;
+    save_pack(&output, report.pack(), WritePolicy::Overwrite).map_err(|error| error.to_string())?;
 
     let project_file_count = report.pack().files().count();
     let vendored_package_count = report
@@ -878,37 +870,35 @@ fn extract_command(args: ExtractArgs) -> CliResult {
     )
     .map_err(|error| error.to_string())?;
     let policy = if args.force {
-        FilesystemMergePolicy::MergeReplaceExactFiles
+        WritePolicy::Overwrite
     } else {
-        FilesystemMergePolicy::MergeCreateOnly
+        WritePolicy::CreateNew
     };
-    let receipt = write_pack_extraction_plan_to_filesystem(&plan, &output, policy)
-        .map_err(|error| format_extraction_write_error(&error))?;
+    write_pack_extraction_plan_to_filesystem(&plan, &output, policy)
+        .map_err(|error| format_extraction_write_error(&error, &output))?;
 
     println!(
         "extracted {} file(s) into `{}`",
-        receipt.completed().len(),
+        plan.entries().len(),
         output.display()
     );
     Ok(())
 }
 
-fn format_extraction_write_error(error: &PackExtractionWriteError) -> String {
-    match error.preflight_issues().and_then(|issues| issues.first()) {
-        Some(FilesystemWritePreflightIssue::ExistingTarget { relative_path }) => format!(
-            "`{}` already exists (pass force to overwrite)",
-            error.destination().join(relative_path).display()
+fn format_extraction_write_error(error: &FilesystemWriteError, destination: &Path) -> String {
+    let FilesystemWriteError::Rejected { issues } = error else {
+        return error.to_string();
+    };
+    match issues.first() {
+        Some(WriteIssue::ExistingTarget { path }) => format!(
+            "`{}` already exists (pass --force to overwrite)",
+            destination.join(path).display()
         ),
-        Some(FilesystemWritePreflightIssue::ConflictingTarget { relative_path, .. }) => {
-            format!(
-                "existing destination entry `{}` conflicts with extraction",
-                error.destination().join(relative_path).display()
-            )
-        }
-        Some(FilesystemWritePreflightIssue::ConflictingAncestor { ancestor, .. })
-        | Some(FilesystemWritePreflightIssue::ConflictingDestinationRoot {
-            path: ancestor, ..
-        }) => format!(
+        Some(WriteIssue::ConflictingTarget { path }) => format!(
+            "existing destination entry `{}` conflicts with extraction",
+            destination.join(path).display()
+        ),
+        Some(WriteIssue::ConflictingAncestor { ancestor, .. }) => format!(
             "existing destination entry `{}` conflicts with extraction",
             ancestor.display()
         ),
@@ -1253,15 +1243,12 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
                         .write_all(output.artifacts()[0].bytes())
                         .map_err(|err| format!("cannot write output to stdout: {err}"))?;
                 } else {
-                    let (destination, relative_paths) = resolve_filesystem_write_paths(&targets)
-                        .map_err(|error| error.to_string())?;
                     write_compilation_artifacts_to_filesystem_paths(
                         output,
-                        destination,
-                        &relative_paths,
-                        FilesystemMergePolicy::MergeReplaceExactFiles,
+                        &targets,
+                        WritePolicy::Overwrite,
                     )
-                    .map_err(|error| format_compilation_write_error(&error))?;
+                    .map_err(|error| error.to_string())?;
                 }
                 Ok::<_, String>((targets, output_is_stdout))
             })();
@@ -1316,36 +1303,6 @@ fn compile_command(args: CompileArgs, color: ColorChoice, cert: Option<&Path>) -
         return Err(CliError::Reported);
     }
     command_result
-}
-
-fn format_compilation_write_error(error: &CompilationArtifactPathWriteError) -> String {
-    error.write_error().map_or_else(
-        || error.to_string(),
-        format_compilation_filesystem_write_error,
-    )
-}
-
-fn format_compilation_filesystem_write_error(error: &CompilationArtifactWriteError) -> String {
-    if let Some(issue) = error.preflight_issues().and_then(|issues| issues.first()) {
-        let relative_path = match issue {
-            FilesystemWritePreflightIssue::ExistingTarget { relative_path }
-            | FilesystemWritePreflightIssue::ConflictingTarget { relative_path, .. }
-            | FilesystemWritePreflightIssue::ConflictingAncestor { relative_path, .. } => {
-                Some(relative_path)
-            }
-            _ => None,
-        };
-        if let Some(relative_path) = relative_path {
-            return format!(
-                "cannot write `{}`: {issue}",
-                error.destination().join(relative_path).display()
-            );
-        }
-    }
-    if let Some(target) = error.failed_target() {
-        return format!("cannot write `{}`: {}", target.display(), error.cause());
-    }
-    error.to_string()
 }
 
 /// Expands Typst page templates into one path per Page Format artifact.
@@ -1427,7 +1384,7 @@ fn read_pack(path: &Path) -> Result<Pack, String> {
         DecodeLimits::reference_v1(),
     )
     .map_err(|error| match error {
-        OpenPackError::Read(FileReadError::Open { source, .. }) => {
+        OpenPackError::Read(FileReadError::Io { source, .. }) => {
             format!("cannot open `{}`: {source}", path.display())
         }
         error => error.to_string(),
@@ -1735,11 +1692,19 @@ fn emit_owned_error(message: &str, color: ColorChoice) {
 }
 
 fn emit_owned_hint(message: &str, color: ColorChoice) {
+    emit_owned_label("hint", Color::Cyan, message, color);
+}
+
+fn emit_owned_warning(message: &str, color: ColorChoice) {
+    emit_owned_label("warning", Color::Yellow, message, color);
+}
+
+fn emit_owned_label(label: &str, label_color: Color, message: &str, color: ColorChoice) {
     let mut stream = StandardStream::stderr(color);
     let mut spec = ColorSpec::new();
-    spec.set_fg(Some(Color::Cyan)).set_bold(true);
+    spec.set_fg(Some(label_color)).set_bold(true);
     let _ = stream.set_color(&spec);
-    let _ = write!(stream, "hint");
+    let _ = write!(stream, "{label}");
     let _ = stream.reset();
     let _ = writeln!(stream, ": {message}");
 }
@@ -1797,71 +1762,12 @@ mod parser_tests {
     }
 }
 
-#[cfg(all(test, windows))]
-mod windows_tests {
-    use super::*;
-
-    #[test]
-    fn incompatible_absolute_prefixes_keep_the_target_absolute() {
-        let target = Path::new(r"C:\project\main.typ");
-        let base = Path::new(r"D:\cwd");
-
-        assert_eq!(relative_path(target, base), Some(target.to_path_buf()));
-    }
-}
-
 #[cfg(all(test, unix))]
 mod tests {
     use std::ffi::OsString;
     use std::os::unix::ffi::OsStringExt as _;
 
     use super::*;
-
-    #[test]
-    fn artifact_write_resolves_symlink_and_parent_components_natively() {
-        use std::os::unix::fs::symlink;
-
-        let directory = tempfile::tempdir().unwrap();
-        let actual = directory.path().join("actual");
-        let nested = actual.join("nested");
-        std::fs::create_dir_all(&nested).unwrap();
-        symlink(&nested, directory.path().join("linked")).unwrap();
-        let target = directory.path().join("linked/../output.pdf");
-
-        let (destination, relative) = resolve_filesystem_write_paths(&[target]).unwrap();
-
-        assert_eq!(destination, actual.canonicalize().unwrap());
-        assert_eq!(relative, [PathBuf::from("output.pdf")]);
-    }
-
-    #[test]
-    fn artifact_write_resolves_distinct_native_output_parents() {
-        use std::os::unix::fs::symlink;
-
-        let directory = tempfile::tempdir().unwrap();
-        let actual = directory.path().join("actual");
-        let first = actual.join("first/nested");
-        let second = actual.join("second/nested");
-        std::fs::create_dir_all(&first).unwrap();
-        std::fs::create_dir_all(&second).unwrap();
-        symlink(&first, directory.path().join("first-link")).unwrap();
-        symlink(&second, directory.path().join("second-link")).unwrap();
-        let targets = [
-            directory.path().join("first-link/../output-1.svg"),
-            directory.path().join("second-link/../output-2.svg"),
-        ];
-
-        let (destination, relative) = resolve_filesystem_write_paths(&targets).unwrap();
-
-        assert_eq!(destination, actual.canonicalize().unwrap());
-        assert_eq!(
-            relative,
-            [
-                PathBuf::from("first/output-1.svg"),
-                PathBuf::from("second/output-2.svg"),
-            ]
-        );
-    }
 
     #[test]
     fn make_dependencies_omit_non_unicode_outputs_with_typst_spacing() {

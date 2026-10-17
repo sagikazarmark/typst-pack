@@ -260,10 +260,9 @@ fn compilation_request_regressions_replay_both_acceptance_and_rejection() {
 #[cfg(feature = "fs")]
 #[test]
 fn typkignore_and_write_state_regressions_replay_natively() {
-    use typst_pack::pack_archive::CommitCertainty;
     use typst_pack::{
-        FilesystemMergePolicy, FilesystemProjectLimits, FilesystemProjectReadError,
-        PackExtractionSelection, plan_pack_extraction, read_filesystem_project,
+        FilesystemReadError, FilesystemWriteError, PackExtractionSelection, ReadLimits,
+        WritePolicy, plan_pack_extraction, read_filesystem_project,
         write_pack_extraction_plan_to_filesystem,
     };
 
@@ -271,12 +270,8 @@ fn typkignore_and_write_state_regressions_replay_natively() {
     std::fs::write(malformed.path().join("main.typ"), b"main").unwrap();
     std::fs::write(malformed.path().join(".typkignore"), [0xff]).unwrap();
     assert!(matches!(
-        read_filesystem_project(
-            malformed.path(),
-            "main.typ",
-            FilesystemProjectLimits::reference_v1(),
-        ),
-        Err(FilesystemProjectReadError::InvalidPolicy { .. })
+        read_filesystem_project(malformed.path(), "main.typ", ReadLimits::default()),
+        Err(FilesystemReadError::InvalidIgnoreFile { .. })
     ));
 
     let pack = Pack::builder("main.typ")
@@ -285,36 +280,30 @@ fn typkignore_and_write_state_regressions_replay_natively() {
         .build()
         .unwrap();
     let plan = plan_pack_extraction(&pack, PackExtractionSelection::default()).unwrap();
-    for policy in [
-        FilesystemMergePolicy::MergeCreateOnly,
-        FilesystemMergePolicy::MergeReplaceExactFiles,
-        FilesystemMergePolicy::WriteNewTree,
-    ] {
-        let directory = tempfile::tempdir().unwrap();
-        let destination = temp_path(&directory).join("written");
-        if policy != FilesystemMergePolicy::WriteNewTree {
-            std::fs::create_dir(&destination).unwrap();
+    for policy in [WritePolicy::CreateNew, WritePolicy::Overwrite] {
+        for existing_root in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let destination = temp_path(&directory).join("written");
+            if existing_root {
+                std::fs::create_dir(&destination).unwrap();
+            }
+            write_pack_extraction_plan_to_filesystem(&plan, &destination, policy)
+                .unwrap_or_else(|error| panic!("write regression {policy:?} failed: {error}"));
+            assert_eq!(
+                std::fs::read(destination.join("main.typ")).unwrap(),
+                b"published"
+            );
         }
-        let receipt = write_pack_extraction_plan_to_filesystem(&plan, &destination, policy)
-            .unwrap_or_else(|error| panic!("write regression {policy:?} failed: {error}"));
-        assert_eq!(receipt.completed().len(), 1);
-        assert_eq!(
-            std::fs::read(destination.join("main.typ")).unwrap(),
-            b"published"
-        );
     }
 
     let directory = tempfile::tempdir().unwrap();
     let destination = temp_path(&directory).join("written");
     std::fs::create_dir(&destination).unwrap();
     std::fs::write(destination.join("main.typ"), b"existing").unwrap();
-    let error = write_pack_extraction_plan_to_filesystem(
-        &plan,
-        &destination,
-        FilesystemMergePolicy::MergeCreateOnly,
-    )
-    .unwrap_err();
-    assert_eq!(error.commit_certainty(), CommitCertainty::NotCommitted);
+    let error =
+        write_pack_extraction_plan_to_filesystem(&plan, &destination, WritePolicy::CreateNew)
+            .unwrap_err();
+    assert!(matches!(error, FilesystemWriteError::Rejected { .. }));
     assert_eq!(
         std::fs::read(destination.join("main.typ")).unwrap(),
         b"existing"

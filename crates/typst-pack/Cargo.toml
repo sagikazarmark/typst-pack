@@ -50,15 +50,9 @@ parallel = ["dep:rayon"]
 # available on wasm targets.
 fs = [
     "dep:cap-fs-ext",
-    "dep:cap-primitives",
     "dep:cap-std",
     "dep:fontconfig-parser",
     "dep:ignore",
-    "dep:libc",
-    "dep:same-file",
-    "dep:unicode-normalization",
-    "dep:walkdir",
-    "dep:windows-sys",
     "typst-kit/system-files",
     "typst-kit/timer",
 ]
@@ -77,7 +71,6 @@ egress = [
 
 [dependencies]
 cap-fs-ext = { version = "4", default-features = false, features = ["std", "cap-std"], optional = true }
-cap-primitives = { version = "4", optional = true }
 cap-std = { version = "4", optional = true }
 ecow = "0.2"
 env_proxy = { version = "0.4", optional = true }
@@ -86,11 +79,9 @@ futures-util = { version = "0.3.31", default-features = false, features = ["allo
 ignore = { version = "0.4", optional = true }
 opendal = { version = "0.58", default-features = false, optional = true }
 rayon = { workspace = true, optional = true }
-same-file = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 toml = "1.1"
-unicode-normalization = { version = "0.1", optional = true }
 tar = { version = "0.4", default-features = false, optional = true }
 # Typst crates share internal types and must resolve to the same exact release.
 typst = { workspace = true }
@@ -101,19 +92,12 @@ typst-pdf = { workspace = true }
 typst-render = "=0.15.1"
 typst-svg = "=0.15.1"
 typst-timing = "=0.15.1"
-walkdir = { version = "2", optional = true }
 ureq = { version = "2", default-features = false, features = ["tls"], optional = true }
 webpki-roots = { version = "1", optional = true }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 
-[target.'cfg(unix)'.dependencies]
-libc = { version = "0.2", optional = true }
-
 [target.'cfg(all(unix, not(any(target_os = "macos", target_os = "android"))))'.dependencies]
 fontconfig-parser = { version = "0.5", default-features = false, optional = true }
-
-[target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Wdk_Storage_FileSystem", "Win32_Foundation", "Win32_Storage_FileSystem", "Win32_System_IO"], optional = true }
 
 [dev-dependencies]
 # The reading suite writes the archives the helpers expand.

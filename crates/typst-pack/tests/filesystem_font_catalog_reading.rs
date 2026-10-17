@@ -7,52 +7,39 @@
 mod font_bytes;
 
 use std::fs;
+use std::path::{Path, PathBuf};
 
 use typst_pack::{
-    FilesystemFontEntryKind, FilesystemFontIssue, FilesystemFontLimits, FilesystemFontOperation,
-    FilesystemFontReadError, FilesystemFontResource, FilesystemFontSource, FontDisposition,
+    FilesystemFontSource, FilesystemFonts, FilesystemReadError, FontDisposition, ReadLimits,
     read_filesystem_fonts,
 };
 
 #[cfg(feature = "embedded-fonts")]
 use crate::font_bytes::typst_container;
 #[cfg(feature = "embedded-fonts")]
-use typst_pack::{CanonicalIdentity, FilesystemFontLimitError};
+use typst_pack::{CanonicalIdentity, LimitExceeded};
 
-#[cfg(feature = "embedded-fonts")]
-fn limits(values: [u64; 4]) -> FilesystemFontLimits {
-    FilesystemFontLimits::new(values[0], values[1], values[2], values[3])
+fn read_directory(root: &Path, limits: ReadLimits) -> Result<FilesystemFonts, FilesystemReadError> {
+    read_filesystem_fonts(
+        [FilesystemFontSource::directory(
+            root,
+            FontDisposition::External,
+        )],
+        limits,
+    )
 }
 
-#[test]
-fn the_reference_v1_profile_bounds_every_font_source_resource() {
-    let limits = FilesystemFontLimits::reference_v1();
-
-    assert_eq!(limits.visited_entries(), 100_000);
-    assert_eq!(limits.accepted_containers(), 16_384);
-    assert_eq!(limits.container_bytes(), 256 * 1024 * 1024);
-    assert_eq!(limits.total_accepted_bytes(), 2 * 1024 * 1024 * 1024);
-}
-
-#[test]
-fn every_font_source_ceiling_must_leave_room_for_a_plus_one_probe() {
-    let resources = [
-        FilesystemFontResource::VisitedEntries,
-        FilesystemFontResource::AcceptedContainers,
-        FilesystemFontResource::ContainerBytes,
-        FilesystemFontResource::TotalAcceptedBytes,
-    ];
-
-    for (index, _resource) in resources.into_iter().enumerate() {
-        let mut values = [1; 4];
-        values[index] = u64::MAX;
-        assert!(
-            std::panic::catch_unwind(|| {
-                FilesystemFontLimits::new(values[0], values[1], values[2], values[3])
-            })
-            .is_err()
-        );
-    }
+fn skipped_paths(fonts: &FilesystemFonts) -> Vec<PathBuf> {
+    fonts
+        .skipped
+        .iter()
+        .map(|skipped| match skipped {
+            FilesystemReadError::Io { path, .. }
+            | FilesystemReadError::Unsupported { path }
+            | FilesystemReadError::InvalidFont { path, .. } => path.clone(),
+            other => panic!("unexpected skipped entry {other}"),
+        })
+        .collect()
 }
 
 #[test]
@@ -70,17 +57,18 @@ fn configured_sources_and_paths_compose_in_order_with_explicit_dispositions() {
     fs::write(first_root.join("a.ttf"), &first).unwrap();
     fs::write(second_root.join("same.ttf"), &first).unwrap();
 
-    let catalog = read_filesystem_fonts(
+    let fonts = read_filesystem_fonts(
         [
             FilesystemFontSource::directory(&first_root, FontDisposition::External),
             FilesystemFontSource::directory(&second_root, FontDisposition::Embedded),
         ],
-        FilesystemFontLimits::reference_v1(),
+        ReadLimits::default(),
     )
     .unwrap();
 
     assert_eq!(
-        catalog
+        fonts
+            .catalog
             .entries()
             .iter()
             .map(|entry| (entry.container().identity(), entry.disposition()))
@@ -100,17 +88,18 @@ fn configured_sources_and_paths_compose_in_order_with_explicit_dispositions() {
             ),
         ]
     );
+    assert!(fonts.skipped.is_empty());
 }
 
 #[test]
 fn no_font_source_is_added_implicitly() {
-    let catalog = read_filesystem_fonts(
+    let fonts = read_filesystem_fonts(
         std::iter::empty::<FilesystemFontSource>(),
-        FilesystemFontLimits::reference_v1(),
+        ReadLimits::default(),
     )
     .unwrap();
 
-    assert!(catalog.entries().is_empty());
+    assert!(fonts.catalog.entries().is_empty());
 }
 
 #[test]
@@ -122,173 +111,84 @@ fn typst_embedded_fonts_join_only_at_the_explicit_source_position() {
     let data = typst_container();
     fs::write(root.join("font.ttf"), &data).unwrap();
 
-    let catalog = read_filesystem_fonts(
+    let fonts = read_filesystem_fonts(
         [
             FilesystemFontSource::directory(&root, FontDisposition::External),
             FilesystemFontSource::typst_embedded(FontDisposition::Embedded),
             FilesystemFontSource::directory(&root, FontDisposition::External),
         ],
-        FilesystemFontLimits::reference_v1(),
+        ReadLimits::default(),
     )
     .unwrap();
+    let entries = fonts.catalog.entries();
 
     let embedded_count = typst_pack::typst_embedded_font_containers().count();
-    assert_eq!(catalog.entries().len(), embedded_count + 2);
-    assert_eq!(
-        catalog.entries()[0].disposition(),
-        FontDisposition::External
-    );
+    assert_eq!(entries.len(), embedded_count + 2);
+    assert_eq!(entries[0].disposition(), FontDisposition::External);
     assert!(
-        catalog.entries()[1..=embedded_count]
+        entries[1..=embedded_count]
             .iter()
             .all(|entry| entry.disposition() == FontDisposition::Embedded)
     );
     assert_eq!(
-        catalog.entries()[embedded_count + 1].disposition(),
+        entries[embedded_count + 1].disposition(),
         FontDisposition::External
     );
 }
 
 #[test]
 #[cfg(feature = "embedded-fonts")]
-fn already_materialized_embedded_containers_do_not_consume_filesystem_limits() {
-    let catalog = read_filesystem_fonts(
+fn font_reading_is_bounded_but_embedded_fonts_are_not_counted() {
+    let dir = tempfile::tempdir().unwrap();
+    let data = typst_container();
+    fs::write(dir.path().join("font.ttf"), &data).unwrap();
+    let size = data.len() as u64;
+
+    let error = read_directory(
+        dir.path(),
+        ReadLimits {
+            max_file_bytes: size - 1,
+            ..ReadLimits::default()
+        },
+    )
+    .unwrap_err();
+    assert!(matches!(
+        error,
+        FilesystemReadError::Limit { source, .. }
+            if source == LimitExceeded { resource: "file bytes", limit: size - 1 }
+    ));
+
+    let empty = ReadLimits {
+        max_entries: 0,
+        max_file_bytes: 0,
+        max_total_bytes: 0,
+    };
+    let fonts = read_filesystem_fonts(
         [FilesystemFontSource::typst_embedded(
             FontDisposition::External,
         )],
-        limits([0, 0, 0, 0]),
+        empty,
     )
     .unwrap();
-
-    assert!(!catalog.entries().is_empty());
+    assert!(!fonts.catalog.entries().is_empty());
 }
 
 #[test]
-fn unavailable_explicit_roots_retain_the_native_inspection_failure() {
+fn unavailable_explicit_roots_retain_the_native_failure() {
     let dir = tempfile::tempdir().unwrap();
     let missing = dir.path().join("missing");
 
-    let error = read_filesystem_fonts(
-        [FilesystemFontSource::directory(
-            &missing,
-            FontDisposition::External,
-        )],
-        FilesystemFontLimits::reference_v1(),
-    )
-    .unwrap_err();
+    let error = read_directory(&missing, ReadLimits::default()).unwrap_err();
 
     assert!(matches!(
         error,
-        FilesystemFontReadError::Io {
-            operation: FilesystemFontOperation::InspectRoot,
-            path,
-            source,
-        } if path == missing && source.kind() == std::io::ErrorKind::NotFound
-    ));
-}
-
-#[cfg(feature = "embedded-fonts")]
-fn assert_limit(
-    root: &std::path::Path,
-    values: [u64; 4],
-    resource: FilesystemFontResource,
-    ceiling: u64,
-    observed: u64,
-) {
-    let error = read_filesystem_fonts(
-        [FilesystemFontSource::directory(
-            root,
-            FontDisposition::External,
-        )],
-        limits(values),
-    )
-    .unwrap_err();
-    assert!(
-        matches!(
-            error,
-            FilesystemFontReadError::Limit {
-                source: FilesystemFontLimitError::Exceeded {
-                    resource: reported,
-                    ceiling: reported_ceiling,
-                    observed_at_least,
-                },
-                ..
-            } if reported == resource
-                && reported_ceiling == ceiling
-                && observed_at_least == observed
-        ),
-        "unexpected {resource:?} limit error: {error}"
-    );
-}
-
-#[test]
-#[cfg(feature = "embedded-fonts")]
-fn generated_boundaries_cover_every_font_source_resource() {
-    let dir = tempfile::tempdir().unwrap();
-    let root = dir.path();
-    let data = typst_container();
-    fs::write(root.join("font.ttf"), &data).unwrap();
-    let mut second = data;
-    second.push(0);
-    fs::write(root.join("second.ttf"), &second).unwrap();
-    let size = second.len() as u64;
-    let cases = [
-        (FilesystemFontResource::VisitedEntries, 2),
-        (FilesystemFontResource::AcceptedContainers, 2),
-        (FilesystemFontResource::ContainerBytes, size),
-        (FilesystemFontResource::TotalAcceptedBytes, size * 2 - 1),
-    ];
-    let exact = [2, 2, size, size * 2 - 1];
-
-    for (index, (resource, observed)) in cases.into_iter().enumerate() {
-        for ceiling in [observed + 1, observed] {
-            let mut values = exact;
-            values[index] = ceiling;
-            read_filesystem_fonts(
-                [FilesystemFontSource::directory(
-                    root,
-                    FontDisposition::External,
-                )],
-                limits(values),
-            )
-            .unwrap();
-        }
-        let mut values = exact;
-        values[index] -= 1;
-        assert_limit(root, values, resource, values[index], observed);
-    }
-}
-
-#[test]
-fn malformed_eligible_font_bytes_retain_the_container_validation_cause() {
-    let dir = tempfile::tempdir().unwrap();
-    let first = dir.path().join("a-broken.otf");
-    let second = dir.path().join("b-broken.ttf");
-    fs::write(&first, b"not a font").unwrap();
-    fs::write(&second, b"also not a font").unwrap();
-
-    let error = read_filesystem_fonts(
-        [FilesystemFontSource::directory(
-            dir.path(),
-            FontDisposition::External,
-        )],
-        FilesystemFontLimits::reference_v1(),
-    )
-    .unwrap_err();
-
-    assert!(matches!(
-        error,
-        FilesystemFontReadError::InvalidContainers(ref validation)
-            if validation
-                .issues()
-                .iter()
-                .map(|issue| issue.path())
-                .collect::<Vec<_>>() == [&first, &second]
+        FilesystemReadError::Io { path, source }
+            if path == missing && source.kind() == std::io::ErrorKind::NotFound
     ));
 }
 
 #[test]
-fn only_supported_font_container_suffixes_are_selected_case_insensitively() {
+fn only_font_suffixes_are_read_and_unparseable_fonts_are_skipped() {
     let dir = tempfile::tempdir().unwrap();
     let candidates = [
         ("lower-ttf.ttf", true),
@@ -316,84 +216,91 @@ fn only_supported_font_container_suffixes_are_selected_case_insensitively() {
         .collect::<Vec<_>>();
     selected.sort();
 
-    let error = read_filesystem_fonts(
-        [FilesystemFontSource::directory(
-            dir.path(),
-            FontDisposition::External,
-        )],
-        FilesystemFontLimits::reference_v1(),
-    )
-    .unwrap_err();
+    let fonts = read_directory(dir.path(), ReadLimits::default()).unwrap();
 
-    // Every selected container holds bytes no Font Container accepts, so the
-    // validation issues name exactly what selection accepted.
-    let FilesystemFontReadError::InvalidContainers(validation) = error else {
-        panic!("expected the selected containers to fail validation");
-    };
-    assert_eq!(
-        validation
-            .issues()
+    // Every selected file holds bytes no Font Container accepts, so the
+    // skipped entries name exactly what selection accepted.
+    assert!(fonts.catalog.entries().is_empty());
+    assert!(
+        fonts
+            .skipped
             .iter()
-            .map(|issue| issue.path().to_owned())
-            .collect::<Vec<_>>(),
-        selected
+            .all(|skipped| matches!(skipped, FilesystemReadError::InvalidFont { .. }))
     );
+    assert_eq!(skipped_paths(&fonts), selected);
 }
 
 #[cfg(unix)]
-#[test]
-fn aliases_remain_typed_survey_failures() {
-    use std::os::unix::fs::symlink;
+mod links {
+    use super::*;
 
-    let dir = tempfile::tempdir().unwrap();
-    let target = dir.path().join("font.ttf");
-    let alias = dir.path().join("alias.ttf");
-    fs::write(&target, b"font").unwrap();
-    symlink(&target, &alias).unwrap();
+    #[test]
+    #[cfg(feature = "embedded-fonts")]
+    fn links_are_followed_anywhere_and_bad_entries_never_fail_the_catalog() {
+        use std::os::unix::fs::symlink;
+        use std::os::unix::net::UnixListener;
 
-    let error = read_filesystem_fonts(
-        [FilesystemFontSource::directory(
-            dir.path(),
-            FontDisposition::External,
-        )],
-        FilesystemFontLimits::reference_v1(),
-    )
-    .unwrap_err();
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("fonts");
+        let elsewhere = dir.path().join("elsewhere");
+        fs::create_dir_all(root.join("unreadable")).unwrap();
+        fs::create_dir_all(&elsewhere).unwrap();
+        let data = typst_container();
+        fs::write(elsewhere.join("linked.ttf"), &data).unwrap();
+        fs::write(elsewhere.join("README"), b"not a font").unwrap();
+        symlink(elsewhere.join("linked.ttf"), root.join("a-linked.ttf")).unwrap();
+        symlink(&elsewhere, root.join("b-directory")).unwrap();
+        symlink(elsewhere.join("missing.ttf"), root.join("c-broken.ttf")).unwrap();
+        symlink(elsewhere.join("missing"), root.join("d-broken-other")).unwrap();
+        fs::write(root.join("e-broken.ttf"), b"not a font").unwrap();
+        let _socket = UnixListener::bind(root.join("f-socket.ttf")).unwrap();
+        fs::write(root.join("unreadable/hidden.ttf"), &data).unwrap();
+        let mut permissions = fs::metadata(root.join("unreadable")).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o000);
+        fs::set_permissions(root.join("unreadable"), permissions).unwrap();
+        // Privileged users read the directory anyway.
+        let unreadable = fs::read_dir(root.join("unreadable")).is_err();
 
-    assert!(matches!(
-        error,
-        FilesystemFontReadError::Survey(ref survey)
-            if matches!(survey.issues(), [FilesystemFontIssue::Alias { path }] if path == &alias)
-    ));
-}
+        let fonts = read_directory(&root, ReadLimits::default()).unwrap();
 
-#[cfg(unix)]
-#[test]
-fn unsupported_eligible_entries_remain_typed_survey_failures() {
-    use std::ffi::CString;
-    use std::os::unix::ffi::OsStrExt;
+        let mut permissions = fs::metadata(root.join("unreadable")).unwrap().permissions();
+        std::os::unix::fs::PermissionsExt::set_mode(&mut permissions, 0o755);
+        fs::set_permissions(root.join("unreadable"), permissions).unwrap();
 
-    let dir = tempfile::tempdir().unwrap();
-    let fifo = dir.path().join("blocked.ttf");
-    let path = CString::new(fifo.as_os_str().as_bytes()).unwrap();
-    // SAFETY: `path` is a valid NUL-terminated filesystem path.
-    assert_eq!(unsafe { libc::mkfifo(path.as_ptr(), 0o600) }, 0);
+        let identity = typst_pack::CanonicalIdentity::for_font_container_bytes(&data);
+        let found = fonts
+            .catalog
+            .entries()
+            .iter()
+            .filter(|entry| entry.container().identity() == identity)
+            .count();
+        assert_eq!(found, if unreadable { 2 } else { 3 });
+        let mut expected = vec![
+            root.join("c-broken.ttf"),
+            root.join("f-socket.ttf"),
+            root.join("e-broken.ttf"),
+        ];
+        if unreadable {
+            expected.insert(2, root.join("unreadable"));
+        }
+        assert_eq!(skipped_paths(&fonts), expected);
+    }
 
-    let error = read_filesystem_fonts(
-        [FilesystemFontSource::directory(
-            dir.path(),
-            FontDisposition::External,
-        )],
-        FilesystemFontLimits::reference_v1(),
-    )
-    .unwrap_err();
+    #[test]
+    fn fifos_with_font_names_are_skipped_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let fifo = dir.path().join("blocked.ttf");
+        let status = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(status.success());
 
-    assert!(matches!(
-        error,
-        FilesystemFontReadError::Survey(ref survey)
-            if matches!(survey.issues(), [FilesystemFontIssue::UnsupportedEntry {
-                path,
-                kind: FilesystemFontEntryKind::Fifo,
-            }] if path == &fifo)
-    ));
+        let fonts = read_directory(dir.path(), ReadLimits::default()).unwrap();
+
+        assert!(matches!(
+            fonts.skipped.as_slice(),
+            [FilesystemReadError::Unsupported { path }] if path == &fifo
+        ));
+    }
 }
