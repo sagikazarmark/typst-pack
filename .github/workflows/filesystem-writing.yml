@@ -42,7 +42,7 @@ jobs:
       - if: ${{ !cancelled() }}
         run: cargo test --locked -p typst-pack --features fs,embedded-fonts --lib fs::
       - if: ${{ !cancelled() }}
-        run: cargo test --locked -p typst-pack --features fs,embedded-fonts --test filesystem_project_reading --test filesystem_package_reading --test filesystem_packer --test fs_creation --test pack_archive --test filesystem_writing
+        run: cargo test --locked -p typst-pack --features fs,embedded-fonts --test fs --test pack
 
   opendal:
     name: opendal (feature-isolated)

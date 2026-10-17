@@ -2,18 +2,15 @@
 
 use std::path::{Path, PathBuf};
 
+use typst_kit::diagnostics::termcolor::Color;
 use typst_pack::compile::{DocumentTime, Input};
 use typst_pack::{FILE_EXTENSION, Metadata, archive, create, fs};
 
-use super::{
-    CommandResult, Failure, Terminal, Timings, check_timestamp, compile_options, initialize_jobs,
-    now, packer,
-};
+use super::{CommandResult, Failure, Terminal, Timings, compile_options, now, packer, prepare};
 use crate::cli::CreateArgs;
 
 pub fn run(args: CreateArgs, terminal: Terminal, cert: Option<PathBuf>) -> CommandResult {
-    check_timestamp(args.automation.creation_timestamp)?;
-    initialize_jobs(args.automation.jobs);
+    prepare(&args.automation)?;
     if args.input == Path::new("-") {
         return Err("create input must be a named Typst source file, not stdin".into());
     }
@@ -22,8 +19,8 @@ pub fn run(args: CreateArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comma
         .canonicalize()
         .map_err(|error| format!("cannot access `{}`: {error}", args.input.display()))?;
     if !input.is_file() {
-        let message = "create input must be a Typst source file";
-        return Err(format!("{message}: `{}`", args.input.display()).into());
+        let input = args.input.display();
+        return Err(format!("create input must be a Typst source file: `{input}`").into());
     }
     let root = match args.root {
         Some(root) => root,
@@ -46,22 +43,19 @@ pub fn run(args: CreateArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comma
         description: args.description,
         authors: args.authors,
     };
+    let variants = args.variants.into_iter().map(|variant| {
+        let inputs = variant.0.into_iter();
+        inputs
+            .map(|(key, value)| (key, Input::Str(value)))
+            .collect()
+    });
     let packer = fs::Packer {
         vendor_packages: !args.no_vendor_packages,
         embed_fonts: args.embed_fonts,
         include_typst_embedded_fonts: args.include_typst_embedded_fonts,
         options,
         target: args.target.unwrap_or_default(),
-        variants: args
-            .variants
-            .into_iter()
-            .map(|variant| {
-                let inputs = variant.0.into_iter();
-                inputs
-                    .map(|(key, value)| (key, Input::Str(value)))
-                    .collect()
-            })
-            .collect(),
+        variants: variants.collect(),
         metadata: (metadata != Metadata::default()).then_some(metadata),
         ..packer(&args.fonts, &args.packages, cert)
     };
@@ -85,17 +79,18 @@ pub fn run(args: CreateArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comma
             return Err(timing_error.map_or(Failure::Reported, Failure::from));
         }
         Err(error) => {
-            if let Some(timing_error) = timing_error {
-                terminal.error(&error.to_string());
-                return Err(timing_error.into());
-            }
-            return Err(error.into());
+            let Some(timing_error) = timing_error else {
+                return Err(error.into());
+            };
+            terminal.error(&error.to_string());
+            return Err(timing_error.into());
         }
     };
 
     terminal.diagnostics(&packed.sources, &packed.warnings);
     for skipped in &packed.skipped_fonts {
-        terminal.warning(&format!("skipped font: {skipped}"));
+        let message = format!("skipped font: {skipped}");
+        terminal.label("warning", Color::Yellow, &message);
     }
     if let Some(error) = timing_error {
         return Err(error.into());
@@ -109,8 +104,8 @@ pub fn run(args: CreateArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comma
     }
     archive::save(&output, pack, fs::WritePolicy::Overwrite)?;
 
-    let requirements = pack.package_requirements();
-    let (vendored, unvendored): (Vec<_>, Vec<_>) = requirements
+    let (vendored, unvendored): (Vec<_>, Vec<_>) = pack
+        .package_requirements()
         .iter()
         .partition(|requirement| requirement.embedded);
     println!(
@@ -121,9 +116,9 @@ pub fn run(args: CreateArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comma
         output.display(),
     );
     if !unvendored.is_empty() {
+        let count = unvendored.len();
         println!(
-            "note: {} package(s) were not vendored and must be available when compiling:",
-            unvendored.len()
+            "note: {count} package(s) were not vendored and must be available when compiling:"
         );
         for requirement in unvendored {
             println!("  {}", requirement.spec);

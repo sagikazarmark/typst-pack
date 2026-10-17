@@ -1,6 +1,8 @@
 //! Pack and compilation identity vectors over the documented preimages, and
 //! what each identity binds and excludes.
 
+use std::collections::HashSet;
+
 use proptest::prelude::*;
 use sha2::{Digest as _, Sha256};
 use typst::foundations::{Datetime, Smart};
@@ -240,98 +242,82 @@ fn manifest_of(pack: &Pack) -> String {
     manifest
 }
 
+/// Asserts that no two of `identities` are equal.
+fn assert_distinct(identities: Vec<Digest>) {
+    let count = identities.len();
+    let unique = identities.into_iter().collect::<HashSet<_>>();
+    assert_eq!(unique.len(), count);
+}
+
 #[test]
 fn pack_identity_binds_every_project_and_package_semantic() {
-    #[derive(Clone)]
-    struct PackCase<'a> {
-        entrypoint: &'a str,
-        project_path: &'a str,
-        project_bytes: &'a [u8],
-        package: typst::syntax::package::PackageSpec,
-        package_path: &'a str,
-        package_bytes: &'a [u8],
-        disposition: bool,
-        extra_package_file: bool,
-    }
-
-    let package: typst::syntax::package::PackageSpec = "@local/example:1.0.0".parse().unwrap();
-    let other_package: typst::syntax::package::PackageSpec = "@local/other:1.0.0".parse().unwrap();
-    let baseline = PackCase {
-        entrypoint: "main.typ",
-        project_path: "other.typ",
-        project_bytes: b"other",
-        package,
-        package_path: "lib.typ",
-        package_bytes: b"package",
-        disposition: true,
-        extra_package_file: false,
-    };
-    let build = |case: PackCase<'_>| {
-        let mut builder = Pack::builder(case.entrypoint)
+    // The entrypoint, one project file, and one package's files.
+    type Case<'a> = (
+        &'a str,
+        (&'a str, &'a str),
+        &'a str,
+        &'a [(&'a str, &'a str)],
+    );
+    let identity = |(entrypoint, (path, text), package, files): Case, embedded: bool| {
+        let spec = package.parse::<PackageSpec>().unwrap();
+        let mut builder = Pack::builder(entrypoint)
             .file("main.typ", b"main".to_vec())
-            .file(case.project_path, case.project_bytes.to_vec());
-        builder = if case.disposition {
-            builder.package_file(
-                case.package.clone(),
-                case.package_path,
-                case.package_bytes.to_vec(),
-            )
-        } else {
-            builder.external_package_file(
-                case.package.clone(),
-                case.package_path,
-                case.package_bytes.to_vec(),
-            )
-        };
-        if case.extra_package_file {
-            builder = if case.disposition {
-                builder.package_file(case.package, "extra.typ", b"extra".to_vec())
+            .file(path, text.as_bytes().to_vec());
+        for &(file, text) in files {
+            let data = text.as_bytes().to_vec();
+            builder = if embedded {
+                builder.package_file(spec.clone(), file, data)
             } else {
-                builder.external_package_file(case.package, "extra.typ", b"extra".to_vec())
+                builder.external_package_file(spec.clone(), file, data)
             };
         }
-        builder.build().unwrap()
+        builder.build().unwrap().identity()
     };
-    let baseline_identity = build(baseline.clone()).identity();
+    let (example, lib) = ("@local/example:1.0.0", &[("lib.typ", "package")][..]);
 
-    let mutations = [
-        PackCase {
-            entrypoint: "other.typ",
-            ..baseline.clone()
-        },
-        PackCase {
-            project_path: "renamed.typ",
-            ..baseline.clone()
-        },
-        PackCase {
-            project_bytes: b"changed",
-            ..baseline.clone()
-        },
-        PackCase {
-            package: other_package,
-            ..baseline.clone()
-        },
-        PackCase {
-            package_path: "renamed.typ",
-            ..baseline.clone()
-        },
-        PackCase {
-            package_bytes: b"changed",
-            ..baseline.clone()
-        },
-        PackCase {
-            extra_package_file: true,
-            ..baseline.clone()
-        },
-        PackCase {
-            disposition: false,
-            ..baseline
-        },
-    ];
-
-    for mutation in mutations {
-        assert_ne!(build(mutation).identity(), baseline_identity);
-    }
+    assert_distinct(vec![
+        identity(("main.typ", ("other.typ", "other"), example, lib), true),
+        identity(("main.typ", ("other.typ", "other"), example, lib), false),
+        identity(("other.typ", ("other.typ", "other"), example, lib), true),
+        identity(("main.typ", ("renamed.typ", "other"), example, lib), true),
+        identity(("main.typ", ("other.typ", "changed"), example, lib), true),
+        identity(
+            (
+                "main.typ",
+                ("other.typ", "other"),
+                "@local/other:1.0.0",
+                lib,
+            ),
+            true,
+        ),
+        identity(
+            (
+                "main.typ",
+                ("other.typ", "other"),
+                example,
+                &[("x.typ", "package")],
+            ),
+            true,
+        ),
+        identity(
+            (
+                "main.typ",
+                ("other.typ", "other"),
+                example,
+                &[("lib.typ", "changed")],
+            ),
+            true,
+        ),
+        identity(
+            (
+                "main.typ",
+                ("other.typ", "other"),
+                example,
+                &[("lib.typ", "package"), ("extra.typ", "extra")],
+            ),
+            true,
+        ),
+    ]);
 }
 
 #[test]
@@ -405,153 +391,104 @@ fn frozen_compilation_identity_vector() {
 
 #[test]
 fn compilation_identity_binds_every_effective_output_control() {
-    let identity = |output| {
+    let identity = |format, change: fn(&mut Output)| {
+        let mut output = Output::new(format);
+        change(&mut output);
         compile(&compile::Request::new(identity_pack(), output))
             .unwrap()
             .identity
     };
-    let distinct = |identities: Vec<Digest>| {
-        let count = identities.len();
-        let unique = identities
-            .into_iter()
-            .collect::<std::collections::HashSet<_>>();
-        assert_eq!(unique.len(), count);
-    };
+    use OutputFormat::{Html, Pdf, Png, Svg};
 
-    distinct(vec![
-        identity(Output::new(OutputFormat::Pdf)),
-        identity(Output {
-            pages: "1".parse::<compile::PageSelection>().unwrap(),
-            ..Output::new(OutputFormat::Pdf)
+    assert_distinct(vec![
+        identity(Pdf, |_| {}),
+        identity(Pdf, |o| o.pages = "1".parse().unwrap()),
+        identity(Pdf, |o| {
+            o.pdf_standards = vec![typst_pdf::PdfStandard::V_1_7]
         }),
-        identity(Output {
-            pdf_standards: vec![typst_pdf::PdfStandard::V_1_7],
-            ..Output::new(OutputFormat::Pdf)
+        identity(Pdf, |o| o.pdf_identifier = Smart::Custom("identity".into())),
+        identity(Pdf, |o| {
+            o.pdf_creator = Smart::Custom(Some("identity".into()))
         }),
-        identity(Output {
-            pdf_identifier: Smart::Custom("identity".to_owned()),
-            ..Output::new(OutputFormat::Pdf)
+        identity(Pdf, |o| o.pdf_creator = Smart::Custom(None)),
+        identity(Pdf, |o| o.pdf_tags = Smart::Custom(false)),
+        identity(Pdf, |o| {
+            o.pdf_timestamp = CreationTimestamp::Utc(1_700_000_000)
         }),
-        identity(Output {
-            pdf_creator: Smart::Custom(Some("identity".to_owned())),
-            ..Output::new(OutputFormat::Pdf)
-        }),
-        identity(Output {
-            pdf_creator: Smart::Custom(None),
-            ..Output::new(OutputFormat::Pdf)
-        }),
-        identity(Output {
-            pdf_tags: Smart::Custom(false),
-            ..Output::new(OutputFormat::Pdf)
-        }),
-        identity(Output {
-            pdf_timestamp: CreationTimestamp::Utc(1_700_000_000),
-            ..Output::new(OutputFormat::Pdf)
-        }),
-        identity(Output {
-            pdf_timestamp: CreationTimestamp::Local {
+        identity(Pdf, |o| {
+            o.pdf_timestamp = CreationTimestamp::Local {
                 unix: 1_700_000_000,
                 offset_minutes: 60,
-            },
-            ..Output::new(OutputFormat::Pdf)
+            }
         }),
-        identity(Output {
-            pretty: true,
-            ..Output::new(OutputFormat::Pdf)
-        }),
-        identity(Output::new(OutputFormat::Png)),
-        identity(Output {
-            pages: "1".parse::<compile::PageSelection>().unwrap(),
-            ..Output::new(OutputFormat::Png)
-        }),
-        identity(Output {
-            ppi: Some(216.0),
-            ..Output::new(OutputFormat::Png)
-        }),
-        identity(Output {
-            render_bleed: true,
-            ..Output::new(OutputFormat::Png)
-        }),
-        identity(Output::new(OutputFormat::Svg)),
-        identity(Output {
-            render_bleed: true,
-            ..Output::new(OutputFormat::Svg)
-        }),
-        identity(Output::new(OutputFormat::Html)),
-        identity(Output {
-            pretty: true,
-            ..Output::new(OutputFormat::Html)
-        }),
+        identity(Pdf, |o| o.pretty = true),
+        identity(Png, |_| {}),
+        identity(Png, |o| o.pages = "1".parse().unwrap()),
+        identity(Png, |o| o.ppi = Some(216.0)),
+        identity(Png, |o| o.render_bleed = true),
+        identity(Svg, |_| {}),
+        identity(Svg, |o| o.render_bleed = true),
+        identity(Html, |_| {}),
+        identity(Html, |o| o.pretty = true),
     ]);
 
-    // Defaults and their explicit values are one request.
+    // Defaults and their explicit values are one request, and so are
+    // equivalent page selections.
     assert_eq!(
-        identity(Output::new(OutputFormat::Png)),
-        identity(Output {
-            ppi: Some(144.0),
-            ..Output::new(OutputFormat::Png)
-        })
+        identity(Png, |_| {}),
+        identity(Png, |o| o.ppi = Some(144.0))
     );
     assert_eq!(
-        identity(Output::new(OutputFormat::Pdf)),
-        identity(Output {
-            pdf_tags: Smart::Custom(true),
-            ..Output::new(OutputFormat::Pdf)
-        })
+        identity(Pdf, |_| {}),
+        identity(Pdf, |o| o.pdf_tags = Smart::Custom(true))
+    );
+    assert_eq!(
+        identity(Svg, |o| o.pages = "2-3,1".parse().unwrap()),
+        identity(Svg, |o| o.pages = "1-3".parse().unwrap())
+    );
+    assert_ne!(
+        identity(Svg, |o| o.pages = "1-3".parse().unwrap()),
+        identity(Svg, |o| o.pages = "1-2".parse().unwrap())
     );
 }
 
 #[test]
 fn compilation_identity_binds_pack_inputs_features_and_document_time() {
-    let identity = |pack: Pack, options: compile::Options| {
+    let identity = |pack: Pack, change: fn(&mut compile::Options)| {
         let mut request = compile::Request::new(pack, Output::new(OutputFormat::Svg));
-        request.options = options;
+        change(&mut request.options);
         compile(&request).unwrap().identity
-    };
-    let baseline = identity(identity_pack(), compile::Options::default());
-    let input = |value: Input| compile::Options {
-        inputs: vec![("unused".into(), value)],
-        ..compile::Options::default()
     };
     let changed = Pack::builder("main.typ")
         .file("main.typ", b"changed pack".to_vec())
         .build()
         .unwrap();
+    let baseline = identity(identity_pack(), |_| {});
 
-    let identities = vec![
+    assert_distinct(vec![
         baseline,
-        identity(changed, compile::Options::default()),
-        identity(identity_pack(), input(Input::from("value"))),
-        identity(identity_pack(), input(Input::Bytes(b"value".to_vec()))),
-        identity(identity_pack(), input(Input::Bytes(b"other".to_vec()))),
-        identity(
-            identity_pack(),
-            compile::Options {
-                features: vec![typst::Feature::A11yExtras],
-                ..compile::Options::default()
-            },
-        ),
-        identity(
-            identity_pack(),
-            compile::Options {
-                document_time: DocumentTime::Fixed(Datetime::from_ymd(2024, 2, 3).unwrap()),
-                ..compile::Options::default()
-            },
-        ),
-        identity(
-            identity_pack(),
-            compile::Options {
-                document_time: DocumentTime::UnixTimestamp(1_700_000_000),
-                ..compile::Options::default()
-            },
-        ),
-    ];
-    let count = identities.len();
-    let unique = identities
-        .into_iter()
-        .collect::<std::collections::HashSet<_>>();
-    assert_eq!(unique.len(), count);
+        identity(changed, |_| {}),
+        identity(identity_pack(), |o| {
+            o.inputs = vec![("unused".into(), "value".into())]
+        }),
+        identity(identity_pack(), |o| {
+            o.inputs = vec![("unused".into(), Input::Bytes(b"value".to_vec()))]
+        }),
+        identity(identity_pack(), |o| {
+            o.inputs = vec![("unused".into(), Input::Bytes(b"other".to_vec()))]
+        }),
+        identity(identity_pack(), |o| {
+            o.features = vec![typst::Feature::A11yExtras]
+        }),
+        identity(identity_pack(), |o| {
+            o.document_time = DocumentTime::Fixed(Datetime::from_ymd(2024, 2, 3).unwrap())
+        }),
+        identity(identity_pack(), |o| {
+            o.document_time = DocumentTime::UnixTimestamp(1_700_000_000)
+        }),
+    ]);
 
+    // Metadata is not part of what compiles.
     let described = Pack::builder("main.typ")
         .file(
             "main.typ",
@@ -565,5 +502,5 @@ fn compilation_identity_binds_pack_inputs_features_and_document_time() {
         })
         .build()
         .unwrap();
-    assert_eq!(identity(described, compile::Options::default()), baseline);
+    assert_eq!(identity(described, |_| {}), baseline);
 }

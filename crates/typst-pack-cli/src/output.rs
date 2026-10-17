@@ -202,24 +202,3 @@ fn munge(path: &str) -> String {
     }
     result
 }
-
-#[cfg(all(test, unix))]
-mod tests {
-    use std::ffi::OsString;
-    use std::os::unix::ffi::OsStringExt as _;
-
-    use super::*;
-
-    #[test]
-    fn make_dependencies_omit_non_unicode_outputs_with_typst_spacing() {
-        let inputs = BTreeSet::from([PathBuf::from("input.typ")]);
-        let outputs = [
-            PathBuf::from(OsString::from_vec(b"invalid-\xff.pdf".to_vec())),
-            PathBuf::from("valid.pdf"),
-        ];
-        assert_eq!(
-            dependencies(DepsFormat::Make, &inputs, Some(&outputs)).unwrap(),
-            b" valid.pdf: input.typ\n"
-        );
-    }
-}

@@ -3,6 +3,7 @@
 
 use std::path::PathBuf;
 
+use clap::builder::{PossibleValuesParser, TypedValueParser};
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use typst::Feature;
 use typst_kit::diagnostics::DiagnosticFormat;
@@ -17,13 +18,8 @@ const ENV_PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
 #[command(name = "typst-pack", version = typst_pack::VERSION, about)]
 pub struct Cli {
     /// Whether to use color. When set to `auto` if the terminal to supports it.
-    #[arg(
-        long,
-        default_value = "auto",
-        default_missing_value = "always",
-        num_args = 0..=1,
-        value_parser = ["auto", "always", "never"]
-    )]
+    #[arg(long, default_value = "auto", default_missing_value = "always", num_args = 0..=1,
+          value_parser = ["auto", "always", "never"])]
     pub color: String,
 
     /// Path to a custom CA certificate to use when making network requests.
@@ -53,35 +49,28 @@ pub struct CompilationArgs {
     #[arg(long = "input", value_name = "key=value", value_parser = parse_input)]
     pub inputs: Vec<(String, String)>,
 
-    /// Add a file's bytes under a key visible through `sys.inputs`, for
-    /// example to pass an image to `image(sys.inputs.logo)`.
+    /// Add a file's bytes under a key visible through `sys.inputs`.
     #[arg(long = "input-file", value_name = "key=path", value_parser = parse_input_file())]
     pub input_files: Vec<(String, PathBuf)>,
 
     /// Enables in-development features that may be changed or removed at any
     /// time.
-    #[arg(
-        long = "features",
-        value_name = "FEATURES",
-        value_delimiter = ',',
-        env = "TYPST_FEATURES",
-        value_parser = one_of(FEATURES)
-    )]
+    #[arg(long = "features", value_name = "FEATURES", value_delimiter = ',',
+          env = "TYPST_FEATURES", value_parser = one_of(FEATURES))]
     pub features: Vec<Feature>,
 }
 
+const FEATURES: &[(&str, Feature)] = &[
+    ("html", Feature::Html),
+    ("a11y-extras", Feature::A11yExtras),
+];
+
 #[derive(Debug, Args)]
 pub struct FontArgs {
-    /// Adds additional directories that are recursively searched for fonts.
-    ///
-    /// If multiple paths are specified, they are separated by the system's path
-    /// separator (`:` on Unix-like systems and `;` on Windows).
-    #[arg(
-        long = "font-path",
-        env = "TYPST_FONT_PATHS",
-        value_name = "DIR",
-        value_delimiter = ENV_PATH_SEPARATOR
-    )]
+    /// Adds additional directories that are recursively searched for fonts,
+    /// separated by the system's path separator.
+    #[arg(long = "font-path", env = "TYPST_FONT_PATHS", value_name = "DIR",
+          value_delimiter = ENV_PATH_SEPARATOR)]
     pub font_paths: Vec<PathBuf>,
 
     /// Ensures system fonts won't be searched, unless explicitly included via
@@ -104,8 +93,7 @@ pub struct PackageArgs {
     #[arg(long, env = "TYPST_PACKAGE_CACHE_PATH", value_name = "DIR")]
     pub package_cache_path: Option<PathBuf>,
 
-    /// Disallow network access; package dependencies must already be available
-    /// in the local package directories.
+    /// Disallow network access; packages must already be available locally.
     #[arg(long)]
     pub offline: bool,
 }
@@ -118,8 +106,6 @@ pub struct AutomationArgs {
     pub jobs: Option<usize>,
 
     /// The document's creation date formatted as a UNIX timestamp.
-    ///
-    /// For more information, see <https://reproducible-builds.org/specs/source-date-epoch/>.
     #[arg(long, env = "SOURCE_DATE_EPOCH", value_name = "UNIX_TIMESTAMP")]
     pub creation_timestamp: Option<i64>,
 
@@ -127,11 +113,8 @@ pub struct AutomationArgs {
     #[arg(long, default_value = "human", value_parser = one_of(DIAGNOSTIC_FORMATS))]
     pub diagnostic_format: DiagnosticFormat,
 
-    /// Produces performance timings of the compilation process. (experimental)
-    ///
-    /// The resulting JSON file can be loaded into a tracing tool such as
-    /// https://ui.perfetto.dev. It does not contain any sensitive information
-    /// apart from file names and line numbers.
+    /// Produces performance timings of the compilation process as JSON for a
+    /// tracing tool such as https://ui.perfetto.dev. (experimental)
     #[arg(long, value_name = "OUTPUT_JSON")]
     pub timings: Option<PathBuf>,
 }
@@ -147,17 +130,14 @@ pub struct CreateArgs {
     pub root: Option<PathBuf>,
 
     /// Target for the creation compile [default: paged].
-    #[arg(long, value_name = "TARGET", value_parser = one_of(TARGETS), help_heading = "Creation")]
+    #[arg(long, value_name = "TARGET", help_heading = "Creation",
+          value_parser = one_of(&[("paged", Target::Paged), ("html", Target::Html)]))]
     pub target: Option<Target>,
 
     /// Also discover dependencies with these string inputs replacing or adding
     /// to `--input`. Repeat for several variants.
-    #[arg(
-        long = "variant",
-        value_name = "key=value,...",
-        value_parser = parse_variant,
-        help_heading = "Creation"
-    )]
+    #[arg(long = "variant", value_name = "key=value,...", value_parser = parse_variant,
+          help_heading = "Creation")]
     pub variants: Vec<Variant>,
 
     #[command(flatten, next_help_heading = "Creation")]
@@ -178,8 +158,7 @@ pub struct CreateArgs {
     #[command(flatten, next_help_heading = "Fonts")]
     pub fonts: FontArgs,
 
-    /// Do not store package files in the pack; record them as unvendored
-    /// dependencies instead.
+    /// Record packages as unvendored dependencies instead of storing them.
     #[arg(long = "no-vendor-packages", help_heading = "Packages")]
     pub no_vendor_packages: bool,
 
@@ -240,42 +219,29 @@ pub struct CompileArgs {
     #[arg(help_heading = "Compilation")]
     pub pack: PathBuf,
 
-    /// Path to output file (PDF, PNG, SVG, or HTML). Use `-` to write output to
-    /// stdout.
+    /// Path to output file (PDF, PNG, SVG, or HTML). Use `-` for stdout.
     ///
-    /// For output formats emitting one file per page (PNG & SVG), a page number
-    /// template must be present if the source document renders to multiple
-    /// pages. Use `{p}` for page numbers, `{0p}` for zero padded page numbers
-    /// and `{t}` for page count. For example, `page-{0p}-of-{t}.png` creates
-    /// `page-01-of-10.png`, `page-02-of-10.png`, and so on.
+    /// PNG and SVG emit one file per page: with several pages, use `{p}`,
+    /// `{0p}` (zero padded), or `{t}` (page count), as in `page-{0p}-of-{t}.png`.
     #[arg(help_heading = "Output")]
     pub output: Option<PathBuf>,
 
     /// The format of the output file, inferred from the extension by default.
-    #[arg(short, long, value_parser = one_of(FORMATS), help_heading = "Output")]
+    #[arg(short, long, help_heading = "Output",
+          value_parser = PossibleValuesParser::new(["pdf", "png", "svg", "html"])
+              .map(|name| OutputFormat::from_extension(&name).expect("a listed format")))]
     pub format: Option<OutputFormat>,
 
-    /// Whether to pretty-print produced output.
-    ///
-    /// This formats the output in a more human-readable, but less
-    /// space-efficient way. Affects HTML, SVG, and PDF export, but not PNG
-    /// export.
+    /// Whether to pretty-print HTML, SVG, and PDF output.
     #[arg(long, help_heading = "Output")]
     pub pretty: bool,
 
     #[command(flatten, next_help_heading = "Compilation")]
     pub compilation: CompilationArgs,
 
-    /// Which pages to export. When unspecified, all pages are exported.
-    ///
-    /// Pages to export are separated by commas, and can be either simple page
-    /// numbers (e.g. '2,5' to export only pages 2 and 5) or page ranges (e.g.
-    /// '2,3-6,8-' to export page 2, pages 3 to 6 (inclusive), page 8 and any
-    /// pages after it).
-    ///
-    /// Page numbers are one-indexed and correspond to physical page numbers in
-    /// the document (therefore not being affected by the document's page
-    /// counter).
+    /// Which pages to export, as comma-separated one-indexed physical page
+    /// numbers or ranges (e.g. `2,3-6,8-`). When unspecified, all pages are
+    /// exported.
     #[arg(long, value_delimiter = ',', help_heading = "Output")]
     pub pages: Vec<PageSelection>,
 
@@ -285,19 +251,12 @@ pub struct CompileArgs {
 
     /// One (or multiple comma-separated) PDF standards that Typst will enforce
     /// conformance with.
-    #[arg(
-        long = "pdf-standard",
-        value_name = "PDF_STANDARD",
-        value_delimiter = ',',
-        value_parser = one_of(PDF_STANDARDS),
-        help_heading = "PDF"
-    )]
-    pub pdf_standards: Vec<PdfStandardArg>,
+    #[arg(long = "pdf-standard", value_name = "PDF_STANDARD", value_delimiter = ',',
+          help_heading = "PDF", value_parser = pdf_standard())]
+    pub pdf_standards: Vec<PdfStandard>,
 
-    /// By default, even when not producing a `PDF/UA-1` document, a tagged PDF
-    /// document is written to provide a baseline of accessibility. In some
-    /// circumstances (for example when trying to reduce the size of a document)
-    /// it can be desirable to disable tagged PDF.
+    /// Do not write a tagged PDF, which is otherwise written for a baseline of
+    /// accessibility.
     #[arg(long = "no-pdf-tags", help_heading = "PDF")]
     pub no_pdf_tags: bool,
 
@@ -326,12 +285,8 @@ pub struct CompileArgs {
 
     /// Opens the output file with the default viewer or a specific program
     /// after compilation. Ignored if output is stdout.
-    #[arg(
-        long,
-        value_name = "VIEWER",
-        num_args = 0..=1,
-        help_heading = "Diagnostics & Automation"
-    )]
+    #[arg(long, value_name = "VIEWER", num_args = 0..=1,
+          help_heading = "Diagnostics & Automation")]
     pub open: Option<Option<String>>,
 }
 
@@ -345,16 +300,15 @@ pub enum DepsFormat {
     Make,
 }
 
-/// A parser accepting exactly the given names.
-fn one_of<T: Copy + Send + Sync + 'static>(
-    values: &'static [(&'static str, T)],
-) -> impl clap::builder::TypedValueParser<Value = T> {
-    use clap::builder::TypedValueParser;
-    let names = values.iter().map(|(name, _)| *name);
-    clap::builder::PossibleValuesParser::new(names).map(|name| {
-        let value = values.iter().find(|(candidate, _)| *candidate == name);
-        value.expect("clap accepted a listed name").1
-    })
+/// Typst's names of the PDF standards, which are also their serde names.
+const PDF_STANDARDS: [&str; 17] = [
+    "1.4", "1.5", "1.6", "1.7", "2.0", "a-1b", "a-1a", "a-2b", "a-2u", "a-2a", "a-3b", "a-3u",
+    "a-3a", "a-4", "a-4f", "a-4e", "ua-1",
+];
+
+fn pdf_standard() -> impl TypedValueParser<Value = PdfStandard> {
+    PossibleValuesParser::new(PDF_STANDARDS)
+        .map(|name| serde_json::from_value(name.into()).expect("Typst names every listed standard"))
 }
 
 const DIAGNOSTIC_FORMATS: &[(&str, DiagnosticFormat)] = &[
@@ -362,57 +316,28 @@ const DIAGNOSTIC_FORMATS: &[(&str, DiagnosticFormat)] = &[
     ("short", DiagnosticFormat::Short),
 ];
 
-const FEATURES: &[(&str, Feature)] = &[
-    ("html", Feature::Html),
-    ("a11y-extras", Feature::A11yExtras),
-];
-
-const TARGETS: &[(&str, Target)] = &[("paged", Target::Paged), ("html", Target::Html)];
-
-const FORMATS: &[(&str, OutputFormat)] = &[
-    ("pdf", OutputFormat::Pdf),
-    ("png", OutputFormat::Png),
-    ("svg", OutputFormat::Svg),
-    ("html", OutputFormat::Html),
-];
-
-/// A PDF standard as Typst's CLI names it, and the name of a standard that
-/// requires accessibility tags.
-pub type PdfStandardArg = (PdfStandard, Option<&'static str>);
-
-const PDF_STANDARDS: &[(&str, PdfStandardArg)] = &[
-    ("1.4", (PdfStandard::V_1_4, None)),
-    ("1.5", (PdfStandard::V_1_5, None)),
-    ("1.6", (PdfStandard::V_1_6, None)),
-    ("1.7", (PdfStandard::V_1_7, None)),
-    ("2.0", (PdfStandard::V_2_0, None)),
-    ("a-1b", (PdfStandard::A_1b, None)),
-    ("a-1a", (PdfStandard::A_1a, Some("PDF/A-1a"))),
-    ("a-2b", (PdfStandard::A_2b, None)),
-    ("a-2u", (PdfStandard::A_2u, None)),
-    ("a-2a", (PdfStandard::A_2a, Some("PDF/A-2a"))),
-    ("a-3b", (PdfStandard::A_3b, None)),
-    ("a-3u", (PdfStandard::A_3u, None)),
-    ("a-3a", (PdfStandard::A_3a, Some("PDF/A-3a"))),
-    ("a-4", (PdfStandard::A_4, None)),
-    ("a-4f", (PdfStandard::A_4f, None)),
-    ("a-4e", (PdfStandard::A_4e, None)),
-    ("ua-1", (PdfStandard::Ua_1, Some("PDF/UA-1"))),
-];
+/// A parser accepting exactly the given names.
+fn one_of<T: Copy + Send + Sync + 'static>(
+    values: &'static [(&'static str, T)],
+) -> impl TypedValueParser<Value = T> {
+    let names = values.iter().map(|(name, _)| *name);
+    PossibleValuesParser::new(names).map(|name| {
+        let value = values.iter().find(|(candidate, _)| *candidate == name);
+        value.expect("clap accepted a listed name").1
+    })
+}
 
 fn parse_input(pair: &str) -> Result<(String, String), String> {
     let (key, value) = pair
         .split_once('=')
         .ok_or("input must be a key and a value separated by an equal sign")?;
-    let key = key.trim();
-    if key.is_empty() {
-        return Err("the key was missing or empty".to_owned());
+    match key.trim() {
+        "" => Err("the key was missing or empty".to_owned()),
+        key => Ok((key.to_owned(), value.trim().to_owned())),
     }
-    Ok((key.to_owned(), value.trim().to_owned()))
 }
 
-fn parse_input_file() -> impl clap::builder::TypedValueParser<Value = (String, PathBuf)> {
-    use clap::builder::TypedValueParser;
+fn parse_input_file() -> impl TypedValueParser<Value = (String, PathBuf)> {
     clap::builder::OsStringValueParser::new().try_map(|pair| {
         let bytes = pair.as_encoded_bytes();
         let split = bytes.iter().position(|&byte| byte == b'=');

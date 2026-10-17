@@ -40,7 +40,7 @@ and note in the upgrade change what changed in:
 
 ```console
 cargo test --locked -p typst-pack --test embedded_typst_gate
-cargo test --locked -p typst-pack --all-features --test official_typst_oracle
+cargo test --locked -p typst-pack --all-features --test typst_parity
 TYPST_PACK_REQUIRE_OFFICIAL_TYPST=1 \
 TYPST_PACK_OFFICIAL_TYPST=/path/to/official/typst \
 TYPST_PACK_TEST_BINARY=/path/to/packaged/typst-pack \

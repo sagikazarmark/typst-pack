@@ -8,7 +8,7 @@ mod inspect;
 
 use std::fs::File;
 use std::io::{BufWriter, IsTerminal, Write};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -22,7 +22,7 @@ use typst_kit::diagnostics::termcolor::{
 use typst_pack::compile::{DocumentTime, Input, Options};
 use typst_pack::{Sources, fs};
 
-use crate::cli::{Cli, Command, CompilationArgs, FontArgs, PackageArgs};
+use crate::cli::{AutomationArgs, Cli, Command, CompilationArgs, FontArgs, PackageArgs};
 
 /// Why a command failed.
 pub enum Failure {
@@ -55,15 +55,8 @@ impl Terminal {
         self.label("error", Color::Red, message);
     }
 
-    pub fn hint(self, message: &str) {
-        self.label("hint", Color::Cyan, message);
-    }
-
-    pub fn warning(self, message: &str) {
-        self.label("warning", Color::Yellow, message);
-    }
-
-    fn label(self, label: &str, color: Color, message: &str) {
+    /// Prints `label: message` with the label styled in `color`.
+    pub fn label(self, label: &str, color: Color, message: &str) {
         let mut stream = StandardStream::stderr(self.color);
         let _ = stream.set_color(ColorSpec::new().set_fg(Some(color)).set_bold(true));
         let _ = write!(stream, "{label}");
@@ -80,16 +73,6 @@ impl Terminal {
         let mut stream = StandardStream::stderr(self.color);
         let _ = typst_kit::diagnostics::emit(&mut stream, sources, diagnostics, self.format);
     }
-
-    /// Prints a failure's message and hints, unless it was printed already.
-    pub fn failure(self, failure: Failure) {
-        if let Failure::Error { message, hints } = failure {
-            self.error(&message);
-            for hint in hints {
-                self.hint(&hint);
-            }
-        }
-    }
 }
 
 /// Runs the CLI and returns the process exit code.
@@ -105,39 +88,46 @@ pub fn run() -> ExitCode {
         _ if std::io::stderr().is_terminal() => ColorChoice::Auto,
         _ => ColorChoice::Never,
     };
-    let terminal = |format: Option<DiagnosticFormat>| Terminal {
-        color,
-        format: format.unwrap_or_default(),
+    let format = match &command {
+        Command::Create(args) => args.automation.diagnostic_format,
+        Command::Compile(args) => args.automation.diagnostic_format,
+        Command::Inspect(_) | Command::Extract(_) => DiagnosticFormat::default(),
     };
-    let (terminal, result) = match command {
-        Command::Create(args) => {
-            let terminal = terminal(Some(args.automation.diagnostic_format));
-            (terminal, create::run(args, terminal, cert))
-        }
-        Command::Inspect(args) => (terminal(None), inspect::run(args)),
-        Command::Extract(args) => (terminal(None), extract::run(args)),
-        Command::Compile(args) => {
-            let terminal = terminal(Some(args.automation.diagnostic_format));
-            (terminal, compile::run(args, terminal, cert))
-        }
+    let terminal = Terminal { color, format };
+    let result = match command {
+        Command::Create(args) => create::run(args, terminal, cert),
+        Command::Inspect(args) => inspect::run(args),
+        Command::Extract(args) => extract::run(args),
+        Command::Compile(args) => compile::run(args, terminal, cert),
     };
     match result {
         Ok(()) => ExitCode::SUCCESS,
-        Err(failure) => {
-            terminal.failure(failure);
+        Err(Failure::Reported) => ExitCode::FAILURE,
+        Err(Failure::Error { message, hints }) => {
+            terminal.error(&message);
+            for hint in hints {
+                terminal.label("hint", Color::Cyan, &hint);
+            }
             ExitCode::FAILURE
         }
     }
 }
 
-/// Validates a creation timestamp as Typst's CLI does, before any I/O.
-fn check_timestamp(timestamp: Option<i64>) -> CommandResult {
-    match timestamp {
-        Some(seconds) if chrono::DateTime::from_timestamp(seconds, 0).is_none() => {
-            Err("creation timestamp is out of range".into())
-        }
-        _ => Ok(()),
+/// Validates the creation timestamp as Typst's CLI does, before any I/O, and
+/// sizes the thread pool.
+fn prepare(automation: &AutomationArgs) -> CommandResult {
+    if let Some(seconds) = automation.creation_timestamp
+        && chrono::DateTime::from_timestamp(seconds, 0).is_none()
+    {
+        return Err("creation timestamp is out of range".into());
     }
+    if let Some(jobs) = automation.jobs {
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(jobs)
+            .use_current_thread();
+        pool.build_global().ok();
+    }
+    Ok(())
 }
 
 /// The current UNIX time and local UTC offset in minutes.
@@ -146,24 +136,13 @@ fn now() -> (i64, i32) {
     (now.timestamp(), now.offset().local_minus_utc() / 60)
 }
 
-fn initialize_jobs(jobs: Option<usize>) {
-    if let Some(jobs) = jobs {
-        rayon::ThreadPoolBuilder::new()
-            .num_threads(jobs)
-            .use_current_thread()
-            .build_global()
-            .ok();
-    }
-}
-
 /// Compile options from the shared arguments, and the input files read.
 fn compile_options(
     args: &CompilationArgs,
     document_time: DocumentTime,
 ) -> Result<(Options, Vec<PathBuf>), Failure> {
-    let mut inputs = args
-        .inputs
-        .iter()
+    let strings = args.inputs.iter();
+    let mut inputs = strings
         .map(|(key, value)| (key.clone(), Input::from(value.as_str())))
         .collect::<Vec<_>>();
     let mut files = Vec::new();
@@ -173,12 +152,15 @@ fn compile_options(
         inputs.push((key.clone(), Input::Bytes(data)));
         files.push(path.clone());
     }
-    let options = Options {
-        inputs,
-        document_time,
-        features: args.features.clone(),
-    };
-    Ok((options, files))
+    let features = args.features.clone();
+    Ok((
+        Options {
+            inputs,
+            document_time,
+            features,
+        },
+        files,
+    ))
 }
 
 /// The host fonts and packages the arguments select.
@@ -238,21 +220,4 @@ fn locate(sources: &Sources, span: Span) -> Option<(String, u32)> {
             .byte_to_line(start)?,
     };
     Some((format!("{id:?}"), line as u32 + 1))
-}
-
-/// Writes bytes to stdout, or a file.
-fn write_to(destination: &Path, bytes: &[u8], what: &str) -> Result<(), String> {
-    if destination == Path::new("-") {
-        std::io::stdout()
-            .lock()
-            .write_all(bytes)
-            .map_err(|error| format!("cannot write {what} to stdout: {error}"))
-    } else {
-        std::fs::write(destination, bytes).map_err(|error| {
-            format!(
-                "cannot write {what} to `{}`: {error}",
-                destination.display()
-            )
-        })
-    }
 }

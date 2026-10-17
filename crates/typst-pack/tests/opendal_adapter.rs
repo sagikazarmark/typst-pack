@@ -13,11 +13,12 @@ use opendal::{ErrorKind, Operator};
 use typst::syntax::package::PackageSpec;
 use typst_pack::archive::{DecodeLimits, decode, encode};
 use typst_pack::compile::{Artifact, Output, OutputFormat};
+use typst_pack::opendal::WritePolicy::{CreateOrVerify, Overwrite};
 use typst_pack::opendal::{
-    Error, PackageRead, PackageSource, WriteOutcome, WritePolicy, read_archive, read_package,
-    read_project, write_archive, write_artifacts, write_extraction, write_package_archive,
+    Error, PackageRead, PackageSource, WriteOutcome, read_archive, read_package, read_project,
+    write_archive, write_artifacts, write_extraction, write_package_archive,
 };
-use typst_pack::{Pack, ReadLimits};
+use typst_pack::{Pack, ProjectSnapshot, ReadLimits};
 use typst_pack::{compile, extract};
 
 fn memory() -> Operator {
@@ -30,6 +31,11 @@ fn put(op: &Operator, path: &str, bytes: impl Into<Vec<u8>>) {
 
 fn get(op: &Operator, path: &str) -> Vec<u8> {
     block_on(op.read(path)).unwrap().to_vec()
+}
+
+/// Reads the project below `prefix` under default limits.
+fn read(op: &Operator, prefix: &str, entrypoint: &str) -> Result<ProjectSnapshot, Error> {
+    block_on(read_project(op, prefix, entrypoint, &ReadLimits::default()))
 }
 
 fn spec(text: &str) -> PackageSpec {
@@ -60,13 +66,7 @@ fn project_read_selects_every_file_below_the_prefix() {
     put(&op, "doc-sibling/stray.typ", "not part of the project");
     put(&op, "other/main.typ", "not part of the project");
 
-    let project = block_on(read_project(
-        &op,
-        "doc/",
-        "main.typ",
-        &ReadLimits::default(),
-    ))
-    .unwrap();
+    let project = read(&op, "doc/", "main.typ").unwrap();
 
     let files = project.files().map(|(path, _)| path).collect::<Vec<_>>();
     assert_eq!(
@@ -81,10 +81,10 @@ fn project_read_selects_every_file_below_the_prefix() {
 fn project_read_from_the_root_and_snapshot_validation() {
     let op = memory();
     put(&op, "main.typ", "= Root");
-    let project = block_on(read_project(&op, "", "main.typ", &ReadLimits::default())).unwrap();
+    let project = read(&op, "", "main.typ").unwrap();
     assert_eq!(project.file("main.typ"), Some(b"= Root".as_slice()));
 
-    let missing = block_on(read_project(&op, "", "absent.typ", &ReadLimits::default()));
+    let missing = read(&op, "", "absent.typ");
     assert!(matches!(missing, Err(Error::Invalid(_))), "{missing:?}");
 }
 
@@ -92,12 +92,7 @@ fn project_read_from_the_root_and_snapshot_validation() {
 fn malformed_prefixes_and_keys_are_rejected_before_storage_access() {
     let op = memory();
     for prefix in ["doc", "/doc/", "doc//", "../doc/", "doc/./"] {
-        let result = block_on(read_project(
-            &op,
-            prefix,
-            "main.typ",
-            &ReadLimits::default(),
-        ));
+        let result = read(&op, prefix, "main.typ");
         assert!(
             matches!(result, Err(Error::InvalidPath { .. })),
             "{prefix:?}"
@@ -114,39 +109,24 @@ fn every_read_limit_is_enforced() {
     let op = memory();
     put(&op, "doc/main.typ", vec![b'a'; 10]);
     put(&op, "doc/b.typ", vec![b'b'; 10]);
-    let read = |limits| block_on(read_project(&op, "doc/", "main.typ", &limits));
-    let exceeded = |result: Result<_, Error>| match result {
-        Err(Error::Limit { exceeded, .. }) => (exceeded.resource, exceeded.limit),
-        other => panic!("expected a limit error, got {other:?}"),
-    };
-
     let fits = ReadLimits {
         max_entries: 2,
         max_file_bytes: 10,
         max_total_bytes: 20,
     };
-    assert!(read(fits).is_ok());
-    assert_eq!(
-        exceeded(read(ReadLimits {
-            max_entries: 1,
-            ..fits
-        })),
-        ("entries", 1)
-    );
-    assert_eq!(
-        exceeded(read(ReadLimits {
-            max_file_bytes: 9,
-            ..fits
-        })),
-        ("file bytes", 9)
-    );
-    assert_eq!(
-        exceeded(read(ReadLimits {
-            max_total_bytes: 19,
-            ..fits
-        })),
-        ("total bytes", 19)
-    );
+    let exceeded = |change: fn(&mut ReadLimits)| {
+        let mut limits = fits;
+        change(&mut limits);
+        match block_on(read_project(&op, "doc/", "main.typ", &limits)) {
+            Err(Error::Limit { exceeded, .. }) => (exceeded.resource, exceeded.limit),
+            other => panic!("expected a limit error, got {other:?}"),
+        }
+    };
+
+    assert!(block_on(read_project(&op, "doc/", "main.typ", &fits)).is_ok());
+    assert_eq!(exceeded(|l| l.max_entries = 1), ("entries", 1));
+    assert_eq!(exceeded(|l| l.max_file_bytes = 9), ("file bytes", 9));
+    assert_eq!(exceeded(|l| l.max_total_bytes = 19), ("total bytes", 19));
 
     put(&op, "pack.typk", vec![0; 11]);
     assert!(matches!(
@@ -346,45 +326,23 @@ fn inserting_a_read_package_updates_the_request_packages_and_failures() {
 }
 
 #[test]
-fn an_object_vanishing_between_list_and_read_fails_the_read() {
+fn an_object_vanishing_or_failing_after_listing_fails_the_read_naming_it() {
     let op = memory();
     let (faulty, faults) = Faults::wrap(&op);
     put(&op, "doc/main.typ", "= Hello");
     put(&op, "doc/gone.typ", "vanishes");
     faults.vanish("doc/gone.typ");
 
-    let error = block_on(read_project(
-        &faulty,
-        "doc/",
-        "main.typ",
-        &ReadLimits::default(),
-    ))
-    .unwrap_err();
+    let error = read(&faulty, "doc/", "main.typ").unwrap_err();
+    assert!(
+        matches!(&error, Error::Storage { path, source, .. }
+            if path == "doc/gone.typ" && source.kind() == ErrorKind::NotFound),
+        "{error:?}"
+    );
 
-    match error {
-        Error::Storage { path, source, .. } => {
-            assert_eq!(path, "doc/gone.typ");
-            assert_eq!(source.kind(), ErrorKind::NotFound);
-        }
-        other => panic!("unexpected {other:?}"),
-    }
-}
-
-#[test]
-fn a_failed_object_read_names_the_object() {
-    let op = memory();
-    let (faulty, faults) = Faults::wrap(&op);
-    put(&op, "doc/main.typ", "= Hello");
+    block_on(op.delete("doc/gone.typ")).unwrap();
     faults.fail_read("doc/main.typ");
-
-    let error = block_on(read_project(
-        &faulty,
-        "doc/",
-        "main.typ",
-        &ReadLimits::default(),
-    ))
-    .unwrap_err();
-
+    let error = read(&faulty, "doc/", "main.typ").unwrap_err();
     assert!(
         matches!(&error, Error::Storage { path, operation: "read", .. } if path == "doc/main.typ"),
         "{error:?}"
@@ -404,18 +362,12 @@ fn pack_archives_round_trip_under_both_policies() {
     let archive = encode(&pack);
     let write = |policy| block_on(write_archive(&op, "out/sample.typk", &archive, policy));
 
+    assert_eq!(write(CreateOrVerify).unwrap(), WriteOutcome::Created);
     assert_eq!(
-        write(WritePolicy::CreateOrVerify).unwrap(),
-        WriteOutcome::Created
-    );
-    assert_eq!(
-        write(WritePolicy::CreateOrVerify).unwrap(),
+        write(CreateOrVerify).unwrap(),
         WriteOutcome::AlreadyMatching
     );
-    assert_eq!(
-        write(WritePolicy::Overwrite).unwrap(),
-        WriteOutcome::Written
-    );
+    assert_eq!(write(Overwrite).unwrap(), WriteOutcome::Written);
 
     let read = block_on(read_archive(&op, "out/sample.typk", 1 << 20)).unwrap();
     assert_eq!(read.as_slice(), archive.as_slice());
@@ -437,13 +389,7 @@ fn create_or_verify_refuses_different_bytes_without_writing() {
     // length conflicts on the advertised size alone.
     for existing in [vec![0; pack.as_slice().len()], b"short".to_vec()] {
         put(&op, "out.typk", existing.clone());
-        let error = block_on(write_archive(
-            &op,
-            "out.typk",
-            &pack,
-            WritePolicy::CreateOrVerify,
-        ))
-        .unwrap_err();
+        let error = block_on(write_archive(&op, "out.typk", &pack, CreateOrVerify)).unwrap_err();
         assert!(matches!(error.error, Error::Conflict { .. }), "{error:?}");
         assert!(!error.indeterminate);
         assert_eq!(get(&op, "out.typk"), existing);
@@ -455,12 +401,7 @@ fn empty_objects_are_created_verified_and_read() {
     let op = memory();
     let empty = Vec::<u8>::new();
     for expected in [WriteOutcome::Created, WriteOutcome::AlreadyMatching] {
-        let outcome = block_on(write_archive(
-            &op,
-            "empty.typk",
-            &empty,
-            WritePolicy::CreateOrVerify,
-        ));
+        let outcome = block_on(write_archive(&op, "empty.typk", &empty, CreateOrVerify));
         assert_eq!(outcome.unwrap(), expected);
     }
     let read = block_on(read_archive(&op, "empty.typk", 0)).unwrap();
@@ -473,13 +414,7 @@ fn create_or_verify_checks_every_key_before_creating_any() {
     let plan = extract::plan(&sample_pack(), extract::Selection::default()).unwrap();
     put(&op, "out/main.typ", "conflicting");
 
-    let error = block_on(write_extraction(
-        &op,
-        "out/",
-        &plan,
-        WritePolicy::CreateOrVerify,
-    ))
-    .unwrap_err();
+    let error = block_on(write_extraction(&op, "out/", &plan, CreateOrVerify)).unwrap_err();
 
     assert!(matches!(&error.error, Error::Conflict { path } if path == "out/main.typ"));
     assert!(error.completed.is_empty());
@@ -492,7 +427,7 @@ fn extraction_writes_replay_as_already_matching() {
     let plan = extract::plan(&sample_pack(), extract::Selection::default()).unwrap();
     let write = |policy| block_on(write_extraction(&op, "out/", &plan, policy)).unwrap();
 
-    let created = write(WritePolicy::CreateOrVerify);
+    let created = write(CreateOrVerify);
     assert_eq!(
         created,
         [
@@ -502,12 +437,12 @@ fn extraction_writes_replay_as_already_matching() {
     );
     assert_eq!(get(&op, "out/assets/logo.bin"), b"logo");
     assert!(
-        write(WritePolicy::CreateOrVerify)
+        write(CreateOrVerify)
             .iter()
             .all(|(_, outcome)| *outcome == WriteOutcome::AlreadyMatching)
     );
     assert!(
-        write(WritePolicy::Overwrite)
+        write(Overwrite)
             .iter()
             .all(|(_, outcome)| *outcome == WriteOutcome::Written)
     );
@@ -516,7 +451,7 @@ fn extraction_writes_replay_as_already_matching() {
 #[test]
 fn a_write_failure_reports_the_completed_prefix_and_indeterminate_effect() {
     let plan = extract::plan(&sample_pack(), extract::Selection::default()).unwrap();
-    for policy in [WritePolicy::Overwrite, WritePolicy::CreateOrVerify] {
+    for policy in [Overwrite, CreateOrVerify] {
         let op = memory();
         let (faulty, faults) = Faults::wrap(&op);
         faults.fail_write("out/main.typ");
@@ -530,13 +465,7 @@ fn a_write_failure_reports_the_completed_prefix_and_indeterminate_effect() {
 
         // Replaying with CreateOrVerify after the fault clears completes the
         // already written prefix as matching.
-        let replay = block_on(write_extraction(
-            &op,
-            "out/",
-            &plan,
-            WritePolicy::CreateOrVerify,
-        ))
-        .unwrap();
+        let replay = block_on(write_extraction(&op, "out/", &plan, CreateOrVerify)).unwrap();
         assert_eq!(replay[1].1, WriteOutcome::Created);
     }
 }
@@ -554,7 +483,7 @@ fn a_lost_conditional_create_race_is_verified() {
         &faulty,
         "matching.typk",
         &archive,
-        WritePolicy::CreateOrVerify,
+        CreateOrVerify,
     ));
     assert_eq!(outcome.unwrap(), WriteOutcome::AlreadyMatching);
 
@@ -565,7 +494,7 @@ fn a_lost_conditional_create_race_is_verified() {
         &faulty,
         "different.typk",
         &archive,
-        WritePolicy::CreateOrVerify,
+        CreateOrVerify,
     ))
     .unwrap_err();
     assert!(matches!(error.error, Error::Conflict { .. }));
@@ -579,24 +508,13 @@ fn create_or_verify_requires_conditional_create() {
     faults.hide_conditional_create();
     let archive = encode(&sample_pack());
 
-    let error = block_on(write_archive(
-        &faulty,
-        "out.typk",
-        &archive,
-        WritePolicy::CreateOrVerify,
-    ))
-    .unwrap_err();
+    let error = block_on(write_archive(&faulty, "out.typk", &archive, CreateOrVerify)).unwrap_err();
     assert!(
         matches!(error.error, Error::Unsupported { .. }),
         "{error:?}"
     );
 
-    let written = block_on(write_archive(
-        &faulty,
-        "out.typk",
-        &archive,
-        WritePolicy::Overwrite,
-    ));
+    let written = block_on(write_archive(&faulty, "out.typk", &archive, Overwrite));
     assert_eq!(written.unwrap(), WriteOutcome::Written);
 }
 
@@ -631,7 +549,7 @@ fn compilation_artifacts_are_written_at_validated_keys() {
             "pages/",
             &result,
             keys,
-            WritePolicy::CreateOrVerify,
+            CreateOrVerify,
         ))
     };
 
@@ -656,6 +574,23 @@ fn compilation_artifacts_are_written_at_validated_keys() {
             matches!(error(&["ok.svg", bad]), Error::InvalidPath { .. }),
             "{bad:?}"
         );
+    }
+    // Keys OpenDAL would normalize into another key are refused.
+    for bad in ["", " a", "a ", "a\u{00a0}", "a/./b"] {
+        assert!(
+            matches!(error(&[bad, "valid.svg"]), Error::InvalidPath { .. }),
+            "{bad:?}"
+        );
+    }
+    // Percent signs and invisible characters are literal key bytes.
+    for keys in [["tree%", "tree%/page%2F.svg"], ["a\u{feff}", "a\u{200b}"]] {
+        write(&keys).unwrap();
+        for key in keys {
+            assert!(
+                block_on(op.exists(&format!("pages/{key}"))).unwrap(),
+                "{key:?}"
+            );
+        }
     }
 }
 

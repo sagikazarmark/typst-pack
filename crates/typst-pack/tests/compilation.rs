@@ -1,3 +1,7 @@
+#[cfg(feature = "embedded-fonts")]
+#[path = "support/fonts.rs"]
+mod font_bytes;
+
 use std::num::NonZeroUsize;
 
 use typst::foundations::Smart;
@@ -6,7 +10,7 @@ use typst_pack::compile::{
     Compiled, CreationTimestamp, DocumentTime, Input, Output, OutputFormat, PageSelection,
     RequestIssue, Unfulfilled,
 };
-use typst_pack::{LimitExceeded, Metadata, Pack};
+use typst_pack::{LimitExceeded, Pack};
 use typst_pack::{compile, package};
 
 fn pack(source: &str) -> Pack {
@@ -552,6 +556,61 @@ fn external_fonts_are_matched_by_digest_and_named_when_missing() {
     );
 }
 
+#[test]
+fn bytes_without_a_readable_face_are_no_font_container() {
+    for bytes in [&b"not a font"[..], b"", b"OTTO", b"ttcf\0\x01"] {
+        assert!(typst_pack::font::Container::new(bytes.to_vec()).is_none());
+    }
+}
+
+/// Discovery that rendered only the regular face of a collection must not
+/// hide its other faces from a later compile.
+#[cfg(feature = "embedded-fonts")]
+#[test]
+fn every_face_of_a_collection_is_available_to_compilation() {
+    use typst_pack::{ProjectSnapshot, create, font};
+
+    let face = |weight: u16| {
+        let mut fonts = typst_kit::fonts::embedded().map(|(font, _)| font);
+        let font = fonts.find(|font| {
+            let info = font.info();
+            info.family == "Libertinus Serif"
+                && info.variant.weight.to_number() == weight
+                && info.variant.style == typst::text::FontStyle::Normal
+        });
+        font.unwrap().data().to_vec()
+    };
+    let collection = font_bytes::font_collection(&[face(400), face(700)]);
+    let container = font::Container::new(collection.clone()).unwrap();
+    let indices = container.faces().iter().map(|face| face.index);
+    assert_eq!(indices.collect::<Vec<_>>(), [0, 1]);
+
+    let source = "#set text(font: \"Libertinus Serif\")\n\
+                  #if sys.inputs.at(\"bold\", default: \"no\") == \"yes\" [*Text*] else [Text]";
+    let project = ProjectSnapshot::new("main.typ", [("main.typ", source)]).unwrap();
+    let mut request = create::Request::new(project);
+    request.fonts = vec![font::Entry {
+        container,
+        embedded: true,
+    }];
+    let Ok(create::Outcome::Created(created)) = create(&request) else {
+        panic!("creation needs no packages");
+    };
+    assert_eq!(created.pack.font_requirements()[0].faces.len(), 2);
+
+    // Typst does not synthesize bold, so different glyphs prove the bold face
+    // was available.
+    let svg = |bold: &str| {
+        let mut request =
+            compile::Request::new(created.pack.clone(), Output::new(OutputFormat::Svg));
+        request.options.inputs = vec![("bold".into(), Input::from(bold))];
+        let compiled = compiled(&request);
+        assert!(compiled.warnings.is_empty(), "{:?}", compiled.warnings);
+        compiled.artifacts[0].bytes.clone()
+    };
+    assert_ne!(svg("yes"), svg("no"));
+}
+
 #[cfg(feature = "embedded-fonts")]
 #[test]
 fn pack_fonts_are_the_only_fonts() {
@@ -600,184 +659,40 @@ fn vendored_packages_compile_from_the_pack() {
 }
 
 #[test]
-fn compilation_identity_binds_the_request_but_not_metadata() {
-    let identity = |pack: Pack, output: Output, inputs: Vec<(String, Input)>| {
-        let mut request = compile::Request::new(pack, output);
-        request.options.inputs = inputs;
-        compiled(&request).identity
-    };
-    let source = "#rect(width: 1pt, height: 1pt)";
-    let svg = Output::new(OutputFormat::Svg);
-    let baseline = identity(pack(source), svg.clone(), vec![]);
-
-    let described = Pack::builder("main.typ")
-        .file("main.typ", source.as_bytes().to_vec())
-        .metadata(Metadata {
-            name: Some("described".into()),
-            ..Metadata::default()
-        })
-        .build()
-        .unwrap();
-    assert_eq!(identity(described, svg.clone(), vec![]), baseline);
-    assert_eq!(
-        identity(pack(source), svg.clone(), vec![]),
-        baseline,
-        "identities are stable"
-    );
-
-    for changed in [
-        identity(pack("#rect(width: 2pt, height: 1pt)"), svg.clone(), vec![]),
-        identity(pack(source), Output::new(OutputFormat::Pdf), vec![]),
-        identity(
-            pack(source),
-            Output {
-                pretty: true,
-                ..Output::new(OutputFormat::Svg)
-            },
-            vec![],
-        ),
-        identity(
-            pack(source),
-            svg.clone(),
-            vec![("a".into(), Input::from("1"))],
-        ),
-        identity(
-            pack(source),
-            svg.clone(),
-            vec![("a".into(), Input::Bytes(b"1".to_vec()))],
-        ),
-    ] {
-        assert_ne!(changed, baseline);
-    }
-
-    // Equivalent page selections are one request.
-    let selected = |text: &str| identity(five_page_pack(), svg_selection(text), vec![]);
-    assert_eq!(selected("2-3,1"), selected("1-3"));
-    assert_ne!(selected("1-3"), selected("1-2"));
-}
-
-fn svg_selection(text: &str) -> Output {
-    svg(selection(text))
-}
-
-#[test]
 fn limits_bound_pages_artifacts_pixels_and_bytes() {
-    let tight = |limits: compile::Limits| compile::Limits {
-        export_workers: 1,
-        ..limits
+    type Change<'a> = &'a dyn Fn(&mut compile::Limits);
+    let run = |pack, output, change: Change| {
+        let mut limits = compile::Limits::default();
+        change(&mut limits);
+        limited(pack, output, limits)
     };
-    let defaults = compile::Limits::default();
-
-    assert!(
-        limited(
-            five_page_pack(),
-            Output::new(OutputFormat::Svg),
-            tight(compile::Limits {
-                max_pages: 5,
-                ..defaults
-            })
-        )
-        .is_ok()
-    );
-    assert_eq!(
-        limit_error(limited(
-            five_page_pack(),
-            Output::new(OutputFormat::Svg),
-            compile::Limits {
-                max_pages: 4,
-                ..defaults
-            }
-        )),
-        ("pages", 4)
-    );
-    assert_eq!(
-        limit_error(limited(
-            five_page_pack(),
-            Output::new(OutputFormat::Svg),
-            compile::Limits {
-                max_artifacts: 4,
-                ..defaults
-            }
-        )),
-        ("artifacts", 4)
-    );
+    let rejected = |pack, output, change: Change| limit_error(run(pack, output, change));
+    let svg = || Output::new(OutputFormat::Svg);
     // One 10pt square page at 72 PPI is 100 pixels.
-    let square = || page_pack(&[10]);
-    assert!(
-        limited(
-            square(),
-            png(72.0),
-            compile::Limits {
-                max_pixels_per_artifact: 100,
-                ..defaults
-            }
-        )
-        .is_ok()
-    );
-    assert_eq!(
-        limit_error(limited(
-            square(),
-            png(72.0),
-            compile::Limits {
-                max_pixels_per_artifact: 99,
-                ..defaults
-            }
-        )),
-        ("pixels per artifact", 99)
-    );
-    assert_eq!(
-        limit_error(limited(
-            page_pack(&[10, 10]),
-            png(72.0),
-            compile::Limits {
-                max_total_pixels: 199,
-                ..defaults
-            }
-        )),
-        ("total pixels", 199)
-    );
-
-    let bytes = compile_to(square(), Output::new(OutputFormat::Svg)).artifacts[0]
-        .bytes
-        .len() as u64;
-    assert!(
-        limited(
-            square(),
-            Output::new(OutputFormat::Svg),
-            compile::Limits {
-                max_artifact_bytes: bytes,
-                ..defaults
-            }
-        )
-        .is_ok()
-    );
-    assert_eq!(
-        limit_error(limited(
-            square(),
-            Output::new(OutputFormat::Svg),
-            compile::Limits {
-                max_artifact_bytes: bytes - 1,
-                ..defaults
-            }
-        )),
-        ("artifact bytes", bytes - 1)
-    );
-    let total = compile_to(page_pack(&[10, 10]), Output::new(OutputFormat::Svg))
-        .artifacts
-        .iter()
+    let (one, two) = (|| page_pack(&[10]), || page_pack(&[10, 10]));
+    let sizes = |pack| compile_to(pack, svg()).artifacts.into_iter();
+    let bytes = sizes(one())
         .map(|artifact| artifact.bytes.len() as u64)
         .sum::<u64>();
-    assert_eq!(
-        limit_error(limited(
-            page_pack(&[10, 10]),
-            Output::new(OutputFormat::Svg),
-            compile::Limits {
-                max_total_artifact_bytes: total - 1,
-                ..defaults
-            }
-        )),
-        ("total artifact bytes", total - 1)
-    );
+    let total = sizes(two())
+        .map(|artifact| artifact.bytes.len() as u64)
+        .sum::<u64>();
+
+    assert!(run(five_page_pack(), svg(), &|l| l.max_pages = 5).is_ok());
+    let pages = rejected(five_page_pack(), svg(), &|l| l.max_pages = 4);
+    assert_eq!(pages, ("pages", 4));
+    let artifacts = rejected(five_page_pack(), svg(), &|l| l.max_artifacts = 4);
+    assert_eq!(artifacts, ("artifacts", 4));
+    assert!(run(one(), png(72.0), &|l| l.max_pixels_per_artifact = 100).is_ok());
+    let pixels = rejected(one(), png(72.0), &|l| l.max_pixels_per_artifact = 99);
+    assert_eq!(pixels, ("pixels per artifact", 99));
+    let pixels = rejected(two(), png(72.0), &|l| l.max_total_pixels = 199);
+    assert_eq!(pixels, ("total pixels", 199));
+    assert!(run(one(), svg(), &|l| l.max_artifact_bytes = bytes).is_ok());
+    let size = rejected(one(), svg(), &|l| l.max_artifact_bytes = bytes - 1);
+    assert_eq!(size, ("artifact bytes", bytes - 1));
+    let size = rejected(two(), svg(), &|l| l.max_total_artifact_bytes = total - 1);
+    assert_eq!(size, ("total artifact bytes", total - 1));
 }
 
 #[cfg(feature = "parallel")]

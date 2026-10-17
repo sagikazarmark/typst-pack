@@ -1,21 +1,18 @@
 //! `typst-pack compile`: compile a pack.
 
 use std::collections::BTreeSet;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use typst::foundations::Smart;
 use typst::syntax::VirtualRoot;
 use typst_pack::Sources;
 use typst_pack::archive::{self, DecodeLimits};
-use typst_pack::compile::{
-    self, CreationTimestamp, DocumentTime, Error, Limits, Output, OutputFormat, PageSelection,
-    Request,
-};
+use typst_pack::compile::{self, CreationTimestamp, DocumentTime, Error, Limits, Output};
+use typst_pack::compile::{OutputFormat, PageSelection, Request};
+use typst_pdf::PdfStandard;
 
-use super::{
-    CommandResult, Failure, Terminal, Timings, check_timestamp, compile_options, initialize_jobs,
-    now, packer, write_to,
-};
+use super::{CommandResult, Failure, Terminal, Timings, compile_options, now, packer, prepare};
 use crate::cli::CompileArgs;
 use crate::output;
 
@@ -26,13 +23,12 @@ pub fn run(args: CompileArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comm
         return Err("an explicit output is required when the Pack is read from stdin".into());
     }
     let format = format(&args)?;
-    let standards = pdf_standards(&args)?;
+    check_pdf_standards(&args)?;
     let stdout = Some(Path::new("-"));
     if args.output.as_deref() == stdout && args.deps.as_deref() == stdout {
         return Err("cannot write both output and dependencies to stdout".into());
     }
-    check_timestamp(args.automation.creation_timestamp)?;
-    initialize_jobs(args.automation.jobs);
+    prepare(&args.automation)?;
 
     let pack = if stdin {
         archive::read(std::io::stdin().lock(), DecodeLimits::default())
@@ -42,7 +38,7 @@ pub fn run(args: CompileArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comm
             .map_err(|error| format!("cannot open pack `{}`: {error}", args.pack.display()))?
     };
     // An explicit timestamp is recorded in UTC, the current time locally.
-    let (unix, timestamp) = match args.automation.creation_timestamp {
+    let (unix, pdf_timestamp) = match args.automation.creation_timestamp {
         Some(unix) => (unix, CreationTimestamp::Utc(unix)),
         None => {
             let (unix, offset_minutes) = now();
@@ -60,24 +56,21 @@ pub fn run(args: CompileArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comm
     let resolved = packer(&args.fonts, &args.packages, cert).resolve(&pack)?;
     let defaults = Limits::default();
     let workers = u64::try_from(rayon::current_num_threads()).unwrap_or(defaults.export_workers);
+    let ranges = args.pages.iter().flat_map(|pages| pages.ranges.clone());
     let request = Request {
         output: Output {
             pages: PageSelection {
-                ranges: args
-                    .pages
-                    .iter()
-                    .flat_map(|pages| pages.ranges.clone())
-                    .collect(),
+                ranges: ranges.collect(),
             },
             pretty: args.pretty,
             ppi: Some(args.ppi),
-            pdf_standards: standards,
+            pdf_standards: args.pdf_standards.clone(),
             pdf_tags: if args.no_pdf_tags {
                 Smart::Custom(false)
             } else {
                 Smart::Auto
             },
-            pdf_timestamp: timestamp,
+            pdf_timestamp,
             ..Output::new(format)
         },
         options,
@@ -102,24 +95,32 @@ pub fn run(args: CompileArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comm
     // The pack, the input files, and the files read from external packages.
     let mut inputs = input_files.into_iter().collect::<BTreeSet<_>>();
     inputs.extend((!stdin).then(|| args.pack.clone()));
-    inputs.extend(
-        sources
-            .map_or(&[][..], Sources::files)
-            .iter()
-            .filter_map(|id| {
-                let VirtualRoot::Package(spec) = id.root() else {
-                    return None;
-                };
-                let root = resolved.package_dirs.get(&spec.to_string())?;
-                Some(root.join(id.vpath().get_without_slash()))
-            }),
-    );
+    let files = sources.map_or(&[][..], Sources::files);
+    inputs.extend(files.iter().filter_map(|id| {
+        let VirtualRoot::Package(spec) = id.root() else {
+            return None;
+        };
+        let root = resolved.package_dirs.get(&spec.to_string())?;
+        Some(root.join(id.vpath().get_without_slash()))
+    }));
     let write_dependencies = |outputs: Option<&[PathBuf]>| -> CommandResult {
         let Some(destination) = &args.deps else {
             return Ok(());
         };
         let bytes = output::dependencies(args.deps_format, &inputs, outputs)?;
-        Ok(write_to(destination, &bytes, "dependencies")?)
+        let written = if destination == Path::new("-") {
+            std::io::stdout().lock().write_all(&bytes)
+        } else {
+            std::fs::write(destination, bytes)
+        };
+        written.map_err(|error| {
+            let to = if destination == Path::new("-") {
+                "stdout".to_owned()
+            } else {
+                format!("`{}`", destination.display())
+            };
+            format!("cannot write dependencies to {to}: {error}").into()
+        })
     };
     let failed = || write_dependencies(None).and(Err(Failure::Reported));
 
@@ -168,15 +169,14 @@ pub fn run(args: CompileArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comm
                     args.pack.display()
                 ));
             }
-            let message = error.to_string();
-            Err(Failure::Error { message, hints })
+            Err(Failure::Error {
+                message: error.to_string(),
+                hints,
+            })
         }
     };
     // As in Typst's CLI, a timing failure replaces a failure not yet printed.
-    match timing_error {
-        Some(error) => Err(error.into()),
-        None => outcome,
-    }
+    timing_error.map_or(outcome, |error| Err(error.into()))
 }
 
 /// The output format: explicit, inferred from the output's extension, or PDF.
@@ -186,32 +186,45 @@ fn format(args: &CompileArgs) -> Result<OutputFormat, Failure> {
         (None, Some(path)) if path != Path::new("-") => path,
         (None, _) => return Ok(OutputFormat::Pdf),
     };
-    let extension = path.extension().and_then(|extension| extension.to_str());
-    match extension {
+    match path.extension().and_then(|extension| extension.to_str()) {
         Some(extension) => OutputFormat::from_extension(extension).ok_or_else(|| {
-            format!("cannot infer output format from extension `{extension}`; pass --format")
+            format!("cannot infer output format from extension `{extension}`; pass --format").into()
         }),
-        None => Err("cannot infer output format; pass --format".to_owned()),
+        None => Err("cannot infer output format; pass --format".into()),
     }
-    .map_err(Failure::from)
 }
 
-/// The PDF standards, checked as Typst's CLI checks them before compiling.
-fn pdf_standards(args: &CompileArgs) -> Result<Vec<typst_pdf::PdfStandard>, Failure> {
-    let (standards, tagged): (Vec<_>, Vec<_>) = args.pdf_standards.iter().copied().unzip();
-    if let Err(error) = typst_pdf::PdfStandards::new(&standards) {
+/// Checks the PDF standards as Typst's CLI does before compiling.
+fn check_pdf_standards(args: &CompileArgs) -> CommandResult {
+    if let Err(error) = typst_pdf::PdfStandards::new(&args.pdf_standards) {
         let hints = error.hints().iter().map(ToString::to_string).collect();
-        let message = error.message().to_string();
-        return Err(Failure::Error { message, hints });
+        return Err(Failure::Error {
+            message: error.message().to_string(),
+            hints,
+        });
     }
-    let untagged = args.no_pdf_tags || !args.pages.is_empty();
-    if let Some(name) = tagged.into_iter().flatten().next().filter(|_| untagged) {
-        let message = format!("cannot disable PDF tags when exporting a {name} document");
-        let hint = (!args.no_pdf_tags).then(|| "using --pages implies --no-pdf-tags".to_owned());
-        let hints = hint.into_iter().collect();
-        return Err(Failure::Error { message, hints });
+    // The first standard that requires tags.
+    let tagged = args
+        .pdf_standards
+        .iter()
+        .find_map(|standard| match standard {
+            PdfStandard::A_1a => Some("PDF/A-1a"),
+            PdfStandard::A_2a => Some("PDF/A-2a"),
+            PdfStandard::A_3a => Some("PDF/A-3a"),
+            PdfStandard::Ua_1 => Some("PDF/UA-1"),
+            _ => None,
+        });
+    match tagged {
+        Some(name) if args.no_pdf_tags || !args.pages.is_empty() => {
+            let message = format!("cannot disable PDF tags when exporting a {name} document");
+            let hint = (!args.no_pdf_tags).then(|| "using --pages implies --no-pdf-tags".into());
+            Err(Failure::Error {
+                message,
+                hints: hint.into_iter().collect(),
+            })
+        }
+        _ => Ok(()),
     }
-    Ok(standards)
 }
 
 /// Opens the first written artifact in a viewer, unless it went to stdout.
