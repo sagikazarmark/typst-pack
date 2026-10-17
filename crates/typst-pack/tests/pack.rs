@@ -617,6 +617,23 @@ fn decoding_reports_the_recorded_producer() {
     let decoded = decode_default(&archive).unwrap();
     assert_eq!(decoded.typst_version(), Some("0.99.0"));
     assert_eq!(decoded.generator(), None);
+
+    // Re-encoding keeps the recorded Typst version, so the mismatch stays
+    // visible, and records this crate as the generator.
+    let reencoded = decode_default(&encode(&decoded)).unwrap();
+    assert_eq!(reencoded.typst_version(), Some("0.99.0"));
+    assert_eq!(reencoded.generator(), pack.generator());
+
+    // A pack recording no Typst version is not given one on re-encoding.
+    let unrecorded = edit_manifest(&encode(&pack), |manifest| {
+        manifest.replace(&format!("typst-version = \"{engine}\"\n"), "")
+    });
+    let decoded = decode_default(&archive_reencoded(&unrecorded)).unwrap();
+    assert_eq!(decoded.typst_version(), None);
+}
+
+fn archive_reencoded(archive: &[u8]) -> Vec<u8> {
+    encode(&decode_default(archive).unwrap())
 }
 
 #[test]
@@ -625,7 +642,8 @@ fn manifest_faces_are_read_leniently() {
         format!(
             "{manifest}\n[[fonts]]\ndigest = \"{}\"\nembedded = false\n\n\
              [[fonts.faces]]\nfamily = \"Future Sans\"\nstyle = \"slanted\"\nweight = 950\nstretch = 875\nfuture-axis = 3\n\n\
-             [[fonts.faces]]\nindex = 1\nstyle = \"italic\"\n",
+             [[fonts.faces]]\nindex = 1\nstyle = \"italic\"\n\n\
+             [[fonts.faces]]\nindex = \"two\"\nfamily = 7\nstyle = 1\nweight = -5\nstretch = true\n",
             typst_pack::Digest::of(b"font")
         )
     });
@@ -650,7 +668,13 @@ fn manifest_faces_are_read_leniently() {
                 FontStretch::SEMI_CONDENSED
             ),
             face(1, "", FontStyle::Italic, 400, FontStretch::NORMAL),
+            // Values of the wrong type read as defaults.
+            face(0, "", FontStyle::Normal, 100, FontStretch::NORMAL),
         ]
+    );
+    assert_eq!(
+        faces[1].to_string(),
+        "(unnamed face) (italic, weight 400, stretch 100.0%)"
     );
     let manifest = String::from_utf8(members(&encode(&pack))[0].1.clone()).unwrap();
     assert!(
@@ -659,6 +683,27 @@ fn manifest_faces_are_read_leniently() {
         ),
         "{manifest}"
     );
+
+    // A face list that is not a list of tables reads as its tables.
+    for faces in ["faces = \"x\"", "faces = [1, \"a\", { family = \"Kept\" }]"] {
+        let archive = edit_manifest(&encode(&simple_pack()), |manifest| {
+            let digest = typst_pack::Digest::of(b"font");
+            format!("{manifest}\n[[fonts]]\ndigest = \"{digest}\"\nembedded = false\n{faces}\n")
+        });
+        let pack = decode_default(&archive).unwrap();
+        let families = pack.font_requirements()[0].faces.iter();
+        let families = families
+            .map(|face| face.family.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            families,
+            if faces.contains("Kept") {
+                vec!["Kept"]
+            } else {
+                vec![]
+            }
+        );
+    }
 }
 
 #[test]
@@ -904,13 +949,25 @@ fn files_are_saved_and_opened_bounded() {
         max_archive_bytes: length,
         ..DecodeLimits::default()
     };
+    // Every failure names the file.
+    let named = |error: fs::Error| {
+        assert!(error.to_string().contains("archive.typk"), "{error}");
+        error
+    };
     assert!(matches!(
-        fs::read_archive(&path, limits),
-        Err(DecodeError::Limit(_))
+        fs::read_archive(&path, limits).map_err(named),
+        Err(fs::Error::Limit { .. })
     ));
+    let missing = directory.path().join("missing.typk");
     assert!(matches!(
-        fs::read_archive(directory.path().join("missing.typk"), DecodeLimits::default()),
-        Err(DecodeError::Io(error)) if error.kind() == io::ErrorKind::NotFound
+        fs::read_archive(&missing, DecodeLimits::default()),
+        Err(fs::Error::Io { path, source })
+            if path == missing && source.kind() == io::ErrorKind::NotFound
+    ));
+    std::fs::write(&path, b"not a pack").unwrap();
+    assert!(matches!(
+        fs::read_archive(&path, DecodeLimits::default()).map_err(named),
+        Err(fs::Error::Decode { source, .. }) if matches!(*source, DecodeError::Zip(_))
     ));
 }
 

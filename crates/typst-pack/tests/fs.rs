@@ -186,6 +186,28 @@ fn a_malformed_ignore_file_and_an_ignored_entrypoint_are_errors() {
 }
 
 #[test]
+fn an_entrypoint_outside_the_root_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    write_tree(
+        dir.path(),
+        &[("project/main.typ", "inside"), ("outside.typ", "outside")],
+    );
+    let root = dir.path().join("project");
+
+    // Relative to the root, or absolute.
+    for entrypoint in [
+        PathBuf::from("../outside.typ"),
+        dir.path().join("outside.typ"),
+    ] {
+        let error = packer().pack(&root, &entrypoint).unwrap_err();
+        assert!(
+            matches!(&error, fs::Error::OutsideRoot(path) if path.ends_with("outside.typ")),
+            "{error:?}"
+        );
+    }
+}
+
+#[test]
 fn only_an_excluded_file_is_reported_as_an_ignored_entrypoint() {
     let dir = tempfile::tempdir().unwrap();
     write_tree(
@@ -455,17 +477,28 @@ fn a_package_is_read_as_one_complete_tree_in_canonical_order() {
             ("typst.toml", "declaration"),
             ("lib.typ", "library"),
             ("assets/unused.txt", "unused"),
-            // Version-control directories are never package files.
+            // Version-control entries are never package files, whether
+            // directories or files (a submodule's `.git` is a file).
             (".git/HEAD", "ref: refs/heads/main"),
             (".hg/store", "store"),
             ("assets/.svn/entries", "entries"),
+            ("vendor/.git", "gitdir: ../.git/modules/vendor"),
+            ("vendor/lib.typ", "vendored"),
         ],
     );
 
     let tree = fs::read_package(dir.path(), ReadLimits::default()).unwrap();
 
     let files = tree.files().map(|(path, _)| path).collect::<Vec<_>>();
-    assert_eq!(files, ["assets/unused.txt", "lib.typ", "typst.toml"]);
+    assert_eq!(
+        files,
+        [
+            "assets/unused.txt",
+            "lib.typ",
+            "typst.toml",
+            "vendor/lib.typ"
+        ]
+    );
 }
 
 /// A pack that requires `spec` externally.
@@ -867,6 +900,38 @@ mod fonts {
 
         assert!(!resolved.fonts.is_empty());
         assert!(resolved.skipped_fonts.is_empty());
+    }
+
+    #[test]
+    fn font_paths_are_resolved_before_system_fonts_can_exhaust_the_limits() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = typst_container();
+        let pack = Pack::builder("main.typ")
+            .file("main.typ", Vec::new())
+            .external_font(data.clone())
+            .build()
+            .unwrap();
+        let fonts = dir.path().join("fonts");
+        std::fs::create_dir(&fonts).unwrap();
+        std::fs::write(fonts.join("font.ttf"), &data).unwrap();
+
+        // Room for the explicit path's one file but not for a system font
+        // directory: whatever the host has is read after the explicit path.
+        let resolved = fs::Packer {
+            font_paths: vec![fonts],
+            system_fonts: true,
+            typst_embedded_fonts: false,
+            font_limits: ReadLimits {
+                max_entries: 1,
+                ..ReadLimits::default()
+            },
+            ..packer()
+        }
+        .resolve(&pack)
+        .unwrap();
+
+        let digests = resolved.fonts.iter().map(|font| font.digest());
+        assert_eq!(digests.collect::<Vec<_>>(), [Digest::of(&data)]);
     }
 
     #[test]
@@ -1324,4 +1389,50 @@ fn overwriting_an_extracted_file_keeps_its_mode() {
     assert_eq!(std::fs::read(&main).unwrap(), b"new main");
     let mode = std::fs::metadata(&main).unwrap().permissions().mode();
     assert_eq!(mode & 0o777, 0o600);
+}
+
+#[cfg(unix)]
+#[test]
+fn overwriting_keeps_the_mode_but_not_setuid_or_setgid() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_directory, root) = temp_root();
+    let target = root.join("tool");
+    std::fs::write(&target, b"old").unwrap();
+    std::fs::set_permissions(&target, std::fs::Permissions::from_mode(0o6755)).unwrap();
+
+    fs::write_file(&target, b"new", fs::WritePolicy::Overwrite).unwrap();
+
+    let mode = std::fs::metadata(&target).unwrap().permissions().mode();
+    assert_eq!(mode & 0o7777, 0o755);
+}
+
+/// The differences from Typst's in-place write that the docs name: a
+/// read-only target is replaced, and a writable target in a directory that
+/// admits no new entry is rewritten in place.
+#[cfg(unix)]
+#[test]
+fn overwriting_replaces_read_only_files_and_rewrites_in_locked_directories() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_directory, root) = temp_root();
+    let read_only = root.join("read-only.pdf");
+    std::fs::write(&read_only, b"old").unwrap();
+    std::fs::set_permissions(&read_only, std::fs::Permissions::from_mode(0o444)).unwrap();
+    fs::write_file(&read_only, b"new", fs::WritePolicy::Overwrite).unwrap();
+    assert_eq!(std::fs::read(&read_only).unwrap(), b"new");
+
+    let locked = root.join("locked");
+    std::fs::create_dir(&locked).unwrap();
+    std::fs::write(locked.join("output.pdf"), b"old").unwrap();
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let written = fs::write_file(
+        locked.join("output.pdf"),
+        b"new",
+        fs::WritePolicy::Overwrite,
+    );
+    std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o755)).unwrap();
+    written.unwrap();
+    assert_eq!(std::fs::read(locked.join("output.pdf")).unwrap(), b"new");
+    assert_eq!(tree(&locked), ["output.pdf"]);
 }

@@ -257,6 +257,6 @@ pub enum ReadFailure {
 fn detail(detail: &Option<String>) -> String {
     detail
         .as_ref()
-        .map(|detail| format!(": {detail:?}"))
+        .map(|detail| format!(": {detail}"))
         .unwrap_or_default()
 }

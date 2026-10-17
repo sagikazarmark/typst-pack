@@ -37,8 +37,12 @@ pub fn run(args: ExtractArgs) -> CommandResult {
     Ok(())
 }
 
-/// Every reason a write was refused, suggesting `--force` only when existing
-/// files were all that stood in the way.
+/// The most refusal reasons listed; the rest are counted.
+const LISTED_ISSUES: usize = 20;
+
+/// Why a write was refused (the first [`LISTED_ISSUES`] reasons, then how
+/// many more), suggesting `--force` only when existing files were all that
+/// stood in the way.
 fn describe(error: &WriteError, destination: &Path) -> Failure {
     let WriteError::Rejected { issues } = error else {
         return escape(&chain(error)).into();
@@ -49,7 +53,7 @@ fn describe(error: &WriteError, destination: &Path) -> Failure {
             path.display()
         )
     };
-    let lines = issues.iter().map(|issue| {
+    let lines = issues.iter().take(LISTED_ISSUES).map(|issue| {
         escape(&match issue {
             WriteIssue::ExistingTarget { path } => {
                 format!("`{}` already exists", destination.join(path).display())
@@ -59,10 +63,12 @@ fn describe(error: &WriteError, destination: &Path) -> Failure {
             issue => issue.to_string(),
         })
     });
+    let more = issues.len().saturating_sub(LISTED_ISSUES);
+    let more = (more > 0).then(|| format!("and {more} more"));
     let existing = |issue| matches!(issue, &WriteIssue::ExistingTarget { .. });
     let force = !issues.is_empty() && issues.iter().all(existing);
     Failure::Error {
-        message: listed("nothing was extracted", lines),
+        message: listed("nothing was extracted", lines.chain(more)),
         hints: force
             .then(|| "pass --force to overwrite existing files".to_owned())
             .into_iter()

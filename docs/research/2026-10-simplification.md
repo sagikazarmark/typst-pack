@@ -19,7 +19,9 @@ without compatibility shims.
 - **Format:** pack format v2 with a self-verifying manifest (per-file digests,
   one package list, one row per font container with its faces). The decoder
   verifies members against the manifest; the hand-rolled ZIP
-  central-directory checks were removed.
+  central-directory checks were removed, except a minimal scan of the
+  central directory's raw member names that detects duplicates the ZIP
+  reader would merge.
 - **Fonts:** requirements became whole containers, which fixed font fallback
   diverging from Typst.
 - **Overrides:** Pack Overrides were replaced by byte inputs in `sys.inputs`
@@ -33,7 +35,7 @@ without compatibility shims.
   the location and binding parser was removed.
 - **Process:** sixteen ADRs with supersession chains up to four deep became
   four self-contained ones; the glossary went from 27 terms with synonym bans
-  to 16 plain definitions; the embedded Typst pinning check moved from
+  to 17 plain definitions; the embedded Typst pinning check moved from
   `build.rs` into a test.
 
 ## Measured outcome
@@ -44,10 +46,10 @@ Final, after the review-round fixes and the API consistency pass, from
 
 | Measure | Before | After |
 | --- | --- | --- |
-| Workspace Rust | ~64.7K lines | 22.0K lines |
-| Library sources (`crates/typst-pack/src`) | — | 8.9K lines |
+| Workspace Rust | ~64.7K lines | 22.6K lines |
+| Library sources (`crates/typst-pack/src`) | — | 9.1K lines |
 | CLI sources (`crates/typst-pack-cli/src`) | — | 1.5K lines |
-| Tests (`crates/*/tests`) and fuzz targets | ~37K lines (tests) | 11.0K and 0.6K lines |
+| Tests (`crates/*/tests`) and fuzz targets | ~37K lines (tests) | 11.3K and 0.6K lines |
 | Public names | ~330 | 63 public types |
 | Public error types (library) | 92 | 18 |
 | Public limits types (library) | 45 names | 3 structs and `LimitExceeded` |

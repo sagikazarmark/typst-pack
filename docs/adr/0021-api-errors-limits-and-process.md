@@ -22,11 +22,12 @@ depend on them.
 
 - Group the API in modules by concept (compile, archive, extract, fs, opendal,
   package, font) rather than prefixing type names.
-- Adapters mirror each other: the same operation has the same name in `fs`
-  and `opendal` (`read_archive`, `write_archive`, `write_extraction`,
-  `write_artifacts`, `embed_packages`), takes its target first, then the
-  data, then the policy, and takes `ReadLimits` by value. Core modules do no
-  file or storage I/O.
+- Adapters mirror each other: the same operation has the same name and
+  shape in `fs` and `opendal` (`read_archive` returns a `Pack` and
+  `write_archive` takes one; `write_extraction`, `write_artifacts`,
+  `embed_packages`), takes its target first, then the data, then the
+  policy, and takes its limits (`ReadLimits` or `DecodeLimits`) by value.
+  Core modules do no file or storage I/O.
 - The library forbids `unsafe` code.
 - A public type must be constructed or matched by a first-party caller or a
   doc example. Otherwise it is private or deleted.

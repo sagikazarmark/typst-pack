@@ -1,6 +1,7 @@
 //! `typst-pack inspect`: list what a pack contains.
 
 use std::collections::BTreeSet;
+use std::path::Path;
 
 use typst_pack::archive::FORMAT_VERSION;
 use typst_pack::font;
@@ -13,7 +14,11 @@ pub fn run(args: InspectArgs, terminal: Terminal) -> CommandResult {
     warn_typst_version(&pack, terminal);
 
     // Names and paths come from the pack and are printed escaped.
-    println!("pack: {}", args.pack.display());
+    if args.pack == Path::new("-") {
+        println!("pack: <stdin>");
+    } else {
+        println!("pack: {}", args.pack.display());
+    }
     println!("format version: {FORMAT_VERSION}");
     if let Some(version) = pack.typst_version() {
         println!("typst version: {}", escape(version));
@@ -84,7 +89,7 @@ pub fn run(args: InspectArgs, terminal: Terminal) -> CommandResult {
             let note = if typst.contains(&requirement.digest) {
                 "provided by Typst"
             } else {
-                "supply with --font-path"
+                "install it or supply it with --font-path"
             };
             println!("{} ({note})", line(requirement));
         }

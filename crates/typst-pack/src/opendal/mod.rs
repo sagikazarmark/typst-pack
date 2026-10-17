@@ -77,6 +77,13 @@ pub enum Error {
     #[cfg(feature = "package-reading")]
     #[error(transparent)]
     Create(Box<crate::create::Error>),
+    /// A pack archive object is not a valid pack.
+    #[error("cannot decode pack {path:?}")]
+    Decode {
+        path: String,
+        #[source]
+        source: Box<crate::archive::DecodeError>,
+    },
     /// Creation reported a package missing again after it was read.
     #[cfg(feature = "package-reading")]
     #[error("creation requested package {spec} again after it was read")]
@@ -146,10 +153,24 @@ async fn stream(
     {
         reader = reader.if_match(etag);
     }
-    let reader = reader.await.map_err(storage(path, "read"))?;
+    let reader = reader.await.map_err(read_failed(path))?;
     // The whole object in one request: a range capped at the stat length
     // would silently return a prefix of a grown object.
-    reader.into_stream(..).await.map_err(storage(path, "read"))
+    reader.into_stream(..).await.map_err(read_failed(path))
+}
+
+/// The error of a read through [`stream`]. A failed `If-Match` means the
+/// object was replaced after its stat, so the error is marked temporary:
+/// retrying the operation is safe, as with [`changed`].
+fn read_failed(path: &str) -> impl FnOnce(::opendal::Error) -> Error {
+    let storage = storage(path, "read");
+    move |error| {
+        if error.kind() == ::opendal::ErrorKind::ConditionNotMatch {
+            storage(error.set_temporary())
+        } else {
+            storage(error)
+        }
+    }
 }
 
 /// The error for an object whose read disagrees with its stat: it was

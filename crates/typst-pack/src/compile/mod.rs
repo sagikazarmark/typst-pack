@@ -125,6 +125,7 @@ impl Request {
 
 /// A successful compilation.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct Compiled {
     /// One artifact for PDF and HTML; one per selected page for PNG and SVG.
     pub artifacts: Vec<Artifact>,
@@ -140,6 +141,7 @@ pub struct Compiled {
 
 /// One file produced by compiling a pack.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Artifact {
     /// The artifact's format.
     pub format: OutputFormat,
@@ -240,8 +242,8 @@ pub enum RequestIssue {
     /// The document-time timestamp cannot be represented.
     #[error("the document-time UNIX timestamp is out of range")]
     InvalidDocumentTimestamp,
-    /// The document-time UTC offset is a day or more.
-    #[error("the document-time UTC offset must be less than a day")]
+    /// A document-time or PDF-timestamp UTC offset is a day or more.
+    #[error("a UTC offset must be less than a day")]
     InvalidUtcOffset,
     /// The fixed document time has no date.
     #[error("the fixed document time must include a date")]
@@ -434,7 +436,7 @@ pub fn compile(request: &Request) -> Result<Compiled, Error> {
     let loader = Loader {
         project: pack.project().clone(),
         packages: Arc::new(trees),
-        failures: Default::default(),
+        failures: Arc::default(),
     };
     let world = SourceWorld::new(loader, containers, environment.library, environment.clock);
     let exported = export::export(&world, &normalized, request.limits);

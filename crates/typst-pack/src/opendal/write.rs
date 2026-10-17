@@ -7,9 +7,13 @@ use ::opendal::{ErrorKind, Operator};
 use futures_util::TryStreamExt;
 use typst::syntax::package::PackageSpec;
 
-use super::{Error, archive_cache_key, check_key, check_prefix, key_issue, stat, storage, stream};
+use super::{
+    Error, archive_cache_key, check_key, check_prefix, key_issue, read_failed, stat, storage,
+    stream,
+};
 use crate::compile::Artifact;
 use crate::extract::Plan;
+use crate::{Pack, archive};
 
 /// How a write treats objects that already exist.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -46,6 +50,7 @@ pub enum WriteOutcome {
 /// already written keys complete as [`WriteOutcome::AlreadyMatching`].
 #[derive(Debug, thiserror::Error)]
 #[error("{}", summary(.path.as_deref(), .completed.len()))]
+#[non_exhaustive]
 pub struct WriteError {
     /// The full path of the key whose write failed.
     pub path: Option<String>,
@@ -116,7 +121,7 @@ async fn matches(op: &Operator, path: &str, expected: &[u8]) -> Result<Option<bo
     }
     let mut chunks = stream(op, path, &metadata).await?;
     let mut offset = 0;
-    while let Some(buffer) = chunks.try_next().await.map_err(storage(path, "read"))? {
+    while let Some(buffer) = chunks.try_next().await.map_err(read_failed(path))? {
         for chunk in buffer {
             let end = offset + chunk.len();
             if expected.get(offset..end) != Some(&chunk[..]) {
@@ -159,7 +164,8 @@ async fn create(op: &Operator, path: &str, bytes: &[u8]) -> Result<WriteOutcome,
                             },
                         ));
                     }
-                    Ok(None) => continue,
+                    // Absent after all: try the conditional create again.
+                    Ok(None) => {}
                     Err(error) => return Err((false, error)),
                 }
             }
@@ -271,14 +277,14 @@ async fn write_one(
     Ok(completed.pop().expect("one key was written").1)
 }
 
-/// Writes one pack archive object at `path`.
+/// Encodes `pack` and writes it as one pack archive object at `path`.
 pub async fn write_archive(
     op: &Operator,
     path: &str,
-    archive: &[u8],
+    pack: &Pack,
     policy: WritePolicy,
 ) -> Result<WriteOutcome, WriteError> {
-    write_one(op, policy, path.to_owned(), archive).await
+    write_one(op, policy, path.to_owned(), &archive::encode(pack)).await
 }
 
 /// Writes raw package archive bytes into a package archive cache at

@@ -74,6 +74,7 @@ impl Request {
 
 /// A created pack.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Created {
     /// The pack.
     pub pack: Pack,

@@ -283,9 +283,11 @@ container provides. `index` is the face's index in the container, `family`
 its typographic family name, `style` one of `normal`, `italic`, or `oblique`,
 `weight` the CSS weight from 100 to 900 (400 is normal), and `stretch` the
 width in per mille of the normal width, from 500 to 2000 (1000 is normal).
-Readers are lenient with faces: every field is optional (defaulting to index
-0, an empty family, `normal`, 400, and 1000), an unknown style reads as
-`normal`, and out-of-range numbers are clamped.
+Readers are lenient with faces: `faces` reads as the entries that are tables,
+every field is optional (defaulting to index 0, an empty family, `normal`,
+400, and 1000), a value of the wrong type reads as the default, an unknown
+style reads as `normal`, and out-of-range numbers are clamped. A producer that
+does not know its Typst version omits `typst-version`.
 
 Paths, specifications, and digests are written in canonical form, each
 declared once: a path is root-relative with `/` separators and no `.`, `..`,
@@ -355,7 +357,7 @@ pages       = count(ranges) { count(first) int(last or -1 when open) }
 identifier  = str("auto") | str("custom") str(identifier)
 creator     = str("auto") | str("none") | str("custom") str(creator)
 timestamp   = str("omit") | str("utc") int(seconds)
-            | str("local") int(seconds) int(offset minutes)
+            | str("local") int(seconds) int(UTC offset seconds)
 ```
 
 `implementation` is `typst_pack::VERSION`, for example `0.6.0 (Typst 0.15.1)`.

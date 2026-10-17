@@ -419,6 +419,45 @@ fn frozen_compilation_identity_vector() {
 }
 
 #[test]
+fn frozen_pdf_output_identity_vector() {
+    let pack = identity_pack();
+    let mut output = Output::new(OutputFormat::Pdf);
+    output.pdf_identifier = Smart::Custom("doc".into());
+    output.pdf_creator = Smart::Custom(None);
+    output.pdf_tags = Smart::Custom(false);
+    output.pdf_timestamp = CreationTimestamp::Local {
+        seconds: 1_700_000_000,
+        utc_offset_seconds: 19_800,
+    };
+    let request = compile::Request::new(pack.clone(), output);
+
+    let expected = Preimage::new("typst-pack/compilation/v1")
+        .str(typst_pack::VERSION)
+        .digest(*pack.identity().as_bytes())
+        // Output: PDF, all pages, no standards, custom identifier, no creator,
+        // untagged, a local timestamp with its UTC offset in seconds, not pretty.
+        .str("pdf")
+        .count(0)
+        .count(0)
+        .str("custom")
+        .str("doc")
+        .str("none")
+        .bool(false)
+        .str("local")
+        .int(1_700_000_000)
+        .int(19_800)
+        .bool(false)
+        // No inputs, absent document time, no features or external dependencies.
+        .count(0)
+        .str("absent")
+        .count(0)
+        .count(0)
+        .count(0)
+        .finish();
+    assert_eq!(compile(&request).unwrap().identity.to_string(), expected);
+}
+
+#[test]
 fn compilation_identity_binds_every_effective_output_control() {
     let identity = |format, change: fn(&mut Output)| {
         let mut output = Output::new(format);
@@ -446,8 +485,8 @@ fn compilation_identity_binds_every_effective_output_control() {
         }),
         identity(Pdf, |o| {
             o.pdf_timestamp = CreationTimestamp::Local {
-                unix: 1_700_000_000,
-                offset_minutes: 60,
+                seconds: 1_700_000_000,
+                utc_offset_seconds: 3600,
             }
         }),
         identity(Pdf, |o| o.pretty = true),

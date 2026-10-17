@@ -162,8 +162,11 @@ fn extract_preflights_collisions_and_force_replaces_only_planned_files() {
     assert!(collided.stdout.is_empty(), "{:?}", collided.stdout);
     assert_eq!(
         String::from_utf8(collided.stderr).unwrap(),
-        "error: `extracted/main.typ` already exists\n\
-         hint: pass --force to overwrite existing files\n"
+        format!(
+            "error: `{}` already exists\n\
+             hint: pass --force to overwrite existing files\n",
+            Path::new("extracted").join("main.typ").display()
+        )
     );
     assert_eq!(
         std::fs::read_to_string(destination.join("main.typ")).unwrap(),
@@ -227,16 +230,22 @@ fn create_replaces_an_existing_pack_without_leaving_temporary_files() {
 #[test]
 fn inspect_and_extract_help_remain_successful_process_outputs() {
     let directory = tempfile::tempdir().unwrap();
+    // Clap names the binary as invoked: `typst-pack.exe` on Windows.
+    let binary = Path::new(env!("CARGO_BIN_EXE_typst-pack"))
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
 
     for (subcommand, usage, expected) in [
         (
             "inspect",
-            "Usage: typst-pack inspect <PACK>",
+            "inspect <PACK>",
             ["Shows what is inside a pack", "The pack file to inspect"].as_slice(),
         ),
         (
             "extract",
-            "Usage: typst-pack extract [OPTIONS] <PACK>",
+            "extract [OPTIONS] <PACK>",
             [
                 "Extracts a pack into a directory",
                 "--output <OUTPUT>",
@@ -259,7 +268,8 @@ fn inspect_and_extract_help_remain_successful_process_outputs() {
             result.stderr
         );
         let stdout = String::from_utf8(result.stdout).unwrap();
-        assert!(stdout.contains(usage), "{subcommand}:\n{stdout}");
+        let usage = format!("Usage: {binary} {usage}");
+        assert!(stdout.contains(&usage), "{subcommand}:\n{stdout}");
         for text in expected {
             assert!(
                 stdout.contains(text),

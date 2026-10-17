@@ -72,10 +72,15 @@ example to embed only some packages):
 | Function | Result |
 | --- | --- |
 | [`read_project`] | A [`ProjectSnapshot`](crate::ProjectSnapshot) of every file below a prefix except `.typk` paths. `.typkignore` is an ordinary file here; ignore rules belong to filesystem reading. |
-| [`read_fonts`] | The [`font::Entry`](crate::font::Entry) values of `.ttf`/`.ttc`/`.otf`/`.otc` objects below each [`FontSource`], in source then path order. |
+| [`read_fonts`] | The [`font::Entry`](crate::font::Entry) values of `.ttf`/`.ttc`/`.otf`/`.otc` objects below each [`FontSource`], in source then path order. An object that is not a readable font fails the read with [`Error::Font`]: font prefixes are curated inputs here, unlike the filesystem adapter's font directories, which are host configuration and whose unreadable fonts are skipped and reported. |
 | [`read_package`] | A [`PackageRead`]: a tree's files, cached or registry archive bytes, or `Unavailable`. Sources are tried in order; only definite absence advances. |
 | [`insert_package`] | Builds or expands the tree, adds it to a [`create::Request`](crate::create::Request), and keeps its package failures (with their reasons) in step. |
-| [`read_archive`] | The exact pack archive bytes; decode with [`archive::decode`](crate::archive::decode). Unlike `fs::read_archive`, which decodes, it returns the bytes so they stay available when decoding fails. |
+| [`read_archive`] | The decoded [`Pack`](crate::Pack) of one archive object, as `fs::read_archive` reads a file; bytes that are not a valid pack fail with [`Error::Decode`]. |
+
+[`write_archive`] encodes the pack it is given, so copying a decoded pack
+writes this build's encoding, which may differ in bytes (never in identity)
+from the original. To mirror archive objects byte for byte, copy them with
+the `Operator` directly.
 
 A listing is one observation, not a storage snapshot: objects may change
 between listing and reading. An object that vanishes in between fails the
@@ -83,8 +88,9 @@ read. Each object is read whole in one request after its stat, and the bytes
 must agree with that stat: where the operator supports conditional reads the
 read is conditional on the stat's ETag, and a read whose length differs from
 the stat's fails. A replaced, grown, or shrunk object therefore fails with a
-temporary [`Error::Storage`] whose source has kind `ConditionNotMatch`; it is
-never returned as a prefix. Without ETag support, a same-length replacement
+temporary [`Error::Storage`] whose source has kind `ConditionNotMatch` (a
+failed `If-Match` is marked temporary too); it is never returned as a
+prefix, and retrying the operation is safe. Without ETag support, a same-length replacement
 between stat and read cannot be detected.
 
 ## Limits
@@ -94,7 +100,11 @@ counts toward `max_entries`, and each object's length is checked against
 `max_file_bytes` and the remaining `max_total_bytes` before it is downloaded,
 so an oversized object is never transferred. A raw package archive is bounded
 by `max_file_bytes` and expanded under the same `ReadLimits`;
-[`read_archive`] takes an explicit byte ceiling.
+[`ReadLimits::PACKAGE`](crate::ReadLimits::PACKAGE) (256 MiB in total) is the
+suggested limit for packages, and the [`Assembler`] uses it as its
+`package_limits` default. [`read_archive`] bounds the object by
+[`DecodeLimits::max_archive_bytes`](crate::archive::DecodeLimits::max_archive_bytes)
+and decodes it under the same [`DecodeLimits`](crate::archive::DecodeLimits).
 Exceeding a limit fails with [`Error::Limit`]; the [`Assembler`] records a
 package over a limit as a package failure instead. An object that grows
 after its stat is abandoned as soon as the read passes the stat's length.
@@ -104,7 +114,7 @@ Limits do not bound memory inside OpenDAL or its transport.
 
 | Function | Writes |
 | --- | --- |
-| [`write_archive`] | One pack archive object. |
+| [`write_archive`] | One [`Pack`](crate::Pack), encoded as an archive object, as `fs::write_archive` writes a file. |
 | [`write_package_archive`] | Validated registry archive bytes into an archive cache (always `CreateOrVerify`). |
 | [`write_extraction`] | Every extraction entry below a prefix. |
 | [`write_artifacts`] | Each compiled artifact at `prefix + key`. |
@@ -169,14 +179,14 @@ async fn compile_with_external_inputs(
     pack: &Pack,
     output: Output,
 ) -> Result<Compiled, Box<dyn std::error::Error>> {
-    let limits = ReadLimits::default();
     let sources = [PackageSource::Trees {
         operator: operator.clone(),
         prefix: "packages/".into(),
     }];
     let mut request = Request::new(pack.clone(), output);
     for requirement in pack.package_requirements().iter().filter(|r| !r.embedded) {
-        let PackageRead::Tree(files) = read_package(&sources, &requirement.spec, limits).await?
+        let read = read_package(&sources, &requirement.spec, ReadLimits::PACKAGE).await?;
+        let PackageRead::Tree(files) = read
         else {
             return Err(format!("no tree for {}", requirement.spec).into());
         };
@@ -189,7 +199,7 @@ async fn compile_with_external_inputs(
         prefix: "fonts/".into(),
         embedded: false,
     };
-    let fonts = read_fonts(operator, &[font_source], limits).await?;
+    let fonts = read_fonts(operator, &[font_source], ReadLimits::default()).await?;
     request.fonts = fonts.into_iter().map(|entry| entry.container).collect();
     Ok(typst_pack::compile(&request)?)
 }

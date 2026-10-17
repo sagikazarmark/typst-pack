@@ -32,8 +32,9 @@ pub(crate) const GENERATOR: &str = concat!("typst-pack ", env!("CARGO_PKG_VERSIO
 #[serde(rename_all = "kebab-case")]
 pub(crate) struct Manifest {
     pub(crate) format_version: i64,
-    /// The Typst version of the producer; informational.
-    #[serde(default)]
+    /// The Typst version of the producer; informational and omitted when
+    /// unknown.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub(crate) typst_version: String,
     /// The producing tool and its version; informational.
     #[serde(default)]
@@ -70,18 +71,19 @@ pub(crate) struct PackageEntry {
 pub(crate) struct FontEntry {
     pub(crate) digest: Digest,
     pub(crate) embedded: bool,
-    /// The faces of the container; informational.
-    #[serde(default)]
+    /// The faces of the container; informational, so a malformed list reads
+    /// as its well-formed faces.
+    #[serde(default, deserialize_with = "lenient_faces")]
     pub(crate) faces: Vec<FaceEntry>,
 }
 
 /// One `[[fonts.faces]]` entry.
 ///
 /// Faces are informational, so reading them is lenient: every field is
-/// optional, an unknown style reads as `normal`, and out-of-range numbers are
-/// clamped.
+/// optional, a value of the wrong type reads as the default, an unknown style
+/// reads as `normal`, and out-of-range numbers are clamped.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(default)]
+#[serde(from = "RawFaceEntry")]
 pub(crate) struct FaceEntry {
     /// The face index within the container.
     pub(crate) index: u32,
@@ -94,6 +96,55 @@ pub(crate) struct FaceEntry {
     /// The width in per mille of the normal width, from 500 to 2000; 1000 is
     /// normal.
     pub(crate) stretch: u16,
+}
+
+/// Reads the faces that are tables, ignoring a list of another type and any
+/// element that is not a table.
+fn lenient_faces<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<FaceEntry>, D::Error> {
+    let toml::Value::Array(values) = toml::Value::deserialize(deserializer)? else {
+        return Ok(Vec::new());
+    };
+    let faces = values.into_iter().filter(toml::Value::is_table);
+    Ok(faces.filter_map(|value| value.try_into().ok()).collect())
+}
+
+/// A face entry as written, before [`FaceEntry`] reads it leniently.
+#[derive(Deserialize)]
+struct RawFaceEntry {
+    index: Option<toml::Value>,
+    family: Option<toml::Value>,
+    style: Option<toml::Value>,
+    weight: Option<toml::Value>,
+    stretch: Option<toml::Value>,
+}
+
+impl From<RawFaceEntry> for FaceEntry {
+    fn from(raw: RawFaceEntry) -> Self {
+        fn integer<T: TryFrom<i64> + Copy>(value: Option<toml::Value>, min: T, max: T) -> Option<T>
+        where
+            i64: From<T>,
+        {
+            let value = value?.as_integer()?;
+            let clamped = value.clamp(i64::from(min), i64::from(max));
+            T::try_from(clamped).ok()
+        }
+        fn string(value: Option<toml::Value>) -> Option<String> {
+            match value? {
+                toml::Value::String(string) => Some(string),
+                _ => None,
+            }
+        }
+        let default = Self::default();
+        Self {
+            index: integer(raw.index, 0, u32::MAX).unwrap_or(default.index),
+            family: string(raw.family).unwrap_or(default.family),
+            style: string(raw.style).unwrap_or(default.style),
+            weight: integer(raw.weight, 0, u16::MAX).unwrap_or(default.weight),
+            stretch: integer(raw.stretch, 0, u16::MAX).unwrap_or(default.stretch),
+        }
+    }
 }
 
 impl Default for FaceEntry {

@@ -14,7 +14,7 @@ use typst_pdf::PdfStandard;
 
 use super::{
     CommandResult, Failure, Terminal, Timings, chain, compile_options, listed, packer, prepare,
-    read_pack, time, warn_typst_version,
+    read_pack, time, warn_skipped_fonts, warn_typst_version,
 };
 use crate::cli::CompileArgs;
 use crate::output;
@@ -153,6 +153,14 @@ pub fn run(args: CompileArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comm
             failed()
         }
         Err(error) => {
+            // Skipped host fonts only matter when a required font is missing.
+            if let Error::Unfulfilled(issues) = &error
+                && issues
+                    .iter()
+                    .any(|issue| matches!(issue, compile::Unfulfilled::MissingFont { .. }))
+            {
+                warn_skipped_fonts(&resolved.skipped_fonts, terminal);
+            }
             let mut hints = error.hints();
             if matches!(error, Error::Unfulfilled(_)) {
                 hints.push(format!(

@@ -53,14 +53,16 @@ pub struct Assembler {
     pub variants: Vec<Vec<(String, Input)>>,
     /// Optional pack metadata.
     pub metadata: Option<Metadata>,
-    /// Limits for reading the project, the fonts, and each package, and for
-    /// expanding each package archive.
+    /// Limits for reading the project and the fonts.
     pub limits: ReadLimits,
+    /// Limits for reading each package and expanding each package archive.
+    pub package_limits: ReadLimits,
 }
 
 impl Assembler {
     /// An assembler with no fonts or package sources, embedded packages,
-    /// default options, and default limits.
+    /// default options, default limits, and [`ReadLimits::PACKAGE`] for
+    /// packages.
     pub fn new(
         operator: Operator,
         project: impl Into<String>,
@@ -78,6 +80,7 @@ impl Assembler {
             variants: Vec::new(),
             metadata: None,
             limits: ReadLimits::default(),
+            package_limits: ReadLimits::PACKAGE,
         }
     }
 
@@ -106,7 +109,7 @@ impl Assembler {
                 // A package over a read limit, like one that fails to expand
                 // or validate, is recorded as a failure; resumed creation
                 // reports it at the importing source span.
-                let read = match read_package(&self.packages, &spec, self.limits).await {
+                let read = match read_package(&self.packages, &spec, self.package_limits).await {
                     Ok(read) => read,
                     Err(error @ Error::Limit { .. }) => {
                         let failure = ReadFailure::Other(Some(crate::chain(&error)));
@@ -115,7 +118,13 @@ impl Assembler {
                     }
                     Err(error) => return Err(error),
                 };
-                let _ = insert_package(&mut request, &spec, read, self.embed_packages, self.limits);
+                let _ = insert_package(
+                    &mut request,
+                    &spec,
+                    read,
+                    self.embed_packages,
+                    self.package_limits,
+                );
             }
         }
     }

@@ -114,10 +114,14 @@ impl fmt::Display for Face {
             FontStyle::Italic => "italic",
             FontStyle::Oblique => "oblique",
         };
+        let family = if self.family.is_empty() {
+            "(unnamed face)"
+        } else {
+            &self.family
+        };
         write!(
             formatter,
-            "{} ({style}, weight {}, stretch {:?})",
-            self.family,
+            "{family} ({style}, weight {}, stretch {:?})",
             self.weight.to_number(),
             self.stretch.to_ratio()
         )

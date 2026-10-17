@@ -13,7 +13,7 @@ use std::io::Write as _;
 
 use futures_util::StreamExt as _;
 use opendal::{ErrorKind, Operator};
-use typst_pack::archive::{DecodeLimits, decode, encode};
+use typst_pack::archive::{DecodeLimits, encode};
 use typst_pack::opendal::{
     Error, FontSource, PackageRead, PackageSource, WriteOutcome, WritePolicy, insert_package,
     read_archive, read_fonts, read_package, read_project, write_archive, write_extraction,
@@ -71,13 +71,11 @@ async fn conditional_create_preserves_existing_bytes(admin: &Operator) {
     assert_eq!(error.kind(), ErrorKind::ConditionNotMatch);
     assert_eq!(admin.read(path).await.unwrap().to_vec(), b"first");
 
-    let archive = encode(
-        &Pack::builder("main.typ")
-            .file("main.typ", b"= Conflict".to_vec())
-            .build()
-            .unwrap(),
-    );
-    let error = write_archive(admin, path, &archive, WritePolicy::CreateOrVerify)
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"= Conflict".to_vec())
+        .build()
+        .unwrap();
+    let error = write_archive(admin, path, &pack, WritePolicy::CreateOrVerify)
         .await
         .unwrap_err();
     assert!(matches!(error.error, Error::Conflict { .. }));
@@ -196,19 +194,19 @@ async fn pack_archive_write_and_read_preserve_exact_bytes(admin: &Operator) {
         .file("main.typ", b"= Archive".to_vec())
         .build()
         .unwrap();
-    let archive = encode(&pack);
     let path = "archives/document.typk";
     for expected in [WriteOutcome::Created, WriteOutcome::AlreadyMatching] {
-        let outcome = write_archive(admin, path, &archive, WritePolicy::CreateOrVerify)
+        let outcome = write_archive(admin, path, &pack, WritePolicy::CreateOrVerify)
             .await
             .unwrap();
         assert_eq!(outcome, expected);
     }
 
-    let read = read_archive(admin, path, 512 * 1024 * 1024).await.unwrap();
-    assert_eq!(read.as_slice(), archive.as_slice());
-    let decoded = decode(&read, DecodeLimits::default()).unwrap();
-    assert_eq!(decoded.identity(), pack.identity());
+    assert_eq!(admin.read(path).await.unwrap().to_vec(), encode(&pack));
+    let read = read_archive(admin, path, DecodeLimits::default())
+        .await
+        .unwrap();
+    assert_eq!(read.identity(), pack.identity());
 }
 
 async fn authorization_and_partial_write_evidence(admin: &Operator, partial: &Operator) {
@@ -216,9 +214,13 @@ async fn authorization_and_partial_write_evidence(admin: &Operator, partial: &Op
         .write("authorization/secret.typk", b"secret".to_vec())
         .await
         .unwrap();
-    let error = read_archive(partial, "authorization/secret.typk", 1024)
-        .await
-        .unwrap_err();
+    let error = read_archive(
+        partial,
+        "authorization/secret.typk",
+        DecodeLimits::default(),
+    )
+    .await
+    .unwrap_err();
     assert!(
         matches!(&error, Error::Storage { source, .. } if source.kind() == ErrorKind::PermissionDenied),
         "{error:?}"

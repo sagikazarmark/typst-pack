@@ -61,7 +61,8 @@ isolation from hostile input provides it outside the process.
 **The CLI tracks the embedded Typst release.** Shared flags, environment
 variables, parsing, defaults, and help follow `typst compile` of the exact
 embedded version; `typst-pack --version` reports both. Pack-specific behaviour
-(no compile-time `--root`, pack-first fonts and packages, `--offline`,
+(no compile-time `--root`, host configuration that only supplies exact
+external requirements, `--offline`,
 `--no-vendor-packages`, `--input-file`, `--variant`, `.typkignore`) is an
 explicit, documented difference. The flag inventory and every difference live
 in `docs/cli-parity.md`; the release pin and the upgrade procedure live in

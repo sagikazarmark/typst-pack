@@ -98,25 +98,43 @@ typst-pack extract project.typk --all --output extracted/
 `--input KEY=VALUE` passes a string and `--input-file KEY=PATH` passes the
 bytes of a local file through `sys.inputs`. The pack is not modified: a
 document reads per-recipient data from its inputs instead of from a replaced
-project file. Typst functions that take data accept bytes directly:
+project file. Typst functions that take data accept bytes directly. An
+`invoice.typ` that reads a logo, a customer record, and a locale:
 
 ```typ
-#image(sys.inputs.logo, width: 2cm)
+#set text(lang: sys.inputs.at("locale", default: "en"))
 #let customer = json(sys.inputs.customer)
-#str(sys.inputs.note)
+#image(sys.inputs.logo, width: 2cm)
+
+Invoice for #customer.name
 ```
+
+The discovery compile of `create` runs the document too, so inputs the
+document requires are needed when the pack is created as well; pass samples
+(and list the input files in `.typkignore` if they live beneath the project
+root, so the pack does not contain them):
 
 ```console
-typst-pack compile invoice.typk customer.pdf \
-  --input-file logo=customer-logo.png \
-  --input-file customer=customers/acme.json \
-  --input locale=en
+typst-pack create invoice.typ invoice.typk \
+  --input-file logo=sample-logo.png \
+  --input-file customer=customers/sample.json
 ```
 
-The discovery compile of `create` runs the document too, so a document that
-requires an input needs it when the pack is created as well: pass a sample
-with `create --input-file logo=sample-logo.png`, or give the document a
-fallback such as `sys.inputs.at("logo", default: none)`.
+Then compile the pack once per recipient:
+
+```console
+typst-pack compile invoice.typk acme.pdf \
+  --input-file logo=acme-logo.png \
+  --input-file customer=customers/acme.json \
+  --input locale=de
+```
+
+Alternatively, give the document a fallback for an input it can do without:
+
+```typ
+#let logo = sys.inputs.at("logo", default: none)
+#if logo != none { image(logo, width: 2cm) }
+```
 
 Input files are dependencies: `--deps` lists them with the pack. One key may
 come from `--input` or from `--input-file`, not from both.

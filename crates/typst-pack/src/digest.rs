@@ -12,6 +12,24 @@ use sha2::{Digest as _, Sha256};
 /// File and font container digests are the SHA-256 of the exact bytes.
 /// Package tree digests and pack identities are SHA-256 of a documented,
 /// domain-separated preimage (see the README's "Pack format" section).
+///
+/// A digest parses from and displays as the same text, so one can be stored
+/// or passed on the command line and read back, for example to check a pack
+/// identity a recipient was given:
+///
+/// ```
+/// use typst_pack::Digest;
+///
+/// let digest = Digest::of(b"= Report\n");
+/// let text = digest.to_string();
+/// assert!(text.starts_with("sha256:") && text.len() == 7 + 64);
+/// assert_eq!(text.parse::<Digest>()?, digest);
+///
+/// // Only the canonical form parses.
+/// assert!("SHA256:00".parse::<Digest>().is_err());
+/// assert!(text.to_uppercase().parse::<Digest>().is_err());
+/// # Ok::<(), typst_pack::InvalidDigest>(())
+/// ```
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Digest([u8; 32]);
 

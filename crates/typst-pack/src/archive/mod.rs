@@ -22,7 +22,7 @@ use crate::pack::{
 use crate::paths::canonical_relative_path;
 use crate::payload::SharedBytes;
 use crate::project::PROJECT_PREFIX;
-use crate::{Digest, LimitExceeded, Pack, PackError, TYPST_VERSION};
+use crate::{Digest, LimitExceeded, Pack, PackError};
 
 const FONTS_PREFIX: &str = "fonts/";
 
@@ -42,7 +42,12 @@ pub(crate) fn font_member_name(digest: &Digest, data: &[u8]) -> String {
     format!("{FONTS_PREFIX}{}.{extension}", digest.to_hex())
 }
 
-/// Encodes a pack as archive bytes, recording this crate as the producer.
+/// Encodes a pack as archive bytes, recording this crate as the generator.
+///
+/// The recorded Typst version is the pack's own
+/// ([`Pack::typst_version`]), so re-encoding a decoded pack keeps the Typst
+/// version it was created with, or records none if it had none. A pack built
+/// by this crate records the embedded Typst version.
 ///
 /// The output is deterministic for a given build: members are written in a
 /// fixed order with a fixed timestamp (1980-01-01), permissions, and
@@ -50,7 +55,7 @@ pub(crate) fn font_member_name(digest: &Digest, data: &[u8]) -> String {
 pub fn encode(pack: &Pack) -> Vec<u8> {
     let manifest = Manifest {
         format_version: FORMAT_VERSION,
-        typst_version: TYPST_VERSION.to_owned(),
+        typst_version: pack.typst_version().unwrap_or_default().to_owned(),
         generator: GENERATOR.to_owned(),
         entrypoint: pack.entrypoint().to_owned(),
         files: pack
@@ -263,41 +268,7 @@ pub fn decode(archive: &[u8], limits: DecodeLimits) -> Result<Pack, DecodeError>
         });
     }
 
-    // Classify every member by name before reading any content. Only
-    // canonical names are accepted, so every extractor sees the same tree.
-    let mut members = BTreeMap::new();
-    let mut declared_total = 0;
-    for index in 0..zip.len() {
-        let entry = zip.by_index_raw(index).map_err(DecodeError::zip)?;
-        let name = entry.name().to_owned();
-        let mode = entry.unix_mode().map(|mode| mode & 0o170000);
-        let directory = entry.is_dir();
-        let path = if directory {
-            name.strip_suffix('/').unwrap_or(&name)
-        } else {
-            &name
-        };
-        if canonical_relative_path(path).map_or(true, |canonical| canonical.as_str() != path) {
-            return Err(DecodeError::UnsafeMemberName(name));
-        }
-        match (directory, mode) {
-            (true, None | Some(0 | 0o040000)) => continue,
-            (false, None | Some(0 | 0o100000)) => {}
-            _ => return Err(DecodeError::UnsupportedMemberKind(name)),
-        }
-        LimitExceeded::check(entry.size(), limits.max_member_bytes, "member bytes")?;
-        LimitExceeded::add(
-            &mut declared_total,
-            entry.size(),
-            limits.max_total_bytes,
-            "total member bytes",
-        )?;
-        if members.contains_key(&name) {
-            return Err(DecodeError::DuplicateMember(name));
-        }
-        members.insert(name, index);
-    }
-
+    let mut members = classify_members(&mut zip, limits)?;
     let mut reader = MemberReader {
         zip,
         limits,
@@ -424,6 +395,49 @@ pub fn decode(archive: &[u8], limits: DecodeLimits) -> Result<Pack, DecodeError>
     })?;
     verify_digests(&pack, &manifest)?;
     Ok(pack)
+}
+
+/// Classifies every member by name and declared size before any content is
+/// read, returning the files' indices by name; directories are skipped. Only
+/// canonical names of regular files and directories are accepted, so every
+/// extractor sees the same tree.
+fn classify_members(
+    zip: &mut zip::ZipArchive<Cursor<&[u8]>>,
+    limits: DecodeLimits,
+) -> Result<BTreeMap<String, usize>, DecodeError> {
+    let mut members = BTreeMap::new();
+    let mut declared_total = 0;
+    for index in 0..zip.len() {
+        let entry = zip.by_index_raw(index).map_err(DecodeError::zip)?;
+        let name = entry.name().to_owned();
+        let mode = entry.unix_mode().map(|mode| mode & 0o170000);
+        let directory = entry.is_dir();
+        let path = if directory {
+            name.strip_suffix('/').unwrap_or(&name)
+        } else {
+            &name
+        };
+        if canonical_relative_path(path).map_or(true, |canonical| canonical.as_str() != path) {
+            return Err(DecodeError::UnsafeMemberName(name));
+        }
+        match (directory, mode) {
+            (true, None | Some(0 | 0o040000)) => continue,
+            (false, None | Some(0 | 0o100000)) => {}
+            _ => return Err(DecodeError::UnsupportedMemberKind(name)),
+        }
+        LimitExceeded::check(entry.size(), limits.max_member_bytes, "member bytes")?;
+        LimitExceeded::add(
+            &mut declared_total,
+            entry.size(),
+            limits.max_total_bytes,
+            "total member bytes",
+        )?;
+        if members.contains_key(&name) {
+            return Err(DecodeError::DuplicateMember(name));
+        }
+        members.insert(name, index);
+    }
+    Ok(members)
 }
 
 /// Splits `packages/<namespace>/<name>/<version>/<path>` into its package

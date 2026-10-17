@@ -600,20 +600,40 @@ fn an_input_file_path_need_not_be_unicode() {
     assert!(dir.join("out.svg").is_file());
 }
 
+/// Asserts that `stderr` is `error: {context}: ` followed by the operating
+/// system's own message for a missing file or directory; platforms word (and
+/// number) it differently.
+#[track_caller]
+fn assert_not_found(stderr: &str, context: &str) {
+    let code = stderr
+        .strip_suffix(")\n")
+        .and_then(|rest| rest.rsplit_once("(os error "))
+        .and_then(|(_, code)| code.parse().ok())
+        .unwrap_or_else(|| panic!("no native error: {stderr}"));
+    let native = std::io::Error::from_raw_os_error(code);
+    assert_eq!(native.kind(), std::io::ErrorKind::NotFound, "{stderr}");
+    assert_eq!(stderr, format!("error: {context}: {native}\n"));
+}
+
 #[test]
 fn write_failures_are_reported_with_the_native_error() {
     let dir = tempfile::tempdir().unwrap();
     let dir = dir.path();
     pack(dir, "doc.typk", "#rect(width: 1pt, height: 1pt)");
-    let native = std::fs::read_dir(dir.join("missing")).unwrap_err();
 
     let stderr = failed(run(dir, &["compile", "doc.typk", "missing/out.svg"]));
 
-    assert_eq!(
-        stderr,
-        format!("error: cannot write `missing/out.svg`: {native}\n")
-    );
+    assert_not_found(&stderr, "cannot write `missing/out.svg`");
     assert!(!dir.join("missing").exists());
+}
+
+#[test]
+fn an_unreadable_pack_is_named_once() {
+    let dir = tempfile::tempdir().unwrap();
+    for command in ["compile", "inspect", "extract"] {
+        let stderr = failed(run(dir.path(), &[command, "missing.typk"]));
+        assert_not_found(&stderr, "cannot read `missing.typk`");
+    }
 }
 
 #[test]
@@ -635,7 +655,9 @@ fn inspect_and_extract_read_a_dash_from_stdin() {
     };
 
     let inspected = ok(piped(&["inspect", "-"], &bytes));
-    assert!(String::from_utf8_lossy(&inspected.stdout).contains("entrypoint: main.typ"));
+    let inspected = String::from_utf8_lossy(&inspected.stdout);
+    assert!(inspected.starts_with("pack: <stdin>\n"), "{inspected}");
+    assert!(inspected.contains("entrypoint: main.typ"));
     ok(piped(&["extract", "-", "-o", "from-stdin"], &bytes));
     assert_eq!(
         std::fs::read(dir.join("from-stdin/main.typ")).unwrap(),
@@ -644,7 +666,7 @@ fn inspect_and_extract_read_a_dash_from_stdin() {
     assert!(failed(piped(&["extract", "-"], &bytes)).contains("explicit --output"));
     let garbage = failed(piped(&["inspect", "-"], b"not a pack"));
     assert!(
-        garbage.starts_with("error: cannot read pack from stdin"),
+        garbage.starts_with("error: cannot decode pack from stdin"),
         "{garbage}"
     );
 }
@@ -789,6 +811,15 @@ fn source_date_epoch_and_the_creation_timestamp_fix_dates() {
 #[cfg(unix)]
 #[test]
 fn without_a_timestamp_today_is_the_local_date() {
+    // The zones below come from the host's tzdata, which the CLI reads from
+    // its standard location.
+    let zoneinfo = Path::new("/usr/share/zoneinfo");
+    if !zoneinfo.join("Etc/GMT-14").is_file() {
+        eprintln!(
+            "skipped: /usr/share/zoneinfo has no Etc/GMT-14; install tzdata to run this test"
+        );
+        return;
+    }
     let dir = tempfile::tempdir().unwrap();
     let dir = dir.path();
     let source = "#assert.eq(datetime.today().display(), sys.inputs.today)";
@@ -917,13 +948,16 @@ fn font_and_package_environment_is_honored_by_compile() {
             .args(args)
             .output()
             .unwrap());
+        // Compared by components: Windows mixes the separators of the
+        // package root and the package-relative path.
         let library = dir.join(used).join("preview/shapes/0.1.0/lib.typ");
         let deps = json(dir.join("deps.json"));
+        let inputs = deps["inputs"].as_array().unwrap();
         assert!(
-            deps["inputs"]
-                .as_array()
-                .unwrap()
-                .contains(&serde_json::json!(library))
+            inputs.iter().any(|input| Path::new(input.as_str().unwrap())
+                .components()
+                .eq(library.components())),
+            "{inputs:?}"
         );
     }
 }
@@ -954,19 +988,36 @@ fn external_fonts_are_named_when_missing_and_used_when_supplied() {
 
     let stderr = failed(run(dir, &compile));
     assert!(
-        stderr.starts_with("error: required font container sha256:"),
+        stderr.contains("error: required font container sha256:"),
         "{stderr}"
     );
     assert!(stderr.contains(&family), "{stderr}");
     assert!(stderr.contains("hint: `typst-pack inspect"), "{stderr}");
     assert!(!dir.join("out.pdf").exists());
 
-    ok(typst_pack(dir)
+    // An unreadable font file is reported only when a required font is
+    // missing, since it might have been the one.
+    std::fs::create_dir(dir.join("broken")).unwrap();
+    std::fs::write(dir.join("broken/broken.ttf"), b"not a font").unwrap();
+    let stderr = failed(
+        typst_pack(dir)
+            .args(compile)
+            .args(["--font-path", "broken"])
+            .output()
+            .unwrap(),
+    );
+    assert!(
+        stderr.contains("warning: skipped font: ") && stderr.contains("broken.ttf"),
+        "{stderr}"
+    );
+    let supplied = ok(typst_pack(dir)
         .args(compile)
-        .args(["--font-path", "fonts"])
+        .args(["--font-path", "fonts", "--font-path", "broken"])
         .output()
         .unwrap());
     assert!(dir.join("out.pdf").is_file());
+    let warnings = String::from_utf8_lossy(&supplied.stderr);
+    assert!(!warnings.contains("skipped font"), "{warnings}");
 }
 
 // --- diagnostics, dependencies, timings, viewing ------------------------
@@ -989,9 +1040,14 @@ fn diagnostics_render_source_names_in_order_without_a_trailer() {
         "short",
     ];
     let stderr = failed(typst_pack(dir).args(short).args(create).output().unwrap());
+    // A host path, with the host's separators.
+    let source = Path::new("project").join("main.typ");
     assert_eq!(
         stderr,
-        "project/main.typ:1:1: error: unknown variable: unknown-function\n"
+        format!(
+            "{}:1:1: error: unknown variable: unknown-function\n",
+            source.display()
+        )
     );
     let compile = [
         "compile",
@@ -1097,10 +1153,22 @@ fn dependencies_follow_typst_formats_and_transport_rules() {
     let mut zero = pack_path.as_os_str().as_encoded_bytes().to_vec();
     zero.push(0);
     assert_eq!(std::fs::read(dir.join("deps.zero")).unwrap(), zero);
-    ok(deps("make.svg", &["deps.mk", "--deps-format", "make"]));
+    // Make escapes spaces, `#`, and `$` (and `:`, which a Windows absolute
+    // path would contain); a relative name keeps the rule platform neutral.
+    pack(dir, "a b#$.typk", "#rect(width: 1pt, height: 1pt)");
+    let args = [
+        "compile",
+        "a b#$.typk",
+        "make.svg",
+        "--deps",
+        "deps.mk",
+        "--deps-format",
+        "make",
+    ];
+    ok(run(dir, &args));
     assert_eq!(
         std::fs::read_to_string(dir.join("deps.mk")).unwrap(),
-        format!("make.svg: {}\n", pack_path.display())
+        "make.svg: a\\ b\\#$$.typk\n"
     );
     let stdout = ok(deps("json.svg", &["-"])).stdout;
     let written: serde_json::Value = serde_json::from_slice(&stdout).unwrap();
@@ -1643,7 +1711,7 @@ fn inspect_lists_identity_packages_and_fonts() {
     );
     for (index, note) in [
         (shipped, "(provided by Typst)"),
-        (foreign, "(supply with --font-path)"),
+        (foreign, "(install it or supply it with --font-path)"),
     ] {
         let start = stdout.find(&line(index)).unwrap();
         let rest = &stdout[start..];
@@ -1777,7 +1845,7 @@ fn extract_selects_packages_and_fonts_and_defaults_to_the_pack_name() {
 }
 
 #[test]
-fn extract_reports_every_conflict_and_suggests_force_only_for_existing_files() {
+fn extract_reports_conflicts_and_suggests_force_only_for_existing_files() {
     let dir = tempfile::tempdir().unwrap();
     let dir = dir.path();
     let pack = Pack::builder("main.typ")
@@ -1813,6 +1881,20 @@ fn extract_reports_every_conflict_and_suggests_force_only_for_existing_files() {
     assert!(blocked.contains("data.txt` already exists"), "{blocked}");
     assert!(blocked.contains("main.typ` conflicts"), "{blocked}");
     assert!(!blocked.contains("--force"), "{blocked}");
+
+    // Many conflicts are listed up to a point, then counted.
+    let mut many = Pack::builder("main.typ").file("main.typ", Vec::new());
+    for index in 0..25 {
+        let path = format!("{index:02}.txt");
+        write(dir, &[(&format!("crowded/{path}"), "keep")]);
+        many = many.file(path, Vec::new());
+    }
+    save(dir, "many.typk", &many.build().unwrap());
+    let crowded = failed(run(dir, &["extract", "many.typk", "-o", "crowded"]));
+    let lines = crowded.lines().collect::<Vec<_>>();
+    assert_eq!(lines.len(), 1 + 20 + 1 + 1, "{crowded}");
+    assert_eq!(lines[21], "  and 5 more");
+    assert!(crowded.contains("hint: pass --force"), "{crowded}");
 }
 
 // --- shared flags ----------------------------------------------------------
@@ -1855,7 +1937,7 @@ fn ppi_scales_png_pixels() {
 }
 
 #[test]
-fn jobs_bound_parallel_export_without_changing_artifacts() {
+fn jobs_do_not_change_artifacts() {
     let dir = tempfile::tempdir().unwrap();
     let dir = dir.path();
     pages(dir, 4);

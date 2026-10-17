@@ -43,7 +43,8 @@ cat >"$audit/enabled/src/main.rs" <<'EOF'
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let operator: opendal::Operator =
         opendal::Operator::new(opendal::services::Memory::default())?;
-    let _future = typst_pack::opendal::read_archive(&operator, "pack.typk", 1024);
+    let limits = typst_pack::archive::DecodeLimits::default();
+    let _future = typst_pack::opendal::read_archive(&operator, "pack.typk", limits);
     let _same_type: &typst_pack::opendal::Operator = &operator;
 
     Ok(())

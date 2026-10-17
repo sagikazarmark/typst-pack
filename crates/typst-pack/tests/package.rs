@@ -358,16 +358,28 @@ mod registry {
                 Err(ExpandError::Invalid(_))
             ));
         }
-        for escaping in [&b"../escape.typ"[..], b"/absolute.typ"] {
-            let name = |header: &mut tar::Header| {
-                header.as_gnu_mut().unwrap().name[..escaping.len()].copy_from_slice(escaping)
-            };
-            let error = expand(&raw_member(name, b"#let value = 1")).unwrap_err();
-            assert!(matches!(
-                &error,
-                ExpandError::Invalid(source)
-                    if matches!(source.issues.as_slice(), [PackIssue::InvalidPath { .. }])
-            ));
+        let named = |name: &'static [u8]| {
+            raw_member(
+                move |header: &mut tar::Header| {
+                    header.as_gnu_mut().unwrap().name[..name.len()].copy_from_slice(name)
+                },
+                b"#let value = 1",
+            )
+        };
+        let error = expand(&named(b"/absolute.typ")).unwrap_err();
+        assert!(matches!(
+            &error,
+            ExpandError::Invalid(source)
+                if matches!(source.issues.as_slice(), [PackIssue::InvalidPath { .. }])
+        ));
+        // Typst skips members with a `..` component rather than normalizing
+        // them, so `a/../lib.typ` must not become `lib.typ`.
+        for escaping in [&b"../escape.typ"[..], b"a/../lib.typ"] {
+            let error = expand(&named(escaping)).unwrap_err();
+            assert!(
+                matches!(&error, ExpandError::Malformed(message) if message.contains("`..`")),
+                "{error}"
+            );
         }
         for kind in [
             tar::EntryType::Symlink,

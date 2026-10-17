@@ -18,8 +18,9 @@ const MAX_EXTENSION_BYTES: u64 = 64 * 1024;
 ///
 /// Regular files become tree entries; directories and PAX global headers
 /// (such as `git archive` writes) are skipped; links and every other member
-/// kind are rejected, as are paths that cannot name a package file or are
-/// longer than 4096 bytes. `limits` bounds the member count, each file, and
+/// kind are rejected, as are paths that cannot name a package file, contain
+/// a `..` component, or are longer than 4096 bytes (a leading `./` is
+/// accepted). `limits` bounds the member count, each file, and
 /// the total expanded size, including the GNU long-name and PAX records that
 /// describe members; the decompressed stream itself is bounded too, so a
 /// compression bomb stops at the limit.
@@ -38,8 +39,11 @@ pub fn expand_archive(archive: &[u8], limits: ReadLimits) -> Result<Tree, Expand
     let mut files = Vec::new();
     let mut entries = 0;
     let mut total = 0;
-    // Records that describe the next member. The tar reader would read them
-    // whole and unmetered, so raw records are read here instead.
+    // Records that describe the next member. They are read here, from raw
+    // entries, rather than by the tar reader: it would read a GNU long-name or
+    // PAX record whole into memory, whatever its declared size and before
+    // yielding the member, outside every limit. Reading them by hand bounds
+    // each record and charges it to `max_total_bytes`.
     let mut long_name = None;
     let mut extensions = None;
     for entry in tar.entries().map_err(malformed)?.raw(true) {
@@ -138,12 +142,20 @@ fn member_path(
             path.len()
         )));
     }
-    String::from_utf8(path).map_err(|error| {
+    let path = String::from_utf8(path).map_err(|error| {
         ExpandError::Malformed(format!(
             "member name {:?} is not valid UTF-8",
             error.as_bytes()
         ))
-    })
+    })?;
+    // Typst's own unpacking skips such members; normalizing `a/../b` to `b`
+    // would read a different tree than Typst does.
+    if path.split(['/', '\\']).any(|segment| segment == "..") {
+        return Err(ExpandError::Malformed(format!(
+            "member {path:?} has a `..` component"
+        )));
+    }
+    Ok(path)
 }
 
 /// Reads a record's data, which must be complete.
@@ -168,7 +180,7 @@ pub enum ExpandError {
     #[error("the package archive exceeded a limit")]
     Limit(#[from] LimitExceeded),
     /// The bytes are not a gzip-compressed tar of regular files.
-    #[error("the package archive is malformed: {0:?}")]
+    #[error("the package archive is malformed: {0}")]
     Malformed(String),
     /// The files do not form a valid package tree.
     #[error("the package archive does not hold a valid package tree")]

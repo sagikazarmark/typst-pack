@@ -98,9 +98,10 @@ concurrency between independent operations.
 
 Project, package, and font readers share one bounded walker. It lists each
 directory through the handle of its parent and takes `ReadLimits` (entries,
-per-file bytes, total bytes; `ReadLimits::default()` is the one default for
-projects, packages, and fonts); an exceeded limit is a `LimitExceeded` naming
-the resource. Only selected entries count: files the ignore policy excludes,
+per-file bytes, total bytes; `ReadLimits::default()` is the default for
+projects and fonts, and the tighter `ReadLimits::PACKAGE`, 256 MiB in total, for
+each package tree or downloaded package archive); an exceeded limit is a
+`LimitExceeded` naming the resource. Only selected entries count: files the ignore policy excludes,
 or that are not fonts in a font directory, count toward no limit. Reading,
 packing, and resolving report one error type, `fs::Error`.
 
@@ -110,8 +111,9 @@ an error naming the link. A link that leads back into a directory on the
 current descent is refused as a cycle, and a link whose target is missing is
 a `BrokenSymlink` error. FIFOs, sockets, and devices are refused.
 The root itself may be a link, as `@local` development packages commonly are.
-Package trees leave out `.git`, `.hg`, and `.svn` directories, as Typst
-Universe bundles do, so a version-controlled `@local` package reads as the
+Package trees leave out entries named `.git`, `.hg`, or `.svn`, directories
+and files (such as a submodule's `.git` link) alike, as Typst Universe bundles
+do, so a version-controlled `@local` package reads as the
 same tree whatever its repository state.
 Project membership comes from the root `.typkignore` policy, applied with
 gitignore semantics before any refusal, so an excluded entry is never examined;
@@ -127,7 +129,9 @@ the same way. Only an explicitly configured font path that cannot be opened
 fails the read. A container several sources offer is passed to creation once,
 embedded when any of those sources embeds it. Resolving takes Typst's
 embedded fonts first and scans font directories only for containers still
-missing.
+missing, the configured font paths before the system directories so the
+shared limits never starve them; the CLI prints skipped fonts as warnings
+when `create` succeeds, and on `compile` when a required font is missing.
 
 These checks are validation, not confinement. The adapter uses the process's
 ambient authority and claims nothing against a filesystem peer acting between
@@ -141,7 +145,8 @@ Write policy is explicit. Filesystem writes take `fs::WritePolicy::CreateNew`
 (fail when a target exists) or `fs::WritePolicy::Overwrite` (replace or create).
 Each file is written to a temporary sibling and then committed: `Overwrite`
 renames it over the target, so readers see the old or the new content, and on
-Unix the replaced file's permissions carry over; `CreateNew` hard-links it,
+Unix the replaced file's permissions carry over except setuid and setgid;
+`CreateNew` hard-links it,
 which fails on an existing target. When the link fails for any other reason
 (FAT and exFAT have no hard links), the temporary file is removed first and the
 target is created exclusively and written, which is safe because an exclusive
@@ -150,6 +155,12 @@ partial file, and later files of the same call skip the temporary file. The
 temporary file is removed on every path, and a failed cleanup after a
 successful commit is not an error. Nothing is flushed to stable storage, so
 there is no crash-durability claim.
+
+`Overwrite` differs from Typst's in-place write in two cases. A read-only
+target (mode `0444` on Unix) is replaced, where Typst fails; a writable target
+in a directory that admits no new entry is rewritten in place, as Typst does,
+since no temporary sibling can be created there, so readers can then observe
+a partial file.
 
 `fs::write_file`, `fs::write_archive`, and `fs::write_artifacts` write through
 a symbolic link at the
@@ -197,13 +208,19 @@ Archive bytes are plain `Vec<u8>` values: `archive::encode` returns them,
 `archive::decode` borrows them, and `archive::read` and `archive::write`
 compose them with streams. The core archive module does no file or storage
 I/O: `fs::read_archive` and `fs::write_archive` read and write pack files, and
-`opendal::read_archive` and `opendal::write_archive` archive objects.
+`opendal::read_archive` and `opendal::write_archive` archive objects, with the
+same shapes: reads take `DecodeLimits` and return a `Pack`, refusing an
+oversized file or object before reading it, and writes take a `&Pack`.
+`fs::read_archive` failures name the file (`fs::Error::Io`, `Limit`, or
+`Archive` with the `DecodeError` as its source); `opendal::read_archive`
+fails with `opendal::Error::Decode` for bytes that are not a pack.
 
 Decoding verifies every member against the digest the manifest declares, so a
 decoded pack is exactly the content its producer encoded, whatever ZIP writer
 produced the archive. Re-encoding a decoded pack yields the canonical encoding,
 which may differ from the original archive in compression, timestamps, and
-member order, but never in its identity.
+member order, but never in its identity; it keeps the recorded Typst version
+(so a mismatch stays visible) and records this crate as the generator.
 
 ## Errors
 

@@ -130,20 +130,19 @@ pub fn run() -> ExitCode {
 
 /// Reads the pack at `path`, or from stdin for `-`.
 fn read_pack(path: &Path) -> Result<Pack, Failure> {
-    let stdin = path == Path::new("-");
-    let read = if stdin {
-        archive::read(std::io::stdin().lock(), DecodeLimits::default())
+    if path == Path::new("-") {
+        archive::read(std::io::stdin().lock(), DecodeLimits::default()).map_err(|error| {
+            // Name the step that failed, as `fs::read_archive` does for files.
+            let action = match error {
+                archive::DecodeError::Io(_) => "read",
+                _ => "decode",
+            };
+            format!("cannot {action} pack from stdin: {}", chain(&error)).into()
+        })
     } else {
-        fs::read_archive(path, DecodeLimits::default())
-    };
-    read.map_err(|error| {
-        let pack = if stdin {
-            "cannot read pack from stdin".to_owned()
-        } else {
-            format!("cannot open pack `{}`", path.display())
-        };
-        format!("{pack}: {}", chain(&error)).into()
-    })
+        // The error names the path.
+        Ok(fs::read_archive(path, DecodeLimits::default())?)
+    }
 }
 
 /// Warns when a pack records a Typst version other than the embedded one: the
@@ -158,6 +157,14 @@ fn warn_typst_version(pack: &Pack, terminal: Terminal) {
             escape(version),
             typst_pack::TYPST_VERSION
         );
+        terminal.label("warning", Color::Yellow, &message);
+    }
+}
+
+/// Warns about each font file or directory that could not be read.
+fn warn_skipped_fonts(skipped: &[fs::Error], terminal: Terminal) {
+    for skipped in skipped {
+        let message = format!("skipped font: {}", chain(skipped));
         terminal.label("warning", Color::Yellow, &message);
     }
 }
@@ -212,15 +219,15 @@ fn time(automation: &AutomationArgs) -> (DocumentTime, CreationTimestamp) {
         ),
         None => {
             let now = chrono::Local::now();
-            let (seconds, offset) = (now.timestamp(), now.offset().local_minus_utc());
+            let (seconds, utc_offset_seconds) = (now.timestamp(), now.offset().local_minus_utc());
             (
                 DocumentTime::Local {
                     seconds,
-                    utc_offset_seconds: offset,
+                    utc_offset_seconds,
                 },
                 CreationTimestamp::Local {
-                    unix: seconds,
-                    offset_minutes: offset / 60,
+                    seconds,
+                    utc_offset_seconds,
                 },
             )
         }

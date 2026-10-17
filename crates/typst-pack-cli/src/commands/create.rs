@@ -2,12 +2,12 @@
 
 use std::path::{Path, PathBuf};
 
-use typst_kit::diagnostics::termcolor::Color;
 use typst_pack::compile::Input;
 use typst_pack::{FILE_EXTENSION, Metadata, archive, create, fs};
 
 use super::{
     CommandResult, Failure, Terminal, Timings, chain, compile_options, packer, prepare, time,
+    warn_skipped_fonts,
 };
 use crate::cli::CreateArgs;
 
@@ -91,10 +91,7 @@ pub fn run(args: CreateArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comma
     };
 
     terminal.diagnostics(&packed.sources, &packed.warnings);
-    for skipped in &packed.skipped_fonts {
-        let message = format!("skipped font: {}", chain(skipped));
-        terminal.label("warning", Color::Yellow, &message);
-    }
+    warn_skipped_fonts(&packed.skipped_fonts, terminal);
     if let Some(error) = timing_error {
         return Err(error.into());
     }

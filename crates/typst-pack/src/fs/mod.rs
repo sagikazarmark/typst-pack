@@ -17,6 +17,7 @@ mod walk;
 mod write;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use typst::diag::SourceDiagnostic;
@@ -88,6 +89,13 @@ pub enum Error {
     /// The files read do not form a valid project or package tree.
     #[error(transparent)]
     Invalid(#[from] PackError),
+    /// A pack file's bytes are not a valid pack.
+    #[error("cannot decode pack `{}`", path.display())]
+    Decode {
+        path: PathBuf,
+        #[source]
+        source: Box<DecodeError>,
+    },
     /// The entrypoint is outside the project root.
     #[error("`{}` is outside the project root and cannot be packed", .0.display())]
     OutsideRoot(PathBuf),
@@ -102,8 +110,8 @@ pub enum Error {
         reason: package::ReadFailure,
     },
     /// Creation reported a package missing again after it was supplied.
-    #[error("creation requested package {0} again after it was supplied")]
-    RepeatedPackage(PackageSpec),
+    #[error("creation requested package {spec} again after it was supplied")]
+    RepeatedPackage { spec: PackageSpec },
     /// Creation failed.
     #[error(transparent)]
     Create(Box<create::Error>),
@@ -111,11 +119,38 @@ pub enum Error {
 
 /// Reads and decodes a pack file, refusing a file larger than
 /// [`DecodeLimits::max_archive_bytes`] before reading it.
-pub fn read_archive(path: impl AsRef<Path>, limits: DecodeLimits) -> Result<Pack, DecodeError> {
-    let file = std::fs::File::open(path)?;
-    let size = file.metadata()?.len();
-    LimitExceeded::check(size, limits.max_archive_bytes, "archive bytes")?;
-    archive::read(file, limits)
+///
+/// Failures name `path`: [`Error::Io`] when the file cannot be read,
+/// [`Error::Limit`] when it is too large, and [`Error::Decode`] when its
+/// bytes are not a valid pack.
+pub fn read_archive(path: impl AsRef<Path>, limits: DecodeLimits) -> Result<Pack, Error> {
+    let path = path.as_ref();
+    let io = |source| Error::Io {
+        path: path.to_owned(),
+        source,
+    };
+    let limit = |source| Error::Limit {
+        path: path.to_owned(),
+        source,
+    };
+    let file = std::fs::File::open(path).map_err(io)?;
+    let size = file.metadata().map_err(io)?.len();
+    LimitExceeded::check(size, limits.max_archive_bytes, "archive bytes").map_err(limit)?;
+    let mut bytes = Vec::with_capacity(size.min(limits.max_archive_bytes) as usize);
+    // The file may have grown since its size was checked.
+    file.take(limits.max_archive_bytes.saturating_add(1))
+        .read_to_end(&mut bytes)
+        .map_err(io)?;
+    LimitExceeded::check(
+        bytes.len() as u64,
+        limits.max_archive_bytes,
+        "archive bytes",
+    )
+    .map_err(limit)?;
+    archive::decode(&bytes, limits).map_err(|source| Error::Decode {
+        path: path.to_owned(),
+        source: Box::new(source),
+    })
 }
 
 /// Creates packs from project directories, and resolves the external
@@ -170,7 +205,8 @@ pub struct Packer {
     pub certificate: Option<PathBuf>,
     /// Limits for reading the project directory.
     pub project_limits: ReadLimits,
-    /// Limits for reading each package tree.
+    /// Limits for reading each package tree or downloaded package archive
+    /// (by default [`ReadLimits::PACKAGE`]).
     pub package_limits: ReadLimits,
     /// Limits shared by every font directory of one read. Font files over
     /// the per-file limit are skipped, and once the entry or total byte limit
@@ -199,8 +235,8 @@ pub struct Packer {
 impl Default for Packer {
     /// System and Typst fonts, the host's package directories without
     /// downloads, embedded packages, external fonts, the paged target, default
-    /// [`ReadLimits`], and the host's current local time as document time,
-    /// as Typst reads the system clock.
+    /// [`ReadLimits`] ([`ReadLimits::PACKAGE`] for packages), and the host's
+    /// current local time as document time, as Typst reads the system clock.
     ///
     /// The document time is captured here, once: every pack this packer
     /// creates uses it until [`options`](Self::options) is changed.
@@ -215,7 +251,7 @@ impl Default for Packer {
             download_packages: false,
             certificate: None,
             project_limits: ReadLimits::default(),
-            package_limits: ReadLimits::default(),
+            package_limits: ReadLimits::PACKAGE,
             font_limits: ReadLimits::default(),
             embed_packages: true,
             embed_fonts: false,
@@ -236,6 +272,7 @@ impl Default for Packer {
 
 /// A pack created from a project directory.
 #[derive(Debug)]
+#[non_exhaustive]
 pub struct Packed {
     /// The pack.
     pub pack: Pack,
@@ -252,6 +289,7 @@ pub struct Packed {
 /// [`compile::Request::packages`](crate::compile::Request::packages) and
 /// [`compile::Request::fonts`](crate::compile::Request::fonts).
 #[derive(Debug, Default)]
+#[non_exhaustive]
 pub struct Resolved {
     /// The trees of the external packages found.
     pub packages: Vec<(PackageSpec, package::Tree)>,
@@ -304,10 +342,11 @@ impl Packer {
                 _ => error,
             })?;
 
-        let (fonts, skipped_fonts) = self.read_fonts(
+        let sources = self.font_sources(
             self.embed_fonts,
             Some(self.embed_fonts && self.include_typst_embedded_fonts),
-        )?;
+        );
+        let (fonts, skipped_fonts) = read_fonts(sources, self.font_limits)?;
         let mut request = create::Request::new(project);
         request.fonts = unique_fonts(fonts);
         request.target = self.target;
@@ -346,7 +385,7 @@ impl Packer {
                 // Creation reports neither supplied nor failed packages, so a
                 // repeat would loop forever.
                 if !attempted.insert(spec.to_string()) {
-                    return Err(Error::RepeatedPackage(spec));
+                    return Err(Error::RepeatedPackage { spec });
                 }
                 let read = packages.read(&spec).and_then(|found| {
                     request
@@ -366,6 +405,11 @@ impl Packer {
     /// A package found nowhere and a font container no font source holds are
     /// left out, for [`compile()`](crate::compile()) to report as
     /// unfulfilled. A package that is found but cannot be read is an error.
+    ///
+    /// Typst's embedded fonts are matched first; font directories are read
+    /// only for containers still missing, [`font_paths`](Self::font_paths)
+    /// before the system directories, so the shared
+    /// [`font_limits`](Self::font_limits) never starve the explicit paths.
     pub fn resolve(&self, pack: &Pack) -> Result<Resolved, Error> {
         let mut resolved = Resolved::default();
         let packages = self.package_dirs();
@@ -404,7 +448,11 @@ impl Packer {
             }
         }
         if !required.is_empty() {
-            let (fonts, skipped) = self.read_fonts(false, None)?;
+            // Explicit font paths first, so the shared limits never starve
+            // them; matching by digest does not depend on the order.
+            let mut sources = self.font_sources(false, None);
+            sources.sort_by_key(|source| !matches!(source, FontSource::Directory { .. }));
+            let (fonts, skipped) = read_fonts(sources, self.font_limits)?;
             for entry in fonts {
                 if required.remove(&entry.container.digest()) {
                     resolved.fonts.push(entry.container);
@@ -426,13 +474,9 @@ impl Packer {
         )
     }
 
-    /// Reads the configured fonts; Typst's embedded fonts join with the
+    /// The configured font sources; Typst's embedded fonts join with the
     /// disposition `typst` when it is `Some`.
-    fn read_fonts(
-        &self,
-        embed: bool,
-        typst: Option<bool>,
-    ) -> Result<(Vec<font::Entry>, Vec<Error>), Error> {
+    fn font_sources(&self, embed: bool, typst: Option<bool>) -> Vec<FontSource> {
         let mut sources = Vec::new();
         if self.system_fonts {
             sources.push(FontSource::System { embedded: embed });
@@ -447,7 +491,7 @@ impl Packer {
             path: path.clone(),
             embedded: embed,
         }));
-        read_fonts(sources, self.font_limits)
+        sources
     }
 }
 

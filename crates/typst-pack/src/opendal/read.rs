@@ -5,11 +5,12 @@ use futures_util::TryStreamExt;
 use typst::syntax::package::PackageSpec;
 
 use super::{
-    Error, archive_cache_key, changed, check_key, check_prefix, is_font_key, key_issue, stat,
-    storage, stream, tree_key,
+    Error, archive_cache_key, changed, check_key, check_prefix, is_font_key, key_issue,
+    read_failed, stat, storage, stream, tree_key,
 };
+use crate::archive::{self, DecodeLimits};
 use crate::pack::names_pack_path;
-use crate::{LimitExceeded, ProjectSnapshot, ReadLimits, font, package};
+use crate::{LimitExceeded, Pack, ProjectSnapshot, ReadLimits, font, package};
 
 /// Running totals charged against one operation's [`ReadLimits`].
 struct Budget {
@@ -68,8 +69,9 @@ async fn read_object(
     )
     .map_err(|exceeded| limit(path, exceeded))?;
     let mut chunks = stream(op, path, &metadata).await?;
-    let mut bytes = Vec::with_capacity(usize::try_from(length).unwrap_or(0));
-    while let Some(buffer) = chunks.try_next().await.map_err(storage(path, "read"))? {
+    // The stat is the storage's claim, so preallocate at most 1 MiB of it.
+    let mut bytes = Vec::with_capacity(length.min(1 << 20) as usize);
+    while let Some(buffer) = chunks.try_next().await.map_err(read_failed(path))? {
         for chunk in buffer {
             if (bytes.len() + chunk.len()) as u64 > length {
                 return Err(changed(path));
@@ -263,7 +265,8 @@ pub enum PackageRead {
 /// lists at least one file. Raw archives are returned unexpanded; with the
 /// `package-reading` feature, [`insert_package`] expands and validates them.
 /// For trees, `limits` bounds the listing and file bytes; for archives,
-/// `max_file_bytes` bounds the archive.
+/// `max_file_bytes` bounds the archive. [`ReadLimits::PACKAGE`] is the
+/// suggested default here and for [`insert_package`]'s expansion.
 pub async fn read_package(
     sources: &[PackageSource],
     spec: &PackageSpec,
@@ -369,23 +372,39 @@ pub fn insert_package(
     }
 }
 
-/// Reads the exact bytes of one pack archive object of at most `max_bytes`.
+/// Reads and decodes one pack archive object, refusing an object larger than
+/// [`DecodeLimits::max_archive_bytes`] before reading it.
 ///
-/// Decode the result with [`archive::decode`](crate::archive::decode);
-/// decoding borrows the bytes, so they stay available if decoding fails.
-pub async fn read_archive(op: &Operator, path: &str, max_bytes: u64) -> Result<Vec<u8>, Error> {
+/// An absent object fails with [`Error::Storage`] of kind `NotFound`, and
+/// bytes that are not a valid pack with [`Error::Decode`].
+pub async fn read_archive(op: &Operator, path: &str, limits: DecodeLimits) -> Result<Pack, Error> {
     check_key(path)?;
     require_read(op)?;
     let mut budget = Budget::new(ReadLimits {
         max_entries: 1,
-        max_file_bytes: max_bytes,
-        max_total_bytes: max_bytes,
+        max_file_bytes: limits.max_archive_bytes,
+        max_total_bytes: limits.max_archive_bytes,
     });
-    let bytes = read_object(op, path, &mut budget).await?.ok_or_else(|| {
+    let bytes = read_object(op, path, &mut budget).await;
+    // Name the limit as `fs::read_archive` does.
+    let bytes = bytes.map_err(|error| match error {
+        Error::Limit { path, source } => Error::Limit {
+            path,
+            source: LimitExceeded {
+                resource: "archive bytes",
+                ..source
+            },
+        },
+        error => error,
+    })?;
+    let bytes = bytes.ok_or_else(|| {
         storage(path, "read")(::opendal::Error::new(
             ErrorKind::NotFound,
             "the pack archive object is absent",
         ))
     })?;
-    Ok(bytes)
+    archive::decode(&bytes, limits).map_err(|source| Error::Decode {
+        path: path.to_owned(),
+        source: Box::new(source),
+    })
 }

@@ -11,7 +11,7 @@ mod fonts;
 use faults::{Faults, block_on};
 use opendal::{ErrorKind, Operator};
 use typst::syntax::package::PackageSpec;
-use typst_pack::archive::{DecodeLimits, decode, encode};
+use typst_pack::archive::{DecodeError, DecodeLimits, encode};
 use typst_pack::compile::{Artifact, Output, OutputFormat};
 use typst_pack::opendal::WritePolicy::{CreateOrVerify, Overwrite};
 use typst_pack::opendal::{
@@ -44,6 +44,14 @@ fn spec(text: &str) -> PackageSpec {
 
 fn package_manifest(name: &str) -> String {
     format!("[package]\nname = \"{name}\"\nversion = \"1.0.0\"\nentrypoint = \"lib.typ\"\n")
+}
+
+/// Default decode limits with archives of at most `max_archive_bytes`.
+fn archive_limits(max_archive_bytes: u64) -> DecodeLimits {
+    DecodeLimits {
+        max_archive_bytes,
+        ..DecodeLimits::default()
+    }
 }
 
 fn sample_pack() -> Pack {
@@ -99,7 +107,7 @@ fn malformed_prefixes_and_keys_are_rejected_before_storage_access() {
         );
     }
     for key in ["", "pack.typk/", "/pack.typk", "a/../pack.typk"] {
-        let result = block_on(read_archive(&op, key, 1024));
+        let result = block_on(read_archive(&op, key, archive_limits(1024)));
         assert!(matches!(result, Err(Error::InvalidPath { .. })), "{key:?}");
     }
 }
@@ -130,8 +138,8 @@ fn every_read_limit_is_enforced() {
 
     put(&op, "pack.typk", vec![0; 11]);
     assert!(matches!(
-        block_on(read_archive(&op, "pack.typk", 10)),
-        Err(Error::Limit { .. })
+        block_on(read_archive(&op, "pack.typk", archive_limits(10))),
+        Err(Error::Limit { source, .. }) if source.resource == "archive bytes" && source.limit == 10
     ));
 }
 
@@ -378,10 +386,10 @@ fn project_read_skips_packs_and_refuses_listed_keys_that_are_not_normalized() {
 }
 
 /// Whether `result` failed because the object at `at` changed between its
-/// stat and its read.
+/// stat and its read, with a temporary error, as retrying is safe.
 fn changed<T: std::fmt::Debug>(result: Result<T, Error>, at: &str) -> bool {
     matches!(&result, Err(Error::Storage { path, operation: "read", source })
-        if path == at && source.kind() == ErrorKind::ConditionNotMatch)
+        if path == at && source.kind() == ErrorKind::ConditionNotMatch && source.is_temporary())
 }
 
 #[test]
@@ -397,7 +405,7 @@ fn an_object_replaced_between_stat_and_read_fails_instead_of_reading_a_prefix() 
     put(&op, "pack.typk", "pack");
     faults.replace_after_stat("pack.typk", "pack and more");
     assert!(changed(
-        block_on(read_archive(&faulty, "pack.typk", 1024)),
+        block_on(read_archive(&faulty, "pack.typk", archive_limits(1024))),
         "pack.typk"
     ));
 
@@ -417,8 +425,7 @@ fn an_object_replaced_between_stat_and_read_fails_instead_of_reading_a_prefix() 
 fn pack_archives_round_trip_under_both_policies() {
     let op = memory();
     let pack = sample_pack();
-    let archive = encode(&pack);
-    let write = |policy| block_on(write_archive(&op, "out/sample.typk", &archive, policy));
+    let write = |policy| block_on(write_archive(&op, "out/sample.typk", &pack, policy));
 
     assert_eq!(write(CreateOrVerify).unwrap(), WriteOutcome::Created);
     assert_eq!(
@@ -426,26 +433,45 @@ fn pack_archives_round_trip_under_both_policies() {
         WriteOutcome::AlreadyMatching
     );
     assert_eq!(write(Overwrite).unwrap(), WriteOutcome::Written);
+    assert_eq!(get(&op, "out/sample.typk"), encode(&pack));
 
-    let read = block_on(read_archive(&op, "out/sample.typk", 1 << 20)).unwrap();
-    assert_eq!(read.as_slice(), archive.as_slice());
-    let decoded = decode(&read, DecodeLimits::default()).unwrap();
-    assert_eq!(decoded.identity(), pack.identity());
+    let read = block_on(read_archive(
+        &op,
+        "out/sample.typk",
+        DecodeLimits::default(),
+    ))
+    .unwrap();
+    assert_eq!(read.identity(), pack.identity());
 
-    let absent = block_on(read_archive(&op, "out/absent.typk", 1 << 20));
+    let absent = block_on(read_archive(
+        &op,
+        "out/absent.typk",
+        DecodeLimits::default(),
+    ));
     assert!(
         matches!(&absent, Err(Error::Storage { source, .. }) if source.kind() == ErrorKind::NotFound),
         "{absent:?}"
+    );
+    put(&op, "out/garbage.typk", "not a pack");
+    let garbage = block_on(read_archive(
+        &op,
+        "out/garbage.typk",
+        DecodeLimits::default(),
+    ));
+    assert!(
+        matches!(&garbage, Err(Error::Decode { path, source })
+            if path == "out/garbage.typk" && matches!(**source, DecodeError::Zip(_))),
+        "{garbage:?}"
     );
 }
 
 #[test]
 fn create_or_verify_refuses_different_bytes_without_writing() {
     let op = memory();
-    let pack = encode(&sample_pack());
+    let pack = sample_pack();
     // Same length with different bytes needs a comparison; a different
     // length conflicts on the advertised size alone.
-    for existing in [vec![0; pack.as_slice().len()], b"short".to_vec()] {
+    for existing in [vec![0; encode(&pack).len()], b"short".to_vec()] {
         put(&op, "out.typk", existing.clone());
         let error = block_on(write_archive(&op, "out.typk", &pack, CreateOrVerify)).unwrap_err();
         assert!(matches!(error.error, Error::Conflict { .. }), "{error:?}");
@@ -457,13 +483,17 @@ fn create_or_verify_refuses_different_bytes_without_writing() {
 #[test]
 fn empty_objects_are_created_verified_and_read() {
     let op = memory();
-    let empty = Vec::<u8>::new();
+    let spec = spec("@preview/empty:1.0.0");
     for expected in [WriteOutcome::Created, WriteOutcome::AlreadyMatching] {
-        let outcome = block_on(write_archive(&op, "empty.typk", &empty, CreateOrVerify));
+        let outcome = block_on(write_package_archive(&op, "cache/", &spec, b""));
         assert_eq!(outcome.unwrap(), expected);
     }
-    let read = block_on(read_archive(&op, "empty.typk", 0)).unwrap();
-    assert!(read.as_slice().is_empty());
+    let source = PackageSource::ArchiveCache {
+        operator: op.clone(),
+        prefix: "cache/".into(),
+    };
+    let read = block_on(read_package(&[source], &spec, ReadLimits::PACKAGE)).unwrap();
+    assert_eq!(read, PackageRead::CachedArchive(Vec::new()));
 }
 
 #[test]
@@ -543,15 +573,15 @@ fn a_write_failure_reports_the_completed_prefix_and_indeterminate_effect() {
 fn a_lost_conditional_create_race_is_verified() {
     let op = memory();
     let (faulty, faults) = Faults::wrap(&op);
-    let archive = encode(&sample_pack());
+    let pack = sample_pack();
 
     // Another writer created matching bytes after the preflight check.
-    put(&op, "matching.typk", archive.as_slice().to_vec());
+    put(&op, "matching.typk", encode(&pack));
     faults.stale_stat_once("matching.typk");
     let outcome = block_on(write_archive(
         &faulty,
         "matching.typk",
-        &archive,
+        &pack,
         CreateOrVerify,
     ));
     assert_eq!(outcome.unwrap(), WriteOutcome::AlreadyMatching);
@@ -562,7 +592,7 @@ fn a_lost_conditional_create_race_is_verified() {
     let error = block_on(write_archive(
         &faulty,
         "different.typk",
-        &archive,
+        &pack,
         CreateOrVerify,
     ))
     .unwrap_err();
@@ -575,13 +605,13 @@ fn a_lost_conditional_create_race_is_verified() {
 fn create_or_verify_does_not_match_a_grown_object_on_its_prefix() {
     let op = memory();
     let (faulty, faults) = Faults::wrap(&op);
-    let archive = encode(&sample_pack());
-    put(&op, "out.typk", archive.as_slice().to_vec());
-    let mut grown = archive.as_slice().to_vec();
+    let pack = sample_pack();
+    put(&op, "out.typk", encode(&pack));
+    let mut grown = encode(&pack);
     grown.extend_from_slice(b"trailing bytes");
     faults.replace_after_stat("out.typk", grown.clone());
 
-    let error = block_on(write_archive(&faulty, "out.typk", &archive, CreateOrVerify)).unwrap_err();
+    let error = block_on(write_archive(&faulty, "out.typk", &pack, CreateOrVerify)).unwrap_err();
 
     assert!(matches!(error.error, Error::Conflict { .. }), "{error:?}");
     assert_eq!(get(&op, "out.typk"), grown);
@@ -591,8 +621,8 @@ fn create_or_verify_does_not_match_a_grown_object_on_its_prefix() {
 fn a_refused_create_of_an_absent_object_is_retried_and_never_a_conflict() {
     let op = memory();
     let (faulty, faults) = Faults::wrap(&op);
-    let archive = encode(&sample_pack());
-    let write = |path| block_on(write_archive(&faulty, path, &archive, CreateOrVerify));
+    let pack = sample_pack();
+    let write = |path| block_on(write_archive(&faulty, path, &pack, CreateOrVerify));
 
     // S3 refuses a conditional create while another upload of the key is in
     // flight, though the object may then be absent.
@@ -612,17 +642,17 @@ fn a_refused_create_of_an_absent_object_is_retried_and_never_a_conflict() {
 
 #[test]
 fn a_write_that_took_effect_but_failed_replays_as_already_matching() {
-    let archive = encode(&sample_pack());
+    let pack = sample_pack();
     for policy in [CreateOrVerify, Overwrite] {
         let op = memory();
         let (faulty, faults) = Faults::wrap(&op);
         faults.lose_ack("out.typk");
 
-        let error = block_on(write_archive(&faulty, "out.typk", &archive, policy)).unwrap_err();
+        let error = block_on(write_archive(&faulty, "out.typk", &pack, policy)).unwrap_err();
         assert!(error.indeterminate, "{policy:?}");
-        assert_eq!(get(&op, "out.typk"), archive.as_slice());
+        assert_eq!(get(&op, "out.typk"), encode(&pack));
 
-        let replay = block_on(write_archive(&faulty, "out.typk", &archive, CreateOrVerify));
+        let replay = block_on(write_archive(&faulty, "out.typk", &pack, CreateOrVerify));
         assert_eq!(replay.unwrap(), WriteOutcome::AlreadyMatching, "{policy:?}");
     }
 }
@@ -652,15 +682,15 @@ fn extraction_refuses_paths_opendal_would_alias_before_writing_any() {
 fn create_or_verify_requires_conditional_create() {
     let (faulty, faults) = Faults::wrap(&memory());
     faults.hide_conditional_create();
-    let archive = encode(&sample_pack());
+    let pack = sample_pack();
 
-    let error = block_on(write_archive(&faulty, "out.typk", &archive, CreateOrVerify)).unwrap_err();
+    let error = block_on(write_archive(&faulty, "out.typk", &pack, CreateOrVerify)).unwrap_err();
     assert!(
         matches!(error.error, Error::Unsupported { .. }),
         "{error:?}"
     );
 
-    let written = block_on(write_archive(&faulty, "out.typk", &archive, Overwrite));
+    let written = block_on(write_archive(&faulty, "out.typk", &pack, Overwrite));
     assert_eq!(written.unwrap(), WriteOutcome::Written);
 }
 
@@ -853,7 +883,7 @@ mod assembly {
         );
         put(&op, "packages/local/big/1.0.0/lib.typ", vec![b' '; 4096]);
         let mut assembler = assembler(&op);
-        assembler.limits.max_file_bytes = 1024;
+        assembler.package_limits.max_file_bytes = 1024;
 
         let error = block_on(assembler.assemble()).unwrap_err();
 

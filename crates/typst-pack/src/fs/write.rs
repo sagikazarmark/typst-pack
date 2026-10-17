@@ -7,7 +7,11 @@
 //!
 //! - [`WritePolicy::Overwrite`] renames the temporary file over the target,
 //!   so readers observe either the old or the new content. On Unix the
-//!   replaced file's permissions carry over to the new one.
+//!   replaced file's permissions, except setuid and setgid, carry over to the
+//!   new one. Unlike Typst's in-place write, this replaces a read-only target.
+//!   When the directory admits no temporary file but the target exists, the
+//!   target is rewritten in place, as Typst does, which fails for a
+//!   read-only target and can leave a partial file.
 //! - [`WritePolicy::CreateNew`] hard-links the temporary file to the target,
 //!   which fails when the target exists. Any other link failure (FAT, exFAT,
 //!   and some network and FUSE filesystems have no hard links) removes the
@@ -296,7 +300,19 @@ fn commit(
     if policy == WritePolicy::CreateNew && !*hard_links {
         return write_exclusive(dir, name, bytes);
     }
-    let (temp, mut file) = create_temp(dir)?;
+    let (temp, mut file) = match create_temp(dir) {
+        Ok(temp) => temp,
+        // A directory that admits no new entry can still hold a writable
+        // file, which Typst would rewrite in place.
+        Err(error)
+            if policy == WritePolicy::Overwrite
+                && error.kind() == io::ErrorKind::PermissionDenied
+                && dir.metadata(name).is_ok_and(|metadata| metadata.is_file()) =>
+        {
+            return write_in_place(dir, name, bytes);
+        }
+        Err(error) => return Err(error),
+    };
     let written = file
         .write_all(bytes)
         .and_then(|()| file.flush())
@@ -351,11 +367,17 @@ fn settle_link(
 }
 
 /// Gives the temporary `file` the permissions of the regular file it
-/// replaces, as rewriting that file in place would keep them.
+/// replaces, as rewriting that file in place would keep them, except setuid
+/// and setgid: an in-place write by anyone but root clears those.
 #[cfg(unix)]
 fn keep_permissions(dir: &Dir, name: &OsStr, file: &cap_std::fs::File) -> io::Result<()> {
+    use cap_std::fs::{Permissions, PermissionsExt};
+
     match dir.metadata(name) {
-        Ok(metadata) if metadata.is_file() => file.set_permissions(metadata.permissions()),
+        Ok(metadata) if metadata.is_file() => {
+            let mode = metadata.permissions().mode() & 0o1777;
+            file.set_permissions(Permissions::from_mode(mode))
+        }
         _ => Ok(()),
     }
 }
@@ -365,6 +387,15 @@ fn keep_permissions(dir: &Dir, name: &OsStr, file: &cap_std::fs::File) -> io::Re
 #[cfg(not(unix))]
 fn keep_permissions(_: &Dir, _: &OsStr, _: &cap_std::fs::File) -> io::Result<()> {
     Ok(())
+}
+
+/// Truncates and rewrites the existing file `name`; readers can observe a
+/// partial file.
+fn write_in_place(dir: &Dir, name: &OsStr, bytes: &[u8]) -> io::Result<()> {
+    let mut options = OpenOptions::new();
+    options.write(true).truncate(true);
+    let mut file = dir.open_with(name, &options)?;
+    file.write_all(bytes).and_then(|()| file.flush())
 }
 
 fn write_exclusive(dir: &Dir, name: &OsStr, bytes: &[u8]) -> io::Result<()> {
@@ -468,11 +499,23 @@ fn check_plan(files: &[(&Path, &[u8])]) -> Vec<WriteIssue> {
 /// A path component as filesystems that ignore case and Unicode
 /// normalization (APFS, HFS+, NTFS) compare it.
 ///
-/// Lowercasing goes character by character, so a final sigma folds like any
-/// other sigma.
+/// Each character is uppercased and then lowercased, character by character:
+/// NTFS compares uppercased names, so `ı` and `i` (both `I`), `ſ` and `s`, and
+/// a final sigma and any other sigma collide there. Only one-to-one uppercase
+/// mappings apply, as in NTFS's upcase table, so `ß` and `ss` stay distinct.
+/// The fold may still equate a few names NTFS keeps apart (`İ` lowercases to
+/// `i` and a combining dot); it errs toward refusing a plan, never toward
+/// letting two files collide.
 fn fold(component: &str) -> String {
     component
         .chars()
+        .map(|character| {
+            let mut upper = character.to_uppercase();
+            match (upper.next(), upper.next()) {
+                (Some(single), None) => single,
+                _ => character,
+            }
+        })
         .flat_map(char::to_lowercase)
         .nfc()
         .collect()
@@ -712,5 +755,12 @@ mod tests {
         assert_eq!(fold("Caf\u{e9}"), fold("cafe\u{301}"));
         assert_eq!(fold("a\u{3a3}"), fold("a\u{3c3}"));
         assert_ne!(fold("a"), fold("b"));
+        // Names NTFS upper-cases alike: dotless i, long s, final sigma.
+        assert_eq!(fold("\u{131}"), fold("i"));
+        assert_eq!(fold("\u{17f}"), fold("S"));
+        assert_eq!(fold("\u{3c2}"), fold("\u{3c3}"));
+        // One-to-many uppercase mappings do not apply, as in NTFS.
+        assert_ne!(fold("stra\u{df}e"), fold("strasse"));
+        assert_ne!(fold("\u{fb01}le"), fold("file"));
     }
 }

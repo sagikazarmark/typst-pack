@@ -94,7 +94,8 @@ impl Output {
 /// The creation datetime recorded in PDF metadata.
 ///
 /// As in Typst's CLI, an instant whose datetime Typst cannot represent (such
-/// as one past the year 9999) or an offset beyond ±23:59 records nothing.
+/// as one past the year 9999) records nothing. A UTC offset of a day or more
+/// is an invalid request, as for [`DocumentTime`](super::DocumentTime).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash)]
 pub enum CreationTimestamp {
     /// Record no creation datetime.
@@ -102,9 +103,16 @@ pub enum CreationTimestamp {
     Omit,
     /// The instant this many seconds after the UNIX epoch, recorded in UTC.
     Utc(i64),
-    /// The instant `unix` seconds after the UNIX epoch, recorded as local time
-    /// at a UTC offset of `offset_minutes`.
-    Local { unix: i64, offset_minutes: i32 },
+    /// The instant `seconds` after the UNIX epoch, recorded as local time at
+    /// a UTC offset of `utc_offset_seconds`, as
+    /// [`DocumentTime::Local`](super::DocumentTime::Local) describes it. PDF
+    /// records the offset in whole minutes, so seconds beyond a minute are
+    /// dropped from the recorded offset (not from the local time), as in
+    /// Typst's CLI.
+    Local {
+        seconds: i64,
+        utc_offset_seconds: i32,
+    },
 }
 
 impl CreationTimestamp {
@@ -114,10 +122,10 @@ impl CreationTimestamp {
             Self::Omit => None,
             Self::Utc(unix) => datetime_at(unix, 0).map(Timestamp::new_utc),
             Self::Local {
-                unix,
-                offset_minutes,
-            } => datetime_at(unix, i64::from(offset_minutes) * 60)
-                .and_then(|at| Timestamp::new_local(at, offset_minutes)),
+                seconds,
+                utc_offset_seconds,
+            } => datetime_at(seconds, i64::from(utc_offset_seconds))
+                .and_then(|at| Timestamp::new_local(at, utc_offset_seconds / 60)),
         }
     }
 }
@@ -326,6 +334,13 @@ impl Output {
                 if output.pdf_tags.is_auto() {
                     output.pdf_tags = Smart::Custom(default_tagged && !selected);
                 }
+                if let CreationTimestamp::Local {
+                    utc_offset_seconds, ..
+                } = output.pdf_timestamp
+                    && utc_offset_seconds.unsigned_abs() >= 86_400
+                {
+                    issues.push(RequestIssue::InvalidUtcOffset);
+                }
                 normalized.pdf_timestamp = output.pdf_timestamp.to_pdf();
             }
             OutputFormat::Png => {
@@ -368,12 +383,12 @@ impl Output {
                     CreationTimestamp::Omit => preimage.str("omit"),
                     CreationTimestamp::Utc(unix) => preimage.str("utc").int(unix),
                     CreationTimestamp::Local {
-                        unix,
-                        offset_minutes,
+                        seconds,
+                        utc_offset_seconds,
                     } => preimage
                         .str("local")
-                        .int(unix)
-                        .int(i64::from(offset_minutes)),
+                        .int(seconds)
+                        .int(i64::from(utc_offset_seconds)),
                 };
                 preimage.bool(self.pretty);
             }

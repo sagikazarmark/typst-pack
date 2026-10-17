@@ -8,7 +8,7 @@ use typst::syntax::package::PackageSpec;
 use typst_kit::packages::FsPackages;
 
 use super::Error;
-use super::walk::{Kind, Root, Walker, utf8_path};
+use super::walk::{Root, Walker, utf8_path};
 use crate::ReadLimits;
 use crate::package::{ReadFailure, Tree};
 
@@ -16,21 +16,23 @@ use crate::package::{ReadFailure, Tree};
 ///
 /// The root may itself be a symbolic link, as `@local` development packages
 /// commonly are. Links inside the tree are followed when they resolve beneath
-/// the root. Version-control directories (`.git`, `.hg`, `.svn`) are left
-/// out, as Typst Universe bundles leave them out, so a package checked out
-/// from version control reads as the same tree.
+/// the root. Version-control entries (`.git`, `.hg`, `.svn`, directories or
+/// files such as a submodule's `.git` link) are left out, as Typst Universe
+/// bundles leave them out, so a package checked out from version control
+/// reads as the same tree.
 pub fn read_package(root: impl AsRef<Path>, limits: ReadLimits) -> Result<Tree, Error> {
     let root_path = root.as_ref();
     let root = Root::open(root_path)?;
     let mut files = Vec::new();
     Walker::strict(limits).walk(
         &root,
-        |relative, kind| {
+        |relative, _| {
             utf8_path(root_path, relative)?;
+            // Whatever their kind: a submodule or worktree has a `.git` file.
             let vcs = relative
                 .file_name()
-                .is_some_and(|name| VCS_DIRS.iter().any(|vcs| name == *vcs));
-            Ok(!(kind == Kind::Dir && vcs))
+                .is_some_and(|name| VCS_NAMES.iter().any(|vcs| name == *vcs));
+            Ok(!vcs)
         },
         |relative, bytes| {
             files.push((utf8_path(root_path, &relative)?, bytes));
@@ -40,8 +42,8 @@ pub fn read_package(root: impl AsRef<Path>, limits: ReadLimits) -> Result<Tree, 
     Ok(Tree::new(files)?)
 }
 
-/// Version-control directories, never part of a package.
-const VCS_DIRS: [&str; 3] = [".git", ".hg", ".svn"];
+/// Version-control entries, never part of a package.
+const VCS_NAMES: [&str; 3] = [".git", ".hg", ".svn"];
 
 /// Where the packer reads packages from.
 #[derive(Clone, Debug)]

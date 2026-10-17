@@ -237,8 +237,8 @@ fn pdf_creation_timestamps_are_recorded_as_requested() {
     );
     assert_eq!(
         creation(CreationTimestamp::Local {
-            unix: 946_684_800,
-            offset_minutes: -90,
+            seconds: 946_684_800,
+            utc_offset_seconds: -90 * 60,
         }),
         Some(((1999, 12, 31), (22, 30, 0), -1))
     );
@@ -392,6 +392,23 @@ fn document_time_is_explicit() {
             Err(compile::Error::InvalidRequest(issues)) if issues == [issue.clone()]
         ));
     }
+
+    // A PDF timestamp offset is held to the same bound.
+    let mut request = compile::Request::new(
+        pack("Hello"),
+        Output {
+            pdf_timestamp: CreationTimestamp::Local {
+                seconds: 0,
+                utc_offset_seconds: -86_400,
+            },
+            ..Output::new(OutputFormat::Pdf)
+        },
+    );
+    request.options.document_time = DocumentTime::Absent;
+    assert!(matches!(
+        compile(&request),
+        Err(compile::Error::InvalidRequest(issues)) if issues == [RequestIssue::InvalidUtcOffset]
+    ));
 }
 
 #[test]
