@@ -40,7 +40,7 @@ jobs:
       - if: ${{ !cancelled() }}
         run: cargo test --locked -p typst-pack --no-default-features --features fs,opendal,package-reading,embedded-fonts --target ${{ matrix.target }} --test creation_conformance
       - if: ${{ !cancelled() }}
-        run: cargo test --locked -p typst-pack --features fs,embedded-fonts --lib fs::
+        run: cargo test --locked -p typst-pack --features fs,embedded-fonts --lib 'fs::'
       - if: ${{ !cancelled() }}
         run: cargo test --locked -p typst-pack --features fs,embedded-fonts --test fs --test pack
       # Writing, paths, and stdout are also platform behavior the CLI exposes.
