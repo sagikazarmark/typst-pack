@@ -6,6 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::btree_map::Entry as Slot;
+use std::fmt;
 
 use crate::archive::font_member_name;
 use crate::pack::package_member_prefix;
@@ -22,11 +23,33 @@ pub struct Selection {
     pub fonts: bool,
 }
 
+/// What one extracted file holds.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum EntryKind {
+    /// A project file, at its root-relative path.
+    ProjectFile,
+    /// A file of an embedded package, under
+    /// `packages/<namespace>/<name>/<version>/`.
+    PackageFile,
+    /// An embedded font container, under `fonts/`.
+    FontContainer,
+}
+
+impl fmt::Display for EntryKind {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::ProjectFile => "project file",
+            Self::PackageFile => "package file",
+            Self::FontContainer => "font container",
+        })
+    }
+}
+
 /// One file of a [`Plan`].
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Entry {
     path: String,
-    kind: &'static str,
+    kind: EntryKind,
     bytes: SharedBytes,
 }
 
@@ -34,6 +57,11 @@ impl Entry {
     /// The canonical slash-separated path relative to the destination.
     pub fn path(&self) -> &str {
         &self.path
+    }
+
+    /// What the file holds.
+    pub fn kind(&self) -> EntryKind {
+        self.kind
     }
 
     /// The exact file bytes.
@@ -63,13 +91,12 @@ impl Plan {
 pub struct Conflict {
     /// The first path, in path order.
     pub path: String,
-    /// What the first path holds: a project file, package file, or font
-    /// container.
-    pub kind: &'static str,
+    /// What the first path holds.
+    pub kind: EntryKind,
     /// The conflicting path.
     pub other_path: String,
     /// What the conflicting path holds.
-    pub other_kind: &'static str,
+    pub other_kind: EntryKind,
 }
 
 /// A pack whose selected content cannot be extracted into one directory
@@ -81,10 +108,6 @@ pub struct Error {
     pub issues: Vec<Conflict>,
 }
 
-const PROJECT_FILE: &str = "project file";
-const PACKAGE_FILE: &str = "package file";
-const FONT_CONTAINER: &str = "font container";
-
 /// Plans the extraction of a pack's project files and the selected embedded
 /// dependencies.
 pub fn plan(pack: &Pack, selection: Selection) -> Result<Plan, Error> {
@@ -95,7 +118,7 @@ pub fn plan(pack: &Pack, selection: Selection) -> Result<Plan, Error> {
         add(
             &mut entries,
             path.to_owned(),
-            PROJECT_FILE,
+            EntryKind::ProjectFile,
             bytes,
             &mut issues,
         );
@@ -107,7 +130,7 @@ pub fn plan(pack: &Pack, selection: Selection) -> Result<Plan, Error> {
                 add(
                     &mut entries,
                     format!("{prefix}{path}"),
-                    PACKAGE_FILE,
+                    EntryKind::PackageFile,
                     bytes,
                     &mut issues,
                 );
@@ -118,7 +141,13 @@ pub fn plan(pack: &Pack, selection: Selection) -> Result<Plan, Error> {
         for requirement in pack.font_requirements() {
             if let Some(data) = pack.shared_font_data(&requirement.digest) {
                 let path = font_member_name(&requirement.digest, data);
-                add(&mut entries, path, FONT_CONTAINER, data, &mut issues);
+                add(
+                    &mut entries,
+                    path,
+                    EntryKind::FontContainer,
+                    data,
+                    &mut issues,
+                );
             }
         }
     }
@@ -149,18 +178,12 @@ pub fn plan(pack: &Pack, selection: Selection) -> Result<Plan, Error> {
 
     if !issues.is_empty() {
         issues.sort_by(|left, right| {
-            (
-                rank(left.kind),
-                &left.path,
-                rank(left.other_kind),
-                &left.other_path,
-            )
-                .cmp(&(
-                    rank(right.kind),
-                    &right.path,
-                    rank(right.other_kind),
-                    &right.other_path,
-                ))
+            (left.kind, &left.path, left.other_kind, &left.other_path).cmp(&(
+                right.kind,
+                &right.path,
+                right.other_kind,
+                &right.other_path,
+            ))
         });
         return Err(Error { issues });
     }
@@ -172,7 +195,7 @@ pub fn plan(pack: &Pack, selection: Selection) -> Result<Plan, Error> {
 fn add(
     entries: &mut BTreeMap<String, Entry>,
     path: String,
-    kind: &'static str,
+    kind: EntryKind,
     bytes: &SharedBytes,
     issues: &mut Vec<Conflict>,
 ) {
@@ -192,13 +215,5 @@ fn add(
                 bytes: bytes.clone(),
             });
         }
-    }
-}
-
-fn rank(kind: &str) -> u8 {
-    match kind {
-        PROJECT_FILE => 0,
-        PACKAGE_FILE => 1,
-        _ => 2,
     }
 }

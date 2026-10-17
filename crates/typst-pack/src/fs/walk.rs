@@ -5,9 +5,10 @@
 //! links are followed. A strict walk (projects and packages) accepts a link
 //! only when its target resolves beneath the root, and opens that target
 //! through the root handle; a lenient walk (fonts, which are host
-//! configuration) follows links anywhere and records failing entries instead
-//! of stopping. Directory cycles are detected by comparing canonical
-//! directory paths on the current descent.
+//! configuration) follows links anywhere and records failing entries, and
+//! files over the per-file byte limit, instead of stopping. Only selected
+//! entries count toward the entry limit. Directory cycles are detected by
+//! comparing canonical directory paths on the current descent.
 
 use std::ffi::{OsStr, OsString};
 use std::io::{self, Read};
@@ -18,6 +19,9 @@ use cap_std::fs::{Dir, File};
 
 use super::Error;
 use crate::limits::{LimitExceeded, ReadLimits};
+
+/// The resource a file over the per-file byte limit names.
+const FILE_BYTES: &str = "file bytes";
 
 /// The resolved kind of one directory entry.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -60,6 +64,8 @@ enum Target {
     Link(PathBuf),
     /// A symbolic link that cannot be resolved.
     Broken(io::Error),
+    /// An entry whose type cannot be read.
+    Unreadable(io::Error),
 }
 
 struct Entry {
@@ -95,8 +101,9 @@ impl Walker {
         Self::new(limits, false)
     }
 
-    /// A lenient walker follows links anywhere and records failing entries in
-    /// [`Self::skipped`]. Exceeded limits still stop it.
+    /// A lenient walker follows links anywhere and records failing entries,
+    /// including files over the per-file byte limit, in [`Self::skipped`].
+    /// The entry and total byte limits still stop it.
     pub(crate) fn lenient(limits: ReadLimits) -> Self {
         Self::new(limits, true)
     }
@@ -182,7 +189,7 @@ impl Walker {
             path: path.to_owned(),
             source,
         };
-        LimitExceeded::check(length, limits.max_file_bytes, "file bytes").map_err(limit)?;
+        LimitExceeded::check(length, limits.max_file_bytes, FILE_BYTES).map_err(limit)?;
         LimitExceeded::add(
             &mut self.total_bytes,
             length,
@@ -195,7 +202,10 @@ impl Walker {
 
     /// Records a failing entry in a lenient walk; anything else stops.
     fn skip(&mut self, error: Error) -> Result<(), Error> {
-        if self.lenient && !matches!(error, Error::Limit { .. }) {
+        // The per-file limit concerns one entry; the others bound the walk.
+        let bounds_walk =
+            matches!(&error, Error::Limit { source, .. } if source.resource != FILE_BYTES);
+        if self.lenient && !bounds_walk {
             self.skipped.push(error);
             Ok(())
         } else {
@@ -219,22 +229,22 @@ where
         };
         for (name, file_type) in listed {
             let relative = relative.join(&name);
+            let entry = match file_type {
+                Ok(file_type) => classify(file_type, self.stack.last().expect("a root"), &name),
+                Err(error) => Entry {
+                    kind: Kind::File,
+                    target: Target::Unreadable(error),
+                },
+            };
+            if !(self.select)(&relative, entry.kind)? {
+                continue;
+            }
             let limits = self.walker.limits;
             LimitExceeded::add(&mut self.walker.entries, 1, limits.max_entries, "entries")
                 .map_err(|source| Error::Limit {
                     path: self.root.path.join(&relative),
                     source,
                 })?;
-            let entry = match file_type {
-                Ok(file_type) => classify(file_type, self.stack.last().expect("a root"), &name),
-                Err(error) => Entry {
-                    kind: Kind::File,
-                    target: Target::Broken(error),
-                },
-            };
-            if !(self.select)(&relative, entry.kind)? {
-                continue;
-            }
             if let Err(error) = self.visit(dir, &name, &relative, entry) {
                 self.walker.skip(error)?;
             }
@@ -252,7 +262,8 @@ where
         let root = self.root;
         let path = root.path.join(relative);
         let (canonical, linked) = match entry.target {
-            Target::Broken(source) => return Err(Error::Io { path, source }),
+            Target::Broken(source) => return Err(Error::BrokenSymlink { path, source }),
+            Target::Unreadable(source) => return Err(Error::Io { path, source }),
             Target::Child => (self.stack.last().expect("a root").join(name), false),
             Target::Link(target) => {
                 if !self.walker.lenient && !target.starts_with(&root.canonical) {

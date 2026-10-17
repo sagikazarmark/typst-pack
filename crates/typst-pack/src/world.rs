@@ -17,7 +17,7 @@ use typst_kit::datetime::Time;
 use typst_kit::files::{FileLoader, FileStore};
 use typst_kit::fonts::FontStore;
 
-use crate::compile::DocumentTime;
+use crate::compile::{DocumentTime, RequestIssue};
 use crate::package::{ReadFailure, Tree};
 use crate::project::ProjectSnapshot;
 
@@ -36,33 +36,70 @@ pub(crate) struct SourceWorld {
 }
 
 /// Where a world's file requests are served from, and nothing else.
+/// Cloning a loader is cheap.
+#[derive(Clone)]
 pub(crate) struct Loader {
     pub(crate) project: ProjectSnapshot,
     /// Package trees keyed by specification text.
-    pub(crate) packages: BTreeMap<String, Tree>,
+    pub(crate) packages: Arc<BTreeMap<String, Tree>>,
     /// Packages the caller declared it cannot supply.
-    pub(crate) failures: HashMap<PackageSpec, ReadFailure>,
+    pub(crate) failures: Arc<HashMap<PackageSpec, ReadFailure>>,
 }
 
 /// What a world answers `datetime.today()` with.
 pub(crate) enum Clock {
     Absent,
-    /// A fixed date or datetime, returned as given.
-    Fixed(Datetime),
-    /// A fixed instant whose date respects requested timezone offsets.
-    Timestamp(Time),
+    /// A fixed date, whatever offset is requested.
+    Date(Datetime),
+    /// A fixed instant whose date respects requested UTC offsets, and is
+    /// read at `utc_offset_seconds` (UTC when `None`) without one.
+    Timestamp {
+        seconds: i64,
+        utc_offset_seconds: Option<i32>,
+        /// The instant, for requested offsets.
+        instant: Time,
+        /// The instant shifted by the default offset, read in UTC.
+        shifted: Time,
+    },
 }
 
 impl Clock {
-    /// The clock for a document time, or `None` when its timestamp is out of
-    /// range.
-    pub(crate) fn new(document_time: DocumentTime) -> Option<Self> {
-        Some(match document_time {
-            DocumentTime::Absent => Self::Absent,
-            DocumentTime::Fixed(datetime) => Self::Fixed(datetime),
-            DocumentTime::UnixTimestamp(timestamp) => {
-                Self::Timestamp(Time::fixed_timestamp(timestamp).ok()?)
+    /// The clock for a document time, or the reason it has none.
+    pub(crate) fn new(document_time: DocumentTime) -> Result<Self, RequestIssue> {
+        let (seconds, utc_offset_seconds) = match document_time {
+            DocumentTime::Absent => return Ok(Self::Absent),
+            // As Typst's fixed clock: the date of a datetime, never a time.
+            DocumentTime::Fixed(datetime) => {
+                let (Some(year), Some(month), Some(day)) =
+                    (datetime.year(), datetime.month(), datetime.day())
+                else {
+                    return Err(RequestIssue::UndatedDocumentTime);
+                };
+                let date = Datetime::from_ymd(year, month, day);
+                return date
+                    .map(Self::Date)
+                    .ok_or(RequestIssue::UndatedDocumentTime);
             }
+            DocumentTime::UnixTimestamp(seconds) => (seconds, None),
+            DocumentTime::Local {
+                seconds,
+                utc_offset_seconds,
+            } => (seconds, Some(utc_offset_seconds)),
+        };
+        let offset = utc_offset_seconds.unwrap_or(0);
+        if offset.unsigned_abs() >= 86_400 {
+            return Err(RequestIssue::InvalidUtcOffset);
+        }
+        let time = |seconds: Option<i64>| {
+            seconds
+                .and_then(|seconds| Time::fixed_timestamp(seconds).ok())
+                .ok_or(RequestIssue::InvalidDocumentTimestamp)
+        };
+        Ok(Self::Timestamp {
+            seconds,
+            utc_offset_seconds,
+            instant: time(Some(seconds))?,
+            shifted: time(seconds.checked_add(i64::from(offset)))?,
         })
     }
 }
@@ -168,8 +205,9 @@ impl World for SourceWorld {
         match &self.clock {
             Clock::Absent => None,
             // A plain date carries no instant for an offset to shift.
-            Clock::Fixed(datetime) => Some(*datetime),
-            Clock::Timestamp(time) => time.today(offset),
+            Clock::Date(date) => Some(*date),
+            Clock::Timestamp { instant, .. } if offset.is_some() => instant.today(offset),
+            Clock::Timestamp { shifted, .. } => shifted.today(None),
         }
     }
 }
@@ -256,10 +294,11 @@ impl Sources {
         }
     }
 
-    /// Names project files by their location beneath a filesystem root.
-    #[cfg(feature = "fs")]
-    pub(crate) fn with_root(mut self, root: PathBuf) -> Self {
-        self.root = Some(root.into());
+    /// Names project files by their location beneath `root`, the directory
+    /// the project was read from, relative to the current directory as
+    /// Typst's CLI does. The sources of `fs::Packer` already do.
+    pub fn with_root(mut self, root: impl Into<PathBuf>) -> Self {
+        self.root = Some(root.into().into());
         self
     }
 }

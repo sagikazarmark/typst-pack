@@ -36,9 +36,9 @@ diagnostics = ["typst-kit/emit-diagnostics"]
 # Ship Typst's embedded fonts (Libertinus Serif, New Computer Modern, ...) so
 # packs that only use them render without any font embedding.
 embedded-fonts = ["typst-kit/embedded-fonts"]
-# Transport-free package reading helpers: registry URL construction and
-# bounded package archive expansion. Pulls compression and archive support but
-# no HTTP client, so a host supplies its own transport.
+# Transport-free bounded expansion of registry package archives. Pulls
+# compression and archive support but no HTTP client, so a host supplies its
+# own transport.
 package-reading = ["dep:flate2", "dep:tar"]
 # Caller-polled OpenDAL storage integration. Backend services, transports,
 # executors, runtimes, TLS, layers, and retry policy remain caller-selected.
@@ -52,8 +52,10 @@ parallel = ["dep:rayon"]
 fs = [
     "dep:cap-fs-ext",
     "dep:cap-std",
+    "dep:chrono",
     "dep:fontconfig-parser",
     "dep:ignore",
+    "dep:unicode-normalization",
     "typst-kit/system-files",
 ]
 # Network egress: downloading packages from the Typst Universe registry during
@@ -72,6 +74,7 @@ egress = [
 [dependencies]
 cap-fs-ext = { version = "4", default-features = false, features = ["std", "cap-std"], optional = true }
 cap-std = { version = "4", optional = true }
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"], optional = true }
 ecow = "0.2"
 env_proxy = { version = "0.4", optional = true }
 flate2 = { version = "1", optional = true }
@@ -93,6 +96,7 @@ typst-pdf = { workspace = true }
 typst-render = "=0.15.1"
 typst-svg = "=0.15.1"
 typst-timing = "=0.15.1"
+unicode-normalization = { version = "0.1", optional = true }
 ureq = { version = "2", default-features = false, features = ["tls"], optional = true }
 webpki-roots = { version = "1", optional = true }
 zip = { version = "8", default-features = false, features = ["deflate"] }
@@ -104,9 +108,7 @@ fontconfig-parser = { version = "0.5", default-features = false, optional = true
 # The reading suite writes the archives the helpers expand.
 flate2 = "1"
 hayro-syntax = { workspace = true }
-ignore = "0.4"
 proptest = "1"
-sha2 = { version = "0.11", default-features = false }
 tar = { version = "0.4", default-features = false }
 tempfile = { workspace = true }
 tiny-skia = "0.12"

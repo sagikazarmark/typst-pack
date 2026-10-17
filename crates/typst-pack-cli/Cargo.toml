@@ -37,3 +37,5 @@ typst-timing = "=0.15.1"
 [dev-dependencies]
 hayro-syntax = { workspace = true }
 tempfile = { workspace = true }
+# Rewrites a pack manifest to record another producer.
+zip = { version = "8", default-features = false, features = ["deflate"] }

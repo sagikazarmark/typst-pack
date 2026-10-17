@@ -50,8 +50,11 @@ compilations. Per-recipient data is passed as `sys.inputs`: strings, or bytes
 `str` accept directly. Inputs never add project paths or change requirements.
 
 **Fonts are whole containers.** A required font container contributes every
-one of its faces at compile time, so text the discovery compile did not render
-falls back the same way it would in Typst.
+one of its faces and glyphs at compile time, so other text set in a required
+font renders with it. Text that needs a font file no discovery compile loaded
+falls back only among the pack's fonts, which can differ from Typst with the
+creator's fonts (for example, missing glyphs); a discovery variant whose inputs
+reach that text makes its font a requirement.
 
 **Embedded or external, fulfilled by digest.** Each package and font container
 is either embedded in the pack or external. Packages are embedded by default;

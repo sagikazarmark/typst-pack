@@ -2,20 +2,22 @@
 
 use std::path::{Path, PathBuf};
 
-use typst_pack::archive::{self, DecodeLimits};
 use typst_pack::extract::{self, Selection};
 use typst_pack::fs::{self, WriteError, WriteIssue, WritePolicy};
 
-use super::CommandResult;
+use super::{CommandResult, Failure, chain, escape, listed, read_pack};
 use crate::cli::ExtractArgs;
 
 pub fn run(args: ExtractArgs) -> CommandResult {
-    let pack = archive::open(&args.pack, DecodeLimits::default())
-        .map_err(|error| format!("cannot open pack `{}`: {error}", args.pack.display()))?;
-    let output = args.output.unwrap_or_else(|| match args.pack.file_stem() {
-        Some(stem) => PathBuf::from(stem),
-        None => PathBuf::from("extracted"),
-    });
+    let output = match (args.output, args.pack.file_stem()) {
+        (Some(output), _) => output,
+        (None, _) if args.pack == Path::new("-") => {
+            return Err("an explicit --output is required when the pack is read from stdin".into());
+        }
+        (None, Some(stem)) => PathBuf::from(stem),
+        (None, None) => PathBuf::from("extracted"),
+    };
+    let pack = read_pack(&args.pack)?;
     let selection = Selection {
         packages: args.packages || args.all,
         fonts: args.fonts || args.all,
@@ -26,7 +28,7 @@ pub fn run(args: ExtractArgs) -> CommandResult {
     } else {
         WritePolicy::CreateNew
     };
-    fs::write_extraction(&plan, &output, policy).map_err(|error| describe(&error, &output))?;
+    fs::write_extraction(&output, &plan, policy).map_err(|error| describe(&error, &output))?;
     println!(
         "extracted {} file(s) into `{}`",
         plan.entries().len(),
@@ -35,9 +37,11 @@ pub fn run(args: ExtractArgs) -> CommandResult {
     Ok(())
 }
 
-fn describe(error: &WriteError, destination: &Path) -> String {
+/// Every reason a write was refused, suggesting `--force` only when existing
+/// files were all that stood in the way.
+fn describe(error: &WriteError, destination: &Path) -> Failure {
     let WriteError::Rejected { issues } = error else {
-        return error.to_string();
+        return escape(&chain(error)).into();
     };
     let conflict = |path: &Path| {
         format!(
@@ -45,13 +49,23 @@ fn describe(error: &WriteError, destination: &Path) -> String {
             path.display()
         )
     };
-    match issues.first() {
-        Some(WriteIssue::ExistingTarget { path }) => format!(
-            "`{}` already exists (pass --force to overwrite)",
-            destination.join(path).display()
-        ),
-        Some(WriteIssue::ConflictingTarget { path }) => conflict(&destination.join(path)),
-        Some(WriteIssue::ConflictingAncestor { ancestor, .. }) => conflict(ancestor),
-        _ => error.to_string(),
+    let lines = issues.iter().map(|issue| {
+        escape(&match issue {
+            WriteIssue::ExistingTarget { path } => {
+                format!("`{}` already exists", destination.join(path).display())
+            }
+            WriteIssue::ConflictingTarget { path } => conflict(&destination.join(path)),
+            WriteIssue::ConflictingAncestor { ancestor, .. } => conflict(ancestor),
+            issue => issue.to_string(),
+        })
+    });
+    let existing = |issue| matches!(issue, &WriteIssue::ExistingTarget { .. });
+    let force = !issues.is_empty() && issues.iter().all(existing);
+    Failure::Error {
+        message: listed("nothing was extracted", lines),
+        hints: force
+            .then(|| "pass --force to overwrite existing files".to_owned())
+            .into_iter()
+            .collect(),
     }
 }

@@ -102,7 +102,7 @@ async fn project_read_hands_off_exact_bytes(admin: &Operator) {
         .await
         .unwrap();
 
-    let snapshot = read_project(admin, "project/", "main.typ", &ReadLimits::default())
+    let snapshot = read_project(admin, "project/", "main.typ", ReadLimits::default())
         .await
         .unwrap();
 
@@ -145,7 +145,7 @@ async fn paginated_font_read_reaches_the_second_page(admin: &Operator) {
         embedded: false,
     }];
 
-    let catalog = read_fonts(admin, &sources, &ReadLimits::default())
+    let catalog = read_fonts(admin, &sources, ReadLimits::default())
         .await
         .unwrap();
 
@@ -173,7 +173,7 @@ async fn package_registry_read_validates_then_populates_cache(admin: &Operator) 
             prefix: "packages/registry/".into(),
         },
     ];
-    let read = read_package(&sources, &spec, &ReadLimits::default())
+    let read = read_package(&sources, &spec, ReadLimits::default())
         .await
         .unwrap();
     assert_eq!(read, PackageRead::RegistryArchive(archive.clone()));
@@ -185,7 +185,7 @@ async fn package_registry_read_validates_then_populates_cache(admin: &Operator) 
         .unwrap();
     assert_eq!(outcome, WriteOutcome::Created);
 
-    let cached = read_package(&sources, &spec, &ReadLimits::default())
+    let cached = read_package(&sources, &spec, ReadLimits::default())
         .await
         .unwrap();
     assert_eq!(cached, PackageRead::CachedArchive(archive));

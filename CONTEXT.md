@@ -39,7 +39,7 @@ every face of a required container is available at compile time.
 An embedded package or font is stored in the pack. An external one is recorded
 by digest and supplied by the caller at compile time.
 
-**Fulfilment**:
+**Fulfillment**:
 Supplying the external packages and fonts a pack requires. Only a supplied tree
 or container with the required digest is used; anything missing is reported by
 package spec or font family.
@@ -67,8 +67,10 @@ A compiled artifact. PDF and HTML produce one document; PNG and SVG produce one
 artifact per selected page, numbered by its page in the source document.
 
 **Document time**:
-The explicit value used for Typst's `datetime.today()`: absent, a fixed date or
-datetime, or a Unix timestamp. Compilation never reads the wall clock.
+The explicit value used for Typst's `datetime.today()`: absent, a fixed date,
+or a Unix timestamp read in UTC or at a local UTC offset. Compilation never
+reads the wall clock; the filesystem packer and the CLI capture the host's
+local time when no timestamp is given, as Typst does.
 
 **Digest, pack identity, compilation identity**:
 A digest is SHA-256 written `sha256:<hex>`. The pack identity digests the
@@ -78,4 +80,5 @@ and the external dependencies used.
 
 **Extraction**:
 Writing a pack's project files, and optionally its embedded packages and fonts,
-back into an editable directory tree.
+back into an editable directory tree. Each extracted file is a project file, a
+package file, or a font container.

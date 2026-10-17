@@ -43,6 +43,9 @@ jobs:
         run: cargo test --locked -p typst-pack --features fs,embedded-fonts --lib fs::
       - if: ${{ !cancelled() }}
         run: cargo test --locked -p typst-pack --features fs,embedded-fonts --test fs --test pack
+      # Writing, paths, and stdout are also platform behavior the CLI exposes.
+      - if: ${{ !cancelled() }}
+        run: cargo test --locked -p typst-pack-cli --test cli --test lifecycle_compatibility
 
   opendal:
     name: opendal (feature-isolated)

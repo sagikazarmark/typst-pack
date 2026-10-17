@@ -9,8 +9,10 @@ use std::io::{self, Cursor, Read, Write};
 
 use proptest::prelude::*;
 use typst::syntax::package::PackageSpec;
+use typst::text::{FontStretch, FontStyle, FontWeight};
 use typst_pack::archive::{self, DecodeError, DecodeLimits, decode, encode};
 use typst_pack::extract::{self, Conflict, Selection};
+use typst_pack::font::Face;
 use typst_pack::{Metadata, Pack, PackIssue, ProjectSnapshot};
 
 fn spec(value: &str) -> PackageSpec {
@@ -315,6 +317,61 @@ fn encode_decode_preserves_font_containers_and_verifies_their_digests() {
     }
 }
 
+#[cfg(feature = "embedded-fonts")]
+#[test]
+fn an_embedded_font_container_has_exactly_one_member_name() {
+    let font = fonts::typst_container();
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"Fonts".to_vec())
+        .font(font.clone())
+        .build()
+        .unwrap();
+    let archive = encode(&pack);
+    let real = members(&archive)
+        .into_iter()
+        .map(|(name, _)| name)
+        .find(|name| name.starts_with("fonts/"))
+        .unwrap();
+    assert!(real.ends_with(".ttf") || real.ends_with(".otf"), "{real}");
+    let stem = real.rsplit_once('.').unwrap().0.to_owned();
+    let other_extension = if real.ends_with(".ttf") { "otf" } else { "ttf" };
+
+    // Extra members named after the declared digest.
+    for (name, data) in [
+        (format!("{stem}.{other_extension}"), b"junk".to_vec()),
+        (format!("{stem}.{other_extension}"), font.clone()),
+        (format!("{stem}.d/evil.typ"), b"junk".to_vec()),
+        (stem.clone(), font.clone()),
+    ] {
+        let result = decode_default(&rewrite(&archive, |members| {
+            members.push((name.clone(), data))
+        }));
+        assert!(
+            matches!(
+                &result,
+                Err(DecodeError::UndeclaredMember(found) | DecodeError::DuplicateMember(found))
+                    if *found == name || *found == real
+            ),
+            "{name}: {result:?}"
+        );
+    }
+    // The container under a name that does not follow from its content.
+    for name in [
+        format!("{stem}.exe"),
+        format!("{stem}.{other_extension}"),
+        stem.clone(),
+    ] {
+        let result = decode_default(&rewrite(&archive, |members| {
+            let member = members.iter_mut().find(|(found, _)| *found == real);
+            member.unwrap().0 = name.clone();
+        }));
+        assert!(
+            matches!(&result, Err(DecodeError::UndeclaredMember(found)) if *found == name),
+            "{name}: {result:?}"
+        );
+    }
+}
+
 #[test]
 fn encoding_is_deterministic() {
     let pack = simple_pack();
@@ -418,14 +475,19 @@ fn decoding_rejects_non_packs_and_other_format_versions() {
     let malformed = edit_manifest(&archive, |manifest| {
         manifest.replace("@local/outside:1.0.0", "not a spec")
     });
-    assert!(matches!(
-        decode_default(&malformed),
-        Err(DecodeError::InvalidManifest(_))
-    ));
+    // The TOML parser's error is the source, not part of the message.
+    let error = decode_default(&malformed).unwrap_err();
+    assert!(matches!(error, DecodeError::InvalidManifest(_)));
+    assert_eq!(
+        error.to_string(),
+        "failed to parse the typst-pack.toml manifest"
+    );
+    let source = std::error::Error::source(&error).unwrap().to_string();
+    assert!(source.contains("not a spec"), "{source}");
 }
 
 #[test]
-fn decoding_rejects_unsafe_and_duplicate_member_names() {
+fn decoding_rejects_unsafe_non_canonical_and_duplicate_member_names() {
     let archive = encode(&simple_pack());
     for name in [
         "../escape.typ",
@@ -433,6 +495,12 @@ fn decoding_rejects_unsafe_and_duplicate_member_names() {
         "/project/main.typ",
         "C:/evil.typ",
         "a\\b",
+        // Aliases unzip would extract elsewhere than the canonical name.
+        "project/./main.typ",
+        "x/../project/./data.txt",
+        "./typst-pack.toml",
+        "project//main.typ",
+        "project/./",
     ] {
         let unsafe_archive = rewrite(&archive, |members| {
             members.push((name.to_owned(), Vec::new()))
@@ -445,15 +513,6 @@ fn decoding_rejects_unsafe_and_duplicate_member_names() {
             "{name}"
         );
     }
-
-    let aliased = rewrite(&archive, |members| {
-        members.push(("project/./main.typ".to_owned(), b"Other".to_vec()));
-    });
-    assert!(matches!(
-        decode_default(&aliased),
-        Err(DecodeError::DuplicateMember(name)) if name == "project/main.typ"
-    ));
-
     // The zip writer refuses duplicate names, so rename a member in place.
     let mut duplicated = rewrite(&archive, |members| {
         members.push(("project/main.tyX".to_owned(), b"Other".to_vec()));
@@ -467,6 +526,198 @@ fn decoding_rejects_unsafe_and_duplicate_member_names() {
     assert!(matches!(
         decode_default(&duplicated),
         Err(DecodeError::DuplicateMember(name)) if name == "project/main.typ"
+    ));
+
+    // An end record that under-counts the central directory is malformed,
+    // not a duplicate.
+    let mut undercounted = archive.clone();
+    let end = undercounted
+        .windows(4)
+        .rposition(|window| window == b"PK\x05\x06")
+        .unwrap();
+    for field in [end + 8, end + 10] {
+        let count = u16::from_le_bytes([undercounted[field], undercounted[field + 1]]);
+        undercounted[field..field + 2].copy_from_slice(&(count - 1).to_le_bytes());
+    }
+    let error = decode_default(&undercounted).unwrap_err();
+    assert!(matches!(error, DecodeError::Zip(_)));
+    assert_eq!(error.to_string(), "not a valid ZIP archive");
+    assert!(std::error::Error::source(&error).is_some());
+}
+
+#[test]
+fn decoding_rejects_manifests_with_more_than_one_reading() {
+    let archive = encode(&simple_pack());
+    let other = typst_pack::Digest::of(b"other");
+    let ambiguous = |edit: &dyn Fn(String) -> String| {
+        let result = decode_default(&edit_manifest(&archive, edit));
+        assert!(
+            matches!(result, Err(DecodeError::AmbiguousManifest(_))),
+            "{result:?}"
+        );
+    };
+
+    // One path, package, or font container declared twice.
+    ambiguous(&|manifest| {
+        format!("{manifest}\n[[files]]\npath = \"main.typ\"\ndigest = \"{other}\"\n")
+    });
+    ambiguous(&|manifest| {
+        format!(
+            "{manifest}\n[[packages]]\nspec = \"@local/outside:1.0.0\"\ndigest = \"{other}\"\nembedded = false\n"
+        )
+    });
+    ambiguous(&|manifest| {
+        format!(
+            "{manifest}\n[[fonts]]\ndigest = \"{other}\"\nembedded = false\n[[fonts]]\ndigest = \"{other}\"\nembedded = false\n"
+        )
+    });
+    // Paths that only normalize to a declared member.
+    ambiguous(&|manifest| {
+        manifest.replace(
+            "entrypoint = \"main.typ\"",
+            "entrypoint = \"x/../main.typ\"",
+        )
+    });
+    ambiguous(&|manifest| {
+        manifest.replace("path = \"data/table.csv\"", "path = \"./data/table.csv\"")
+    });
+
+    // A specification is written in canonical form only.
+    let spec = edit_manifest(&archive, |manifest| {
+        manifest.replace("@local/outside:1.0.0", "@local/outside:1.00.0")
+    });
+    assert!(matches!(
+        decode_default(&spec),
+        Err(DecodeError::InvalidManifest(error)) if error.to_string().contains("canonical")
+    ));
+}
+
+#[test]
+fn decoding_reports_the_recorded_producer() {
+    let pack = simple_pack();
+    assert_eq!(
+        pack.generator(),
+        Some(concat!("typst-pack ", env!("CARGO_PKG_VERSION")))
+    );
+    let engine = pack.typst_version().unwrap();
+    assert!(typst_pack::VERSION.ends_with(&format!("(Typst {engine})")));
+
+    let archive = edit_manifest(&encode(&pack), |manifest| {
+        let manifest = manifest.replace(
+            &format!("typst-version = \"{engine}\""),
+            "typst-version = \"0.99.0\"",
+        );
+        let generator = concat!(
+            "generator = \"typst-pack ",
+            env!("CARGO_PKG_VERSION"),
+            "\"\n"
+        );
+        manifest.replace(generator, "")
+    });
+    let decoded = decode_default(&archive).unwrap();
+    assert_eq!(decoded.typst_version(), Some("0.99.0"));
+    assert_eq!(decoded.generator(), None);
+}
+
+#[test]
+fn manifest_faces_are_read_leniently() {
+    let archive = edit_manifest(&encode(&simple_pack()), |manifest| {
+        format!(
+            "{manifest}\n[[fonts]]\ndigest = \"{}\"\nembedded = false\n\n\
+             [[fonts.faces]]\nfamily = \"Future Sans\"\nstyle = \"slanted\"\nweight = 950\nstretch = 875\nfuture-axis = 3\n\n\
+             [[fonts.faces]]\nindex = 1\nstyle = \"italic\"\n",
+            typst_pack::Digest::of(b"font")
+        )
+    });
+    let pack = decode_default(&archive).unwrap();
+
+    let faces = &pack.font_requirements()[0].faces;
+    let face = |index, family: &str, style, weight, stretch| Face {
+        index,
+        family: family.to_owned(),
+        style,
+        weight: FontWeight::from_number(weight),
+        stretch,
+    };
+    assert_eq!(
+        *faces,
+        [
+            face(
+                0,
+                "Future Sans",
+                FontStyle::Normal,
+                900,
+                FontStretch::SEMI_CONDENSED
+            ),
+            face(1, "", FontStyle::Italic, 400, FontStretch::NORMAL),
+        ]
+    );
+    let manifest = String::from_utf8(members(&encode(&pack))[0].1.clone()).unwrap();
+    assert!(
+        manifest.contains(
+            "family = \"Future Sans\"\nstyle = \"normal\"\nweight = 900\nstretch = 875\n"
+        ),
+        "{manifest}"
+    );
+}
+
+#[test]
+fn decoding_accepts_unbounded_limits() {
+    let archive = encode(&simple_pack());
+    let unbounded = DecodeLimits {
+        max_archive_bytes: u64::MAX,
+        max_members: u64::MAX,
+        max_member_bytes: u64::MAX,
+        max_total_bytes: u64::MAX,
+    };
+    assert_eq!(
+        decode(&archive, unbounded).unwrap().identity(),
+        simple_pack().identity()
+    );
+    assert!(archive::read(Cursor::new(&archive), unbounded).is_ok());
+}
+
+#[test]
+fn package_trees_must_declare_their_specification() {
+    let declaration =
+        "[package]\nname = \"inside\"\nversion = \"1.0.0\"\nentrypoint = \"lib.typ\"\n";
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"main".to_vec())
+        .package_file(spec("@local/inside:1.0.0"), "typst.toml", declaration)
+        .build()
+        .unwrap();
+
+    let wrong = declaration.replace("1.0.0", "2.0.0");
+    let error = Pack::builder("main.typ")
+        .file("main.typ", b"main".to_vec())
+        .package_file(spec("@local/inside:1.0.0"), "typst.toml", wrong.clone())
+        .build()
+        .unwrap_err();
+    assert!(
+        matches!(error.issues.as_slice(), [PackIssue::InvalidDeclaration { spec: found, .. }] if *found == spec("@local/inside:1.0.0")),
+        "{error}"
+    );
+
+    // An archive whose manifest declares the edited tree's digest is refused
+    // the same way.
+    let tree = typst_pack::package::Tree::new([("typst.toml", wrong.clone())]).unwrap();
+    let original = pack.package_requirements()[0].digest.to_string();
+    let archive = rewrite(&encode(&pack), |members| {
+        for (name, data) in members.iter_mut() {
+            if name == "typst-pack.toml" {
+                let manifest = String::from_utf8(data.clone()).unwrap();
+                *data = manifest
+                    .replace(&original, &tree.digest().to_string())
+                    .into_bytes();
+            } else if name.ends_with("typst.toml") {
+                *data = wrong.clone().into_bytes();
+            }
+        }
+    });
+    assert!(matches!(
+        decode_default(&archive),
+        Err(DecodeError::InvalidPack(error))
+            if matches!(error.issues.as_slice(), [PackIssue::InvalidDeclaration { .. }])
     ));
 }
 
@@ -634,18 +885,18 @@ fn streams_are_read_bounded_and_written_whole() {
 #[cfg(feature = "fs")]
 #[test]
 fn files_are_saved_and_opened_bounded() {
-    use typst_pack::fs::{WriteError, WritePolicy};
+    use typst_pack::fs::{self, WriteError, WritePolicy};
 
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("archive.typk");
     let pack = simple_pack();
-    archive::save(&path, &pack, WritePolicy::CreateNew).unwrap();
+    fs::write_archive(&path, &pack, WritePolicy::CreateNew).unwrap();
     assert!(matches!(
-        archive::save(&path, &pack, WritePolicy::CreateNew),
+        fs::write_archive(&path, &pack, WritePolicy::CreateNew),
         Err(WriteError::Io { .. })
     ));
-    archive::save(&path, &pack, WritePolicy::Overwrite).unwrap();
-    let opened = archive::open(&path, DecodeLimits::default()).unwrap();
+    fs::write_archive(&path, &pack, WritePolicy::Overwrite).unwrap();
+    let opened = fs::read_archive(&path, DecodeLimits::default()).unwrap();
     assert_eq!(opened.identity(), pack.identity());
 
     let length = encode(&pack).len() as u64 - 1;
@@ -654,11 +905,11 @@ fn files_are_saved_and_opened_bounded() {
         ..DecodeLimits::default()
     };
     assert!(matches!(
-        archive::open(&path, limits),
+        fs::read_archive(&path, limits),
         Err(DecodeError::Limit(_))
     ));
     assert!(matches!(
-        archive::open(directory.path().join("missing.typk"), DecodeLimits::default()),
+        fs::read_archive(directory.path().join("missing.typk"), DecodeLimits::default()),
         Err(DecodeError::Io(error)) if error.kind() == io::ErrorKind::NotFound
     ));
 }
@@ -712,6 +963,20 @@ fn plans_hold_the_project_and_selected_embedded_trees_in_path_order() {
         ]
     );
     assert_eq!(entries(&pack, false, true), entries(&pack, true, true)[..2]);
+
+    let plan = extract::plan(
+        &pack,
+        Selection {
+            packages: true,
+            fonts: true,
+        },
+    )
+    .unwrap();
+    let kinds = plan.entries().iter().map(|entry| entry.kind().to_string());
+    assert_eq!(
+        kinds.collect::<Vec<_>>(),
+        ["project file", "project file", "package file"]
+    );
 }
 
 #[test]
@@ -736,6 +1001,7 @@ fn planning_aggregates_collisions_by_kind_then_path() {
     )
     .unwrap_err();
 
+    use typst_pack::extract::EntryKind::{PackageFile, ProjectFile};
     let found = error
         .issues
         .iter()
@@ -743,9 +1009,9 @@ fn planning_aggregates_collisions_by_kind_then_path() {
     assert_eq!(
         found.collect::<Vec<_>>(),
         [
-            ("project file", "packages/local/example/1.0.0/a.typ"),
-            ("project file", "packages/local/example/1.0.0/z.typ"),
-            ("package file", "packages/local/example/1.0.0/b"),
+            (ProjectFile, "packages/local/example/1.0.0/a.typ"),
+            (ProjectFile, "packages/local/example/1.0.0/z.typ"),
+            (PackageFile, "packages/local/example/1.0.0/b"),
         ]
     );
     let message = error.to_string();

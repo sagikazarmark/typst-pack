@@ -267,7 +267,9 @@ pub struct Limits {
     pub max_artifact_bytes: u64,
     /// Maximum combined size of all artifacts.
     pub max_total_artifact_bytes: u64,
-    /// Number of pages exported concurrently; zero is treated as one.
+    /// Number of pages exported concurrently; zero is treated as one. Pages
+    /// export on the current rayon pool, or on a dedicated pool when this
+    /// exceeds the current pool's size.
     pub export_workers: u64,
 }
 

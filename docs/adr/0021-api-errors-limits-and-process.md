@@ -22,6 +22,12 @@ depend on them.
 
 - Group the API in modules by concept (compile, archive, extract, fs, opendal,
   package, font) rather than prefixing type names.
+- Adapters mirror each other: the same operation has the same name in `fs`
+  and `opendal` (`read_archive`, `write_archive`, `write_extraction`,
+  `write_artifacts`, `embed_packages`), takes its target first, then the
+  data, then the policy, and takes `ReadLimits` by value. Core modules do no
+  file or storage I/O.
+- The library forbids `unsafe` code.
 - A public type must be constructed or matched by a first-party caller or a
   doc example. Otherwise it is private or deleted.
 - Plain data has public fields and `Default` where sensible; private fields
@@ -36,6 +42,17 @@ depend on them.
 - An aggregate error's `Display` lists every issue, in a deterministic order.
 - Foreign errors (I/O, storage, caller-supplied resolvers) cross the boundary
   as `#[source]`, boxed if the caller supplies the type, with the chain intact.
+  A dependency's error type that is not part of the crate's chosen API (ZIP,
+  TOML) is an opaque boxed source, never a public variant field or `From`
+  impl.
+- An error with a cause exposes it through `source()` and does not
+  interpolate it in its `Display`; the `Display` says what failed. A wrapper
+  that adds nothing is `#[error(transparent)]`. Whoever prints an error for a
+  person prints the whole chain, `error: source: source`, as the CLI does; a
+  library that records an error as text (a package failure reason) records
+  the chain too.
+- Error, issue, and outcome enums are `#[non_exhaustive]`, so adding a case
+  is not a breaking change.
 
 **Limits.**
 

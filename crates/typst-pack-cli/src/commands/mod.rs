@@ -8,7 +8,7 @@ mod inspect;
 
 use std::fs::File;
 use std::io::{BufWriter, IsTerminal, Write};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::Parser;
@@ -19,8 +19,9 @@ use typst_kit::diagnostics::DiagnosticFormat;
 use typst_kit::diagnostics::termcolor::{
     Color, ColorChoice, ColorSpec, StandardStream, WriteColor,
 };
-use typst_pack::compile::{DocumentTime, Input, Options};
-use typst_pack::{Sources, fs};
+use typst_pack::archive::{self, DecodeLimits};
+use typst_pack::compile::{CreationTimestamp, DocumentTime, Input, Options};
+use typst_pack::{Pack, Sources, fs};
 
 use crate::cli::{AutomationArgs, Cli, Command, CompilationArgs, FontArgs, PackageArgs};
 
@@ -32,13 +33,27 @@ pub enum Failure {
     Error { message: String, hints: Vec<String> },
 }
 
-impl<T: ToString> From<T> for Failure {
-    fn from(message: T) -> Self {
+impl<T: Into<Box<dyn std::error::Error>>> From<T> for Failure {
+    /// A message, or an error and its sources.
+    fn from(error: T) -> Self {
         Self::Error {
-            message: message.to_string(),
+            message: chain(&*error.into()),
             hints: Vec::new(),
         }
     }
+}
+
+/// An error followed by each of its sources, `error: source: ...`. Library
+/// errors expose their causes as sources rather than in their own messages.
+pub fn chain(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(error) = source {
+        message.push_str(": ");
+        message.push_str(&error.to_string());
+        source = error.source();
+    }
+    message
 }
 
 type CommandResult = Result<(), Failure>;
@@ -96,7 +111,7 @@ pub fn run() -> ExitCode {
     let terminal = Terminal { color, format };
     let result = match command {
         Command::Create(args) => create::run(args, terminal, cert),
-        Command::Inspect(args) => inspect::run(args),
+        Command::Inspect(args) => inspect::run(args, terminal),
         Command::Extract(args) => extract::run(args),
         Command::Compile(args) => compile::run(args, terminal, cert),
     };
@@ -111,6 +126,62 @@ pub fn run() -> ExitCode {
             ExitCode::FAILURE
         }
     }
+}
+
+/// Reads the pack at `path`, or from stdin for `-`.
+fn read_pack(path: &Path) -> Result<Pack, Failure> {
+    let stdin = path == Path::new("-");
+    let read = if stdin {
+        archive::read(std::io::stdin().lock(), DecodeLimits::default())
+    } else {
+        fs::read_archive(path, DecodeLimits::default())
+    };
+    read.map_err(|error| {
+        let pack = if stdin {
+            "cannot read pack from stdin".to_owned()
+        } else {
+            format!("cannot open pack `{}`", path.display())
+        };
+        format!("{pack}: {}", chain(&error)).into()
+    })
+}
+
+/// Warns when a pack records a Typst version other than the embedded one: the
+/// same pack may then render differently than where it was created.
+fn warn_typst_version(pack: &Pack, terminal: Terminal) {
+    if let Some(version) = pack.typst_version()
+        && version != typst_pack::TYPST_VERSION
+    {
+        let message = format!(
+            "the pack was created with Typst {}, but this typst-pack embeds Typst {}; \
+             the output may differ",
+            escape(version),
+            typst_pack::TYPST_VERSION
+        );
+        terminal.label("warning", Color::Yellow, &message);
+    }
+}
+
+/// The only issue, or a summary followed by one issue per line.
+fn listed(summary: &str, issues: impl IntoIterator<Item = String>) -> String {
+    let mut issues = issues.into_iter().collect::<Vec<_>>();
+    match issues.len() {
+        1 => issues.remove(0),
+        _ => format!("{summary}:\n  {}", issues.join("\n  ")),
+    }
+}
+
+/// `text` with control characters escaped, for printing untrusted names.
+fn escape(text: &str) -> String {
+    let mut escaped = String::with_capacity(text.len());
+    for character in text.chars() {
+        if character.is_control() {
+            escaped.extend(character.escape_default());
+        } else {
+            escaped.push(character);
+        }
+    }
+    escaped
 }
 
 /// Validates the creation timestamp as Typst's CLI does, before any I/O, and
@@ -130,10 +201,30 @@ fn prepare(automation: &AutomationArgs) -> CommandResult {
     Ok(())
 }
 
-/// The current UNIX time and local UTC offset in minutes.
-fn now() -> (i64, i32) {
-    let now = chrono::Local::now();
-    (now.timestamp(), now.offset().local_minus_utc() / 60)
+/// What `datetime.today()` returns and the PDF creation date, as in Typst's
+/// CLI: the creation timestamp read in UTC, or the current time read in the
+/// local timezone.
+fn time(automation: &AutomationArgs) -> (DocumentTime, CreationTimestamp) {
+    match automation.creation_timestamp {
+        Some(seconds) => (
+            DocumentTime::UnixTimestamp(seconds),
+            CreationTimestamp::Utc(seconds),
+        ),
+        None => {
+            let now = chrono::Local::now();
+            let (seconds, offset) = (now.timestamp(), now.offset().local_minus_utc());
+            (
+                DocumentTime::Local {
+                    seconds,
+                    utc_offset_seconds: offset,
+                },
+                CreationTimestamp::Local {
+                    unix: seconds,
+                    offset_minutes: offset / 60,
+                },
+            )
+        }
+    }
 }
 
 /// Compile options from the shared arguments, and the input files read.
@@ -147,9 +238,13 @@ fn compile_options(
         .collect::<Vec<_>>();
     let mut files = Vec::new();
     for (key, path) in &args.input_files {
+        // Which flag would win is not obvious from the command line.
+        if args.inputs.iter().any(|(string, _)| string == key) {
+            return Err(format!("input `{key}` is given by both --input and --input-file").into());
+        }
         let data = std::fs::read(path)
             .map_err(|error| format!("cannot read input file `{}`: {error}", path.display()))?;
-        inputs.push((key.clone(), Input::Bytes(data)));
+        inputs.push((key.clone(), Input::from(data)));
         files.push(path.clone());
     }
     let features = args.features.clone();

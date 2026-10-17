@@ -3,6 +3,7 @@
 //! See the README's "Pack format" section for the exact byte layouts.
 
 use std::fmt;
+use std::str::FromStr;
 
 use sha2::{Digest as _, Sha256};
 
@@ -105,11 +106,25 @@ impl fmt::Debug for Digest {
     }
 }
 
-impl Digest {
+impl FromStr for Digest {
+    type Err = InvalidDigest;
+
     /// Parses `sha256:` followed by 64 lowercase hexadecimal digits.
-    fn parse(value: &str) -> Option<Self> {
-        value.strip_prefix("sha256:").and_then(Self::from_hex)
+    fn from_str(text: &str) -> Result<Self, Self::Err> {
+        text.strip_prefix("sha256:")
+            .and_then(Self::from_hex)
+            .ok_or_else(|| InvalidDigest {
+                text: text.to_owned(),
+            })
     }
+}
+
+/// Text that is not `sha256:` followed by 64 lowercase hexadecimal digits.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[error("invalid digest {text:?}: expected `sha256:` and 64 lowercase hexadecimal digits")]
+pub struct InvalidDigest {
+    /// The rejected text.
+    pub text: String,
 }
 
 impl serde::Serialize for Digest {
@@ -121,11 +136,7 @@ impl serde::Serialize for Digest {
 impl<'de> serde::Deserialize<'de> for Digest {
     fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         let value = String::deserialize(deserializer)?;
-        Self::parse(&value).ok_or_else(|| {
-            serde::de::Error::custom(format!(
-                "invalid digest {value:?}: expected `sha256:` and 64 lowercase hexadecimal digits"
-            ))
-        })
+        value.parse().map_err(serde::de::Error::custom)
     }
 }
 
@@ -140,14 +151,20 @@ mod tests {
             digest.to_string(),
             "sha256:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
         );
-        assert_eq!(Digest::parse(&digest.to_string()), Some(digest));
+        assert_eq!(digest.to_string().parse(), Ok(digest));
         for invalid in [
             "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
             "sha256:BA7816BF8F01CFEA414140DE5DAE2223B00361A396177A9CB410FF61F20015AD",
             "sha256:ba78",
             "sha1:ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
         ] {
-            assert!(Digest::parse(invalid).is_none(), "{invalid}");
+            assert_eq!(
+                invalid.parse::<Digest>(),
+                Err(InvalidDigest {
+                    text: invalid.to_owned()
+                }),
+                "{invalid}"
+            );
         }
     }
 }

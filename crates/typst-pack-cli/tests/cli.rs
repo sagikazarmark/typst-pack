@@ -223,7 +223,7 @@ fn create_applies_the_root_ignore_policy_and_reports_a_summary() {
 
     let summary = String::from_utf8_lossy(&output.stdout);
     assert!(
-        summary.contains("packed 4 project file(s), 0 package(s), 1 font(s)"),
+        summary.contains("packed 4 project file(s), 0 package(s), 1 font(s) (0 embedded)"),
         "{summary}"
     );
     let pack = open(dir.join("out.typk"));
@@ -617,13 +617,36 @@ fn write_failures_are_reported_with_the_native_error() {
 }
 
 #[test]
-fn inspect_treats_a_dash_as_a_file_path() {
+fn inspect_and_extract_read_a_dash_from_stdin() {
     let dir = tempfile::tempdir().unwrap();
-    let inspect = typst_pack(dir.path())
-        .args(["inspect", "-"])
-        .stdin(Stdio::null())
-        .output();
-    assert!(failed(inspect.unwrap()).contains("cannot open pack `-`"));
+    let dir = dir.path();
+    let bytes = std::fs::read(pack(dir, "doc.typk", "Hello")).unwrap();
+    let piped = |args: &[&str], input: &[u8]| {
+        let mut child = typst_pack(dir)
+            .args(args)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .unwrap();
+        // A command that fails before reading closes stdin early.
+        let _ = std::io::Write::write_all(&mut child.stdin.take().unwrap(), input);
+        child.wait_with_output().unwrap()
+    };
+
+    let inspected = ok(piped(&["inspect", "-"], &bytes));
+    assert!(String::from_utf8_lossy(&inspected.stdout).contains("entrypoint: main.typ"));
+    ok(piped(&["extract", "-", "-o", "from-stdin"], &bytes));
+    assert_eq!(
+        std::fs::read(dir.join("from-stdin/main.typ")).unwrap(),
+        b"Hello"
+    );
+    assert!(failed(piped(&["extract", "-"], &bytes)).contains("explicit --output"));
+    let garbage = failed(piped(&["inspect", "-"], b"not a pack"));
+    assert!(
+        garbage.starts_with("error: cannot read pack from stdin"),
+        "{garbage}"
+    );
 }
 
 // --- compile: controls ----------------------------------------------------
@@ -763,6 +786,40 @@ fn source_date_epoch_and_the_creation_timestamp_fix_dates() {
     assert!(failed(run(dir, &out_of_range)).contains("out of range"));
 }
 
+#[cfg(unix)]
+#[test]
+fn without_a_timestamp_today_is_the_local_date() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let source = "#assert.eq(datetime.today().display(), sys.inputs.today)";
+    write(dir, &[("main.typ", source)]);
+    pack(dir, "today.typk", source);
+
+    // Both zones are off the UTC date for half of every day.
+    for (zone, hours) in [("Etc/GMT-14", 14), ("Etc/GMT+12", -12)] {
+        let today = || {
+            let local = chrono::Utc::now() + chrono::Duration::hours(hours);
+            format!("today={}", local.format("%Y-%m-%d"))
+        };
+        for command in [
+            &["create", "main.typ", "today-created.typk"][..],
+            &["compile", "today.typk", "today.svg"],
+        ] {
+            let expected = today();
+            let output = typst_pack(dir)
+                .env("TZ", zone)
+                .args(command)
+                .args(["--input", &expected])
+                .output()
+                .unwrap();
+            // Unless the local date changed while the command ran.
+            if today() == expected {
+                ok(output);
+            }
+        }
+    }
+}
+
 #[test]
 fn the_compile_alias_and_version_name_the_typst_baseline() {
     let dir = tempfile::tempdir().unwrap();
@@ -771,8 +828,7 @@ fn the_compile_alias_and_version_name_the_typst_baseline() {
 
     let version = ok(run(dir.path(), &["--version"])).stdout;
     let version = String::from_utf8_lossy(&version);
-    assert!(version.contains(env!("CARGO_PKG_VERSION")), "{version}");
-    assert!(version.contains("Typst 0.15.1"), "{version}");
+    assert_eq!(version, format!("typst-pack {}\n", typst_pack::VERSION));
 }
 
 /// Two directories, each holding one distinct font Typst ships.
@@ -950,24 +1006,35 @@ fn diagnostics_render_source_names_in_order_without_a_trailer() {
         "main.typ:1:1: error: unknown variable: unknown-function\n"
     );
 
-    // Compiler warnings, then the CLI's own, then errors.
+    // Errors, then compiler warnings, then the CLI's own, as Typst prints
+    // them; also when layout fails after evaluation warned.
     pack(
         dir,
         "warned.typk",
         &format!("{WARNING}\n#unknown-function()"),
     );
-    let output = run(dir, &["compile", "warned.typk", "x.pdf", "--pages", "1"]);
-    assert!(output.stdout.is_empty());
-    let stderr = failed(output);
-    ordered(
-        &stderr,
-        &[
-            "Definitely Missing",
-            "using --pages implies --no-pdf-tags",
-            "unknown-function",
-        ],
+    pack(
+        dir,
+        "panicked.typk",
+        &format!("{WARNING}\n#context panic(\"boom\")"),
     );
-    assert!(!stderr.contains("compilation failed"), "{stderr}");
+    for (name, error) in [
+        ("warned.typk", "unknown-function"),
+        ("panicked.typk", "boom"),
+    ] {
+        let output = run(dir, &["compile", name, "x.pdf", "--pages", "1"]);
+        assert!(output.stdout.is_empty());
+        let stderr = failed(output);
+        ordered(
+            &stderr,
+            &[
+                error,
+                "Definitely Missing",
+                "using --pages implies --no-pdf-tags",
+            ],
+        );
+        assert!(!stderr.contains("compilation failed"), "{stderr}");
+    }
     assert!(!dir.join("x.pdf").exists());
 }
 
@@ -1218,7 +1285,8 @@ fn a_viewer_opens_the_first_emitted_page_unless_output_is_stdout() {
             .arg(&viewer)
             .output()
             .unwrap());
-        for _ in 0..100 {
+        // The viewer is detached; give a loaded machine time to run it.
+        for _ in 0..1000 {
             if marker.exists() {
                 break;
             }
@@ -1466,11 +1534,15 @@ fn an_ordinary_build_ignores_the_download_probe() {
     );
     std::fs::create_dir(dir.join("empty")).unwrap();
 
+    // The missing certificate fails the downloader before it connects, and
+    // the unroutable proxy keeps a regression off the real network.
     let output = typst_pack(dir)
         .env(
             "TYPST_PACK_TEST_PACKAGE_DOWNLOAD_PROBE",
             dir.join("probe.txt"),
         )
+        .env("HTTPS_PROXY", "http://127.0.0.1:9")
+        .env("HTTP_PROXY", "http://127.0.0.1:9")
         .args(["--cert", "missing.pem", "create", "main.typ", "out.typk"])
         .args(["--package-path", "empty", "--package-cache-path", "empty"])
         .output()
@@ -1479,4 +1551,536 @@ fn an_ordinary_build_ignores_the_download_probe() {
     assert!(output.stdout.is_empty());
     failed(output);
     assert!(!dir.join("probe.txt").exists() && !dir.join("out.typk").exists());
+}
+
+// --- inspect and extract --------------------------------------------------
+
+/// Two distinct font files: one Typst ships, and one it does not.
+fn shipped_and_foreign_fonts() -> ((Vec<u8>, String), (Vec<u8>, String)) {
+    let mut fonts = typst_kit::fonts::embedded();
+    let (shipped, info) = fonts.next().unwrap();
+    let shipped = (shipped.data().to_vec(), info.family);
+    let (other, info) = fonts
+        .find(|(font, info)| info.family != shipped.1 && font.data().as_ref() != shipped.0)
+        .unwrap();
+    // Trailing bytes keep the font readable but change its digest.
+    let mut foreign = other.data().to_vec();
+    foreign.extend_from_slice(b"not shipped by Typst");
+    (shipped, (foreign, info.family))
+}
+
+/// A pack with a vendored and an unvendored package, an embedded font, a
+/// required font Typst ships, and a required font it does not.
+fn dependent_pack(dir: &Path) -> (PathBuf, Pack) {
+    let ((shipped, _), (foreign, _)) = shipped_and_foreign_fonts();
+    let vendored: typst::syntax::package::PackageSpec = "@preview/vendored:0.1.0".parse().unwrap();
+    let external: typst::syntax::package::PackageSpec = "@preview/external:0.1.0".parse().unwrap();
+    let library = b"#let mark = rect(width: 1pt, height: 1pt)".to_vec();
+    let pack = Pack::builder("main.typ")
+        .file(
+            "main.typ",
+            b"#import \"@preview/vendored:0.1.0\": mark\n#mark".to_vec(),
+        )
+        .package_file(
+            vendored.clone(),
+            "typst.toml",
+            manifest("vendored").into_bytes(),
+        )
+        .package_file(vendored, "lib.typ", library.clone())
+        .external_package_file(
+            external.clone(),
+            "typst.toml",
+            manifest("external").into_bytes(),
+        )
+        .external_package_file(external, "lib.typ", library)
+        .font(foreign.clone())
+        .external_font(shipped)
+        .external_font({
+            let mut other = foreign;
+            other.extend_from_slice(b" twice");
+            other
+        })
+        .build()
+        .unwrap();
+    (save(dir, "deps.typk", &pack), pack)
+}
+
+#[test]
+fn inspect_lists_identity_packages_and_fonts() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let (path, pack) = dependent_pack(dir);
+
+    let stdout = ok(run(dir, &["inspect", path.to_str().unwrap()])).stdout;
+    let stdout = String::from_utf8(stdout).unwrap();
+
+    let ((_, shipped_family), (_, foreign_family)) = shipped_and_foreign_fonts();
+    let fonts = pack.font_requirements();
+    let line = |index: usize| {
+        let requirement = &fonts[index];
+        format!(
+            "  {} - {} (",
+            requirement.digest, requirement.faces[0].family
+        )
+    };
+    let embedded = (0..fonts.len()).find(|&i| fonts[i].embedded).unwrap();
+    let shipped = (0..fonts.len())
+        .find(|&i| fonts[i].faces[0].family == shipped_family)
+        .unwrap();
+    let foreign = (0..fonts.len())
+        .find(|&i| !fonts[i].embedded && fonts[i].faces[0].family == foreign_family)
+        .unwrap();
+    ordered(
+        &stdout,
+        &[
+            &format!("identity: {}\n", pack.identity()),
+            "\nvendored packages:\n  @preview/vendored:0.1.0 (2 files, ",
+            "\nunvendored packages:\n  @preview/external:0.1.0\n",
+            "\nembedded fonts:\n",
+            &line(embedded),
+            "\nrequired fonts:\n",
+        ],
+    );
+    for (index, note) in [
+        (shipped, "(provided by Typst)"),
+        (foreign, "(supply with --font-path)"),
+    ] {
+        let start = stdout.find(&line(index)).unwrap();
+        let rest = &stdout[start..];
+        let end = rest.find('\n').unwrap();
+        assert!(rest[..end].ends_with(note), "{stdout}");
+    }
+}
+
+/// Rewrites a pack archive so its manifest records another producer.
+fn produced_by(archive: &[u8], typst_version: &str) -> Vec<u8> {
+    use std::io::{Read, Write};
+
+    let mut source = zip::ZipArchive::new(std::io::Cursor::new(archive)).unwrap();
+    let mut output = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
+    for index in 0..source.len() {
+        let mut member = source.by_index(index).unwrap();
+        let mut data = Vec::new();
+        member.read_to_end(&mut data).unwrap();
+        if member.name() == "typst-pack.toml" {
+            let current = format!("typst-version = \"{}\"", typst_pack::TYPST_VERSION);
+            let text = String::from_utf8(data).unwrap();
+            assert!(text.contains(&current), "{text}");
+            let replaced = format!("typst-version = \"{typst_version}\"");
+            data = text.replace(&current, &replaced).into_bytes();
+        }
+        let options = zip::write::SimpleFileOptions::default();
+        output.start_file(member.name(), options).unwrap();
+        output.write_all(&data).unwrap();
+    }
+    output.finish().unwrap().into_inner()
+}
+
+#[test]
+fn inspect_and_compile_name_the_producer_and_warn_on_another_typst() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let path = pack(dir, "current.typk", "Hello");
+
+    let current = ok(run(dir, &["inspect", "current.typk"]));
+    let stdout = String::from_utf8(current.stdout.clone()).unwrap();
+    let version = typst_pack::TYPST_VERSION;
+    let generator = format!("generator: typst-pack {}\n", env!("CARGO_PKG_VERSION"));
+    ordered(
+        &stdout,
+        &[
+            "format version: 2\n",
+            &format!("typst version: {version}\n"),
+            &generator,
+            "identity: ",
+        ],
+    );
+    assert!(current.stderr.is_empty(), "{}", stderr(&current));
+
+    let older = produced_by(&std::fs::read(path).unwrap(), "0.1.0");
+    std::fs::write(dir.join("older.typk"), older).unwrap();
+    let warning = format!(
+        "warning: the pack was created with Typst 0.1.0, but this typst-pack embeds Typst \
+         {version}; the output may differ\n"
+    );
+    let inspected = ok(run(dir, &["inspect", "older.typk"]));
+    let stdout = String::from_utf8_lossy(&inspected.stdout);
+    assert!(stdout.contains("typst version: 0.1.0\n"), "{stdout}");
+    assert_eq!(stderr(&inspected), warning);
+    let compiled = ok(run(dir, &["compile", "older.typk", "older.svg"]));
+    assert_eq!(stderr(&compiled), warning);
+    assert!(dir.join("older.svg").is_file());
+}
+
+#[test]
+fn inspect_escapes_control_characters_in_pack_names() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"Hello".to_vec())
+        .metadata(typst_pack::Metadata {
+            name: Some("evil\x1b[2Jname".to_owned()),
+            ..Default::default()
+        })
+        .build()
+        .unwrap();
+    save(dir, "evil.typk", &pack);
+
+    let stdout = ok(run(dir, &["inspect", "evil.typk"])).stdout;
+    let stdout = String::from_utf8(stdout).unwrap();
+    assert!(stdout.contains("name: evil\\u{1b}[2Jname"), "{stdout}");
+    assert!(!stdout.contains('\x1b'));
+}
+
+#[test]
+fn extract_selects_packages_and_fonts_and_defaults_to_the_pack_name() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let (_, pack) = dependent_pack(dir);
+    let font = pack
+        .font_requirements()
+        .iter()
+        .find(|r| r.embedded)
+        .unwrap();
+    let font = format!(
+        "fonts/{}",
+        font.digest.to_string().trim_start_matches("sha256:")
+    );
+    let has = |root: &str, path: &str| dir.join(root).join(path).exists();
+    let package = "packages/preview/vendored/0.1.0/lib.typ";
+
+    // Without an output, the directory is named after the pack.
+    ok(run(dir, &["extract", "deps.typk"]));
+    assert!(has("deps", "main.typ"));
+    assert!(!has("deps", "packages") && !has("deps", "fonts"));
+    let fonts_in = |root: &str| {
+        let fonts = std::fs::read_dir(dir.join(root).join("fonts")).unwrap();
+        fonts
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect::<Vec<_>>()
+    };
+
+    ok(run(
+        dir,
+        &["extract", "deps.typk", "-o", "with-packages", "--packages"],
+    ));
+    assert!(has("with-packages", package) && !has("with-packages", "fonts"));
+    ok(run(
+        dir,
+        &["extract", "deps.typk", "-o", "with-fonts", "--fonts"],
+    ));
+    assert!(!has("with-fonts", "packages"));
+    assert!(fonts_in("with-fonts")[0].starts_with(&font["fonts/".len()..]));
+    ok(run(dir, &["extract", "deps.typk", "-o", "all", "--all"]));
+    assert!(has("all", package) && has("all", "main.typ"));
+    assert_eq!(fonts_in("all"), fonts_in("with-fonts"));
+}
+
+#[test]
+fn extract_reports_every_conflict_and_suggests_force_only_for_existing_files() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"Hello".to_vec())
+        .file("data.txt", b"data".to_vec())
+        .build()
+        .unwrap();
+    save(dir, "doc.typk", &pack);
+    write(
+        dir,
+        &[("existing/main.typ", "keep"), ("existing/data.txt", "keep")],
+    );
+    write(
+        dir,
+        &[
+            ("blocked/data.txt", "keep"),
+            ("blocked/main.typ/inner", "keep"),
+        ],
+    );
+
+    let existing = failed(run(dir, &["extract", "doc.typk", "-o", "existing"]));
+    ordered(
+        &existing,
+        &[
+            "error: nothing was extracted:\n",
+            "data.txt` already exists\n",
+            "main.typ` already exists\n",
+            "hint: pass --force to overwrite existing files\n",
+        ],
+    );
+
+    let blocked = failed(run(dir, &["extract", "doc.typk", "-o", "blocked"]));
+    assert!(blocked.contains("data.txt` already exists"), "{blocked}");
+    assert!(blocked.contains("main.typ` conflicts"), "{blocked}");
+    assert!(!blocked.contains("--force"), "{blocked}");
+}
+
+// --- shared flags ----------------------------------------------------------
+
+#[test]
+fn pretty_changes_svg_and_html_bytes() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    pack(dir, "doc.typk", "#rect(width: 1pt, height: 1pt)[A]");
+    for format in ["svg", "html"] {
+        let compile = |output: &str, pretty: &[&str]| {
+            ok(typst_pack(dir)
+                .args(["compile", "doc.typk", output, "--features", "html"])
+                .args(pretty)
+                .output()
+                .unwrap());
+            std::fs::read(dir.join(output)).unwrap()
+        };
+        let compact = compile(&format!("compact.{format}"), &[]);
+        let pretty = compile(&format!("pretty.{format}"), &["--pretty"]);
+        assert_ne!(compact, pretty, "{format}");
+    }
+}
+
+#[test]
+fn ppi_scales_png_pixels() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    pack(dir, "doc.typk", "#set page(width: 20pt, height: 10pt)");
+    let size = |ppi: &str| {
+        let output = format!("{ppi}.png");
+        ok(run(dir, &["compile", "doc.typk", &output, "--ppi", ppi]));
+        let png = std::fs::read(dir.join(output)).unwrap();
+        let word = |at: usize| u32::from_be_bytes(png[at..at + 4].try_into().unwrap());
+        (word(16), word(20))
+    };
+
+    assert_eq!(size("72"), (20, 10));
+    assert_eq!(size("144"), (40, 20));
+}
+
+#[test]
+fn jobs_bound_parallel_export_without_changing_artifacts() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    pages(dir, 4);
+    ok(run(
+        dir,
+        &["compile", "pages.typk", "serial-{p}.png", "-j", "1"],
+    ));
+    ok(run(
+        dir,
+        &["compile", "pages.typk", "parallel-{p}.png", "-j", "3"],
+    ));
+    for page in 1..=4 {
+        assert_eq!(
+            std::fs::read(dir.join(format!("serial-{page}.png"))).unwrap(),
+            std::fs::read(dir.join(format!("parallel-{page}.png"))).unwrap()
+        );
+    }
+}
+
+#[test]
+fn create_embeds_typst_fonts_only_when_asked() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    write(dir, &[("main.typ", "Text")]);
+    let embedded = |output: &str, flags: &[&str]| {
+        ok(typst_pack(dir)
+            .args(["create", "main.typ", output])
+            .args(flags)
+            .output()
+            .unwrap());
+        let pack = open(dir.join(output));
+        let fonts = pack.font_requirements().iter();
+        fonts.filter(|requirement| requirement.embedded).count()
+    };
+
+    assert_eq!(embedded("plain.typk", &[]), 0);
+    assert_eq!(embedded("fonts.typk", &["--embed-fonts"]), 0);
+    let all = ["--embed-fonts", "--include-typst-embedded-fonts"];
+    assert!(embedded("typst.typk", &all) > 0);
+    // Typst's fonts are only embedded alongside the others.
+    failed(run(
+        dir,
+        &[
+            "create",
+            "main.typ",
+            "x.typk",
+            "--include-typst-embedded-fonts",
+        ],
+    ));
+}
+
+#[test]
+fn create_inputs_reach_discovery_and_conflicting_keys_are_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    write(
+        dir,
+        &[
+            (
+                "main.typ",
+                "#assert.eq(sys.inputs.name, \"value\")\n#assert.eq(type(sys.inputs.logo), bytes)",
+            ),
+            ("logo.bin", "bytes"),
+        ],
+    );
+    let create = |args: &[&str]| {
+        typst_pack(dir)
+            .args(["create", "main.typ", "out.typk"])
+            .args(args)
+            .output()
+            .unwrap()
+    };
+
+    failed(create(&[]));
+    ok(create(&[
+        "--input",
+        "name=value",
+        "--input-file",
+        "logo=logo.bin",
+    ]));
+    let both = ["--input", "logo=text", "--input-file", "logo=logo.bin"];
+    let stderr = failed(create(&both));
+    assert!(
+        stderr.contains("input `logo` is given by both --input and --input-file"),
+        "{stderr}"
+    );
+    let stderr = failed(run(
+        dir,
+        &[&["compile", "out.typk", "out.pdf"][..], &both].concat(),
+    ));
+    assert!(stderr.contains("given by both"), "{stderr}");
+}
+
+#[test]
+fn a_failing_variant_is_named() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    write(
+        dir,
+        &[(
+            "main.typ",
+            "#if sys.inputs.at(\"edition\", default: \"a\") == \"b\" { panic(\"edition b\") }",
+        )],
+    );
+
+    let stderr = failed(run(
+        dir,
+        &["create", "main.typ", "out.typk", "--variant", "edition=b"],
+    ));
+    ordered(
+        &stderr,
+        &["edition b", "discovery compile of variant `edition=b`"],
+    );
+}
+
+#[test]
+fn compile_hints_at_packages_the_pack_does_not_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    pack(
+        dir,
+        "doc.typk",
+        "#if sys.inputs.at(\"edition\", default: \"a\") == \"b\" {\n\
+           import \"@preview/absent:0.1.0\": mark\n\
+         }",
+    );
+
+    ok(run(dir, &["compile", "doc.typk", "a.pdf"]));
+    let stderr = failed(run(
+        dir,
+        &["compile", "doc.typk", "b.pdf", "--input", "edition=b"],
+    ));
+    assert!(
+        stderr.contains("hint: the pack does not contain @preview/absent:0.1.0"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn unfulfilled_requirements_are_listed_one_per_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    dependent_pack(dir);
+    std::fs::create_dir(dir.join("empty")).unwrap();
+
+    let stderr = failed(run(
+        dir,
+        &[
+            "compile",
+            "deps.typk",
+            "out.pdf",
+            "--offline",
+            "--package-path",
+            "empty",
+            "--package-cache-path",
+            "empty",
+            "--ignore-embedded-fonts",
+        ],
+    ));
+    let lines = stderr.lines().collect::<Vec<_>>();
+    assert_eq!(
+        lines[0], "error: the pack's external dependencies are not satisfied:",
+        "{stderr}"
+    );
+    assert!(lines[1].starts_with("  required package @preview/external:0.1.0"));
+    assert!(
+        lines[2..4]
+            .iter()
+            .all(|line| line.starts_with("  required font container"))
+    );
+}
+
+#[test]
+fn pack_dependencies_take_precedence_over_host_configuration() {
+    let dir = tempfile::tempdir().unwrap();
+    let dir = dir.path();
+    // The host offers a different tree under the vendored specification and
+    // a font the pack does not require.
+    write_package(&dir.join("vendoring"), "shapes");
+    write(
+        &dir.join("project"),
+        &[("main.typ", "#import \"@preview/shapes:0.1.0\": mark\n#mark")],
+    );
+    ok(typst_pack(dir)
+        .args(["create", "project/main.typ", "shapes.typk", "--offline"])
+        .args(["--package-path", "vendoring"])
+        .output()
+        .unwrap());
+    write(
+        &dir.join("host/preview/shapes/0.1.0"),
+        &[
+            ("typst.toml", &manifest("shapes")),
+            ("lib.typ", "#let mark = panic(\"host package\")"),
+        ],
+    );
+    let (font, family) = distinct_fonts(dir).remove(1);
+    pack(
+        dir,
+        "font.typk",
+        &format!("#set text(font: \"{family}\", fallback: false)\nText"),
+    );
+
+    let host = [
+        "--offline",
+        "--package-path",
+        "host",
+        "--ignore-embedded-fonts",
+    ];
+    ok(typst_pack(dir)
+        .args([
+            "compile",
+            "shapes.typk",
+            "shapes.pdf",
+            "--deps",
+            "deps.json",
+        ])
+        .args(host)
+        .output()
+        .unwrap());
+    assert!(!json(dir.join("deps.json")).to_string().contains("host"));
+    let output = ok(typst_pack(dir)
+        .args(["compile", "font.typk", "font.pdf", "--font-path"])
+        .arg(&font)
+        .args(host)
+        .output()
+        .unwrap());
+    assert!(stderr(&output).contains("unknown font family"));
 }

@@ -186,6 +186,38 @@ fn a_malformed_ignore_file_and_an_ignored_entrypoint_are_errors() {
 }
 
 #[test]
+fn only_an_excluded_file_is_reported_as_an_ignored_entrypoint() {
+    let dir = tempfile::tempdir().unwrap();
+    write_tree(
+        dir.path(),
+        &[("main.typ", "main"), ("chapters/one.typ", "one")],
+    );
+
+    let error = packer().pack(dir.path(), "chapters").unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            fs::Error::Invalid(invalid) if matches!(
+                invalid.issues.as_slice(),
+                [typst_pack::PackIssue::MissingEntrypoint { path }] if path == "chapters"
+            )
+        ),
+        "{error}"
+    );
+
+    let error = packer().pack(dir.path(), "missing.typ").unwrap_err();
+    assert!(
+        matches!(
+            &error,
+            fs::Error::Io { path, source }
+                if path.ends_with("missing.typ")
+                    && source.kind() == std::io::ErrorKind::NotFound
+        ),
+        "{error}"
+    );
+}
+
+#[test]
 fn project_and_package_reading_are_bounded() {
     let dir = tempfile::tempdir().unwrap();
     write_tree(
@@ -240,6 +272,25 @@ fn a_missing_root_names_the_root() {
     let error = read(&missing).unwrap_err();
 
     assert!(matches!(error, fs::Error::Io { ref path, .. } if path == &missing));
+    // The I/O error is the source, not part of the message.
+    assert_eq!(
+        error.to_string(),
+        format!("cannot read `{}`", missing.display())
+    );
+    let source = std::error::Error::source(&error).unwrap();
+    assert_eq!(
+        source.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::NotFound
+    );
+}
+
+#[test]
+fn the_default_packer_reads_today_in_the_local_timezone() {
+    let packer = fs::Packer::default();
+    assert!(matches!(
+        packer.options.document_time,
+        typst_pack::compile::DocumentTime::Local { .. }
+    ));
 }
 
 #[cfg(unix)]
@@ -333,10 +384,12 @@ mod links {
         let root = dir.path().join("broken");
         write_tree(&root, &[("main.typ", "main")]);
         symlink("missing", root.join("broken.log")).unwrap();
+        let error = read(&root).unwrap_err();
         assert!(matches!(
-            read(&root),
-            Err(fs::Error::Io { ref path, .. }) if path.ends_with("broken.log")
+            error,
+            fs::Error::BrokenSymlink { ref path, .. } if path.ends_with("broken.log")
         ));
+        assert!(error.to_string().starts_with("broken symbolic link"));
         std::fs::write(root.join(".typkignore"), b"*.log\n").unwrap();
         assert!(read(&root).is_ok());
 
@@ -402,6 +455,10 @@ fn a_package_is_read_as_one_complete_tree_in_canonical_order() {
             ("typst.toml", "declaration"),
             ("lib.typ", "library"),
             ("assets/unused.txt", "unused"),
+            // Version-control directories are never package files.
+            (".git/HEAD", "ref: refs/heads/main"),
+            (".hg/store", "store"),
+            ("assets/.svn/entries", "entries"),
         ],
     );
 
@@ -444,7 +501,7 @@ fn the_package_directory_precedes_the_cache_by_namespace_name_and_version() {
         let spec: PackageSpec = text.parse().unwrap();
         let resolved = resolver(&data, &cache).resolve(&requiring(&spec)).unwrap();
         let tree = &resolved.packages.first()?.1;
-        let directory = resolved.package_dirs[text].clone();
+        let directory = resolved.package_dirs[&spec].clone();
         Some((tree.file("marker.txt").unwrap().to_vec(), directory))
     };
 
@@ -479,7 +536,7 @@ fn external_packages_resolve_from_the_package_path_for_compilation() {
     write_package(&packages, "kept", "#let mark = rect(width: 1pt)");
     let packer = fs::Packer {
         package_path: Some(packages.clone()),
-        vendor_packages: false,
+        embed_packages: false,
         ..packer()
     };
     let pack = packer.pack(&project, "main.typ").unwrap().pack;
@@ -671,7 +728,10 @@ fn an_unavailable_universe_package_fails_at_its_import() {
 
     let result = resolver(&empty, &empty).pack(dir.path(), "main.typ");
 
-    let Err(fs::Error::Create(create::Error::Failed { errors, .. })) = result else {
+    let Err(fs::Error::Create(error)) = result else {
+        panic!("an unresolvable package did not fail discovery");
+    };
+    let create::Error::Failed { errors, .. } = *error else {
         panic!("an unresolvable package did not fail discovery");
     };
     assert!(errors.iter().all(|error| !error.span.is_detached()));
@@ -755,6 +815,58 @@ mod fonts {
         assert_eq!(requirements.len(), 1);
         assert_eq!(requirements[0].digest, Digest::of(&data));
         assert!(requirements[0].embedded);
+    }
+
+    #[test]
+    fn a_container_offered_twice_is_used_once_and_embedded_if_either_embeds_it() {
+        let dir = tempfile::tempdir().unwrap();
+        let data = typst_container();
+        let family = family_of(&data);
+        write_tree(
+            dir.path(),
+            &[(
+                "project/main.typ",
+                &format!("#set text(font: \"{family}\")\nSelected"),
+            )],
+        );
+        std::fs::create_dir(dir.path().join("fonts")).unwrap();
+        std::fs::write(dir.path().join("fonts/font.ttf"), &data).unwrap();
+
+        // Typst ships the bytes too, unembedded, and the path is listed twice.
+        let packed = fs::Packer {
+            font_paths: vec![dir.path().join("fonts"), dir.path().join("fonts")],
+            embed_fonts: true,
+            ..packer()
+        }
+        .pack(dir.path().join("project"), "main.typ")
+        .unwrap();
+
+        let requirements = packed.pack.font_requirements();
+        assert_eq!(requirements.len(), 1);
+        assert_eq!(requirements[0].digest, Digest::of(&data));
+        assert!(requirements[0].embedded);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolving_typst_fonts_scans_no_font_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        write_tree(dir.path(), &[("main.typ", "Hello")]);
+        let pack = packer().pack(dir.path(), "main.typ").unwrap().pack;
+        let fonts = dir.path().join("fonts");
+        std::fs::create_dir(&fonts).unwrap();
+        // A scan would report this broken font as skipped.
+        std::os::unix::fs::symlink("missing.ttf", fonts.join("broken.ttf")).unwrap();
+
+        let resolved = fs::Packer {
+            font_paths: vec![fonts],
+            ..packer()
+        }
+        .resolve(&pack)
+        .unwrap();
+
+        assert!(!resolved.fonts.is_empty());
+        assert!(resolved.skipped_fonts.is_empty());
     }
 
     #[test]
@@ -847,7 +959,7 @@ fn compiled(source: &str, format: OutputFormat) -> Vec<Artifact> {
 fn extraction_creates_the_destination_and_writes_exact_bytes() {
     let (_directory, root) = temp_root();
     for destination in [root.join("new/nested/written"), root.clone()] {
-        fs::write_extraction(&extraction_plan(), &destination, fs::WritePolicy::CreateNew).unwrap();
+        fs::write_extraction(&destination, &extraction_plan(), fs::WritePolicy::CreateNew).unwrap();
 
         assert_eq!(
             std::fs::read(destination.join("main.typ")).unwrap(),
@@ -873,15 +985,15 @@ fn create_new_refuses_every_existing_target_and_overwrite_replaces_them() {
     );
 
     let issues = rejected(fs::write_extraction(
-        &extraction_plan(),
         &root,
+        &extraction_plan(),
         fs::WritePolicy::CreateNew,
     ));
     let existing = |path: &str| fs::WriteIssue::ExistingTarget { path: path.into() };
     assert_eq!(issues, [existing("assets/data.txt"), existing("main.typ")]);
     assert_eq!(std::fs::read(root.join("main.typ")).unwrap(), b"old main");
 
-    fs::write_extraction(&extraction_plan(), &root, fs::WritePolicy::Overwrite).unwrap();
+    fs::write_extraction(&root, &extraction_plan(), fs::WritePolicy::Overwrite).unwrap();
     assert_eq!(std::fs::read(root.join("main.typ")).unwrap(), b"new main");
     assert_eq!(
         std::fs::read(root.join("unrelated.txt")).unwrap(),
@@ -900,7 +1012,7 @@ fn conflicting_files_and_directories_are_refused_under_every_policy() {
         std::fs::create_dir_all(root.join("main.typ")).unwrap();
         std::fs::write(root.join("assets"), b"a file").unwrap();
 
-        let issues = rejected(fs::write_extraction(&extraction_plan(), &root, policy));
+        let issues = rejected(fs::write_extraction(&root, &extraction_plan(), policy));
 
         assert_eq!(
             issues,
@@ -917,7 +1029,7 @@ fn conflicting_files_and_directories_are_refused_under_every_policy() {
         assert_eq!(tree(&root), ["assets", "main.typ"]);
 
         let file = root.join("assets");
-        let issues = rejected(fs::write_extraction(&extraction_plan(), &file, policy));
+        let issues = rejected(fs::write_extraction(&file, &extraction_plan(), policy));
         assert!(matches!(
             issues.as_slice(),
             [fs::WriteIssue::ConflictingAncestor { ancestor, .. }] if ancestor == &file
@@ -932,13 +1044,17 @@ fn unportable_and_case_colliding_plan_paths_are_refused_everywhere() {
         ("notes.", b"trailing dot"),
         ("Data.txt", b"upper"),
         ("data.txt", b"lower"),
+        ("caf\u{e9}.txt", b"composed"),
+        ("cafe\u{301}.txt", b"decomposed"),
+        ("a\u{3a3}", b"capital sigma"),
+        ("a\u{3c3}", b"small sigma"),
     ]);
     let (_directory, root) = temp_root();
     let destination = root.join("written");
 
     let issues = rejected(fs::write_extraction(
-        &plan,
         &destination,
+        &plan,
         fs::WritePolicy::Overwrite,
     ));
 
@@ -948,10 +1064,20 @@ fn unportable_and_case_colliding_plan_paths_are_refused_everywhere() {
             component: name.to_owned(),
         }));
     }
-    assert!(issues.contains(&fs::WriteIssue::PathConflict {
-        first: "Data.txt".into(),
-        second: "data.txt".into(),
-    }));
+    for (first, second) in [
+        ("Data.txt", "data.txt"),
+        // Plans are in byte order, so the decomposed form comes first.
+        ("cafe\u{301}.txt", "caf\u{e9}.txt"),
+        ("a\u{3a3}", "a\u{3c3}"),
+    ] {
+        assert!(
+            issues.contains(&fs::WriteIssue::PathConflict {
+                first: first.into(),
+                second: second.into(),
+            }),
+            "{first} and {second} collide"
+        );
+    }
     assert!(!destination.exists());
 }
 
@@ -969,8 +1095,8 @@ fn symlinks_beneath_the_destination_are_refused_but_above_it_followed() {
     symlink(outside.join("main.typ"), destination.join("main.typ")).unwrap();
 
     let issues = rejected(fs::write_extraction(
-        &extraction_plan(),
         &destination,
+        &extraction_plan(),
         fs::WritePolicy::Overwrite,
     ));
 
@@ -991,10 +1117,10 @@ fn symlinks_beneath_the_destination_are_refused_but_above_it_followed() {
     // The destination itself is a link, then lies beneath one.
     symlink(&outside, root.join("linked")).unwrap();
     let plan = extraction_plan();
-    fs::write_extraction(&plan, root.join("linked"), fs::WritePolicy::CreateNew).unwrap();
+    fs::write_extraction(root.join("linked"), &plan, fs::WritePolicy::CreateNew).unwrap();
     fs::write_extraction(
-        &plan,
         root.join("linked/nested"),
+        &plan,
         fs::WritePolicy::CreateNew,
     )
     .unwrap();
@@ -1016,7 +1142,7 @@ fn artifacts_are_written_to_their_paths_and_replaced_on_overwrite() {
     let paths = [root.join("page-1.svg"), root.join("pages/page-2.svg")];
     std::fs::write(&paths[0], b"stale").unwrap();
 
-    let error = fs::write_artifacts(&result, &paths, fs::WritePolicy::CreateNew).unwrap_err();
+    let error = fs::write_artifacts(&paths, &result, fs::WritePolicy::CreateNew).unwrap_err();
     assert!(matches!(
         error,
         fs::WriteError::Io { ref path, ref completed, .. }
@@ -1024,7 +1150,7 @@ fn artifacts_are_written_to_their_paths_and_replaced_on_overwrite() {
     ));
     assert_eq!(std::fs::read(&paths[0]).unwrap(), b"stale");
 
-    fs::write_artifacts(&result, &paths, fs::WritePolicy::Overwrite).unwrap();
+    fs::write_artifacts(&paths, &result, fs::WritePolicy::Overwrite).unwrap();
     for (artifact, path) in result.iter().zip(&paths) {
         assert_eq!(std::fs::read(path).unwrap(), artifact.bytes);
     }
@@ -1037,9 +1163,11 @@ fn artifact_writes_reject_count_and_path_conflicts_before_writing() {
     let (_directory, root) = temp_root();
     let same = root.join("same.svg");
 
+    let nested = same.join("nested.svg");
+
     let issues = rejected(fs::write_artifacts(
+        &[same.clone(), nested.clone(), same.clone()],
         &result,
-        &[same.clone(), same.clone(), root.join("third.svg")],
         fs::WritePolicy::Overwrite,
     ));
 
@@ -1052,7 +1180,11 @@ fn artifact_writes_reject_count_and_path_conflicts_before_writing() {
             },
             fs::WriteIssue::PathConflict {
                 first: same.clone(),
-                second: same,
+                second: same.clone(),
+            },
+            fs::WriteIssue::PathConflict {
+                first: same,
+                second: nested,
             },
         ]
     );
@@ -1067,8 +1199,8 @@ fn a_failed_artifact_write_leaves_no_temporary_file() {
     std::fs::create_dir(&output).unwrap();
 
     let error = fs::write_artifacts(
-        &result,
         std::slice::from_ref(&output),
+        &result,
         fs::WritePolicy::Overwrite,
     )
     .unwrap_err();
@@ -1089,7 +1221,7 @@ fn artifact_paths_resolve_natively_and_need_not_be_unicode() {
     symlink(root.join("actual/nested"), root.join("linked")).unwrap();
 
     let parent = [root.join("linked/../output.pdf")];
-    fs::write_artifacts(&result, &parent, fs::WritePolicy::Overwrite).unwrap();
+    fs::write_artifacts(&parent, &result, fs::WritePolicy::Overwrite).unwrap();
     assert_eq!(
         std::fs::read(root.join("actual/output.pdf")).unwrap(),
         result[0].bytes
@@ -1099,7 +1231,7 @@ fn artifact_paths_resolve_natively_and_need_not_be_unicode() {
     // APFS and HFS+ refuse names that are not UTF-8.
     if std::fs::write(&path, b"probe").is_ok() {
         let paths = std::slice::from_ref(&path);
-        fs::write_artifacts(&result, paths, fs::WritePolicy::Overwrite).unwrap();
+        fs::write_artifacts(paths, &result, fs::WritePolicy::Overwrite).unwrap();
         assert_eq!(std::fs::read(&path).unwrap(), result[0].bytes);
     }
 }
@@ -1124,4 +1256,72 @@ fn files_are_written_without_replacing_unless_asked() {
         ["archive.typk"],
         "no temporary file is left behind"
     );
+}
+
+#[cfg(unix)]
+#[test]
+fn overwrite_writes_through_a_final_symbolic_link_and_keeps_the_mode() {
+    use std::os::unix::fs::{PermissionsExt, symlink};
+
+    let result = compiled("= Written", OutputFormat::Pdf);
+    let (_directory, root) = temp_root();
+    std::fs::create_dir(root.join("real")).unwrap();
+    let real = root.join("real/output.pdf");
+    std::fs::write(&real, b"old").unwrap();
+    std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o640)).unwrap();
+    symlink("real/output.pdf", root.join("output.pdf")).unwrap();
+    symlink("real/created.pdf", root.join("dangling.pdf")).unwrap();
+    let linked = [root.join("output.pdf"), root.join("dangling.pdf")];
+
+    for path in &linked {
+        let error = fs::write_file(path, b"new", fs::WritePolicy::CreateNew).unwrap_err();
+        assert!(matches!(
+            error,
+            fs::WriteError::Io { ref source, .. }
+                if source.kind() == std::io::ErrorKind::AlreadyExists
+        ));
+    }
+    assert_eq!(std::fs::read(&real).unwrap(), b"old");
+    assert!(!root.join("real/created.pdf").exists());
+
+    fs::write_artifacts(&linked[..1], &result, fs::WritePolicy::Overwrite).unwrap();
+    fs::write_file(&linked[1], b"created", fs::WritePolicy::Overwrite).unwrap();
+
+    for path in &linked {
+        assert!(path.symlink_metadata().unwrap().is_symlink());
+    }
+    assert_eq!(std::fs::read(&real).unwrap(), result[0].bytes);
+    let mode = std::fs::metadata(&real).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o640);
+    assert_eq!(
+        std::fs::read(root.join("real/created.pdf")).unwrap(),
+        b"created"
+    );
+    assert_eq!(
+        tree(&root),
+        [
+            "dangling.pdf",
+            "output.pdf",
+            "real",
+            "real/created.pdf",
+            "real/output.pdf"
+        ]
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn overwriting_an_extracted_file_keeps_its_mode() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let (_directory, root) = temp_root();
+    write_tree(&root, &[("main.typ", "old main")]);
+    let main = root.join("main.typ");
+    std::fs::set_permissions(&main, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+    fs::write_extraction(&root, &extraction_plan(), fs::WritePolicy::Overwrite).unwrap();
+
+    assert_eq!(std::fs::read(&main).unwrap(), b"new main");
+    let mode = std::fs::metadata(&main).unwrap().permissions().mode();
+    assert_eq!(mode & 0o777, 0o600);
 }

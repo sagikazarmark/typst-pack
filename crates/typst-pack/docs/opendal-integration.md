@@ -21,8 +21,12 @@ Functions take an `&Operator` plus plain string paths relative to the
 operator's root. A *prefix* is `""` (the root) or a key ending in `/`; an
 *object key* is nonempty, has no leading or trailing slash or whitespace, no
 empty or `.`/`..` segments, and no backslashes or control characters. These rules keep a key
-from aliasing another one after OpenDAL's path normalization. Violations fail
-with [`Error::InvalidPath`].
+from aliasing another one after OpenDAL's path normalization. A bad prefix,
+archive path, or listed key fails with [`Error::InvalidPath`]. Writes of many
+keys ([`write_extraction`], [`write_artifacts`]) check every key first and
+fail with [`Error::InvalidKeys`], listing each invalid or repeated key, before
+anything is written; pack paths may end in whitespace, which OpenDAL would
+trim into another key.
 
 ## Reading and assembling
 
@@ -30,7 +34,16 @@ with [`Error::InvalidPath`].
 the project and fonts, calls [`create()`](crate::create()), reads each missing
 package from the configured [`PackageSource`]s, inserts it, and resumes until a
 pack is created. Its public `target`, `options`, and `variants` fields are the
-discovery controls of [`create::Request`](crate::create::Request).
+discovery controls of [`create::Request`](crate::create::Request). A package
+that is unavailable, over a read limit, or fails to expand or validate becomes
+a package failure that creation reports at its import; storage failures end
+assembly.
+
+`create()` compiles the document synchronously, so polling `assemble()`
+blocks the polling thread while it runs. On a shared async executor, poll it
+from a blocking-capable task (for example Tokio's `spawn_blocking` with
+`Handle::block_on`), or use the building blocks below and run `create()` on a
+blocking thread yourself.
 
 ```rust,no_run
 # #[cfg(feature = "package-reading")]
@@ -58,15 +71,21 @@ example to embed only some packages):
 
 | Function | Result |
 | --- | --- |
-| [`read_project`] | A [`ProjectSnapshot`](crate::ProjectSnapshot) of every file below a prefix. `.typkignore` is an ordinary file here; ignore rules belong to filesystem reading. |
+| [`read_project`] | A [`ProjectSnapshot`](crate::ProjectSnapshot) of every file below a prefix except `.typk` paths. `.typkignore` is an ordinary file here; ignore rules belong to filesystem reading. |
 | [`read_fonts`] | The [`font::Entry`](crate::font::Entry) values of `.ttf`/`.ttc`/`.otf`/`.otc` objects below each [`FontSource`], in source then path order. |
 | [`read_package`] | A [`PackageRead`]: a tree's files, cached or registry archive bytes, or `Unavailable`. Sources are tried in order; only definite absence advances. |
-| [`insert_package`] | Builds or expands the tree, adds it to a [`create::Request`](crate::create::Request), and keeps its package failures in step. |
-| [`read_archive`] | The exact pack archive bytes; decode with [`archive::decode`](crate::archive::decode). |
+| [`insert_package`] | Builds or expands the tree, adds it to a [`create::Request`](crate::create::Request), and keeps its package failures (with their reasons) in step. |
+| [`read_archive`] | The exact pack archive bytes; decode with [`archive::decode`](crate::archive::decode). Unlike `fs::read_archive`, which decodes, it returns the bytes so they stay available when decoding fails. |
 
 A listing is one observation, not a storage snapshot: objects may change
 between listing and reading. An object that vanishes in between fails the
-read.
+read. Each object is read whole in one request after its stat, and the bytes
+must agree with that stat: where the operator supports conditional reads the
+read is conditional on the stat's ETag, and a read whose length differs from
+the stat's fails. A replaced, grown, or shrunk object therefore fails with a
+temporary [`Error::Storage`] whose source has kind `ConditionNotMatch`; it is
+never returned as a prefix. Without ETag support, a same-length replacement
+between stat and read cannot be detected.
 
 ## Limits
 
@@ -76,8 +95,10 @@ counts toward `max_entries`, and each object's length is checked against
 so an oversized object is never transferred. A raw package archive is bounded
 by `max_file_bytes` and expanded under the same `ReadLimits`;
 [`read_archive`] takes an explicit byte ceiling.
-Exceeding a limit fails with [`Error::Limit`]. Limits do not bound memory
-inside OpenDAL or its transport.
+Exceeding a limit fails with [`Error::Limit`]; the [`Assembler`] records a
+package over a limit as a package failure instead. An object that grows
+after its stat is abandoned as soon as the read passes the stat's length.
+Limits do not bound memory inside OpenDAL or its transport.
 
 ## Writing
 
@@ -93,7 +114,12 @@ with a different length is a conflict without being downloaded, and an
 object of equal length is compared in chunks. A conflict anywhere fails with
 [`Error::Conflict`] before anything is written. Absent keys are then created
 with a conditional write (`if_not_exists`); if another writer wins the race,
-its bytes must match. [`WritePolicy::Overwrite`] writes every key
+its bytes must match. A conditional create refused although the object is
+then absent (S3 answers `409 ConditionalRequestConflict` while another upload
+of the key is in flight) is retried once; a second refusal is a temporary
+[`Error::Storage`], not a conflict. Verification reads the whole object, so
+an object that grew past the expected bytes never matches on its prefix.
+[`WritePolicy::Overwrite`] writes every key
 unconditionally. Required capabilities are checked up front and reported as
 [`Error::Unsupported`].
 
@@ -104,9 +130,10 @@ for the guarantees you need.
 ### Recovery
 
 Writes are sequential and not atomic across keys. A [`WriteError`] carries
-the `completed` keys and their outcomes, the underlying [`Error`], and
-whether the failing key's effect is `indeterminate` (the write was issued
-but its outcome is unknown). Every write borrows its input, so the recovery
+the failing key's `path` (`None` when the write was refused before any key
+was tried), the `completed` keys and their outcomes, the underlying
+[`Error`] as its `source`, and whether the failing key's effect is
+`indeterminate` (the write was issued but its outcome is unknown). Every write borrows its input, so the recovery
 path is to replay the whole write: with `CreateOrVerify`, keys that were
 already written complete as [`WriteOutcome::AlreadyMatching`].
 
@@ -114,7 +141,14 @@ already written complete as [`WriteOutcome::AlreadyMatching`].
 
 [`Error`] is the one adapter error. Its `Display` names the path and the
 storage operation but not the operator's endpoint or credentials; the native
-OpenDAL error, which may carry backend context, is the error's `source`.
+OpenDAL error, which may carry backend context, is the error's `source`, as
+is the [`LimitExceeded`](crate::LimitExceeded) of [`Error::Limit`]. As
+everywhere in the crate, a cause is exposed through `source()` and not
+repeated in `Display`; print the whole chain to show it.
+
+Every function takes its target (operator and path or prefix) first, then
+the data, then the policy, as the filesystem adapter does; limits are passed
+by value.
 
 ## External compilation dependencies
 
@@ -142,7 +176,7 @@ async fn compile_with_external_inputs(
     }];
     let mut request = Request::new(pack.clone(), output);
     for requirement in pack.package_requirements().iter().filter(|r| !r.embedded) {
-        let PackageRead::Tree(files) = read_package(&sources, &requirement.spec, &limits).await?
+        let PackageRead::Tree(files) = read_package(&sources, &requirement.spec, limits).await?
         else {
             return Err(format!("no tree for {}", requirement.spec).into());
         };
@@ -155,7 +189,7 @@ async fn compile_with_external_inputs(
         prefix: "fonts/".into(),
         embedded: false,
     };
-    let fonts = read_fonts(operator, &[font_source], &limits).await?;
+    let fonts = read_fonts(operator, &[font_source], limits).await?;
     request.fonts = fonts.into_iter().map(|entry| entry.container).collect();
     Ok(typst_pack::compile(&request)?)
 }

@@ -80,6 +80,8 @@ pub(super) fn export(
         mut warnings,
     } = typst::compile::<PagedDocument>(world);
     if normalized.untagged_by_selection {
+        // Typst's CLI words this warning in terms of its flags; the text is
+        // kept verbatim so both tools report the same diagnostic.
         warnings.push(
             SourceDiagnostic::warning(Span::detached(), "using --pages implies --no-pdf-tags")
                 .with_hints([
@@ -233,7 +235,8 @@ fn retain(limits: Limits, total: &mut u64, artifact: &Artifact) -> Result<(), Li
 }
 
 /// Exports pages in order, in batches of at most `export_workers`, stopping
-/// at the first failure or exceeded byte limit.
+/// at the first failure or exceeded byte limit. Batches run on the current
+/// rayon pool unless it has fewer threads than workers.
 #[cfg(feature = "parallel")]
 pub(super) fn export_pages<T: Send>(
     items: Vec<T>,
@@ -243,10 +246,14 @@ pub(super) fn export_pages<T: Send>(
     let workers = usize::try_from(limits.export_workers.max(1))
         .unwrap_or(usize::MAX)
         .min(items.len().max(1));
-    let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(workers)
-        .build()
-        .ok();
+    let pool = (workers > 1 && workers > rayon::current_num_threads())
+        .then(|| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(workers)
+                .build()
+                .ok()
+        })
+        .flatten();
     let mut items = items.into_iter();
     let mut artifacts = Vec::new();
     let mut total = 0;
@@ -256,8 +263,9 @@ pub(super) fn export_pages<T: Send>(
             return Ok(artifacts);
         }
         let batch: Vec<_> = match &pool {
+            _ if workers == 1 => batch.into_iter().map(&export).collect(),
             Some(pool) => pool.install(|| batch.into_par_iter().map(&export).collect()),
-            None => batch.into_iter().map(&export).collect(),
+            None => batch.into_par_iter().map(&export).collect(),
         };
         for artifact in batch {
             let artifact = artifact?;

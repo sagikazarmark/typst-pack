@@ -313,7 +313,6 @@ type Tests {
       project: source,
       input: "main.typ",
       target: TypstPackTypstTarget.HTML,
-      features: [TypstPackFeature.HTML],
     )
     let output = self.typstPack.inspect(ws, pack)
 

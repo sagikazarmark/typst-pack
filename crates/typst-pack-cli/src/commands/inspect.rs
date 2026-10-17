@@ -1,33 +1,43 @@
 //! `typst-pack inspect`: list what a pack contains.
 
-use typst_pack::archive::{self, DecodeLimits, FORMAT_VERSION};
+use std::collections::BTreeSet;
+
+use typst_pack::archive::FORMAT_VERSION;
 use typst_pack::font;
 
-use super::CommandResult;
+use super::{CommandResult, Terminal, escape, read_pack, warn_typst_version};
 use crate::cli::InspectArgs;
 
-pub fn run(args: InspectArgs) -> CommandResult {
-    let pack = archive::open(&args.pack, DecodeLimits::default())
-        .map_err(|error| format!("cannot open pack `{}`: {error}", args.pack.display()))?;
+pub fn run(args: InspectArgs, terminal: Terminal) -> CommandResult {
+    let pack = read_pack(&args.pack)?;
+    warn_typst_version(&pack, terminal);
 
+    // Names and paths come from the pack and are printed escaped.
     println!("pack: {}", args.pack.display());
     println!("format version: {FORMAT_VERSION}");
-    println!("entrypoint: {}", pack.entrypoint());
+    if let Some(version) = pack.typst_version() {
+        println!("typst version: {}", escape(version));
+    }
+    if let Some(generator) = pack.generator() {
+        println!("generator: {}", escape(generator));
+    }
+    println!("identity: {}", pack.identity());
+    println!("entrypoint: {}", escape(pack.entrypoint()));
     if let Some(metadata) = pack.metadata() {
         if let Some(name) = &metadata.name {
-            println!("name: {name}");
+            println!("name: {}", escape(name));
         }
         if let Some(description) = &metadata.description {
-            println!("description: {description}");
+            println!("description: {}", escape(description));
         }
         if !metadata.authors.is_empty() {
-            println!("authors: {}", metadata.authors.join(", "));
+            println!("authors: {}", escape(&metadata.authors.join(", ")));
         }
     }
 
     println!("\npacked project files:");
     for (path, data) in pack.files() {
-        println!("  {path} ({})", human_size(data.len()));
+        println!("  {} ({})", escape(path), human_size(data.len()));
     }
 
     let vendored = pack.packages().collect::<Vec<_>>();
@@ -52,7 +62,7 @@ pub fn run(args: InspectArgs) -> CommandResult {
     let line = |requirement: &font::Requirement| {
         let faces = requirement.faces.iter().map(ToString::to_string);
         let faces = faces.collect::<Vec<_>>().join("; ");
-        format!("  {} - {faces}", requirement.digest)
+        format!("  {} - {}", requirement.digest, escape(&faces))
     };
     let (embedded, required): (Vec<_>, Vec<_>) =
         pack.font_requirements().iter().partition(|r| r.embedded);
@@ -66,9 +76,17 @@ pub fn run(args: InspectArgs) -> CommandResult {
     // External fonts are identified by content digest, so this listing is the
     // only place a recipient learns which fonts a pack expects them to supply.
     if !required.is_empty() {
-        println!("\nrequired fonts (supply with --font-path at compile time):");
+        let typst = font::embedded()
+            .map(|container| container.digest())
+            .collect::<BTreeSet<_>>();
+        println!("\nrequired fonts:");
         for requirement in required {
-            println!("{}", line(requirement));
+            let note = if typst.contains(&requirement.digest) {
+                "provided by Typst"
+            } else {
+                "supply with --font-path"
+            };
+            println!("{} ({note})", line(requirement));
         }
     }
     Ok(())

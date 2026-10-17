@@ -30,7 +30,7 @@ fn failed(request: &create::Request) -> Vec<typst::diag::SourceDiagnostic> {
 fn created(request: &create::Request) -> create::Created {
     match create(request).unwrap() {
         create::Outcome::Created(created) => created,
-        create::Outcome::MissingPackages(missing) => panic!("{missing:?} reported missing"),
+        other => panic!("expected a created pack, got {other:?}"),
     }
 }
 
@@ -39,7 +39,7 @@ fn missing(request: &create::Request) -> Vec<String> {
         create::Outcome::MissingPackages(missing) => {
             missing.iter().map(ToString::to_string).collect()
         }
-        create::Outcome::Created(_) => panic!("a missing package was not reported"),
+        other => panic!("expected missing packages, got {other:?}"),
     }
 }
 
@@ -111,7 +111,7 @@ fn the_document_time_inputs_and_metadata_reach_creation() {
     assert!(!failed(&request).is_empty());
     request.options.inputs = vec![
         ("key".into(), Input::from("value")),
-        ("data".into(), Input::Bytes(vec![1, 2])),
+        ("data".into(), Input::from(vec![1, 2])),
     ];
     request.metadata = Some(Metadata {
         name: Some("Reused".into()),
@@ -179,10 +179,41 @@ fn variants_union_the_packages_every_input_set_reaches() {
     base.packages = package::Catalog::new();
     assert_eq!(missing(&base), ["@local/alpha:1.0.0", "@local/beta:1.0.0"]);
 
-    // A variant that does not compile fails creation.
+    // A variant that does not compile fails creation, and its errors name
+    // the variant's inputs.
     let mut broken = request("#assert.eq(sys.inputs.at(\"ok\", default: \"yes\"), \"yes\")");
     broken.variants = vec![vec![("ok".into(), Input::from("no"))]];
-    assert!(!failed(&broken).is_empty());
+    let errors = failed(&broken);
+    assert!(
+        errors[0]
+            .hints
+            .iter()
+            .any(|hint| hint.v.contains("variant `ok=no`"))
+    );
+}
+
+#[test]
+fn a_variant_replaces_base_inputs_and_shares_warnings() {
+    let source = "#set text(font: \"Definitely Missing\")\nWarning\n\
+                  #let edition = sys.inputs.edition\n\
+                  #if edition == \"alpha\" { import \"@local/alpha:1.0.0\": value; value }\n\
+                  #if edition == \"beta\" { import \"@local/beta:1.0.0\": value; value }";
+    let mut request = request(source);
+    request.packages = catalog([
+        ("alpha", "#let value = 1", true),
+        ("beta", "#let value = 2", true),
+    ]);
+    request.options.inputs = vec![("edition".into(), Input::from("alpha"))];
+    request.variants = vec![vec![("edition".into(), Input::from("beta"))]];
+
+    let created = created(&request);
+    assert_eq!(
+        required(&created.pack),
+        ["@local/alpha:1.0.0", "@local/beta:1.0.0"]
+    );
+    let warnings = created.warnings.iter();
+    let missing_font = warnings.filter(|warning| warning.message.contains("unknown font family"));
+    assert_eq!(missing_font.count(), 1);
 }
 
 #[test]
@@ -249,6 +280,7 @@ fn a_resumed_creation_issues_the_pack_one_invocation_would_have() {
                     resumed.packages.insert(spec, tree, true).unwrap();
                 }
             }
+            other => panic!("unexpected outcome: {other:?}"),
         }
     };
 
@@ -289,6 +321,7 @@ fn a_declared_package_failure_fails_the_import_unless_a_tree_is_supplied() {
 /// Face selection out of the supplied fonts.
 #[cfg(feature = "embedded-fonts")]
 mod fonts {
+    use typst_pack::compile::Input;
     use typst_pack::{Digest, font};
 
     use crate::{catalog, created, request};
@@ -339,6 +372,27 @@ mod fonts {
         assert_eq!(
             requirements(&created(&request).pack),
             [(Digest::of(&serif), false)]
+        );
+    }
+
+    #[test]
+    fn a_font_reached_only_under_a_variant_becomes_a_requirement() {
+        let (serif, mono) = (container("Libertinus Serif"), container("DejaVu Sans Mono"));
+        let mut request = request(
+            "Serif\n\n#if sys.inputs.at(\"code\", default: \"no\") == \"yes\" {\n\
+               text(font: \"DejaVu Sans Mono\")[Mono]\n\
+             }",
+        );
+        request.fonts = entries(&[(&serif, true), (&mono, false)]);
+        assert_eq!(
+            requirements(&created(&request).pack),
+            [(Digest::of(&serif), true)]
+        );
+
+        request.variants = vec![vec![("code".into(), Input::from("yes"))]];
+        assert_eq!(
+            requirements(&created(&request).pack),
+            [(Digest::of(&serif), true), (Digest::of(&mono), false)]
         );
     }
 

@@ -38,7 +38,7 @@ fuzz_target!(|data: &[u8]| {
             fs::WritePolicy::Overwrite
         };
         let before = snapshot(&destination);
-        match fs::write_extraction(&plan, &destination, policy) {
+        match fs::write_extraction(&destination, &plan, policy) {
             Ok(()) => {
                 for entry in plan.entries() {
                     assert_eq!(

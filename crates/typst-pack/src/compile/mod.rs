@@ -8,6 +8,7 @@ mod output;
 
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use typst::Feature;
 use typst::diag::SourceDiagnostic;
@@ -25,12 +26,13 @@ use crate::{Digest, LimitExceeded, Pack, Sources, VERSION, font, list, package};
 ///
 /// Strings appear as Typst `str` values and bytes as Typst `bytes` values, so
 /// a document can, for example, decode an image with `image(sys.inputs.logo)`.
+/// Cloning an input shares its bytes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Input {
     /// A Typst `str`.
     Str(String),
     /// A Typst `bytes`.
-    Bytes(Vec<u8>),
+    Bytes(Bytes),
 }
 
 impl From<&str> for Input {
@@ -47,7 +49,7 @@ impl From<String> for Input {
 
 impl From<Vec<u8>> for Input {
     fn from(value: Vec<u8>) -> Self {
-        Self::Bytes(value)
+        Self::Bytes(Bytes::new(value))
     }
 }
 
@@ -57,10 +59,20 @@ pub enum DocumentTime {
     /// `datetime.today()` returns `none`.
     #[default]
     Absent,
-    /// One fixed Typst date or datetime, whatever offset is requested.
+    /// One fixed date, whatever offset is requested. A datetime is truncated
+    /// to its date; a value without a date is an invalid request.
     Fixed(Datetime),
-    /// One UNIX timestamp, shifted to each requested UTC offset.
+    /// One UNIX timestamp, shifted to each requested UTC offset and read in
+    /// UTC when no offset is requested, as Typst's `--creation-timestamp`.
     UnixTimestamp(i64),
+    /// One UNIX timestamp observed in a local timezone, shifted to each
+    /// requested UTC offset and read at `utc_offset_seconds` (east of UTC,
+    /// less than a day) when no offset is requested, as Typst does with the
+    /// system clock.
+    Local {
+        seconds: i64,
+        utc_offset_seconds: i32,
+    },
 }
 
 /// The document-facing controls shared by creation and compilation.
@@ -139,6 +151,7 @@ pub struct Artifact {
 
 /// A compilation that produced no artifacts.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// The request holds invalid values; nothing was compiled.
     #[error("{}", list("invalid compile request", .0))]
@@ -210,6 +223,7 @@ impl Error {
 
 /// One invalid value in a compile or create request.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum RequestIssue {
     /// A page range ends before it starts.
     #[error("page selection range {start}-{end} ends before it starts")]
@@ -226,6 +240,12 @@ pub enum RequestIssue {
     /// The document-time timestamp cannot be represented.
     #[error("the document-time UNIX timestamp is out of range")]
     InvalidDocumentTimestamp,
+    /// The document-time UTC offset is a day or more.
+    #[error("the document-time UTC offset must be less than a day")]
+    InvalidUtcOffset,
+    /// The fixed document time has no date.
+    #[error("the fixed document time must include a date")]
+    UndatedDocumentTime,
     /// The Typst Bundle feature was requested.
     #[error("the Typst Bundle feature is not supported")]
     UnsupportedBundleFeature,
@@ -233,6 +253,7 @@ pub enum RequestIssue {
 
 /// One external requirement of a pack that the request does not satisfy.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum Unfulfilled {
     /// No tree was supplied for a required package.
     #[error("required package {spec} was not supplied")]
@@ -255,7 +276,6 @@ pub(crate) struct Environment {
     pub(crate) clock: Clock,
     inputs: Vec<(String, Input)>,
     features: Vec<Feature>,
-    document_time: DocumentTime,
 }
 
 impl Environment {
@@ -265,10 +285,9 @@ impl Environment {
         html: bool,
         issues: &mut Vec<RequestIssue>,
     ) -> Option<Self> {
-        let clock = Clock::new(options.document_time);
-        if clock.is_none() {
-            issues.push(RequestIssue::InvalidDocumentTimestamp);
-        }
+        let clock = Clock::new(options.document_time)
+            .map_err(|issue| issues.push(issue))
+            .ok();
         if options.features.contains(&Feature::Bundle) {
             issues.push(RequestIssue::UnsupportedBundleFeature);
         }
@@ -289,7 +308,7 @@ impl Environment {
         for (key, value) in &inputs {
             let value = match value {
                 Input::Str(text) => text.as_str().into_value(),
-                Input::Bytes(data) => Bytes::new(data.clone()).into_value(),
+                Input::Bytes(data) => data.clone().into_value(),
             };
             dict.insert(key.as_str().into(), value);
         }
@@ -302,7 +321,6 @@ impl Environment {
             clock: clock?,
             inputs,
             features,
-            document_time: options.document_time,
         })
     }
 
@@ -315,25 +333,33 @@ impl Environment {
                 Input::Bytes(data) => preimage.str("bytes").digest(&Digest::of(data)),
             };
         }
-        match self.document_time {
-            DocumentTime::Absent => {
+        match &self.clock {
+            Clock::Absent => {
                 preimage.str("absent");
             }
-            DocumentTime::UnixTimestamp(seconds) => {
-                preimage.str("unix").int(seconds);
-            }
-            DocumentTime::Fixed(datetime) => {
-                preimage.str("fixed");
+            Clock::Date(date) => {
+                preimage.str("date");
                 for part in [
-                    datetime.year().map(i64::from),
-                    datetime.month().map(i64::from),
-                    datetime.day().map(i64::from),
-                    datetime.hour().map(i64::from),
-                    datetime.minute().map(i64::from),
-                    datetime.second().map(i64::from),
+                    date.year(),
+                    date.month().map(i32::from),
+                    date.day().map(i32::from),
                 ] {
-                    preimage.bool(part.is_some()).int(part.unwrap_or_default());
+                    preimage.int(part.map(i64::from).unwrap_or_default());
                 }
+            }
+            Clock::Timestamp {
+                seconds,
+                utc_offset_seconds: None,
+                ..
+            } => {
+                preimage.str("unix").int(*seconds);
+            }
+            Clock::Timestamp {
+                seconds,
+                utc_offset_seconds: Some(offset),
+                ..
+            } => {
+                preimage.str("local").int(*seconds).int(i64::from(*offset));
             }
         }
         preimage.count(self.features.len());
@@ -407,7 +433,7 @@ pub fn compile(request: &Request) -> Result<Compiled, Error> {
     trees.extend(packages);
     let loader = Loader {
         project: pack.project().clone(),
-        packages: trees,
+        packages: Arc::new(trees),
         failures: Default::default(),
     };
     let world = SourceWorld::new(loader, containers, environment.library, environment.clock);

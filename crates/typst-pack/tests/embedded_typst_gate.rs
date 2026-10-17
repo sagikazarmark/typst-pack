@@ -1,9 +1,22 @@
 //! The embedded Typst pinning policy. Typst crates share internal types, so
 //! every `typst` and `typst-*` crate must resolve to the one release declared
 //! in `embedded-typst.toml`. This runs in the repository only; downstream
-//! builds of the published crate never read workspace files.
+//! builds of the published crate never read workspace files, and the
+//! workspace checks skip themselves outside the repository.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+/// The workspace root, or `None` outside the repository (for example when
+/// testing the published package).
+fn workspace_root() -> Option<PathBuf> {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let manifest = std::fs::read_to_string(root.join("Cargo.toml")).ok()?;
+    let is_workspace = manifest.contains("[workspace]") && root.join("Cargo.lock").is_file();
+    if !is_workspace {
+        eprintln!("skipping: the typst-pack workspace is not available");
+    }
+    is_workspace.then_some(root)
+}
 
 fn read_toml(path: &Path) -> toml::Value {
     let source = std::fs::read_to_string(path)
@@ -50,7 +63,9 @@ fn requirement<'a>(
 fn every_direct_typst_dependency_is_pinned_exactly() {
     let baseline = baseline();
     let expected = format!("={}", engine_version(&baseline));
-    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("../..");
+    let Some(root) = workspace_root() else {
+        return;
+    };
     let workspace = read_toml(&root.join("Cargo.toml"));
 
     let mut problems = Vec::new();
@@ -76,7 +91,10 @@ fn every_direct_typst_dependency_is_pinned_exactly() {
 fn the_lockfile_resolves_each_typst_crate_once_at_the_embedded_release() {
     let baseline = baseline();
     let expected = engine_version(&baseline);
-    let lockfile = read_toml(&Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.lock"));
+    let Some(root) = workspace_root() else {
+        return;
+    };
+    let lockfile = read_toml(&root.join("Cargo.lock"));
 
     let mut problems = Vec::new();
     let mut seen = std::collections::BTreeMap::<&str, Vec<&str>>::new();

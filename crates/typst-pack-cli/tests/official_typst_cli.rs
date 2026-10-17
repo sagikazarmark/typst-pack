@@ -93,7 +93,8 @@ fn assert_success(output: &Output) {
 
 #[cfg(unix)]
 fn read_eventually(path: &Path) -> String {
-    for _ in 0..100 {
+    // Viewers are detached; give a loaded machine time to run them.
+    for _ in 0..1000 {
         if let Ok(value) = std::fs::read_to_string(path) {
             return value;
         }
@@ -315,6 +316,128 @@ fn official_typst_compile_gates_shared_environment_diagnostics_and_exit_behavior
         std::fs::read(pack_svg).unwrap(),
         std::fs::read(official_svg).unwrap()
     );
+}
+
+/// A timezone whose current date differs from the UTC date.
+#[cfg(unix)]
+fn timezone_off_the_utc_date() -> &'static str {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap();
+    if now.as_secs() % 86_400 >= 12 * 3600 {
+        "Etc/GMT-14"
+    } else {
+        "Etc/GMT+12"
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn official_typst_compile_gates_the_local_date_without_a_timestamp() {
+    let Some(official) = OfficialTypstCli::from_environment() else {
+        eprintln!("skipping official CLI parity outside its pinned Dagger gate");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    // Without SOURCE_DATE_EPOCH (removed for both), `today()` is the local
+    // date, and an explicit offset still shifts the current instant.
+    let source = "#let today = datetime.today()\n\
+                  #set page(width: today.month() * 1pt, height: today.day() * 1pt, margin: 0pt)\n\
+                  #rect(width: datetime.today(offset: 3).day() * 0.1pt)";
+    let project = write_project(directory.path(), source);
+    let pack_path = directory.path().join("today.typk");
+    write_pack(&pack_path, source);
+    let official_svg = directory.path().join("official.svg");
+    let pack_svg = directory.path().join("pack.svg");
+    let timezone = [("TZ", timezone_off_the_utc_date())];
+
+    let official_result = official.run(
+        &project,
+        [
+            "compile",
+            "main.typ",
+            official_svg.to_str().unwrap(),
+            "--ignore-system-fonts",
+        ],
+        &timezone,
+    );
+    let pack_result = pack_run(
+        directory.path(),
+        [
+            "compile",
+            pack_path.to_str().unwrap(),
+            pack_svg.to_str().unwrap(),
+            "--ignore-system-fonts",
+        ],
+        &timezone,
+    );
+    assert_success(&official_result);
+    assert_success(&pack_result);
+    assert_eq!(
+        std::fs::read_to_string(pack_svg).unwrap(),
+        std::fs::read_to_string(official_svg).unwrap()
+    );
+}
+
+#[test]
+fn official_typst_compile_gates_errors_before_warnings() {
+    let Some(official) = OfficialTypstCli::from_environment() else {
+        eprintln!("skipping official CLI parity outside its pinned Dagger gate");
+        return;
+    };
+    let directory = tempfile::tempdir().unwrap();
+    // Layout fails after evaluation warned.
+    let source = "#set text(font: \"No Such Family\")\nWarned\n#context panic(\"boom\")";
+    let project = write_project(directory.path(), source);
+    let pack_path = directory.path().join("failing.typk");
+    write_pack(&pack_path, source);
+
+    for format in ["short", "human"] {
+        let official_result = official.run(
+            &project,
+            [
+                "--color",
+                "never",
+                "compile",
+                "main.typ",
+                "out.pdf",
+                "--pages",
+                "1",
+                "--diagnostic-format",
+                format,
+                "--ignore-system-fonts",
+            ],
+            &[],
+        );
+        let pack_result = pack_run(
+            directory.path(),
+            [
+                "--color",
+                "never",
+                "compile",
+                pack_path.to_str().unwrap(),
+                "out.pdf",
+                "--pages",
+                "1",
+                "--diagnostic-format",
+                format,
+                "--ignore-system-fonts",
+            ],
+            &[],
+        );
+        let official_stderr = String::from_utf8_lossy(&official_result.stderr);
+        let first = official_stderr.lines().next().unwrap_or_default();
+        assert!(
+            first.contains("error: panicked with: boom"),
+            "{official_stderr}"
+        );
+        assert!(official_stderr.contains("warning: unknown font family"));
+        assert_eq!(pack_result.status.code(), official_result.status.code());
+        assert_eq!(
+            String::from_utf8_lossy(&pack_result.stderr),
+            String::from_utf8_lossy(&official_result.stderr)
+        );
+    }
 }
 
 #[test]

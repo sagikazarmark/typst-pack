@@ -8,7 +8,7 @@ use typst::syntax::package::PackageSpec;
 use typst_kit::packages::FsPackages;
 
 use super::Error;
-use super::walk::{Root, Walker, utf8_path};
+use super::walk::{Kind, Root, Walker, utf8_path};
 use crate::ReadLimits;
 use crate::package::{ReadFailure, Tree};
 
@@ -16,14 +16,22 @@ use crate::package::{ReadFailure, Tree};
 ///
 /// The root may itself be a symbolic link, as `@local` development packages
 /// commonly are. Links inside the tree are followed when they resolve beneath
-/// the root.
+/// the root. Version-control directories (`.git`, `.hg`, `.svn`) are left
+/// out, as Typst Universe bundles leave them out, so a package checked out
+/// from version control reads as the same tree.
 pub fn read_package(root: impl AsRef<Path>, limits: ReadLimits) -> Result<Tree, Error> {
     let root_path = root.as_ref();
     let root = Root::open(root_path)?;
     let mut files = Vec::new();
     Walker::strict(limits).walk(
         &root,
-        |relative, _| utf8_path(root_path, relative).map(|_| true),
+        |relative, kind| {
+            utf8_path(root_path, relative)?;
+            let vcs = relative
+                .file_name()
+                .is_some_and(|name| VCS_DIRS.iter().any(|vcs| name == *vcs));
+            Ok(!(kind == Kind::Dir && vcs))
+        },
         |relative, bytes| {
             files.push((utf8_path(root_path, &relative)?, bytes));
             Ok(())
@@ -31,6 +39,9 @@ pub fn read_package(root: impl AsRef<Path>, limits: ReadLimits) -> Result<Tree, 
     )?;
     Ok(Tree::new(files)?)
 }
+
+/// Version-control directories, never part of a package.
+const VCS_DIRS: [&str; 3] = [".git", ".hg", ".svn"];
 
 /// Where the packer reads packages from.
 #[derive(Clone, Debug)]
@@ -74,7 +85,7 @@ impl PackageDirs {
                 continue;
             };
             let tree = read_package(root.path(), self.limits)
-                .map_err(|error| ReadFailure::Other(Some(error.to_string())))?;
+                .map_err(|error| ReadFailure::Other(Some(crate::chain(&error))))?;
             return Ok(Found {
                 tree,
                 root: Some(root.path().to_owned()),
@@ -105,7 +116,7 @@ mod egress {
 
     use super::Found;
     use crate::package::registry::{ExpandError, archive_url, expand_archive};
-    use crate::package::{ReadFailure, Tree, tree_key};
+    use crate::package::{ReadFailure, Tree};
     use crate::{LimitExceeded, ReadLimits};
 
     const USER_AGENT: &str = concat!("typst-pack/", env!("CARGO_PKG_VERSION"));
@@ -152,7 +163,13 @@ mod egress {
                     cache
                         .store(spec, |directory| write_tree(directory, &tree))
                         .map_err(|source| ReadFailure::Other(Some(source.to_string())))?;
-                    Some(cache.path().join(tree_key(spec)))
+                    Some(
+                        cache
+                            .path()
+                            .join(spec.namespace.as_str())
+                            .join(spec.name.as_str())
+                            .join(spec.version.to_string()),
+                    )
                 }
                 None => None,
             };
@@ -179,8 +196,8 @@ mod egress {
             .map_err(|error| ReadFailure::NetworkFailed(Some(error.to_string())))?;
         LimitExceeded::check(archive.len() as u64, max, "package archive bytes").map_err(limit)?;
         expand_archive(&archive, limits).map_err(|error| match error {
-            ExpandError::Limit(_) => ReadFailure::Other(Some(error.to_string())),
-            _ => ReadFailure::MalformedArchive(Some(error.to_string())),
+            ExpandError::Limit(_) => ReadFailure::Other(Some(crate::chain(&error))),
+            _ => ReadFailure::MalformedArchive(Some(crate::chain(&error))),
         })
     }
 

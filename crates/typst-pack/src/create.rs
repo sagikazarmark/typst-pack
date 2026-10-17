@@ -6,6 +6,7 @@
 //! the core runs, including a host with no filesystem and no clock.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 use typst::World;
 use typst::diag::{SourceDiagnostic, SourceResult, Warned};
@@ -84,6 +85,7 @@ pub struct Created {
 
 /// What one creation produced.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum Outcome {
     /// Every discovery compile succeeded.
     Created(Created),
@@ -95,6 +97,7 @@ pub enum Outcome {
 
 /// A creation that produced no pack.
 #[derive(Debug, thiserror::Error)]
+#[non_exhaustive]
 pub enum Error {
     /// The request holds invalid values; nothing was compiled.
     #[error("{}", list("invalid create request", .0))]
@@ -144,6 +147,7 @@ pub enum Error {
 ///                     request.packages.insert(spec, tree, true)?;
 ///                 }
 ///             }
+///             outcome => return Err(format!("unexpected outcome: {outcome:?}").into()),
 ///         }
 ///     }
 /// }
@@ -164,27 +168,37 @@ pub fn create(request: &Request) -> Result<Outcome, Error> {
         return Err(Error::InvalidRequest(issues));
     };
 
+    let loader = Loader {
+        project: request.project.clone(),
+        packages: Arc::new(
+            request
+                .packages
+                .entries()
+                .map(|entry| (entry.spec.to_string(), entry.tree.clone()))
+                .collect(),
+        ),
+        failures: Arc::new(request.package_failures.clone()),
+    };
     let mut used_packages = BTreeMap::new();
     let mut missing = BTreeMap::new();
     let mut used_fonts = BTreeSet::new();
     let mut warnings = Vec::<SourceDiagnostic>::new();
     let mut failure = None;
     let mut sources = None;
-    for environment in environments {
-        let loader = Loader {
-            project: request.project.clone(),
-            packages: request
-                .packages
-                .entries()
-                .map(|entry| (entry.spec.to_string(), entry.tree.clone()))
-                .collect(),
-            failures: request.package_failures.clone(),
-        };
+    for (index, environment) in environments.into_iter().enumerate() {
+        let variant = index
+            .checked_sub(1)
+            .map(|variant| &request.variants[variant]);
         let fonts = request
             .fonts
             .iter()
             .map(|entry| entry.container.fonts().to_vec());
-        let mut world = SourceWorld::new(loader, fonts, environment.library, environment.clock);
+        let mut world = SourceWorld::new(
+            loader.clone(),
+            fonts,
+            environment.library,
+            environment.clock,
+        );
         let Warned {
             output,
             warnings: run_warnings,
@@ -215,8 +229,15 @@ pub fn create(request: &Request) -> Result<Outcome, Error> {
         if let Err(errors) = output
             && failure.is_none()
         {
+            let mut errors = errors.into_iter().collect::<Vec<_>>();
+            if let Some(inputs) = variant {
+                let hint = variant_hint(inputs);
+                errors
+                    .iter_mut()
+                    .for_each(|error| error.hint(hint.as_str()));
+            }
             failure = Some(Error::Failed {
-                errors: errors.into_iter().collect(),
+                errors,
                 warnings: run_warnings.into_iter().collect(),
                 sources: run_sources.clone(),
             });
@@ -241,20 +262,25 @@ pub fn create(request: &Request) -> Result<Outcome, Error> {
                 .get(&spec)
                 .expect("a used package is cataloged");
             PackageInput {
-                embedded: entry.embedded,
-                content: PackageContent::Tree(entry.tree.clone()),
+                content: PackageContent::Tree {
+                    tree: entry.tree.clone(),
+                    embedded: entry.embedded,
+                },
                 spec,
             }
         })
         .collect();
+    // One requirement per container, with the disposition of its first used
+    // position: the same file may be supplied twice, for example from two
+    // font directories.
+    let mut digests = BTreeSet::new();
     let fonts = used_fonts
         .into_iter()
-        .map(|position| {
-            let entry = &request.fonts[position];
-            FontInput::Container {
-                container: entry.container.clone(),
-                embedded: entry.embedded,
-            }
+        .map(|position| &request.fonts[position])
+        .filter(|entry| digests.insert(entry.container.digest()))
+        .map(|entry| FontInput::Container {
+            container: entry.container.clone(),
+            embedded: entry.embedded,
         })
         .collect();
     let pack = Pack::with_dependencies(
@@ -268,6 +294,16 @@ pub fn create(request: &Request) -> Result<Outcome, Error> {
         warnings,
         sources: sources.expect("the base options always compile"),
     }))
+}
+
+/// Names the variant inputs a failed discovery compile ran with.
+fn variant_hint(inputs: &[(String, Input)]) -> String {
+    let inputs = inputs.iter().map(|(key, value)| match value {
+        Input::Str(text) => format!("{key}={text}"),
+        Input::Bytes(data) => format!("{key}=<{} bytes>", data.len()),
+    });
+    let inputs = inputs.collect::<Vec<_>>().join(",");
+    format!("this error occurred in the discovery compile of variant `{inputs}`")
 }
 
 /// Compiles the target's document model, keeping only whether it succeeded.

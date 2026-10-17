@@ -6,23 +6,31 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Cursor, Read, Write};
-#[cfg(feature = "fs")]
-use std::path::Path;
 
 use zip::ZipWriter;
+use zip::result::ZipError;
 use zip::write::SimpleFileOptions;
 
+use crate::font::Face;
 pub use crate::manifest::FORMAT_VERSION;
-use crate::manifest::{FileEntry, FontEntry, MANIFEST_PATH, Manifest, PackageEntry};
-use crate::pack::{FontInput, PackInput, PackageContent, PackageInput, package_member_prefix};
+use crate::manifest::{
+    FaceEntry, FileEntry, FontEntry, GENERATOR, MANIFEST_PATH, Manifest, PackageEntry,
+};
+use crate::pack::{
+    FontInput, PackInput, PackageContent, PackageInput, Producer, package_member_prefix,
+};
 use crate::paths::canonical_relative_path;
 use crate::payload::SharedBytes;
 use crate::project::PROJECT_PREFIX;
-use crate::{Digest, LimitExceeded, Pack, PackError};
+use crate::{Digest, LimitExceeded, Pack, PackError, TYPST_VERSION};
 
 const FONTS_PREFIX: &str = "fonts/";
 
-/// The archive member name of an embedded font container.
+/// Every extension [`font_member_name`] chooses.
+const FONT_EXTENSIONS: [&str; 5] = ["ttf", "otf", "ttc", "woff", "woff2"];
+
+/// The archive member name of an embedded font container: its digest and an
+/// extension chosen by the container's leading bytes.
 pub(crate) fn font_member_name(digest: &Digest, data: &[u8]) -> String {
     let extension = match data.get(..4) {
         Some(b"OTTO") => "otf",
@@ -34,7 +42,7 @@ pub(crate) fn font_member_name(digest: &Digest, data: &[u8]) -> String {
     format!("{FONTS_PREFIX}{}.{extension}", digest.to_hex())
 }
 
-/// Encodes a pack as archive bytes.
+/// Encodes a pack as archive bytes, recording this crate as the producer.
 ///
 /// The output is deterministic for a given build: members are written in a
 /// fixed order with a fixed timestamp (1980-01-01), permissions, and
@@ -42,8 +50,8 @@ pub(crate) fn font_member_name(digest: &Digest, data: &[u8]) -> String {
 pub fn encode(pack: &Pack) -> Vec<u8> {
     let manifest = Manifest {
         format_version: FORMAT_VERSION,
-        typst_version: env!("TYPST_PACK_ENGINE_VERSION").to_owned(),
-        generator: concat!("typst-pack ", env!("CARGO_PKG_VERSION")).to_owned(),
+        typst_version: TYPST_VERSION.to_owned(),
+        generator: GENERATOR.to_owned(),
         entrypoint: pack.entrypoint().to_owned(),
         files: pack
             .file_digests()
@@ -67,7 +75,7 @@ pub fn encode(pack: &Pack) -> Vec<u8> {
             .map(|requirement| FontEntry {
                 digest: requirement.digest,
                 embedded: requirement.embedded,
-                faces: requirement.faces.clone(),
+                faces: requirement.faces.iter().map(FaceEntry::from).collect(),
             })
             .collect(),
         metadata: pack.metadata().cloned(),
@@ -117,17 +125,6 @@ pub fn write(mut writer: impl Write, pack: &Pack) -> io::Result<()> {
     writer.flush()
 }
 
-/// Encodes a pack and writes it to a file through a temporary sibling; see
-/// [`fs::WritePolicy`](crate::fs::WritePolicy).
-#[cfg(feature = "fs")]
-pub fn save(
-    path: impl AsRef<Path>,
-    pack: &Pack,
-    policy: crate::fs::WritePolicy,
-) -> Result<(), crate::fs::WriteError> {
-    crate::fs::write_file(path, &encode(pack), policy)
-}
-
 /// Ceilings for decoding an untrusted pack archive.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct DecodeLimits {
@@ -157,22 +154,23 @@ impl Default for DecodeLimits {
 #[non_exhaustive]
 pub enum DecodeError {
     /// The archive could not be read from its stream or file.
-    #[error("failed to read pack archive bytes: {0}")]
+    #[error("failed to read pack archive bytes")]
     Io(#[from] io::Error),
     /// A decode limit was exceeded.
     #[error(transparent)]
     Limit(#[from] LimitExceeded),
-    /// The bytes are not a valid ZIP archive.
-    #[error("not a valid ZIP archive: {0}")]
-    Zip(#[from] zip::result::ZipError),
+    /// The bytes are not a valid ZIP archive. The ZIP reader's own error is
+    /// the source.
+    #[error("not a valid ZIP archive")]
+    Zip(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// A member could not be decompressed.
-    #[error("archive member {name:?} could not be read: {source}")]
+    #[error("archive member {name:?} could not be read")]
     UnreadableMember {
         name: String,
         #[source]
         source: io::Error,
     },
-    /// A member name is not a safe relative path.
+    /// A member name is not a canonical, safe relative path.
     #[error("archive member {0:?} has an unsafe name")]
     UnsafeMemberName(String),
     /// Two members share one name.
@@ -187,9 +185,15 @@ pub enum DecodeError {
     /// The manifest is not UTF-8.
     #[error("the {MANIFEST_PATH} manifest is not valid UTF-8")]
     ManifestNotUtf8,
-    /// The manifest is not valid TOML of the expected shape.
-    #[error("failed to parse the {MANIFEST_PATH} manifest: {0}")]
-    InvalidManifest(#[from] toml::de::Error),
+    /// The manifest is not valid TOML of the expected shape. The TOML
+    /// parser's own error is the source.
+    #[error("failed to parse the {MANIFEST_PATH} manifest")]
+    InvalidManifest(#[source] Box<dyn std::error::Error + Send + Sync>),
+    /// The manifest admits more than one reading of the archive: a path
+    /// that is not canonical, or a path, package, or font container declared
+    /// twice.
+    #[error("the {MANIFEST_PATH} manifest is ambiguous: {0}")]
+    AmbiguousManifest(String),
     /// The manifest declares no format version.
     #[error("the {MANIFEST_PATH} manifest has no integer `format-version`")]
     MissingFormatVersion,
@@ -214,6 +218,16 @@ pub enum DecodeError {
     InvalidPack(#[from] PackError),
 }
 
+impl DecodeError {
+    fn zip(error: ZipError) -> Self {
+        Self::Zip(Box::new(error))
+    }
+
+    pub(crate) fn manifest(error: toml::de::Error) -> Self {
+        Self::InvalidManifest(Box::new(error))
+    }
+}
+
 /// Reads and decodes a pack from a stream, reading at most
 /// [`DecodeLimits::max_archive_bytes`].
 pub fn read(reader: impl Read, limits: DecodeLimits) -> Result<Pack, DecodeError> {
@@ -224,16 +238,6 @@ pub fn read(reader: impl Read, limits: DecodeLimits) -> Result<Pack, DecodeError
     decode(&archive, limits)
 }
 
-/// Reads and decodes a pack file, refusing a file larger than
-/// [`DecodeLimits::max_archive_bytes`] before reading it.
-#[cfg(feature = "fs")]
-pub fn open(path: impl AsRef<Path>, limits: DecodeLimits) -> Result<Pack, DecodeError> {
-    let file = std::fs::File::open(path)?;
-    let size = file.metadata()?.len();
-    LimitExceeded::check(size, limits.max_archive_bytes, "archive bytes")?;
-    read(file, limits)
-}
-
 /// Decodes archive bytes into a pack, verifying every member against the
 /// digest the manifest declares for it.
 pub fn decode(archive: &[u8], limits: DecodeLimits) -> Result<Pack, DecodeError> {
@@ -242,7 +246,7 @@ pub fn decode(archive: &[u8], limits: DecodeLimits) -> Result<Pack, DecodeError>
         limits.max_archive_bytes,
         "archive bytes",
     )?;
-    let mut zip = zip::ZipArchive::new(Cursor::new(archive))?;
+    let mut zip = zip::ZipArchive::new(Cursor::new(archive)).map_err(DecodeError::zip)?;
     let raw_names = raw_member_names(archive, zip.central_directory_start());
     LimitExceeded::check(
         raw_names.len().max(zip.len()) as u64,
@@ -251,23 +255,31 @@ pub fn decode(archive: &[u8], limits: DecodeLimits) -> Result<Pack, DecodeError>
     )?;
     if raw_names.len() != zip.len() {
         let mut seen = BTreeSet::new();
-        let duplicate = raw_names.iter().find(|name| !seen.insert(**name));
-        return Err(DecodeError::DuplicateMember(
-            String::from_utf8_lossy(duplicate.copied().unwrap_or_default()).into_owned(),
-        ));
+        return Err(match raw_names.iter().find(|name| !seen.insert(**name)) {
+            Some(name) => DecodeError::DuplicateMember(String::from_utf8_lossy(name).into_owned()),
+            None => DecodeError::zip(ZipError::InvalidArchive(
+                "the central directory entry count does not match its entries".into(),
+            )),
+        });
     }
 
-    // Classify every member by canonical name before reading any content.
+    // Classify every member by name before reading any content. Only
+    // canonical names are accepted, so every extractor sees the same tree.
     let mut members = BTreeMap::new();
     let mut declared_total = 0;
     for index in 0..zip.len() {
-        let entry = zip.by_index_raw(index)?;
+        let entry = zip.by_index_raw(index).map_err(DecodeError::zip)?;
         let name = entry.name().to_owned();
         let mode = entry.unix_mode().map(|mode| mode & 0o170000);
         let directory = entry.is_dir();
-        let canonical = canonical_relative_path(name.strip_suffix('/').unwrap_or(&name))
-            .map_err(|_| DecodeError::UnsafeMemberName(name.clone()))?
-            .into_string();
+        let path = if directory {
+            name.strip_suffix('/').unwrap_or(&name)
+        } else {
+            &name
+        };
+        if canonical_relative_path(path).map_or(true, |canonical| canonical.as_str() != path) {
+            return Err(DecodeError::UnsafeMemberName(name));
+        }
         match (directory, mode) {
             (true, None | Some(0 | 0o040000)) => continue,
             (false, None | Some(0 | 0o100000)) => {}
@@ -280,9 +292,10 @@ pub fn decode(archive: &[u8], limits: DecodeLimits) -> Result<Pack, DecodeError>
             limits.max_total_bytes,
             "total member bytes",
         )?;
-        if members.insert(canonical.clone(), index).is_some() {
-            return Err(DecodeError::DuplicateMember(canonical));
+        if members.contains_key(&name) {
+            return Err(DecodeError::DuplicateMember(name));
         }
+        members.insert(name, index);
     }
 
     let mut reader = MemberReader {
@@ -298,8 +311,8 @@ pub fn decode(archive: &[u8], limits: DecodeLimits) -> Result<Pack, DecodeError>
     let declared_files = manifest
         .files
         .iter()
-        .map(|entry| (entry.path.as_str(), entry.digest))
-        .collect::<BTreeMap<_, _>>();
+        .map(|entry| entry.path.as_str())
+        .collect::<BTreeSet<_>>();
     let embedded_packages = manifest
         .packages
         .iter()
@@ -319,33 +332,40 @@ pub fn decode(archive: &[u8], limits: DecodeLimits) -> Result<Pack, DecodeError>
     for (name, index) in members {
         if let Some(path) = name
             .strip_prefix(PROJECT_PREFIX)
-            .filter(|path| declared_files.contains_key(path))
+            .filter(|path| declared_files.contains(path))
         {
             files.push((path.to_owned(), reader.read_shared(index, &name)?));
-        } else if let Some((prefix, path)) = embedded_packages
-            .keys()
-            .find_map(|prefix| Some((prefix, name.strip_prefix(prefix.as_str())?)))
+        } else if let Some((prefix, path)) = split_package_member(&name)
+            .filter(|(prefix, _)| embedded_packages.contains_key(*prefix))
         {
             let data = reader.read_shared(index, &name)?;
             package_files
-                .entry(prefix.clone())
+                .entry(prefix.to_owned())
                 .or_default()
                 .push((path.to_owned(), data));
-        } else if let Some(digest) = name
-            .strip_prefix(FONTS_PREFIX)
-            .and_then(|file| Digest::from_hex(file.split('.').next().unwrap_or_default()))
-            .filter(|digest| embedded_fonts.contains(digest))
+        } else if let Some(digest) =
+            font_member_digest(&name).filter(|digest| embedded_fonts.contains(digest))
         {
-            font_data.insert(digest, reader.read_shared(index, &name)?);
+            if font_data.contains_key(&digest) {
+                return Err(DecodeError::DuplicateMember(name));
+            }
+            let data = reader.read_shared(index, &name)?;
+            // The name follows from the content, so a container has exactly
+            // one name.
+            if font_member_name(&digest, &data) != name {
+                return Err(DecodeError::UndeclaredMember(name));
+            }
+            font_data.insert(digest, data);
         } else {
             return Err(DecodeError::UndeclaredMember(name));
         }
     }
 
-    if let Some(path) = declared_files
-        .keys()
-        .find(|path| !files.iter().any(|(file, _)| file == *path))
-    {
+    let present = files
+        .iter()
+        .map(|(path, _)| path.as_str())
+        .collect::<BTreeSet<_>>();
+    if let Some(path) = declared_files.difference(&present).next() {
         return Err(DecodeError::MissingMember(format!("project file {path:?}")));
     }
     let packages = manifest
@@ -353,19 +373,19 @@ pub fn decode(archive: &[u8], limits: DecodeLimits) -> Result<Pack, DecodeError>
         .iter()
         .map(|entry| {
             let content = if entry.embedded {
-                PackageContent::Files(
-                    package_files
+                PackageContent::Files {
+                    files: package_files
                         .remove(&package_member_prefix(&entry.spec))
                         .ok_or_else(|| {
                             DecodeError::MissingMember(format!("package {}", entry.spec))
                         })?,
-                )
+                    embedded: true,
+                }
             } else {
                 PackageContent::Declared(entry.digest)
             };
             Ok(PackageInput {
                 spec: entry.spec.clone(),
-                embedded: entry.embedded,
                 content,
             })
         })
@@ -384,21 +404,41 @@ pub fn decode(archive: &[u8], limits: DecodeLimits) -> Result<Pack, DecodeError>
             } else {
                 FontInput::Declared {
                     digest: entry.digest,
-                    faces: entry.faces.clone(),
+                    faces: entry.faces.iter().map(Face::from).collect(),
                 }
             })
         })
         .collect::<Result<_, DecodeError>>()?;
 
+    let recorded = |value: &str| (!value.is_empty()).then(|| value.to_owned());
     let pack = Pack::construct(PackInput {
         entrypoint: manifest.entrypoint.clone(),
         metadata: manifest.metadata.clone(),
+        producer: Producer {
+            typst_version: recorded(&manifest.typst_version),
+            generator: recorded(&manifest.generator),
+        },
         files,
         packages,
         fonts,
     })?;
     verify_digests(&pack, &manifest)?;
     Ok(pack)
+}
+
+/// Splits `packages/<namespace>/<name>/<version>/<path>` into its package
+/// prefix, with the trailing slash, and the package-relative path.
+fn split_package_member(name: &str) -> Option<(&str, &str)> {
+    let end = name.match_indices('/').nth(3)?.0 + 1;
+    name.starts_with("packages/").then(|| name.split_at(end))
+}
+
+/// The digest a `fonts/<hex digest>.<extension>` member name declares.
+fn font_member_digest(name: &str) -> Option<Digest> {
+    let (hex, extension) = name.strip_prefix(FONTS_PREFIX)?.split_once('.')?;
+    FONT_EXTENSIONS
+        .contains(&extension)
+        .then(|| Digest::from_hex(hex))?
 }
 
 /// Compares the digests derived from the decoded content with the declared
@@ -462,14 +502,14 @@ struct MemberReader<'a> {
 
 impl MemberReader<'_> {
     fn read(&mut self, index: usize, name: &str) -> Result<Vec<u8>, DecodeError> {
-        let entry = self.zip.by_index(index)?;
+        let entry = self.zip.by_index(index).map_err(DecodeError::zip)?;
         let limit = self
             .limits
             .max_member_bytes
             .min(self.limits.max_total_bytes - self.total);
         let mut data = Vec::with_capacity(entry.size().min(limit).min(1 << 20) as usize);
         entry
-            .take(limit + 1)
+            .take(limit.saturating_add(1))
             .read_to_end(&mut data)
             .map_err(|source| DecodeError::UnreadableMember {
                 name: name.to_owned(),

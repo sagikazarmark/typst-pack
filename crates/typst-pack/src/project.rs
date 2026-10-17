@@ -1,6 +1,7 @@
 //! The validated project part of a pack: an entrypoint and its project files.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use crate::Digest;
 use crate::pack::{FILE_EXTENSION, MAX_MEMBER_NAME, PackError, PackIssue, names_pack_path};
@@ -17,11 +18,11 @@ pub(crate) const PROJECT_PREFIX: &str = "project/";
 /// which files belong to the project, and the snapshot checks canonical
 /// paths, duplicates, path-tree conflicts, `.typk` paths, and that the
 /// entrypoint is present. A pack created from a snapshot carries it
-/// unchanged.
+/// unchanged. Cloning a snapshot is cheap.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ProjectSnapshot {
     entrypoint: CanonicalPath,
-    files: BTreeMap<CanonicalPath, (SharedBytes, Digest)>,
+    files: Arc<BTreeMap<CanonicalPath, (SharedBytes, Digest)>>,
 }
 
 impl ProjectSnapshot {
@@ -93,7 +94,7 @@ impl ProjectSnapshot {
         }?;
         Some(Self {
             entrypoint,
-            files: canonical,
+            files: Arc::new(canonical),
         })
     }
 

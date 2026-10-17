@@ -3965,10 +3965,11 @@ dependencies = [
 
 [[package]]
 name = "typst-pack"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
+ "chrono",
  "ecow",
  "env_proxy",
  "flate2",
@@ -3997,6 +3998,7 @@ dependencies = [
  "typst-render",
  "typst-svg",
  "typst-timing",
+ "unicode-normalization",
  "ureq",
  "webpki-roots 1.0.9",
  "zip",
@@ -4004,7 +4006,7 @@ dependencies = [
 
 [[package]]
 name = "typst-pack-cli"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "chrono",
  "clap",
@@ -4019,6 +4021,7 @@ dependencies = [
  "typst-pack",
  "typst-pdf",
  "typst-timing",
+ "zip",
 ]
 
 [[package]]

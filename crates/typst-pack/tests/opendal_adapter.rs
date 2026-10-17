@@ -35,7 +35,7 @@ fn get(op: &Operator, path: &str) -> Vec<u8> {
 
 /// Reads the project below `prefix` under default limits.
 fn read(op: &Operator, prefix: &str, entrypoint: &str) -> Result<ProjectSnapshot, Error> {
-    block_on(read_project(op, prefix, entrypoint, &ReadLimits::default()))
+    block_on(read_project(op, prefix, entrypoint, ReadLimits::default()))
 }
 
 fn spec(text: &str) -> PackageSpec {
@@ -117,13 +117,13 @@ fn every_read_limit_is_enforced() {
     let exceeded = |change: fn(&mut ReadLimits)| {
         let mut limits = fits;
         change(&mut limits);
-        match block_on(read_project(&op, "doc/", "main.typ", &limits)) {
-            Err(Error::Limit { exceeded, .. }) => (exceeded.resource, exceeded.limit),
+        match block_on(read_project(&op, "doc/", "main.typ", limits)) {
+            Err(Error::Limit { source, .. }) => (source.resource, source.limit),
             other => panic!("expected a limit error, got {other:?}"),
         }
     };
 
-    assert!(block_on(read_project(&op, "doc/", "main.typ", &fits)).is_ok());
+    assert!(block_on(read_project(&op, "doc/", "main.typ", fits)).is_ok());
     assert_eq!(exceeded(|l| l.max_entries = 1), ("entries", 1));
     assert_eq!(exceeded(|l| l.max_file_bytes = 9), ("file bytes", 9));
     assert_eq!(exceeded(|l| l.max_total_bytes = 19), ("total bytes", 19));
@@ -157,7 +157,7 @@ fn font_read_selects_containers_case_insensitively_in_source_order() {
         },
     ];
 
-    let catalog = block_on(read_fonts(&op, &sources, &ReadLimits::default())).unwrap();
+    let catalog = block_on(read_fonts(&op, &sources, ReadLimits::default())).unwrap();
 
     let dispositions = catalog
         .iter()
@@ -166,7 +166,7 @@ fn font_read_selects_containers_case_insensitively_in_source_order() {
     assert_eq!(dispositions, [true, false, false]);
 
     put(&op, "fonts/a/broken.ttf", "not a font");
-    let error = block_on(read_fonts(&op, &sources, &ReadLimits::default())).unwrap_err();
+    let error = block_on(read_fonts(&op, &sources, ReadLimits::default())).unwrap_err();
     assert!(
         matches!(&error, Error::Font { path, .. } if path == "fonts/a/broken.ttf"),
         "{error:?}"
@@ -194,8 +194,7 @@ fn package_read_tries_sources_in_order_and_reports_each_outcome() {
             prefix: "registry/".into(),
         },
     ];
-    let read =
-        |text| block_on(read_package(&sources, &spec(text), &ReadLimits::default())).unwrap();
+    let read = |text| block_on(read_package(&sources, &spec(text), ReadLimits::default())).unwrap();
 
     put(
         &op,
@@ -251,7 +250,7 @@ fn a_failing_source_stops_package_fallback() {
     let error = block_on(read_package(
         &sources,
         &spec("@local/pkg:1.0.0"),
-        &ReadLimits::default(),
+        ReadLimits::default(),
     ))
     .unwrap_err();
 
@@ -318,11 +317,15 @@ fn inserting_a_read_package_updates_the_request_packages_and_failures() {
         failures.get(&spec("@local/gone:1.0.0")),
         Some(&package::ReadFailure::NotFound)
     );
-    assert_eq!(
+    // Recorded failures keep the reason creation reports at the import.
+    assert!(matches!(
         failures.get(&spec("@preview/bad:1.0.0")),
-        Some(&package::ReadFailure::MalformedArchive(None))
-    );
-    assert!(failures.contains_key(&spec("@local/no-manifest:1.0.0")));
+        Some(package::ReadFailure::MalformedArchive(Some(_)))
+    ));
+    assert!(matches!(
+        failures.get(&spec("@local/no-manifest:1.0.0")),
+        Some(package::ReadFailure::Other(Some(reason))) if reason.contains("typst.toml")
+    ));
 }
 
 #[test]
@@ -351,6 +354,61 @@ fn an_object_vanishing_or_failing_after_listing_fails_the_read_naming_it() {
     assert!(!error.to_string().contains("injected"));
     let source = std::error::Error::source(&error).unwrap().to_string();
     assert!(source.contains("injected"), "{source}");
+}
+
+#[test]
+fn project_read_skips_packs_and_refuses_listed_keys_that_are_not_normalized() {
+    let op = memory();
+    put(&op, "doc/main.typ", "= Hello");
+    put(&op, "doc/out.typk", "a pack, not a project file");
+    put(&op, "doc/build/old.typk", "another pack");
+    let project = read(&op, "doc/", "main.typ").unwrap();
+    assert_eq!(
+        project.files().map(|(path, _)| path).collect::<Vec<_>>(),
+        ["main.typ"]
+    );
+
+    // OpenDAL keeps backslashes, so another tool can create such a key.
+    put(&op, "doc/a\\b.typ", "");
+    let error = read(&op, "doc/", "main.typ").unwrap_err();
+    assert!(
+        matches!(&error, Error::InvalidPath { path, .. } if path == "doc/a\\b.typ"),
+        "{error:?}"
+    );
+}
+
+/// Whether `result` failed because the object at `at` changed between its
+/// stat and its read.
+fn changed<T: std::fmt::Debug>(result: Result<T, Error>, at: &str) -> bool {
+    matches!(&result, Err(Error::Storage { path, operation: "read", source })
+        if path == at && source.kind() == ErrorKind::ConditionNotMatch)
+}
+
+#[test]
+fn an_object_replaced_between_stat_and_read_fails_instead_of_reading_a_prefix() {
+    let op = memory();
+    let (faulty, faults) = Faults::wrap(&op);
+    // A grown or shrunk object disagrees with the stat's length.
+    for replacement in ["= Hello, world", "= He"] {
+        put(&op, "doc/main.typ", "= Hello");
+        faults.replace_after_stat("doc/main.typ", replacement);
+        assert!(changed(read(&faulty, "doc/", "main.typ"), "doc/main.typ"));
+    }
+    put(&op, "pack.typk", "pack");
+    faults.replace_after_stat("pack.typk", "pack and more");
+    assert!(changed(
+        block_on(read_archive(&faulty, "pack.typk", 1024)),
+        "pack.typk"
+    ));
+
+    // A same-length replacement is caught by the stat's ETag where the
+    // service supports conditional reads.
+    faults.emulate_etags();
+    put(&op, "doc/main.typ", "= Hello");
+    faults.replace_after_stat("doc/main.typ", "= Howdy");
+    assert!(changed(read(&faulty, "doc/", "main.typ"), "doc/main.typ"));
+    let project = read(&faulty, "doc/", "main.typ").unwrap();
+    assert_eq!(project.file("main.typ"), Some(b"= Howdy".as_slice()));
 }
 
 // --- Writing -------------------------------------------------------------
@@ -419,6 +477,17 @@ fn create_or_verify_checks_every_key_before_creating_any() {
     assert!(matches!(&error.error, Error::Conflict { path } if path == "out/main.typ"));
     assert!(error.completed.is_empty());
     assert!(!block_on(op.exists("out/assets/logo.bin")).unwrap());
+    // The message says which key failed; the cause is the source.
+    assert_eq!(error.path.as_deref(), Some("out/main.typ"));
+    assert_eq!(
+        error.to_string(),
+        "writing \"out/main.typ\" failed after 0 completed key(s)"
+    );
+    let source = std::error::Error::source(&error).unwrap().to_string();
+    assert_eq!(
+        source,
+        "object \"out/main.typ\" already exists with different bytes"
+    );
 }
 
 #[test]
@@ -503,6 +572,83 @@ fn a_lost_conditional_create_race_is_verified() {
 }
 
 #[test]
+fn create_or_verify_does_not_match_a_grown_object_on_its_prefix() {
+    let op = memory();
+    let (faulty, faults) = Faults::wrap(&op);
+    let archive = encode(&sample_pack());
+    put(&op, "out.typk", archive.as_slice().to_vec());
+    let mut grown = archive.as_slice().to_vec();
+    grown.extend_from_slice(b"trailing bytes");
+    faults.replace_after_stat("out.typk", grown.clone());
+
+    let error = block_on(write_archive(&faulty, "out.typk", &archive, CreateOrVerify)).unwrap_err();
+
+    assert!(matches!(error.error, Error::Conflict { .. }), "{error:?}");
+    assert_eq!(get(&op, "out.typk"), grown);
+}
+
+#[test]
+fn a_refused_create_of_an_absent_object_is_retried_and_never_a_conflict() {
+    let op = memory();
+    let (faulty, faults) = Faults::wrap(&op);
+    let archive = encode(&sample_pack());
+    let write = |path| block_on(write_archive(&faulty, path, &archive, CreateOrVerify));
+
+    // S3 refuses a conditional create while another upload of the key is in
+    // flight, though the object may then be absent.
+    faults.refuse_creates("once.typk", 1);
+    assert_eq!(write("once.typk").unwrap(), WriteOutcome::Created);
+
+    faults.refuse_creates("twice.typk", 2);
+    let error = write("twice.typk").unwrap_err();
+    assert!(!error.indeterminate);
+    assert!(
+        matches!(&error.error, Error::Storage { source, .. }
+            if source.kind() == ErrorKind::ConditionNotMatch && source.is_temporary()),
+        "{error:?}"
+    );
+    assert!(!block_on(op.exists("twice.typk")).unwrap());
+}
+
+#[test]
+fn a_write_that_took_effect_but_failed_replays_as_already_matching() {
+    let archive = encode(&sample_pack());
+    for policy in [CreateOrVerify, Overwrite] {
+        let op = memory();
+        let (faulty, faults) = Faults::wrap(&op);
+        faults.lose_ack("out.typk");
+
+        let error = block_on(write_archive(&faulty, "out.typk", &archive, policy)).unwrap_err();
+        assert!(error.indeterminate, "{policy:?}");
+        assert_eq!(get(&op, "out.typk"), archive.as_slice());
+
+        let replay = block_on(write_archive(&faulty, "out.typk", &archive, CreateOrVerify));
+        assert_eq!(replay.unwrap(), WriteOutcome::AlreadyMatching, "{policy:?}");
+    }
+}
+
+#[test]
+fn extraction_refuses_paths_opendal_would_alias_before_writing_any() {
+    let pack = Pack::builder("a.typ")
+        .file("a.typ", b"one".to_vec())
+        .file("a.typ ", b"two".to_vec())
+        .build()
+        .unwrap();
+    let plan = extract::plan(&pack, extract::Selection::default()).unwrap();
+    for policy in [CreateOrVerify, Overwrite] {
+        let op = memory();
+        let error = block_on(write_extraction(&op, "out/", &plan, policy)).unwrap_err();
+        assert!(
+            matches!(&error.error, Error::InvalidKeys { keys }
+                if keys.len() == 1 && keys[0].0 == "a.typ "),
+            "{error:?}"
+        );
+        assert!(error.completed.is_empty());
+        assert!(!block_on(op.exists("out/a.typ")).unwrap());
+    }
+}
+
+#[test]
 fn create_or_verify_requires_conditional_create() {
     let (faulty, faults) = Faults::wrap(&memory());
     faults.hide_conditional_create();
@@ -533,7 +679,7 @@ fn package_archives_are_cached_in_the_layout_the_cache_source_reads() {
             prefix: "cache/".into(),
         }],
         &spec,
-        &ReadLimits::default(),
+        ReadLimits::default(),
     ))
     .unwrap();
     assert_eq!(read, PackageRead::CachedArchive(b"archive".to_vec()));
@@ -547,8 +693,8 @@ fn compilation_artifacts_are_written_at_validated_keys() {
         block_on(write_artifacts(
             &op,
             "pages/",
-            &result,
             keys,
+            &result,
             CreateOrVerify,
         ))
     };
@@ -565,23 +711,20 @@ fn compilation_artifacts_are_written_at_validated_keys() {
             actual: 1
         }
     ));
-    assert!(matches!(
-        error(&["same.svg", "same.svg"]),
-        Error::InvalidPath { .. }
-    ));
+    let invalid = |keys: &[&str]| match error(keys) {
+        Error::InvalidKeys { keys } => keys.into_iter().map(|(key, _)| key).collect::<Vec<_>>(),
+        other => panic!("expected invalid keys, got {other:?}"),
+    };
+    assert_eq!(invalid(&["same.svg", "same.svg"]), ["same.svg"]);
     for bad in ["../escape.svg", "/abs.svg", "dir/", "a//b.svg", "a\\b.svg"] {
-        assert!(
-            matches!(error(&["ok.svg", bad]), Error::InvalidPath { .. }),
-            "{bad:?}"
-        );
+        assert_eq!(invalid(&["ok.svg", bad]), [bad]);
     }
     // Keys OpenDAL would normalize into another key are refused.
     for bad in ["", " a", "a ", "a\u{00a0}", "a/./b"] {
-        assert!(
-            matches!(error(&[bad, "valid.svg"]), Error::InvalidPath { .. }),
-            "{bad:?}"
-        );
+        assert_eq!(invalid(&[bad, "valid.svg"]), [bad]);
     }
+    // Every bad key is listed.
+    assert_eq!(invalid(&[" a", "a/../b"]), [" a", "a/../b"]);
     // Percent signs and invisible characters are literal key bytes.
     for keys in [["tree%", "tree%/page%2F.svg"], ["a\u{feff}", "a\u{200b}"]] {
         write(&keys).unwrap();
@@ -697,6 +840,25 @@ mod assembly {
             assembled.pack.file("main.typ"),
             Some(b"#import \"@local/greet:1.0.0\": hello\n#hello()".as_slice())
         );
+    }
+
+    #[test]
+    fn a_package_over_a_read_limit_fails_creation_at_its_import() {
+        let op = memory();
+        put(&op, "doc/main.typ", "#import \"@local/big:1.0.0\": x");
+        put(
+            &op,
+            "packages/local/big/1.0.0/typst.toml",
+            package_manifest("big"),
+        );
+        put(&op, "packages/local/big/1.0.0/lib.typ", vec![b' '; 4096]);
+        let mut assembler = assembler(&op);
+        assembler.limits.max_file_bytes = 1024;
+
+        let error = block_on(assembler.assemble()).unwrap_err();
+
+        assert!(matches!(&error, Error::Create(_)), "{error:?}");
+        assert!(error.to_string().contains("file bytes"), "{error}");
     }
 
     #[test]

@@ -38,14 +38,17 @@ without compatibility shims.
 
 ## Measured outcome
 
-Snapshot before the final API-naming phase, from
-`find crates fuzz -name '*.rs' | xargs wc -l`:
+Final, after the review-round fixes and the API consistency pass, from
+`find crates fuzz -name '*.rs' | xargs cat | wc -l` and
+`rg '^\s*pub (struct|enum|trait|type) ' crates/typst-pack/src`:
 
 | Measure | Before | After |
 | --- | --- | --- |
-| Workspace Rust | ~64.7K lines | 27.9K lines |
-| Library and CLI sources (`src/`) | — | 10.6K lines |
-| Tests and fuzz targets | ~37K lines (tests) | 17.4K lines |
-| Public error types (library) | 92 | 22 |
-| Public limits types (library) | 45 names | 4 structs and `LimitExceeded` |
+| Workspace Rust | ~64.7K lines | 22.0K lines |
+| Library sources (`crates/typst-pack/src`) | — | 8.9K lines |
+| CLI sources (`crates/typst-pack-cli/src`) | — | 1.5K lines |
+| Tests (`crates/*/tests`) and fuzz targets | ~37K lines (tests) | 11.0K and 0.6K lines |
+| Public names | ~330 | 63 public types |
+| Public error types (library) | 92 | 18 |
+| Public limits types (library) | 45 names | 3 structs and `LimitExceeded` |
 | ADRs | 16 (7 superseded or amended) | 4 |

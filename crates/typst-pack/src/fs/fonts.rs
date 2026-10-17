@@ -2,9 +2,11 @@
 //!
 //! Font directories are host configuration, so reading them is lenient:
 //! symbolic links are followed wherever they lead, and an unreadable
-//! directory, unreadable file, or unparseable font is skipped and reported
-//! rather than failing the whole read. Only an explicitly configured
-//! directory that cannot be opened, or an exceeded limit, fails the read.
+//! directory, unreadable file, file over the per-file limit, or unparseable
+//! font is skipped and reported rather than failing the whole read. When a
+//! directory exceeds the entry or total byte limit, the rest of it is skipped
+//! and reported. Only an explicitly configured directory that cannot be
+//! opened fails the read.
 
 use std::path::{Path, PathBuf};
 
@@ -46,7 +48,7 @@ pub(crate) fn read_fonts(
             }
             FontSource::Directory { path, embedded } => {
                 let root = Root::open(&path)?;
-                read_root(&mut walker, &root, embedded, &mut entries, &mut invalid)?;
+                read_root(&mut walker, &root, embedded, &mut entries, &mut invalid);
                 continue;
             }
         };
@@ -61,7 +63,7 @@ pub(crate) fn read_fonts(
                     continue;
                 }
             };
-            read_root(&mut walker, &root, embedded, &mut entries, &mut invalid)?;
+            read_root(&mut walker, &root, embedded, &mut entries, &mut invalid);
         }
     }
     let mut skipped = walker.skipped;
@@ -69,14 +71,16 @@ pub(crate) fn read_fonts(
     Ok((entries, skipped))
 }
 
+/// Reads the fonts beneath one root. A lenient walk stops only at the entry or
+/// total byte limit, which skips the rest of this root.
 fn read_root(
     walker: &mut Walker,
     root: &Root,
     embedded: bool,
     entries: &mut Vec<font::Entry>,
     invalid: &mut Vec<Error>,
-) -> Result<(), Error> {
-    walker.walk(
+) {
+    let walked = walker.walk(
         root,
         |relative, kind| Ok(kind == Kind::Dir || is_font_file(relative)),
         |relative, bytes| {
@@ -91,7 +95,10 @@ fn read_root(
             }
             Ok(())
         },
-    )
+    );
+    if let Err(error) = walked {
+        walker.skipped.push(error);
+    }
 }
 
 fn is_font_file(path: &Path) -> bool {
@@ -229,6 +236,8 @@ mod tests {
             .iter()
             .map(|skipped| match skipped {
                 Error::Io { path, .. }
+                | Error::BrokenSymlink { path, .. }
+                | Error::Limit { path, .. }
                 | Error::Unsupported { path }
                 | Error::InvalidFont { path } => path.clone(),
                 other => panic!("unexpected skipped entry {other}"),
@@ -287,22 +296,62 @@ mod tests {
 
     #[test]
     #[cfg(feature = "embedded-fonts")]
-    fn font_reading_is_bounded_but_typst_fonts_are_not_counted() {
+    fn exceeded_font_limits_skip_files_and_roots_but_typst_fonts_are_not_counted() {
         let dir = tempfile::tempdir().unwrap();
         let data = typst_container();
-        std::fs::write(dir.path().join("font.ttf"), &data).unwrap();
         let size = data.len() as u64;
-
-        let limits = ReadLimits {
-            max_file_bytes: size - 1,
-            ..ReadLimits::default()
+        let (first, second) = (dir.path().join("first"), dir.path().join("second"));
+        for root in [&first, &second] {
+            std::fs::create_dir(root).unwrap();
+            // Files that are not fonts count toward no limit.
+            for index in 0..4 {
+                std::fs::write(root.join(format!("{index}.txt")), b"not a font").unwrap();
+            }
+        }
+        std::fs::write(first.join("a.ttf"), &data).unwrap();
+        std::fs::write(first.join("b.ttf"), &data).unwrap();
+        let mut larger = data.clone();
+        larger.push(0);
+        std::fs::write(second.join("a.ttf"), &larger).unwrap();
+        std::fs::write(second.join("b.ttf"), &data).unwrap();
+        let read = |limits| {
+            let directory = |path: &PathBuf| FontSource::Directory {
+                path: path.clone(),
+                embedded: false,
+            };
+            let (entries, skipped) =
+                read_fonts(vec![directory(&first), directory(&second)], limits).unwrap();
+            let skipped = skipped
+                .iter()
+                .map(|error| match error {
+                    Error::Limit { path, source } => (path.clone(), source.resource),
+                    other => panic!("unexpected skipped entry {other}"),
+                })
+                .collect::<Vec<_>>();
+            (entries.len(), skipped)
         };
-        let error = read_directory(dir.path(), limits).unwrap_err();
-        assert!(matches!(
-            error,
-            Error::Limit { source, .. }
-                if source == crate::LimitExceeded { resource: "file bytes", limit: size - 1 }
-        ));
+
+        // A file over the per-file limit is skipped alone.
+        let (found, skipped) = read(ReadLimits {
+            max_file_bytes: size,
+            ..ReadLimits::default()
+        });
+        assert_eq!(found, 3);
+        assert_eq!(skipped, [(second.join("a.ttf"), "file bytes")]);
+
+        // An exceeded entry or total limit skips the rest of a root.
+        let (found, skipped) = read(ReadLimits {
+            max_entries: 3,
+            ..ReadLimits::default()
+        });
+        assert_eq!(found, 3);
+        assert_eq!(skipped, [(second.join("b.ttf"), "entries")]);
+        let (found, skipped) = read(ReadLimits {
+            max_total_bytes: 2 * size,
+            ..ReadLimits::default()
+        });
+        assert_eq!(found, 2);
+        assert_eq!(skipped, [(second.join("a.ttf"), "total bytes")]);
 
         let empty = ReadLimits {
             max_entries: 0,
@@ -410,6 +459,7 @@ mod tests {
             .filter(|entry| entry.container.digest() == identity)
             .count();
         assert_eq!(found, if unreadable { 2 } else { 3 });
+        assert!(matches!(&skipped[0], Error::BrokenSymlink { .. }));
         let mut expected = vec![
             root.join("c-broken.ttf"),
             root.join("f-socket.ttf"),

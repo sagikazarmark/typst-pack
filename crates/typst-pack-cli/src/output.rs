@@ -8,6 +8,7 @@ use typst_pack::compile::{Compiled, OutputFormat};
 use typst_pack::fs::{self, WritePolicy};
 
 use crate::cli::DepsFormat;
+use crate::commands::chain;
 
 /// The paths the compiled artifacts go to: the output (default: the pack
 /// path with the format's extension), expanded once per page for PNG and SVG.
@@ -106,8 +107,8 @@ pub fn write(targets: &[PathBuf], compiled: &Compiled) -> Result<(), String> {
             .write_all(&artifact.bytes)
             .map_err(|error| format!("cannot write output to stdout: {error}"));
     }
-    fs::write_artifacts(&compiled.artifacts, targets, WritePolicy::Overwrite)
-        .map_err(|error| error.to_string())
+    fs::write_artifacts(targets, &compiled.artifacts, WritePolicy::Overwrite)
+        .map_err(|error| chain(&error))
 }
 
 /// Serializes the inputs and outputs of a compilation in one of Typst's

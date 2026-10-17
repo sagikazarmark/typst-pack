@@ -159,7 +159,7 @@ fn pack_compile(
         .map(|(key, value)| {
             let input = match value {
                 Value::Str(text) => Input::Str(text.to_string()),
-                Value::Bytes(bytes) => Input::Bytes(bytes.to_vec()),
+                Value::Bytes(bytes) => Input::from(bytes.to_vec()),
                 other => panic!("unsupported input {other:?}"),
             };
             (key.clone(), input)

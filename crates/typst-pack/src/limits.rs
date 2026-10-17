@@ -4,8 +4,9 @@
 /// package tree, font roots, or a storage prefix.
 ///
 /// Every reader that crosses a byte trust boundary takes one of these. The
-/// [`Default`] values suit ordinary documents; raise them for unusually large
-/// projects.
+/// [`Default`] values are the one default for projects, packages, and font
+/// roots; raise them for unusually large inputs. Readers hold what they read
+/// in memory, so `max_total_bytes` also bounds memory use.
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub struct ReadLimits {
     /// Maximum number of directory entries or listed objects visited.
@@ -17,12 +18,15 @@ pub struct ReadLimits {
 }
 
 impl Default for ReadLimits {
-    /// Ceilings suitable for ordinary Typst projects, packages, and font roots.
+    /// 100,000 entries, 256 MiB per file, and 2 GiB in total: enough for
+    /// ordinary Typst projects and packages, and for system font directories,
+    /// which routinely hold gigabytes of font collections.
     fn default() -> Self {
+        const MIB: u64 = 1024 * 1024;
         Self {
             max_entries: 100_000,
-            max_file_bytes: 256 * 1024 * 1024,
-            max_total_bytes: 1024 * 1024 * 1024,
+            max_file_bytes: 256 * MIB,
+            max_total_bytes: 2048 * MIB,
         }
     }
 }

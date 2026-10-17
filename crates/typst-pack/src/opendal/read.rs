@@ -4,7 +4,11 @@ use ::opendal::{EntryMode, ErrorKind, Operator};
 use futures_util::TryStreamExt;
 use typst::syntax::package::PackageSpec;
 
-use super::{Error, check_key, check_prefix, storage};
+use super::{
+    Error, archive_cache_key, changed, check_key, check_prefix, is_font_key, key_issue, stat,
+    storage, stream, tree_key,
+};
+use crate::pack::names_pack_path;
 use crate::{LimitExceeded, ProjectSnapshot, ReadLimits, font, package};
 
 /// Running totals charged against one operation's [`ReadLimits`].
@@ -15,35 +19,38 @@ struct Budget {
 }
 
 impl Budget {
-    fn new(limits: &ReadLimits) -> Self {
+    fn new(limits: ReadLimits) -> Self {
         Self {
-            limits: *limits,
+            limits,
             entries: 0,
             bytes: 0,
         }
     }
 }
 
-fn limit(path: &str, exceeded: LimitExceeded) -> Error {
+fn limit(path: &str, source: LimitExceeded) -> Error {
     Error::Limit {
         path: path.to_owned(),
-        exceeded,
+        source,
     }
 }
 
 /// Reads one object after checking its advertised length against the
 /// per-file and remaining total limits, so an oversized object is never
 /// downloaded. `Ok(None)` means the object is absent.
+///
+/// The bytes read must match the stat: the read is conditional on the stat's
+/// ETag where supported, and a read whose length differs from the stat's
+/// fails instead of returning a prefix or more bytes than were budgeted.
 async fn read_object(
     op: &Operator,
     path: &str,
     budget: &mut Budget,
 ) -> Result<Option<Vec<u8>>, Error> {
-    let length = match op.stat(path).await {
-        Ok(metadata) => metadata.content_length(),
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(storage(path, "stat")(error)),
+    let Some(metadata) = stat(op, path).await? else {
+        return Ok(None);
     };
+    let length = metadata.content_length();
     if length > budget.limits.max_file_bytes {
         return Err(limit(
             path,
@@ -60,23 +67,27 @@ async fn read_object(
         "total bytes",
     )
     .map_err(|exceeded| limit(path, exceeded))?;
-    if length == 0 {
-        // A ranged read of an empty object is unsatisfiable on some services.
-        return Ok(Some(Vec::new()));
+    let mut chunks = stream(op, path, &metadata).await?;
+    let mut bytes = Vec::with_capacity(usize::try_from(length).unwrap_or(0));
+    while let Some(buffer) = chunks.try_next().await.map_err(storage(path, "read"))? {
+        for chunk in buffer {
+            if (bytes.len() + chunk.len()) as u64 > length {
+                return Err(changed(path));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
     }
-    // The range caps the transfer at the stat-observed length even when the
-    // object grows concurrently.
-    let buffer = op
-        .read_with(path)
-        .range(0..length)
-        .await
-        .map_err(storage(path, "read"))?;
-    Ok(Some(buffer.to_vec()))
+    if bytes.len() as u64 != length {
+        return Err(changed(path));
+    }
+    Ok(Some(bytes))
 }
 
 /// Recursively lists `prefix` and reads every selected file, returning
 /// prefix-relative paths in sorted order. Every listed entry counts toward
-/// `max_entries`. A listing that reports a missing prefix reads as empty.
+/// `max_entries`. A listing that reports a missing prefix reads as empty. A
+/// selected entry whose relative path is not a normalized object key fails
+/// with [`Error::InvalidPath`].
 async fn read_tree(
     op: &Operator,
     prefix: &str,
@@ -110,6 +121,14 @@ async fn read_tree(
             }
         }
         if select(relative) {
+            if let Some(reason) = key_issue(relative) {
+                // Such a key would alias another one or name a file outside
+                // the tree once OpenDAL normalizes it.
+                return Err(Error::InvalidPath {
+                    path: path.to_owned(),
+                    reason,
+                });
+            }
             selected.push((path.to_owned(), relative.to_owned()));
         }
     }
@@ -150,19 +169,21 @@ fn require_read(op: &Operator) -> Result<(), Error> {
 
 /// Reads every file below `prefix` into a [`ProjectSnapshot`].
 ///
-/// All listed files are selected; `.typkignore` is an ordinary project file
-/// here (ignore rules apply only to filesystem reading). Directory markers
-/// are skipped. The snapshot validates paths, collisions, and the
-/// entrypoint. The listing is one observation, not a storage snapshot.
+/// All listed files are selected except `.typk` paths (a pack is never a
+/// project file); `.typkignore` is an ordinary project file here (ignore
+/// rules apply only to filesystem reading). Directory markers are skipped. The
+/// snapshot validates paths, collisions, and the entrypoint. The listing is
+/// one observation, not a storage snapshot.
 pub async fn read_project(
     op: &Operator,
     prefix: &str,
     entrypoint: &str,
-    limits: &ReadLimits,
+    limits: ReadLimits,
 ) -> Result<ProjectSnapshot, Error> {
     check_prefix(prefix)?;
     require_listing(op)?;
-    let files = read_tree(op, prefix, |_| true, &mut Budget::new(limits)).await?;
+    let select = |path: &str| !names_pack_path(path);
+    let files = read_tree(op, prefix, select, &mut Budget::new(limits)).await?;
     Ok(ProjectSnapshot::new(entrypoint, files)?)
 }
 
@@ -182,7 +203,7 @@ pub struct FontSource {
 pub async fn read_fonts(
     op: &Operator,
     sources: &[FontSource],
-    limits: &ReadLimits,
+    limits: ReadLimits,
 ) -> Result<Vec<font::Entry>, Error> {
     for source in sources {
         check_prefix(&source.prefix)?;
@@ -193,7 +214,7 @@ pub async fn read_fonts(
     let mut budget = Budget::new(limits);
     let mut entries = Vec::new();
     for source in sources {
-        let files = read_tree(op, &source.prefix, font::is_container_key, &mut budget).await?;
+        let files = read_tree(op, &source.prefix, is_font_key, &mut budget).await?;
         for (relative, bytes) in files {
             let container = font::Container::new(bytes).ok_or_else(|| Error::Font {
                 path: format!("{}{relative}", source.prefix),
@@ -223,6 +244,7 @@ pub enum PackageSource {
 
 /// What [`read_package`] found for one specification.
 #[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum PackageRead {
     /// A package tree's files, with package-relative paths.
     Tree(Vec<(String, Vec<u8>)>),
@@ -245,7 +267,7 @@ pub enum PackageRead {
 pub async fn read_package(
     sources: &[PackageSource],
     spec: &PackageSpec,
-    limits: &ReadLimits,
+    limits: ReadLimits,
 ) -> Result<PackageRead, Error> {
     for source in sources {
         let mut budget = Budget::new(limits);
@@ -253,7 +275,7 @@ pub async fn read_package(
             PackageSource::Trees { operator, prefix } => {
                 check_prefix(prefix)?;
                 require_listing(operator)?;
-                let tree = format!("{prefix}{}/", package::tree_key(spec));
+                let tree = format!("{prefix}{}/", tree_key(spec));
                 let files = read_tree(operator, &tree, |_| true, &mut budget).await?;
                 if !files.is_empty() {
                     return Ok(PackageRead::Tree(files));
@@ -262,7 +284,7 @@ pub async fn read_package(
             PackageSource::ArchiveCache { operator, prefix } => {
                 check_prefix(prefix)?;
                 require_read(operator)?;
-                let key = package::archive_cache_key(spec);
+                let key = archive_cache_key(spec);
                 if let Some(bytes) =
                     read_object(operator, &format!("{prefix}{key}"), &mut budget).await?
                 {
@@ -271,7 +293,7 @@ pub async fn read_package(
             }
             PackageSource::Registry { operator, prefix } => {
                 check_prefix(prefix)?;
-                let Some(key) = package::registry_archive_key(spec) else {
+                let Some(key) = package::registry::archive_key(spec) else {
                     continue;
                 };
                 require_read(operator)?;
@@ -292,8 +314,9 @@ pub async fn read_package(
 /// On success the tree is cataloged and any earlier failure for `spec` is
 /// removed. `Unavailable` records a `NotFound` failure and returns `Ok`. A
 /// tree, archive, or catalog rejection records a failure (`MalformedArchive`
-/// for malformed archive contents, otherwise `Other`) and returns the error;
-/// resumed creation then reports the failure at the import.
+/// for malformed archive contents, otherwise `Other`) carrying the reason and
+/// returns the error; resumed creation then reports the failure at the
+/// import.
 #[cfg(feature = "package-reading")]
 pub fn insert_package(
     request: &mut crate::create::Request,
@@ -329,11 +352,16 @@ pub fn insert_package(
             Ok(())
         }
         Err(error) => {
+            // The failure's own Display already says "malformed archive", so
+            // its detail is the inner reason.
             let reason = match &error {
-                Error::PackageArchive(ExpandError::Malformed(_) | ExpandError::Invalid(_)) => {
-                    ReadFailure::MalformedArchive(None)
+                Error::PackageArchive(ExpandError::Malformed(reason)) => {
+                    ReadFailure::MalformedArchive(Some(reason.clone()))
                 }
-                _ => ReadFailure::Other(None),
+                Error::PackageArchive(ExpandError::Invalid(invalid)) => {
+                    ReadFailure::MalformedArchive(Some(invalid.to_string()))
+                }
+                _ => ReadFailure::Other(Some(crate::chain(&error))),
             };
             request.package_failures.insert(spec.clone(), reason);
             Err(error)
@@ -348,7 +376,7 @@ pub fn insert_package(
 pub async fn read_archive(op: &Operator, path: &str, max_bytes: u64) -> Result<Vec<u8>, Error> {
     check_key(path)?;
     require_read(op)?;
-    let mut budget = Budget::new(&ReadLimits {
+    let mut budget = Budget::new(ReadLimits {
         max_entries: 1,
         max_file_bytes: max_bytes,
         max_total_bytes: max_bytes,

@@ -7,10 +7,9 @@ use ::opendal::{ErrorKind, Operator};
 use futures_util::TryStreamExt;
 use typst::syntax::package::PackageSpec;
 
-use super::{Error, check_key, check_prefix, storage};
+use super::{Error, archive_cache_key, check_key, check_prefix, key_issue, stat, storage, stream};
 use crate::compile::Artifact;
 use crate::extract::Plan;
-use crate::package;
 
 /// How a write treats objects that already exist.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -26,6 +25,7 @@ pub enum WritePolicy {
 
 /// What a write did at one key.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
 pub enum WriteOutcome {
     /// `CreateOrVerify` created the absent object.
     Created,
@@ -37,15 +37,18 @@ pub enum WriteOutcome {
 
 /// A write that failed, with the keys it completed before failing.
 ///
-/// Writes are sequential and not atomic across keys. `completed` lists the
-/// full paths (in input order) whose outcome was established before the
-/// failure. `indeterminate` is `true` when the failing key's write was issued
-/// and may or may not have taken effect. Replaying the whole write is the
-/// recovery path; with [`WritePolicy::CreateOrVerify`] already written keys
-/// complete as [`WriteOutcome::AlreadyMatching`].
+/// Writes are sequential and not atomic across keys. `path` names the key
+/// that failed, or is `None` when the write was refused before any key was
+/// tried. `completed` lists the full paths (in input order) whose outcome was
+/// established before the failure. `indeterminate` is `true` when the failing
+/// key's write was issued and may or may not have taken effect. Replaying the
+/// whole write is the recovery path; with [`WritePolicy::CreateOrVerify`]
+/// already written keys complete as [`WriteOutcome::AlreadyMatching`].
 #[derive(Debug, thiserror::Error)]
-#[error("write failed after {} completed key(s)", .completed.len())]
+#[error("{}", summary(.path.as_deref(), .completed.len()))]
 pub struct WriteError {
+    /// The full path of the key whose write failed.
+    pub path: Option<String>,
     /// The keys whose outcome was established before the failure, in order.
     pub completed: Vec<(String, WriteOutcome)>,
     /// Whether the failing key's write was issued and may have taken effect.
@@ -55,9 +58,17 @@ pub struct WriteError {
     pub error: Error,
 }
 
+fn summary(path: Option<&str>, completed: usize) -> String {
+    match path {
+        Some(path) => format!("writing {path:?} failed after {completed} completed key(s)"),
+        None => "nothing was written".to_owned(),
+    }
+}
+
 impl From<Error> for WriteError {
     fn from(error: Error) -> Self {
         Self {
+            path: None,
             completed: Vec::new(),
             indeterminate: false,
             error,
@@ -92,29 +103,20 @@ fn require_write(
 }
 
 /// Whether an existing object matches `expected`. A length mismatch is a
-/// conflict without downloading; otherwise the object is streamed and
-/// compared chunk by chunk. `Ok(None)` means the object is absent.
+/// conflict without downloading; otherwise the whole object is streamed (in
+/// one request, conditional on the stat's ETag where supported) and compared
+/// chunk by chunk, so an object that grew after the stat never matches on
+/// its prefix. `Ok(None)` means the object is absent.
 async fn matches(op: &Operator, path: &str, expected: &[u8]) -> Result<Option<bool>, Error> {
-    let length = match op.stat(path).await {
-        Ok(metadata) => metadata.content_length(),
-        Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
-        Err(error) => return Err(storage(path, "stat")(error)),
+    let Some(metadata) = stat(op, path).await? else {
+        return Ok(None);
     };
-    if length != expected.len() as u64 {
+    if metadata.content_length() != expected.len() as u64 {
         return Ok(Some(false));
     }
-    if length == 0 {
-        return Ok(Some(true));
-    }
-    let mut stream = op
-        .reader(path)
-        .await
-        .map_err(storage(path, "read"))?
-        .into_stream(0..length)
-        .await
-        .map_err(storage(path, "read"))?;
+    let mut chunks = stream(op, path, &metadata).await?;
     let mut offset = 0;
-    while let Some(buffer) = stream.try_next().await.map_err(storage(path, "read"))? {
+    while let Some(buffer) = chunks.try_next().await.map_err(storage(path, "read"))? {
         for chunk in buffer {
             let end = offset + chunk.len();
             if expected.get(offset..end) != Some(&chunk[..]) {
@@ -126,6 +128,52 @@ async fn matches(op: &Operator, path: &str, expected: &[u8]) -> Result<Option<bo
     Ok(Some(offset == expected.len()))
 }
 
+/// The `CreateOrVerify` write of one absent key. The conditional create is
+/// retried once when it is refused although the object turns out absent (for
+/// example S3's `ConditionalRequestConflict` while another upload is in
+/// flight); a second such refusal is a retryable storage error, not a
+/// conflict. `Err` carries whether the write may have taken effect.
+async fn create(op: &Operator, path: &str, bytes: &[u8]) -> Result<WriteOutcome, (bool, Error)> {
+    for _ in 0..2 {
+        match op
+            .write_with(path, bytes.to_vec())
+            .if_not_exists(true)
+            .await
+        {
+            Ok(_) => return Ok(WriteOutcome::Created),
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    ErrorKind::AlreadyExists | ErrorKind::ConditionNotMatch
+                ) =>
+            {
+                // Another writer created the object first; accept it only
+                // when its bytes match.
+                match matches(op, path, bytes).await {
+                    Ok(Some(true)) => return Ok(WriteOutcome::AlreadyMatching),
+                    Ok(Some(false)) => {
+                        return Err((
+                            false,
+                            Error::Conflict {
+                                path: path.to_owned(),
+                            },
+                        ));
+                    }
+                    Ok(None) => continue,
+                    Err(error) => return Err((false, error)),
+                }
+            }
+            Err(error) => return Err((true, storage(path, "conditional create")(error))),
+        }
+    }
+    let refused = ::opendal::Error::new(
+        ErrorKind::ConditionNotMatch,
+        "the conditional create was refused twice but the object is absent",
+    )
+    .set_temporary();
+    Err((false, storage(path, "conditional create")(refused)))
+}
+
 /// Writes `entries` (full paths and bytes) in order under `policy`.
 async fn write_keys(
     op: &Operator,
@@ -134,7 +182,8 @@ async fn write_keys(
 ) -> Result<Vec<(String, WriteOutcome)>, WriteError> {
     require_write(op, policy, entries)?;
     let mut completed = Vec::with_capacity(entries.len());
-    let fail = |completed: Vec<_>, indeterminate, error| WriteError {
+    let fail = |path: &String, completed: Vec<_>, indeterminate, error| WriteError {
+        path: Some(path.clone()),
         completed,
         indeterminate,
         error,
@@ -143,7 +192,7 @@ async fn write_keys(
     if policy == WritePolicy::Overwrite {
         for (path, bytes) in entries {
             if let Err(error) = op.write(path, bytes.to_vec()).await {
-                return Err(fail(completed, true, storage(path, "write")(error)));
+                return Err(fail(path, completed, true, storage(path, "write")(error)));
             }
             completed.push((path.clone(), WriteOutcome::Written));
         }
@@ -159,51 +208,56 @@ async fn write_keys(
             Ok(Some(true)) => absent.push(false),
             Ok(Some(false)) => {
                 return Err(fail(
+                    path,
                     Vec::new(),
                     false,
                     Error::Conflict { path: path.clone() },
                 ));
             }
-            Err(error) => return Err(fail(Vec::new(), false, error)),
+            Err(error) => return Err(fail(path, Vec::new(), false, error)),
         }
     }
 
     for ((path, bytes), absent) in entries.iter().zip(absent) {
-        let outcome = if !absent {
-            WriteOutcome::AlreadyMatching
-        } else {
-            match op
-                .write_with(path, bytes.to_vec())
-                .if_not_exists(true)
-                .await
-            {
-                Ok(_) => WriteOutcome::Created,
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        ErrorKind::AlreadyExists | ErrorKind::ConditionNotMatch
-                    ) =>
-                {
-                    // Another writer created the object first; accept it only
-                    // when its bytes match.
-                    match matches(op, path, bytes).await {
-                        Ok(Some(true)) => WriteOutcome::AlreadyMatching,
-                        Ok(_) => {
-                            let error = Error::Conflict { path: path.clone() };
-                            return Err(fail(completed, false, error));
-                        }
-                        Err(error) => return Err(fail(completed, false, error)),
-                    }
-                }
-                Err(error) => {
-                    let error = storage(path, "conditional create")(error);
-                    return Err(fail(completed, true, error));
+        let outcome = if absent {
+            match create(op, path, bytes).await {
+                Ok(outcome) => outcome,
+                Err((indeterminate, error)) => {
+                    return Err(fail(path, completed, indeterminate, error));
                 }
             }
+        } else {
+            WriteOutcome::AlreadyMatching
         };
         completed.push((path.clone(), outcome));
     }
     Ok(completed)
+}
+
+/// Joins `prefix` to every key after checking all of them, so a key that
+/// OpenDAL would normalize into another key (or out of the prefix) or a
+/// repeated key is refused, with every offending key listed, before anything
+/// is written.
+fn join_keys<'a>(
+    prefix: &str,
+    entries: impl IntoIterator<Item = (&'a str, &'a [u8])>,
+) -> Result<Vec<(String, &'a [u8])>, Error> {
+    let mut seen = HashSet::new();
+    let mut invalid = Vec::new();
+    let mut joined = Vec::new();
+    for (key, bytes) in entries {
+        if let Some(reason) = key_issue(key) {
+            invalid.push((key.to_owned(), reason));
+        } else if !seen.insert(key) {
+            invalid.push((key.to_owned(), "an object key is used more than once"));
+        }
+        joined.push((format!("{prefix}{key}"), bytes));
+    }
+    if invalid.is_empty() {
+        Ok(joined)
+    } else {
+        Err(Error::InvalidKeys { keys: invalid })
+    }
 }
 
 async fn write_one(
@@ -242,11 +296,15 @@ pub async fn write_package_archive(
     bytes: &[u8],
 ) -> Result<WriteOutcome, WriteError> {
     check_prefix(prefix)?;
-    let path = format!("{prefix}{}", package::archive_cache_key(spec));
+    let path = format!("{prefix}{}", archive_cache_key(spec));
     write_one(op, WritePolicy::CreateOrVerify, path, bytes).await
 }
 
 /// Writes every entry of an extraction plan below `prefix`.
+///
+/// Every entry path must be a normalized object key (pack paths may end in
+/// whitespace, which OpenDAL would trim into another key); otherwise the write
+/// fails with [`Error::InvalidKeys`] listing them before anything is written.
 pub async fn write_extraction(
     op: &Operator,
     prefix: &str,
@@ -254,23 +312,25 @@ pub async fn write_extraction(
     policy: WritePolicy,
 ) -> Result<Vec<(String, WriteOutcome)>, WriteError> {
     check_prefix(prefix)?;
-    let entries = plan
-        .entries()
-        .iter()
-        .map(|entry| (format!("{prefix}{}", entry.path()), entry.bytes()))
-        .collect::<Vec<_>>();
+    let entries = join_keys(
+        prefix,
+        plan.entries()
+            .iter()
+            .map(|entry| (entry.path(), entry.bytes())),
+    )?;
     write_keys(op, policy, &entries).await
 }
 
 /// Writes each compiled artifact at `{prefix}{key}`, pairing `keys` with the
 /// artifacts in order.
 ///
-/// Keys must be relative, normalized, and distinct.
+/// Keys must be relative, normalized, and distinct; otherwise the write fails
+/// with [`Error::InvalidKeys`] listing them before anything is written.
 pub async fn write_artifacts(
     op: &Operator,
     prefix: &str,
+    keys: &[impl AsRef<str>],
     artifacts: &[Artifact],
-    keys: &[&str],
     policy: WritePolicy,
 ) -> Result<Vec<(String, WriteOutcome)>, WriteError> {
     check_prefix(prefix)?;
@@ -281,21 +341,11 @@ pub async fn write_artifacts(
         }
         .into());
     }
-    let mut seen = HashSet::new();
-    for key in keys {
-        check_key(key)?;
-        if !seen.insert(*key) {
-            return Err(Error::InvalidPath {
-                path: (*key).to_owned(),
-                reason: "an artifact key is used more than once",
-            }
-            .into());
-        }
-    }
-    let entries = keys
-        .iter()
-        .zip(artifacts)
-        .map(|(key, artifact)| (format!("{prefix}{key}"), artifact.bytes.as_slice()))
-        .collect::<Vec<_>>();
+    let entries = join_keys(
+        prefix,
+        keys.iter()
+            .zip(artifacts)
+            .map(|(key, artifact)| (key.as_ref(), artifact.bytes.as_slice())),
+    )?;
     write_keys(op, policy, &entries).await
 }

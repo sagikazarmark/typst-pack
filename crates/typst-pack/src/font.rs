@@ -8,7 +8,6 @@
 
 use std::fmt;
 
-use serde::{Deserialize, Serialize};
 #[cfg(feature = "embedded-fonts")]
 use typst::foundations::Bytes;
 use typst::text::{Font, FontStretch, FontStyle, FontWeight};
@@ -78,7 +77,10 @@ impl PartialEq for Container {
 impl Eq for Container {}
 
 /// The selection metadata of one face of a font container.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// A pack's manifest records faces in its own format; see the README's "Pack
+/// format" section.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Face {
     /// The face index within the container.
     pub index: u32,
@@ -188,37 +190,4 @@ pub(crate) fn is_container_extension(extension: &str) -> bool {
     ["ttf", "ttc", "otf", "otc"]
         .iter()
         .any(|supported| extension.eq_ignore_ascii_case(supported))
-}
-
-/// Whether a storage key ends in a font container extension. Unlike a path,
-/// a key that is nothing but the extension, such as `.ttf`, qualifies.
-#[cfg(feature = "opendal")]
-pub(crate) fn is_container_key(key: &str) -> bool {
-    key.rsplit_once('.')
-        .is_some_and(|(_, suffix)| is_container_extension(suffix))
-}
-
-#[cfg(all(test, feature = "opendal"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn font_container_names_are_matched_case_insensitively() {
-        for (key, supported) in [
-            ("container.ttf", true),
-            ("container.TTF", true),
-            ("fonts/nested/container.otc", true),
-            ("container.Ttc", true),
-            ("container.oTf", true),
-            (".ttf", true),
-            ("container.woff", false),
-            ("container.ttf.txt", false),
-            ("container", false),
-            ("ttf", false),
-            ("fonts.ttf/container", false),
-            ("", false),
-        ] {
-            assert_eq!(is_container_key(key), supported, "{key:?}");
-        }
-    }
 }

@@ -453,6 +453,90 @@ mod registry {
         ));
     }
 
+    /// A PAX record: its own decimal length, a space, `key=value`, a newline.
+    fn pax_record(key: &str, value: &str) -> String {
+        let record = format!(" {key}={value}\n");
+        let length = (record.len()..)
+            .find(|length| length.to_string().len() + record.len() == *length)
+            .unwrap();
+        format!("{length}{record}")
+    }
+
+    fn extension_header(kind: tar::EntryType, data: &[u8]) -> (tar::Header, Vec<u8>) {
+        let mut header = tar::Header::new_ustar();
+        header.set_entry_type(kind);
+        header.set_size(data.len() as u64);
+        header.set_mode(0o644);
+        header.set_path("pax_header").unwrap();
+        header.set_cksum();
+        (header, data.to_vec())
+    }
+
+    #[test]
+    fn member_names_longer_than_a_path_can_be_are_rejected() {
+        let long = format!("{}/lib.typ", "nested/".repeat(1200));
+        assert!(long.len() > 8 << 10);
+        let mut gnu = builder();
+        let mut header = tar::Header::new_gnu();
+        header.set_size(1);
+        gnu.append_data(&mut header, &long, &b"g"[..]).unwrap();
+        let mut pax = builder();
+        pax.append_pax_extensions([("path", long.as_bytes())])
+            .unwrap();
+        let mut header = tar::Header::new_ustar();
+        header.set_size(1);
+        pax.append_data(&mut header, "short", &b"p"[..]).unwrap();
+
+        for archive in [finish(gnu), finish(pax)] {
+            let result = expand(&archive);
+            assert!(
+                matches!(&result, Err(ExpandError::Malformed(message)) if message.contains("member name")),
+                "{result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn global_extended_headers_are_skipped() {
+        // As `git archive` writes at the start of every tarball.
+        let mut builder = builder();
+        let comment = pax_record("comment", &"0123456789abcdef".repeat(5));
+        let (header, data) = extension_header(tar::EntryType::XGlobalHeader, comment.as_bytes());
+        builder.append(&header, &data[..]).unwrap();
+        let mut file = tar::Header::new_ustar();
+        file.set_size(1);
+        builder
+            .append_data(&mut file, "lib.typ", &b"x"[..])
+            .unwrap();
+
+        let tree = expand(&finish(builder)).unwrap();
+        assert_eq!(tree.files().collect::<Vec<_>>(), [("lib.typ", &b"x"[..])]);
+    }
+
+    #[test]
+    fn extended_headers_must_describe_one_member_consistently() {
+        // A size that disagrees with the member's header.
+        let mut sized = builder();
+        sized.append_pax_extensions([("size", &b"2"[..])]).unwrap();
+        let mut file = tar::Header::new_ustar();
+        file.set_size(1);
+        sized.append_data(&mut file, "lib.typ", &b"x"[..]).unwrap();
+        assert!(matches!(
+            expand(&finish(sized)),
+            Err(ExpandError::Malformed(_))
+        ));
+
+        // An extended header that describes no member.
+        let mut dangling = builder();
+        let record = pax_record("path", "lib.typ");
+        let (header, data) = extension_header(tar::EntryType::XHeader, record.as_bytes());
+        dangling.append(&header, &data[..]).unwrap();
+        assert!(matches!(
+            expand(&finish(dangling)),
+            Err(ExpandError::Malformed(_))
+        ));
+    }
+
     #[test]
     fn a_resume_loop_fetches_and_expands_what_creation_reported() {
         // A stand-in for whatever transport the caller's host provides.
@@ -484,6 +568,7 @@ mod registry {
                         request.packages.insert(spec, tree, true).unwrap();
                     }
                 }
+                outcome => panic!("unexpected outcome: {outcome:?}"),
             }
         };
 

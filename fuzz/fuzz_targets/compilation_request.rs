@@ -22,7 +22,7 @@ fuzz_target!(|data: &[u8]| {
         .unwrap();
     let mut inputs = vec![
         ("text".to_owned(), Input::Str(String::from_utf8_lossy(data).into_owned())),
-        ("bytes".to_owned(), Input::Bytes(data.to_vec())),
+        ("bytes".to_owned(), Input::from(data.to_vec())),
     ];
     if reverse {
         inputs.reverse();

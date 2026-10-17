@@ -59,7 +59,7 @@ fn ordinary_file_lifecycle_remains_compatible_through_the_cli_process() {
     assert_eq!(created.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(created.stdout).unwrap(),
-        "packed 2 project file(s), 0 package(s), 0 font(s) into `project.typk`\n"
+        "packed 2 project file(s), 0 package(s), 0 font(s) (0 embedded) into `project.typk`\n"
     );
     assert!(created.stderr.is_empty(), "{:?}", created.stderr);
     assert!(directory.path().join("project.typk").is_file());
@@ -68,6 +68,8 @@ fn ordinary_file_lifecycle_remains_compatible_through_the_cli_process() {
         .args(["inspect", "project.typk"])
         .output()
         .unwrap();
+    let pack = std::fs::read(directory.path().join("project.typk")).unwrap();
+    let pack = typst_pack::archive::decode(&pack, Default::default()).unwrap();
     assert_eq!(inspected.status.code(), Some(0));
     assert_eq!(
         String::from_utf8(inspected.stdout).unwrap(),
@@ -75,6 +77,9 @@ fn ordinary_file_lifecycle_remains_compatible_through_the_cli_process() {
             concat!(
                 "pack: project.typk\n",
                 "format version: 2\n",
+                "typst version: {}\n",
+                "generator: typst-pack {}\n",
+                "identity: {}\n",
                 "entrypoint: main.typ\n",
                 "name: Compatibility Fixture\n",
                 "description: Ordinary CLI lifecycle\n",
@@ -84,6 +89,9 @@ fn ordinary_file_lifecycle_remains_compatible_through_the_cli_process() {
                 "  data.txt (7 B)\n",
                 "  main.typ ({} B)\n",
             ),
+            typst_pack::TYPST_VERSION,
+            env!("CARGO_PKG_VERSION"),
+            pack.identity(),
             MAIN_SOURCE.len()
         )
     );
@@ -154,7 +162,8 @@ fn extract_preflights_collisions_and_force_replaces_only_planned_files() {
     assert!(collided.stdout.is_empty(), "{:?}", collided.stdout);
     assert_eq!(
         String::from_utf8(collided.stderr).unwrap(),
-        "error: `extracted/main.typ` already exists (pass --force to overwrite)\n"
+        "error: `extracted/main.typ` already exists\n\
+         hint: pass --force to overwrite existing files\n"
     );
     assert_eq!(
         std::fs::read_to_string(destination.join("main.typ")).unwrap(),

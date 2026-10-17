@@ -15,7 +15,8 @@ opendal = { version = "0.58", default-features = false }
 tar = { version = "0.4", default-features = false }
 tempfile = "3"
 typst = "=0.15.1"
-typst-pack = { path = "../crates/typst-pack", features = ["fs", "opendal", "package-reading"] }
+typst-pack = { path = "../crates/typst-pack", features = ["embedded-fonts", "fs", "opendal", "package-reading"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
 
 [[bin]]
 name = "project_snapshot_assembly"

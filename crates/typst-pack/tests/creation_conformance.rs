@@ -250,22 +250,38 @@ fn create_directly(fixture: &Fixture) -> Run {
     }
     resume(fixture, request, false, |request, package| {
         let tree = match &package.source {
-            Source::Files(files) => package::Tree::new(files.clone()).ok(),
+            Source::Files(files) => package::Tree::new(files.clone()).map_err(|e| e.to_string()),
             #[cfg(feature = "package-reading")]
             Source::Archive { bytes, limits, .. } => {
-                package::registry::expand_archive(bytes, *limits).ok()
+                package::registry::expand_archive(bytes, *limits).map_err(|e| chain(&e))
             }
         };
         let spec = package.spec.clone();
         let catalog = &mut request.packages;
-        if tree.is_some_and(|tree| catalog.insert(spec.clone(), tree, package.embedded).is_ok()) {
-            request.package_failures.remove(&spec);
-        } else {
-            request
+        let inserted = tree.and_then(|tree| {
+            let inserted = catalog.insert(spec.clone(), tree, package.embedded);
+            inserted.map_err(|e| e.to_string())
+        });
+        // A rejected package is recorded with its reason, as adapters do.
+        match inserted {
+            Ok(()) => request.package_failures.remove(&spec),
+            Err(reason) => request
                 .package_failures
-                .insert(spec, ReadFailure::Other(None));
-        }
+                .insert(spec, ReadFailure::Other(Some(reason))),
+        };
     })
+}
+
+/// An error and its sources, as adapters record a failure reason.
+#[cfg(feature = "package-reading")]
+fn chain(error: &dyn std::error::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(error) = source {
+        message = format!("{message}: {error}");
+        source = error.source();
+    }
+    message
 }
 
 /// Reads every input through one OpenDAL Memory backend, written in
@@ -330,9 +346,9 @@ fn create_on_opendal(fixture: &Fixture, reversed: bool) -> Run {
     }
 
     let limits = ReadLimits::default();
-    let project = adapter::read_project(&operator, "project/", "main.typ", &limits);
+    let project = adapter::read_project(&operator, "project/", "main.typ", limits);
     let mut request = create::Request::new(block_on(project).unwrap());
-    request.fonts = block_on(adapter::read_fonts(&operator, &font_sources, &limits)).unwrap();
+    request.fonts = block_on(adapter::read_fonts(&operator, &font_sources, limits)).unwrap();
     let (operator, prefix) = (&operator, String::from);
     let sources = [
         PackageSource::Trees {
@@ -349,7 +365,7 @@ fn create_on_opendal(fixture: &Fixture, reversed: bool) -> Run {
         },
     ];
     resume(fixture, request, reversed, |request, package| {
-        let read = block_on(adapter::read_package(&sources, &package.spec, &limits)).unwrap();
+        let read = block_on(adapter::read_package(&sources, &package.spec, limits)).unwrap();
         let limits = match &package.source {
             Source::Files(_) => ReadLimits::default(),
             Source::Archive { limits, .. } => *limits,
@@ -392,7 +408,7 @@ fn create_on_filesystem(fixture: &Fixture) -> Run {
         package_path: Some(packages),
         system_fonts: false,
         typst_embedded_fonts: false,
-        vendor_packages: fixture.packages.iter().all(|package| package.embedded),
+        embed_packages: fixture.packages.iter().all(|package| package.embedded),
         options: compile::Options {
             document_time: DOCUMENT_TIME,
             ..Default::default()
@@ -424,7 +440,7 @@ fn create_on_filesystem(fixture: &Fixture) -> Run {
             warnings: packed.warnings,
             ..run
         },
-        Err(fs::Error::Create(error)) => run.finish(Err(error)),
+        Err(fs::Error::Create(error)) => run.finish(Err(*error)),
         Err(error) => panic!("filesystem creation failed unexpectedly: {error}"),
     }
 }
@@ -468,12 +484,21 @@ fn conform_object_storage(fixture: &Fixture) -> Run {
     run(fixture, false)
 }
 
-fn assert_package_failure(run: &Run, spec: &str) {
+/// Asserts the run failed on `spec` alone, with a recorded failure whose
+/// reason contains `reason` and reaches the import's diagnostic.
+fn assert_package_failure(run: &Run, spec: &str, reason: &str) {
     assert_eq!(run.archive, None);
-    let failure = BTreeMap::from([(spec.to_owned(), ReadFailure::Other(None))]);
-    assert_eq!(run.failure_states.last(), Some(&failure));
+    let failures = run.failure_states.last().unwrap();
+    assert_eq!(failures.keys().collect::<Vec<_>>(), [spec]);
+    assert!(
+        matches!(&failures[spec], ReadFailure::Other(Some(detail)) if detail.contains(reason)),
+        "{failures:?}"
+    );
     let mut errors = run.errors.iter();
-    assert!(errors.any(|error| error.message.starts_with("failed to load package")));
+    assert!(
+        errors.any(|error| error.message.starts_with("failed to load package")
+            && error.message.contains(reason))
+    );
 }
 
 fn package_dispositions(pack: &Pack) -> Vec<(String, bool)> {
@@ -569,7 +594,11 @@ fn a_supplied_tree_that_does_not_satisfy_its_specification_fails_every_adapter()
     );
 
     // A diagnosis rather than a loop that never progresses.
-    assert_package_failure(&conform(&fixture), "@local/declared:1.0.0");
+    assert_package_failure(
+        &conform(&fixture),
+        "@local/declared:1.0.0",
+        "declares the name \"other\"",
+    );
 }
 
 #[cfg(feature = "package-reading")]
@@ -592,6 +621,7 @@ fn an_archive_beyond_the_expansion_ceiling_fails_the_resume_loop() {
     assert_package_failure(
         &conform_object_storage(&fixture),
         "@preview/oversized:1.0.0",
+        "file bytes limit of 4096 exceeded",
     );
 }
 

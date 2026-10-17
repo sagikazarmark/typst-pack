@@ -9,11 +9,11 @@ use typst::text::Font;
 
 use crate::digest::Preimage;
 use crate::font::{self, Face};
-use crate::manifest::Metadata;
+use crate::manifest::{GENERATOR, Metadata};
 use crate::package::{self, Tree};
 use crate::payload::SharedBytes;
 use crate::project::ProjectSnapshot;
-use crate::{Digest, list};
+use crate::{Digest, TYPST_VERSION, list};
 
 /// The conventional file extension for packs.
 pub const FILE_EXTENSION: &str = "typk";
@@ -47,6 +47,7 @@ struct Contents {
     identity: Digest,
     project: ProjectSnapshot,
     metadata: Option<Metadata>,
+    producer: Producer,
     /// Embedded package trees, keyed by spec string.
     packages: BTreeMap<String, Tree>,
     package_requirements: Vec<package::Requirement>,
@@ -61,24 +62,44 @@ struct Contents {
 pub(crate) struct PackInput {
     pub(crate) entrypoint: String,
     pub(crate) metadata: Option<Metadata>,
+    pub(crate) producer: Producer,
     pub(crate) files: Vec<(String, SharedBytes)>,
     pub(crate) packages: Vec<PackageInput>,
     pub(crate) fonts: Vec<FontInput>,
 }
 
+/// The producer a pack's manifest records; informational.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct Producer {
+    pub(crate) typst_version: Option<String>,
+    pub(crate) generator: Option<String>,
+}
+
+impl Producer {
+    /// This crate and its embedded Typst version.
+    pub(crate) fn current() -> Self {
+        Self {
+            typst_version: Some(TYPST_VERSION.to_owned()),
+            generator: Some(GENERATOR.to_owned()),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct PackageInput {
     pub(crate) spec: PackageSpec,
-    pub(crate) embedded: bool,
     pub(crate) content: PackageContent,
 }
 
 #[derive(Debug)]
 pub(crate) enum PackageContent {
-    Files(Vec<(String, SharedBytes)>),
+    Files {
+        files: Vec<(String, SharedBytes)>,
+        embedded: bool,
+    },
     /// An already validated tree.
-    Tree(Tree),
-    /// A tree digest declared without its files; only for external packages.
+    Tree { tree: Tree, embedded: bool },
+    /// An external package's tree digest, declared without its files.
     Declared(Digest),
 }
 
@@ -126,6 +147,7 @@ impl Pack {
         PackBuilder {
             input: PackInput {
                 entrypoint: entrypoint.into(),
+                producer: Producer::current(),
                 ..PackInput::default()
             },
             packages: BTreeMap::new(),
@@ -137,7 +159,14 @@ impl Pack {
     pub(crate) fn construct(input: PackInput) -> Result<Self, PackError> {
         let mut issues = Vec::new();
         let project = ProjectSnapshot::validate(&input.entrypoint, input.files, &mut issues);
-        Self::assemble(project, input.metadata, input.packages, input.fonts, issues)
+        Self::assemble(
+            project,
+            input.metadata,
+            input.producer,
+            input.packages,
+            input.fonts,
+            issues,
+        )
     }
 
     /// Adds validated dependencies to an already validated project.
@@ -147,12 +176,20 @@ impl Pack {
         packages: Vec<PackageInput>,
         fonts: Vec<FontInput>,
     ) -> Result<Self, PackError> {
-        Self::assemble(Some(project), metadata, packages, fonts, Vec::new())
+        Self::assemble(
+            Some(project),
+            metadata,
+            Producer::current(),
+            packages,
+            fonts,
+            Vec::new(),
+        )
     }
 
     fn assemble(
         project: Option<ProjectSnapshot>,
         metadata: Option<Metadata>,
+        producer: Producer,
         packages: Vec<PackageInput>,
         fonts: Vec<FontInput>,
         mut issues: Vec<PackIssue>,
@@ -167,6 +204,7 @@ impl Pack {
             identity,
             project,
             metadata,
+            producer,
             packages,
             package_requirements,
             font_requirements,
@@ -188,6 +226,24 @@ impl Pack {
     /// Optional descriptive metadata, excluded from the identity.
     pub fn metadata(&self) -> Option<&Metadata> {
         self.0.metadata.as_ref()
+    }
+
+    /// The Typst version of the pack's producer; informational.
+    ///
+    /// A pack built by this crate reports the embedded Typst version. A
+    /// decoded pack reports its manifest's `typst-version`, or `None` when the
+    /// manifest records none.
+    pub fn typst_version(&self) -> Option<&str> {
+        self.0.producer.typst_version.as_deref()
+    }
+
+    /// The tool that produced the pack and its version, such as
+    /// `typst-pack 0.6.0`; informational.
+    ///
+    /// A pack built by this crate reports this crate. A decoded pack reports
+    /// its manifest's `generator`, or `None` when the manifest records none.
+    pub fn generator(&self) -> Option<&str> {
+        self.0.producer.generator.as_deref()
     }
 
     /// The project files, in root-relative path order.
@@ -259,7 +315,7 @@ fn validate_packages(
 ) -> (BTreeMap<String, Tree>, Vec<package::Requirement>) {
     let mut pass = Vec::new();
     let mut seen = BTreeSet::new();
-    let mut embedded = BTreeMap::new();
+    let mut trees = BTreeMap::new();
     let mut requirements = Vec::new();
     for input in inputs {
         let key = input.spec.to_string();
@@ -271,8 +327,8 @@ fn validate_packages(
             pass.push(PackIssue::DuplicatePackage { spec: input.spec });
             continue;
         }
-        let tree = match input.content {
-            PackageContent::Declared(digest) if !input.embedded => {
+        let (tree, embedded) = match input.content {
+            PackageContent::Declared(digest) => {
                 requirements.push(package::Requirement {
                     spec: input.spec,
                     digest,
@@ -280,11 +336,8 @@ fn validate_packages(
                 });
                 continue;
             }
-            PackageContent::Declared(_) => {
-                unreachable!("embedded packages are always supplied with their files")
-            }
-            PackageContent::Files(files) => match Tree::from_shared(files) {
-                Ok(tree) => tree,
+            PackageContent::Files { files, embedded } => match Tree::from_shared(files) {
+                Ok(tree) => (tree, embedded),
                 Err(error) => {
                     pass.push(PackIssue::InvalidPackage {
                         spec: input.spec,
@@ -293,9 +346,20 @@ fn validate_packages(
                     continue;
                 }
             },
-            PackageContent::Tree(tree) => tree,
+            PackageContent::Tree { tree, embedded } => (tree, embedded),
         };
-        if input.embedded {
+        // A tree that declares itself must declare its specification, as
+        // the catalog requires of the trees creation selects.
+        if tree.file("typst.toml").is_some()
+            && let Err(message) = package::check_declaration(&input.spec, &tree)
+        {
+            pass.push(PackIssue::InvalidDeclaration {
+                spec: input.spec,
+                message,
+            });
+            continue;
+        }
+        if embedded {
             let prefix = package_member_prefix(&input.spec).len();
             let long = tree
                 .files()
@@ -317,16 +381,16 @@ fn validate_packages(
         requirements.push(package::Requirement {
             digest: tree.digest(),
             spec: input.spec,
-            embedded: input.embedded,
+            embedded,
         });
-        if input.embedded {
-            embedded.insert(key, tree);
+        if embedded {
+            trees.insert(key, tree);
         }
     }
     pass.sort_by_cached_key(ToString::to_string);
     issues.extend(pass);
     requirements.sort_by_cached_key(|requirement| requirement.spec.to_string());
-    (embedded, requirements)
+    (trees, requirements)
 }
 
 fn validate_package_spec(spec: &PackageSpec) -> Result<(), String> {
@@ -474,10 +538,12 @@ impl PackBuilder {
             .entry((spec.to_string(), embedded))
             .or_insert_with(|| PackageInput {
                 spec,
-                embedded,
-                content: PackageContent::Files(Vec::new()),
+                content: PackageContent::Files {
+                    files: Vec::new(),
+                    embedded,
+                },
             });
-        if let PackageContent::Files(files) = &mut package.content {
+        if let PackageContent::Files { files, .. } = &mut package.content {
             files.push((path, SharedBytes::new(data)));
         }
         self

@@ -2,9 +2,11 @@
 //! from.
 
 #[cfg(feature = "package-reading")]
+mod expand;
 pub mod registry;
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
 
 use typst::syntax::package::{PackageSpec, PackageVersion};
 
@@ -25,10 +27,10 @@ pub struct Requirement {
 }
 
 /// Every file beneath one package root, with the package tree digest derived
-/// from every path and its bytes.
+/// from every path and its bytes. Cloning a tree is cheap.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Tree {
-    files: BTreeMap<String, SharedBytes>,
+    files: Arc<BTreeMap<String, SharedBytes>>,
     digest: Digest,
 }
 
@@ -87,7 +89,10 @@ impl Tree {
                 .iter()
                 .map(|(path, data)| (path.as_str(), Digest::of(data))),
         );
-        Ok(Self { files, digest })
+        Ok(Self {
+            files: Arc::new(files),
+            digest,
+        })
     }
 
     /// The files in canonical package-relative path order.
@@ -195,7 +200,7 @@ impl Catalog {
 
 /// Checks that a tree's `typst.toml` declares the specification's name and
 /// version.
-fn check_declaration(spec: &PackageSpec, tree: &Tree) -> Result<(), String> {
+pub(crate) fn check_declaration(spec: &PackageSpec, tree: &Tree) -> Result<(), String> {
     #[derive(serde::Deserialize)]
     struct Manifest {
         package: Declared,
@@ -254,50 +259,4 @@ fn detail(detail: &Option<String>) -> String {
         .as_ref()
         .map(|detail| format!(": {detail:?}"))
         .unwrap_or_default()
-}
-
-/// The namespace the official registry serves.
-#[cfg(any(feature = "opendal", feature = "package-reading"))]
-const REGISTRY_NAMESPACE: &str = "preview";
-
-/// Where one specification's tree lives in a directory of trees:
-/// `namespace/name/version`, Typst's package directory layout.
-#[cfg(any(feature = "opendal", feature = "egress"))]
-pub(crate) fn tree_key(spec: &PackageSpec) -> String {
-    format!("{}/{}/{}", spec.namespace, spec.name, spec.version)
-}
-
-/// Where one specification's archive lives in a cache of raw archives.
-#[cfg(feature = "opendal")]
-pub(crate) fn archive_cache_key(spec: &PackageSpec) -> String {
-    format!("{}.tar.gz", tree_key(spec))
-}
-
-/// Where the official registry serves one specification's archive, or `None`
-/// when it does not serve the specification's namespace.
-#[cfg(any(feature = "opendal", feature = "package-reading"))]
-pub(crate) fn registry_archive_key(spec: &PackageSpec) -> Option<String> {
-    (spec.namespace == REGISTRY_NAMESPACE)
-        .then(|| format!("{}/{}-{}.tar.gz", spec.namespace, spec.name, spec.version))
-}
-
-#[cfg(all(test, feature = "opendal"))]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn layouts_derive_from_namespace_name_and_version() {
-        let spec: PackageSpec = "@preview/nested-name:10.0.1".parse().unwrap();
-        assert_eq!(tree_key(&spec), "preview/nested-name/10.0.1");
-        assert_eq!(
-            archive_cache_key(&spec),
-            "preview/nested-name/10.0.1.tar.gz"
-        );
-        assert_eq!(
-            registry_archive_key(&spec).as_deref(),
-            Some("preview/nested-name-10.0.1.tar.gz")
-        );
-        let local: PackageSpec = "@local/example:0.1.0".parse().unwrap();
-        assert_eq!(registry_archive_key(&local), None);
-    }
 }

@@ -346,47 +346,76 @@ fn frozen_compilation_identity_vector() {
         },
     );
     request.packages = vec![(spec, tree.clone())];
-    request.options = compile::Options {
-        inputs: vec![
-            ("a".into(), Input::from("x")),
-            ("b".into(), Input::Bytes(b"y".to_vec())),
-            ("a".into(), Input::from("z")),
-        ],
-        document_time: DocumentTime::UnixTimestamp(946_684_800),
-        features: vec![typst::Feature::A11yExtras],
-    };
+    type Encoding = fn(&mut Preimage);
+    let times: [(DocumentTime, Encoding); 4] = [
+        (DocumentTime::Absent, |p| {
+            p.str("absent");
+        }),
+        (DocumentTime::UnixTimestamp(946_684_800), |p| {
+            p.str("unix").int(946_684_800);
+        }),
+        (
+            DocumentTime::Local {
+                seconds: 946_684_800,
+                utc_offset_seconds: -3600,
+            },
+            |p| {
+                p.str("local").int(946_684_800).int(-3600);
+            },
+        ),
+        // A fixed datetime is normalized to its date.
+        (
+            DocumentTime::Fixed(Datetime::from_ymd_hms(2000, 1, 2, 3, 4, 5).unwrap()),
+            |p| {
+                p.str("date").int(2000).int(1).int(2);
+            },
+        ),
+    ];
+    for (document_time, time) in times {
+        request.options = compile::Options {
+            inputs: vec![
+                ("a".into(), Input::from("x")),
+                ("b".into(), Input::from(b"y".to_vec())),
+                ("a".into(), Input::from("z")),
+            ],
+            document_time,
+            features: vec![typst::Feature::A11yExtras],
+        };
 
-    let expected = Preimage::new("typst-pack/compilation/v1")
-        .str(typst_pack::VERSION)
-        .digest(*pack.identity().as_bytes())
-        // Output: SVG, ranges 1-3 and 5- (open end), no bleed, not pretty.
-        .str("svg")
-        .count(2)
-        .count(1)
-        .int(3)
-        .count(5)
-        .int(-1)
-        .bool(false)
-        .bool(false)
-        // Inputs in effective order; a repeated key replaces in place.
-        .count(2)
-        .str("a")
-        .str("str")
-        .str("z")
-        .str("b")
-        .str("bytes")
-        .digest(sha256(b"y"))
-        .str("unix")
-        .int(946_684_800)
-        .count(1)
-        .str("a11y-extras")
-        // External packages by specification, then external fonts.
-        .count(1)
-        .str("@local/example:1.0.0")
-        .digest(*tree.digest().as_bytes())
-        .count(0)
-        .finish();
-    assert_eq!(compile(&request).unwrap().identity.to_string(), expected);
+        let mut expected = Preimage::new("typst-pack/compilation/v1");
+        expected
+            .str(typst_pack::VERSION)
+            .digest(*pack.identity().as_bytes())
+            // Output: SVG, ranges 1-3 and 5- (open end), no bleed, not pretty.
+            .str("svg")
+            .count(2)
+            .count(1)
+            .int(3)
+            .count(5)
+            .int(-1)
+            .bool(false)
+            .bool(false)
+            // Inputs in effective order; a repeated key replaces in place.
+            .count(2)
+            .str("a")
+            .str("str")
+            .str("z")
+            .str("b")
+            .str("bytes")
+            .digest(sha256(b"y"));
+        time(&mut expected);
+        let expected = expected
+            .count(1)
+            .str("a11y-extras")
+            // External packages by specification, then external fonts.
+            .count(1)
+            .str("@local/example:1.0.0")
+            .digest(*tree.digest().as_bytes())
+            .count(0)
+            .finish();
+        let compiled = compile(&request).unwrap();
+        assert_eq!(compiled.identity.to_string(), expected, "{document_time:?}");
+    }
 }
 
 #[test]
@@ -472,10 +501,10 @@ fn compilation_identity_binds_pack_inputs_features_and_document_time() {
             o.inputs = vec![("unused".into(), "value".into())]
         }),
         identity(identity_pack(), |o| {
-            o.inputs = vec![("unused".into(), Input::Bytes(b"value".to_vec()))]
+            o.inputs = vec![("unused".into(), Input::from(b"value".to_vec()))]
         }),
         identity(identity_pack(), |o| {
-            o.inputs = vec![("unused".into(), Input::Bytes(b"other".to_vec()))]
+            o.inputs = vec![("unused".into(), Input::from(b"other".to_vec()))]
         }),
         identity(identity_pack(), |o| {
             o.features = vec![typst::Feature::A11yExtras]
@@ -485,6 +514,18 @@ fn compilation_identity_binds_pack_inputs_features_and_document_time() {
         }),
         identity(identity_pack(), |o| {
             o.document_time = DocumentTime::UnixTimestamp(1_700_000_000)
+        }),
+        identity(identity_pack(), |o| {
+            o.document_time = DocumentTime::Local {
+                seconds: 1_700_000_000,
+                utc_offset_seconds: 0,
+            }
+        }),
+        identity(identity_pack(), |o| {
+            o.document_time = DocumentTime::Local {
+                seconds: 1_700_000_000,
+                utc_offset_seconds: 3600,
+            }
         }),
     ]);
 
@@ -503,4 +544,34 @@ fn compilation_identity_binds_pack_inputs_features_and_document_time() {
         .build()
         .unwrap();
     assert_eq!(identity(described, |_| {}), baseline);
+}
+
+#[test]
+fn compilation_identity_excludes_limits_and_unrequired_dependencies() {
+    let baseline = compile::Request::new(identity_pack(), Output::new(OutputFormat::Png));
+    let identity = |request: &compile::Request| compile(request).unwrap().identity;
+
+    let mut limited = baseline.clone();
+    limited.limits = compile::Limits {
+        max_pages: 1,
+        max_total_artifact_bytes: 1 << 20,
+        export_workers: 1,
+        ..compile::Limits::default()
+    };
+    let mut supplied = baseline.clone();
+    let spec: PackageSpec = "@local/unused:1.0.0".parse().unwrap();
+    let tree = package::Tree::new([("lib.typ", b"#let value = 1".as_slice())]).unwrap();
+    supplied.packages = vec![(spec, tree)];
+    supplied.fonts = font_containers();
+
+    assert_eq!(identity(&limited), identity(&baseline));
+    assert_eq!(identity(&supplied), identity(&baseline));
+}
+
+/// Font containers of the fonts Typst ships, or none without them.
+fn font_containers() -> Vec<typst_pack::font::Container> {
+    #[cfg(feature = "embedded-fonts")]
+    return typst_pack::font::embedded().take(1).collect();
+    #[cfg(not(feature = "embedded-fonts"))]
+    Vec::new()
 }

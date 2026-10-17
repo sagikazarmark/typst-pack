@@ -18,6 +18,15 @@ vendored by default:
 typst-pack create project/main.typ project.typk
 ```
 
+Every file beneath the project root is packed. List files that should stay
+out, such as per-recipient data or a Git checkout's `.git/`, in a root
+`.typkignore` (Gitignore syntax):
+
+```text
+.git/
+recipients/
+```
+
 Embed the fonts used by the document:
 
 ```console
@@ -42,6 +51,17 @@ Inspect the resulting pack:
 typst-pack inspect project.typk
 ```
 
+`inspect` shows the Typst version and tool that produced the pack, its
+identity, its files, and the packages and fonts it embeds or requires; a
+required font Typst ships is marked as provided by Typst. `inspect` and
+`compile` warn when the pack was created with another Typst version than the
+one typst-pack embeds, since its output may differ. `-` reads a pack from stdin for `inspect`, `extract` (which then needs
+`--output`), and `compile`, and `create` writes one to stdout with `-`:
+
+```console
+typst-pack create project/main.typ - | typst-pack inspect -
+```
+
 ## Compile
 
 Compile to PDF without allowing package downloads:
@@ -58,9 +78,10 @@ typst-pack compile project.typk output.pdf \
   --input locale=en
 ```
 
-Render selected pages to numbered PNG files:
+Render selected pages to numbered PNG files (the output directory must exist):
 
 ```console
+mkdir -p output
 typst-pack compile project.typk "output/page-{0p}-of-{t}.png" \
   --pages 1-3 \
   --ppi 300
@@ -92,6 +113,10 @@ typst-pack compile invoice.typk customer.pdf \
   --input locale=en
 ```
 
-Input files are dependencies: `--deps` lists them with the pack. `create`
-accepts `--input` and `--input-file` too, for discovery compiles that read
-them.
+The discovery compile of `create` runs the document too, so a document that
+requires an input needs it when the pack is created as well: pass a sample
+with `create --input-file logo=sample-logo.png`, or give the document a
+fallback such as `sys.inputs.at("logo", default: none)`.
+
+Input files are dependencies: `--deps` lists them with the pack. One key may
+come from `--input` or from `--input-file`, not from both.

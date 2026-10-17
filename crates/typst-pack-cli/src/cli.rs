@@ -15,7 +15,7 @@ const ENV_PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
 
 /// Pack, inspect, extract, and compile portable Typst project packs.
 #[derive(Debug, Parser)]
-#[command(name = "typst-pack", version = typst_pack::VERSION, about)]
+#[command(name = "typst-pack", version = typst_pack::VERSION)]
 pub struct Cli {
     /// Whether to use color. When set to `auto` if the terminal to supports it.
     #[arg(long, default_value = "auto", default_missing_value = "always", num_args = 0..=1,
@@ -143,7 +143,8 @@ pub struct CreateArgs {
     #[command(flatten, next_help_heading = "Creation")]
     pub compilation: CompilationArgs,
 
-    /// Path to the output Pack [default: INPUT with its extension replaced by .typk].
+    /// Path to the output pack, or `-` for stdout [default: INPUT with its
+    /// extension replaced by .typk].
     #[arg(help_heading = "Pack Contents")]
     pub output: Option<PathBuf>,
 
@@ -183,16 +184,17 @@ pub struct CreateArgs {
 
 #[derive(Debug, Args)]
 pub struct InspectArgs {
-    /// The pack file to inspect.
+    /// The pack file to inspect. Use `-` to read from stdin.
     pub pack: PathBuf,
 }
 
 #[derive(Debug, Args)]
 pub struct ExtractArgs {
-    /// The pack file to extract.
+    /// The pack file to extract. Use `-` to read from stdin.
     pub pack: PathBuf,
 
-    /// The directory to extract into [default: <pack name>/].
+    /// The directory to extract into [default: the pack's file name without
+    /// its extension; required for stdin].
     #[arg(short, long)]
     pub output: Option<PathBuf>,
 
@@ -215,7 +217,7 @@ pub struct ExtractArgs {
 
 #[derive(Debug, Args)]
 pub struct CompileArgs {
-    /// The pack file to compile.
+    /// The pack file to compile. Use `-` to read from stdin.
     #[arg(help_heading = "Compilation")]
     pub pack: PathBuf,
 

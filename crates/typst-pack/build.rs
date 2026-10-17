@@ -1,5 +1,4 @@
 fn main() {
-    println!("cargo:rustc-check-cfg=cfg(fuzzing)");
     emit_engine_version();
     stage_readme();
 }

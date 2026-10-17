@@ -36,7 +36,7 @@ fuzz_target!(|data: &[u8]| {
     };
     let op = Operator::new(opendal::services::Memory::default()).unwrap();
 
-    match ready(write_artifacts(&op, "artifacts/", result, &keys, policy)) {
+    match ready(write_artifacts(&op, "artifacts/", &keys, result, policy)) {
         Ok(written) => {
             assert_eq!(written.len(), keys.len());
             for (key, artifact) in keys.iter().zip(result) {

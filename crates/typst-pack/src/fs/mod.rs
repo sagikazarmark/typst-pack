@@ -16,7 +16,7 @@ mod project;
 mod walk;
 mod write;
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 
 use typst::diag::SourceDiagnostic;
@@ -28,12 +28,15 @@ use self::packages::PackageDirs;
 pub use self::packages::read_package;
 pub use self::project::{IGNORE_FILE, read_project};
 pub use self::write::{
-    WriteError, WriteIssue, WritePolicy, write_artifacts, write_extraction, write_file,
+    WriteError, WriteIssue, WritePolicy, write_archive, write_artifacts, write_extraction,
+    write_file,
 };
+use crate::archive::{self, DecodeError, DecodeLimits};
 use crate::compile::{DocumentTime, Input, Options};
 use crate::create::{self, Outcome, Target};
+use crate::pack::names_pack_path;
 use crate::{
-    LimitExceeded, Metadata, Pack, PackError, PackIssue, ReadLimits, Sources, font, package,
+    Digest, LimitExceeded, Metadata, Pack, PackError, PackIssue, ReadLimits, Sources, font, package,
 };
 
 /// A failed filesystem read, pack, or resolution.
@@ -41,7 +44,7 @@ use crate::{
 #[non_exhaustive]
 pub enum Error {
     /// A path could not be read or opened.
-    #[error("cannot read `{}`: {source}", path.display())]
+    #[error("cannot read `{}`", path.display())]
     Io {
         path: PathBuf,
         #[source]
@@ -50,6 +53,13 @@ pub enum Error {
     /// A symbolic link in a project or package leads outside its root.
     #[error("symbolic link `{}` resolves outside `{}`", path.display(), root.display())]
     EscapingSymlink { path: PathBuf, root: PathBuf },
+    /// A symbolic link's target does not exist or cannot be resolved.
+    #[error("broken symbolic link `{}`", path.display())]
+    BrokenSymlink {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
     /// A symbolic link leads back into a directory being read.
     #[error("symbolic link `{}` leads back to a directory it is inside of", path.display())]
     SymlinkCycle { path: PathBuf },
@@ -63,7 +73,7 @@ pub enum Error {
     #[error("path `{}` is not valid UTF-8", path.display())]
     NonUtf8Path { path: PathBuf },
     /// A read limit was exceeded.
-    #[error("cannot read `{}`: {source}", path.display())]
+    #[error("cannot read `{}`", path.display())]
     Limit {
         path: PathBuf,
         #[source]
@@ -81,13 +91,14 @@ pub enum Error {
     /// The entrypoint is outside the project root.
     #[error("`{}` is outside the project root and cannot be packed", .0.display())]
     OutsideRoot(PathBuf),
-    /// The ignore file excludes the entrypoint.
+    /// The entrypoint is a regular file the ignore file excludes.
     #[error("entrypoint `{0}` is excluded by the project's {IGNORE_FILE}")]
     EntrypointIgnored(String),
     /// A package a pack requires externally was found but cannot be read.
-    #[error("failed to read {spec}: {reason}")]
+    #[error("failed to read {spec}")]
     Package {
         spec: PackageSpec,
+        #[source]
         reason: package::ReadFailure,
     },
     /// Creation reported a package missing again after it was supplied.
@@ -95,7 +106,16 @@ pub enum Error {
     RepeatedPackage(PackageSpec),
     /// Creation failed.
     #[error(transparent)]
-    Create(#[from] create::Error),
+    Create(Box<create::Error>),
+}
+
+/// Reads and decodes a pack file, refusing a file larger than
+/// [`DecodeLimits::max_archive_bytes`] before reading it.
+pub fn read_archive(path: impl AsRef<Path>, limits: DecodeLimits) -> Result<Pack, DecodeError> {
+    let file = std::fs::File::open(path)?;
+    let size = file.metadata()?.len();
+    LimitExceeded::check(size, limits.max_archive_bytes, "archive bytes")?;
+    archive::read(file, limits)
 }
 
 /// Creates packs from project directories, and resolves the external
@@ -103,12 +123,16 @@ pub enum Error {
 ///
 /// Fonts come from the system font directories, Typst's embedded fonts (with
 /// the `embedded-fonts` feature), and [`font_paths`](Self::font_paths), in
-/// that order. Packages come from the local package directory, then the
-/// package cache, then, only with `download_packages` (and the `egress`
-/// feature), the Typst Universe registry.
+/// that order; a container several sources offer is used once, and embedded
+/// when any of them embeds it. Packages come from the local package
+/// directory, then the package cache, then, only with `download_packages`
+/// (and the `egress` feature), the Typst Universe registry.
+///
+/// Every field exists in every build; a field naming a capability the build
+/// lacks has no effect.
 ///
 /// ```no_run
-/// use typst_pack::{archive, fs};
+/// use typst_pack::fs;
 ///
 /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
 /// let packer = fs::Packer {
@@ -119,7 +143,7 @@ pub enum Error {
 /// for warning in &packed.warnings {
 ///     eprintln!("warning: {}", warning.message);
 /// }
-/// archive::save("project.typk", &packed.pack, fs::WritePolicy::CreateNew)?;
+/// fs::write_archive("project.typk", &packed.pack, fs::WritePolicy::CreateNew)?;
 /// # Ok(())
 /// # }
 /// ```
@@ -129,7 +153,8 @@ pub struct Packer {
     pub font_paths: Vec<PathBuf>,
     /// Whether the system font directories are searched.
     pub system_fonts: bool,
-    /// Whether Typst's embedded fonts are offered (needs `embedded-fonts`).
+    /// Whether Typst's embedded fonts are offered. No effect without the
+    /// `embedded-fonts` feature.
     pub typst_embedded_fonts: bool,
     /// The local package directory (`namespace/name/version` layout) instead
     /// of the system one.
@@ -138,25 +163,27 @@ pub struct Packer {
     /// whether or not downloads are enabled, and receives downloads.
     pub package_cache_path: Option<PathBuf>,
     /// Whether packages found in no directory are downloaded from the Typst
-    /// Universe registry.
-    #[cfg(feature = "egress")]
+    /// Universe registry. No effect without the `egress` feature.
     pub download_packages: bool,
     /// A PEM file of certificates trusted for downloads in addition to the
-    /// bundled roots.
-    #[cfg(feature = "egress")]
+    /// bundled roots. No effect without the `egress` feature.
     pub certificate: Option<PathBuf>,
     /// Limits for reading the project directory.
     pub project_limits: ReadLimits,
     /// Limits for reading each package tree.
     pub package_limits: ReadLimits,
-    /// Limits shared by every font directory of one read.
+    /// Limits shared by every font directory of one read. Font files over
+    /// the per-file limit are skipped, and once the entry or total byte limit
+    /// is reached the rest of each directory is skipped; both are reported as
+    /// skipped fonts.
     pub font_limits: ReadLimits,
     /// Whether created packs embed their packages (the default) or record
     /// them as external requirements.
-    pub vendor_packages: bool,
+    pub embed_packages: bool,
     /// Whether created packs embed the system and font-path fonts they use.
     pub embed_fonts: bool,
-    /// Whether embedding also covers Typst's embedded fonts.
+    /// Whether embedding also covers Typst's embedded fonts. No effect
+    /// without the `embedded-fonts` feature.
     pub include_typst_embedded_fonts: bool,
     /// The document model discovery compiles.
     pub target: Target,
@@ -171,45 +198,34 @@ pub struct Packer {
 
 impl Default for Packer {
     /// System and Typst fonts, the host's package directories without
-    /// downloads, vendored packages, external fonts, the paged target, and the
-    /// host's current time as document time.
+    /// downloads, embedded packages, external fonts, the paged target, default
+    /// [`ReadLimits`], and the host's current local time as document time,
+    /// as Typst reads the system clock.
+    ///
+    /// The document time is captured here, once: every pack this packer
+    /// creates uses it until [`options`](Self::options) is changed.
     fn default() -> Self {
-        const MIB: u64 = 1024 * 1024;
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_secs() as i64);
+        let now = chrono::Local::now();
         Self {
             font_paths: Vec::new(),
             system_fonts: true,
             typst_embedded_fonts: true,
             package_path: None,
             package_cache_path: None,
-            #[cfg(feature = "egress")]
             download_packages: false,
-            #[cfg(feature = "egress")]
             certificate: None,
-            project_limits: ReadLimits {
-                max_entries: 1_000_000,
-                max_file_bytes: 256 * MIB,
-                max_total_bytes: 2048 * MIB,
-            },
-            package_limits: ReadLimits {
-                max_entries: 100_000,
-                max_file_bytes: 64 * MIB,
-                max_total_bytes: 512 * MIB,
-            },
-            // System font directories routinely hold gigabytes of collections.
-            font_limits: ReadLimits {
-                max_entries: 100_000,
-                max_file_bytes: 256 * MIB,
-                max_total_bytes: 2048 * MIB,
-            },
-            vendor_packages: true,
+            project_limits: ReadLimits::default(),
+            package_limits: ReadLimits::default(),
+            font_limits: ReadLimits::default(),
+            embed_packages: true,
             embed_fonts: false,
             include_typst_embedded_fonts: false,
             target: Target::Paged,
             options: Options {
-                document_time: DocumentTime::UnixTimestamp(now),
+                document_time: DocumentTime::Local {
+                    seconds: now.timestamp(),
+                    utc_offset_seconds: now.offset().local_minus_utc(),
+                },
                 ..Options::default()
             },
             variants: Vec::new(),
@@ -242,7 +258,7 @@ pub struct Resolved {
     /// The external font containers found.
     pub fonts: Vec<font::Container>,
     /// The directory each package was read from, for dependency reporting.
-    pub package_dirs: BTreeMap<String, PathBuf>,
+    pub package_dirs: HashMap<PackageSpec, PathBuf>,
     /// Font files and directories that could not be read and were left out.
     pub skipped_fonts: Vec<Error>,
 }
@@ -267,17 +283,21 @@ impl Packer {
             })
         };
         let root = canonical(root.as_ref())?;
-        let entrypoint = canonical(&root.join(entrypoint))?;
-        let entrypoint = VirtualPath::virtualize(&root, &entrypoint)
-            .map_err(|_| Error::OutsideRoot(entrypoint.clone()))?;
+        let host_entrypoint = canonical(&root.join(entrypoint))?;
+        let entrypoint = VirtualPath::virtualize(&root, &host_entrypoint)
+            .map_err(|_| Error::OutsideRoot(host_entrypoint.clone()))?;
         let entrypoint = entrypoint.get_without_slash();
         let project =
             read_project(&root, entrypoint, self.project_limits).map_err(|error| match &error {
+                // A regular file that is not a pack is missing only because
+                // the ignore file excludes it.
                 Error::Invalid(invalid)
-                    if invalid
-                        .issues
-                        .iter()
-                        .any(|issue| matches!(issue, PackIssue::MissingEntrypoint { .. })) =>
+                    if host_entrypoint.is_file()
+                        && !names_pack_path(entrypoint)
+                        && invalid
+                            .issues
+                            .iter()
+                            .any(|issue| matches!(issue, PackIssue::MissingEntrypoint { .. })) =>
                 {
                     Error::EntrypointIgnored(entrypoint.to_owned())
                 }
@@ -286,10 +306,10 @@ impl Packer {
 
         let (fonts, skipped_fonts) = self.read_fonts(
             self.embed_fonts,
-            self.embed_fonts && self.include_typst_embedded_fonts,
+            Some(self.embed_fonts && self.include_typst_embedded_fonts),
         )?;
         let mut request = create::Request::new(project);
-        request.fonts = fonts;
+        request.fonts = unique_fonts(fonts);
         request.target = self.target;
         request.options = self.options.clone();
         request.variants = self.variants.clone();
@@ -297,17 +317,19 @@ impl Packer {
         let packages = self.package_dirs();
         let mut attempted = BTreeSet::new();
         loop {
-            let created = create::create(&request).map_err(|error| match error {
-                create::Error::Failed {
-                    errors,
-                    warnings,
-                    sources,
-                } => create::Error::Failed {
-                    errors,
-                    warnings,
-                    sources: sources.with_root(root.clone()),
-                },
-                error => error,
+            let created = create::create(&request).map_err(|error| {
+                Error::Create(Box::new(match error {
+                    create::Error::Failed {
+                        errors,
+                        warnings,
+                        sources,
+                    } => create::Error::Failed {
+                        errors,
+                        warnings,
+                        sources: sources.with_root(root.clone()),
+                    },
+                    error => error,
+                }))
             });
             let missing = match created? {
                 Outcome::Created(created) => {
@@ -329,7 +351,7 @@ impl Packer {
                 let read = packages.read(&spec).and_then(|found| {
                     request
                         .packages
-                        .insert(spec.clone(), found.tree, self.vendor_packages)
+                        .insert(spec.clone(), found.tree, self.embed_packages)
                         .map_err(|error| package::ReadFailure::Other(Some(error.to_string())))
                 });
                 if let Err(failure) = read {
@@ -351,9 +373,7 @@ impl Packer {
             match packages.read(&requirement.spec) {
                 Ok(found) => {
                     if let Some(root) = found.root {
-                        resolved
-                            .package_dirs
-                            .insert(requirement.spec.to_string(), root);
+                        resolved.package_dirs.insert(requirement.spec.clone(), root);
                     }
                     resolved
                         .packages
@@ -368,18 +388,25 @@ impl Packer {
                 }
             }
         }
-        let required = pack
+        let mut required = pack
             .font_requirements()
             .iter()
             .filter(|requirement| !requirement.embedded)
             .map(|requirement| requirement.digest)
             .collect::<BTreeSet<_>>();
+        // Typst's own fonts need no directory scan.
+        #[cfg(feature = "embedded-fonts")]
+        if self.typst_embedded_fonts {
+            for container in font::embedded() {
+                if required.remove(&container.digest()) {
+                    resolved.fonts.push(container);
+                }
+            }
+        }
         if !required.is_empty() {
-            let (fonts, skipped) = self.read_fonts(false, false)?;
-            let mut seen = BTreeSet::new();
+            let (fonts, skipped) = self.read_fonts(false, None)?;
             for entry in fonts {
-                let digest = entry.container.digest();
-                if required.contains(&digest) && seen.insert(digest) {
+                if required.remove(&entry.container.digest()) {
                     resolved.fonts.push(entry.container);
                 }
             }
@@ -399,27 +426,44 @@ impl Packer {
         )
     }
 
+    /// Reads the configured fonts; Typst's embedded fonts join with the
+    /// disposition `typst` when it is `Some`.
     fn read_fonts(
         &self,
         embed: bool,
-        embed_typst: bool,
+        typst: Option<bool>,
     ) -> Result<(Vec<font::Entry>, Vec<Error>), Error> {
         let mut sources = Vec::new();
         if self.system_fonts {
             sources.push(FontSource::System { embedded: embed });
         }
         #[cfg(feature = "embedded-fonts")]
-        if self.typst_embedded_fonts {
-            sources.push(FontSource::Typst {
-                embedded: embed_typst,
-            });
+        if let Some(embedded) = typst.filter(|_| self.typst_embedded_fonts) {
+            sources.push(FontSource::Typst { embedded });
         }
         #[cfg(not(feature = "embedded-fonts"))]
-        let _ = embed_typst;
+        let _ = typst;
         sources.extend(self.font_paths.iter().map(|path| FontSource::Directory {
             path: path.clone(),
             embedded: embed,
         }));
         read_fonts(sources, self.font_limits)
     }
+}
+
+/// Keeps the first entry of each container, embedded when any entry for it
+/// is, so creation never sees one container twice.
+fn unique_fonts(fonts: Vec<font::Entry>) -> Vec<font::Entry> {
+    let mut positions = BTreeMap::<Digest, usize>::new();
+    let mut unique = Vec::<font::Entry>::with_capacity(fonts.len());
+    for entry in fonts {
+        match positions.get(&entry.container.digest()) {
+            Some(&position) => unique[position].embedded |= entry.embedded,
+            None => {
+                positions.insert(entry.container.digest(), unique.len());
+                unique.push(entry);
+            }
+        }
+    }
+    unique
 }

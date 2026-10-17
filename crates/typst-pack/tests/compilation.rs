@@ -4,7 +4,7 @@ mod font_bytes;
 
 use std::num::NonZeroUsize;
 
-use typst::foundations::Smart;
+use typst::foundations::{Datetime, Smart};
 use typst::syntax::package::PackageSpec;
 use typst_pack::compile::{
     Compiled, CreationTimestamp, DocumentTime, Input, Output, OutputFormat, PageSelection,
@@ -297,7 +297,7 @@ fn string_and_byte_inputs_reach_sys_inputs() {
     request.options.inputs = vec![
         ("name".into(), Input::from("Acme")),
         ("width".into(), Input::from("4")),
-        ("logo".into(), Input::Bytes(logo.to_vec())),
+        ("logo".into(), Input::from(logo.to_vec())),
     ];
     let narrow = compiled(&request);
     request
@@ -329,6 +329,69 @@ fn document_time_is_explicit() {
     request.options.document_time = DocumentTime::UnixTimestamp(946_684_799);
     request.pack = pack("#assert.eq(datetime.today(offset: 2).year(), 2000)");
     compiled(&request);
+
+    // Without a requested offset, a timestamp reads in UTC and a local time
+    // at its own offset; a requested offset shifts either instant.
+    let at = |document_time| {
+        let mut request = request.clone();
+        request.options.document_time = document_time;
+        request.pack = pack(
+            "#assert.eq(datetime.today().display() + \" \" + datetime.today(offset: 0).display(), \
+             sys.inputs.dates)",
+        );
+        request
+    };
+    let check = |document_time, dates: &str| {
+        let mut request = at(document_time);
+        request
+            .options
+            .inputs
+            .push(("dates".into(), Input::from(dates)));
+        compiled(&request).identity
+    };
+    let utc = check(
+        DocumentTime::UnixTimestamp(946_684_799),
+        "1999-12-31 1999-12-31",
+    );
+    let local = |utc_offset_seconds| DocumentTime::Local {
+        seconds: 946_684_799,
+        utc_offset_seconds,
+    };
+    let east = check(local(3600), "2000-01-01 1999-12-31");
+    let west = check(local(-3600), "1999-12-31 1999-12-31");
+    assert_ne!(utc, east);
+    assert_ne!(east, west);
+    assert_ne!(
+        check(local(0), "1999-12-31 1999-12-31"),
+        utc,
+        "a local time names its offset"
+    );
+
+    // A fixed datetime is its date, whatever offset is requested.
+    let date = |datetime| check(DocumentTime::Fixed(datetime), "2000-01-01 2000-01-01");
+    let midnight = Datetime::from_ymd(2000, 1, 1).unwrap();
+    let late = Datetime::from_ymd_hms(2000, 1, 1, 23, 59, 59).unwrap();
+    assert_eq!(date(midnight), date(late));
+
+    for (document_time, issue) in [
+        (
+            DocumentTime::Fixed(Datetime::from_hms(12, 0, 0).unwrap()),
+            RequestIssue::UndatedDocumentTime,
+        ),
+        (local(86_400), RequestIssue::InvalidUtcOffset),
+        (
+            DocumentTime::Local {
+                seconds: i64::MAX,
+                utc_offset_seconds: 1,
+            },
+            RequestIssue::InvalidDocumentTimestamp,
+        ),
+    ] {
+        assert!(matches!(
+            compile(&at(document_time)),
+            Err(compile::Error::InvalidRequest(issues)) if issues == [issue.clone()]
+        ));
+    }
 }
 
 #[test]

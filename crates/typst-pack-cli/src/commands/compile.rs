@@ -6,13 +6,16 @@ use std::path::{Path, PathBuf};
 
 use typst::foundations::Smart;
 use typst::syntax::VirtualRoot;
-use typst_pack::Sources;
-use typst_pack::archive::{self, DecodeLimits};
-use typst_pack::compile::{self, CreationTimestamp, DocumentTime, Error, Limits, Output};
+use typst_kit::diagnostics::termcolor::Color;
+use typst_pack::compile::{self, Error, Limits, Output};
 use typst_pack::compile::{OutputFormat, PageSelection, Request};
+use typst_pack::{Pack, Sources};
 use typst_pdf::PdfStandard;
 
-use super::{CommandResult, Failure, Terminal, Timings, compile_options, now, packer, prepare};
+use super::{
+    CommandResult, Failure, Terminal, Timings, chain, compile_options, listed, packer, prepare,
+    read_pack, time, warn_typst_version,
+};
 use crate::cli::CompileArgs;
 use crate::output;
 
@@ -20,7 +23,7 @@ pub fn run(args: CompileArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comm
     // Arguments are checked before any I/O, in Typst's order.
     let stdin = args.pack == Path::new("-");
     if stdin && args.output.is_none() {
-        return Err("an explicit output is required when the Pack is read from stdin".into());
+        return Err("an explicit output is required when the pack is read from stdin".into());
     }
     let format = format(&args)?;
     check_pdf_standards(&args)?;
@@ -30,32 +33,13 @@ pub fn run(args: CompileArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comm
     }
     prepare(&args.automation)?;
 
-    let pack = if stdin {
-        archive::read(std::io::stdin().lock(), DecodeLimits::default())
-            .map_err(|error| format!("cannot read Pack from stdin: {error}"))?
-    } else {
-        archive::open(&args.pack, DecodeLimits::default())
-            .map_err(|error| format!("cannot open pack `{}`: {error}", args.pack.display()))?
-    };
-    // An explicit timestamp is recorded in UTC, the current time locally.
-    let (unix, pdf_timestamp) = match args.automation.creation_timestamp {
-        Some(unix) => (unix, CreationTimestamp::Utc(unix)),
-        None => {
-            let (unix, offset_minutes) = now();
-            (
-                unix,
-                CreationTimestamp::Local {
-                    unix,
-                    offset_minutes,
-                },
-            )
-        }
-    };
-    let (options, input_files) =
-        compile_options(&args.compilation, DocumentTime::UnixTimestamp(unix))?;
+    let pack = read_pack(&args.pack)?;
+    warn_typst_version(&pack, terminal);
+    let (document_time, pdf_timestamp) = time(&args.automation);
+    let (options, input_files) = compile_options(&args.compilation, document_time)?;
     let resolved = packer(&args.fonts, &args.packages, cert).resolve(&pack)?;
-    let defaults = Limits::default();
-    let workers = u64::try_from(rayon::current_num_threads()).unwrap_or(defaults.export_workers);
+    // Pages export on the global pool, which `--jobs` sizes.
+    let workers = rayon::current_num_threads() as u64;
     let ranges = args.pages.iter().flat_map(|pages| pages.ranges.clone());
     let request = Request {
         output: Output {
@@ -77,8 +61,8 @@ pub fn run(args: CompileArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comm
         packages: resolved.packages,
         fonts: resolved.fonts,
         limits: Limits {
-            export_workers: workers.clamp(1, defaults.export_workers),
-            ..defaults
+            export_workers: workers,
+            ..Limits::default()
         },
         pack,
     };
@@ -100,7 +84,7 @@ pub fn run(args: CompileArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comm
         let VirtualRoot::Package(spec) = id.root() else {
             return None;
         };
-        let root = resolved.package_dirs.get(&spec.to_string())?;
+        let root = resolved.package_dirs.get(spec)?;
         Some(root.join(id.vpath().get_without_slash()))
     }));
     let write_dependencies = |outputs: Option<&[PathBuf]>| -> CommandResult {
@@ -146,7 +130,15 @@ pub fn run(args: CompileArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comm
             warnings,
             sources,
         }) => {
-            terminal.diagnostics(&sources, warnings.iter().chain(&errors));
+            // Errors first, as Typst's CLI prints them.
+            terminal.diagnostics(&sources, errors.iter().chain(&warnings));
+            for spec in unrecorded_packages(&request.pack, &sources) {
+                let hint = format!(
+                    "the pack does not contain {spec}; recreate it with a --variant whose \
+                     inputs reach this import"
+                );
+                terminal.label("hint", Color::Cyan, &hint);
+            }
             failed()
         }
         Err(
@@ -156,7 +148,7 @@ pub fn run(args: CompileArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comm
                 ..
             },
         ) => {
-            terminal.error(&error.to_string());
+            terminal.error(&chain(error));
             terminal.diagnostics(sources, warnings);
             failed()
         }
@@ -169,14 +161,34 @@ pub fn run(args: CompileArgs, terminal: Terminal, cert: Option<PathBuf>) -> Comm
                     args.pack.display()
                 ));
             }
-            Err(Failure::Error {
-                message: error.to_string(),
-                hints,
-            })
+            let message = match &error {
+                Error::InvalidRequest(issues) => listed(
+                    "invalid compile request",
+                    issues.iter().map(ToString::to_string),
+                ),
+                Error::Unfulfilled(issues) => listed(
+                    "the pack's external dependencies are not satisfied",
+                    issues.iter().map(ToString::to_string),
+                ),
+                error => chain(error),
+            };
+            Err(Failure::Error { message, hints })
         }
     };
     // As in Typst's CLI, a timing failure replaces a failure not yet printed.
     timing_error.map_or(outcome, |error| Err(error.into()))
+}
+
+/// The packages a compile requested that the pack does not record.
+fn unrecorded_packages(pack: &Pack, sources: &Sources) -> BTreeSet<String> {
+    let recorded = pack.package_requirements().iter();
+    let recorded = recorded.map(|requirement| &requirement.spec);
+    let recorded = recorded.collect::<Vec<_>>();
+    let requested = sources.files().iter().filter_map(|id| match id.root() {
+        VirtualRoot::Package(spec) if !recorded.contains(&spec) => Some(spec.to_string()),
+        _ => None,
+    });
+    requested.collect()
 }
 
 /// The output format: explicit, inferred from the output's extension, or PDF.

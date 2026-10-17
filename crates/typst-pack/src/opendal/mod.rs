@@ -18,7 +18,9 @@ pub use write::{
     write_package_archive,
 };
 
-use crate::{LimitExceeded, PackError};
+use typst::syntax::package::PackageSpec;
+
+use crate::{LimitExceeded, PackError, font};
 
 /// A failure of an OpenDAL adapter operation.
 ///
@@ -38,10 +40,11 @@ pub enum Error {
         source: Box<::opendal::Error>,
     },
     /// A read limit was exceeded.
-    #[error("{exceeded} while reading {path:?}")]
+    #[error("cannot read {path:?}")]
     Limit {
         path: String,
-        exceeded: LimitExceeded,
+        #[source]
+        source: LimitExceeded,
     },
     /// The operator does not advertise a capability the operation needs.
     #[error("the operator does not support {capability}")]
@@ -52,6 +55,10 @@ pub enum Error {
     /// A caller-supplied or listed path is not usable as a storage path.
     #[error("invalid storage path {path:?}: {reason}")]
     InvalidPath { path: String, reason: &'static str },
+    /// Object keys a write would use are invalid or repeated; nothing was
+    /// written. Each key is listed with the reason.
+    #[error("invalid object keys: {}", describe_keys(.keys))]
+    InvalidKeys { keys: Vec<(String, &'static str)> },
     /// The number of artifact keys does not match the number of artifacts.
     #[error("expected {expected} artifact key(s), got {actual}")]
     ArtifactKeyCount { expected: usize, actual: usize },
@@ -90,35 +97,105 @@ pub(crate) fn storage(
     }
 }
 
-/// Checks that `key` is a relative, normalized object key: nonempty segments
-/// separated by single slashes, no `.`/`..`, backslashes, control characters,
-/// or surrounding whitespace. Such a key cannot alias another key after
-/// OpenDAL's path normalization or escape the prefix it is joined to.
-pub(crate) fn check_key(key: &str) -> Result<(), Error> {
-    let invalid = |reason| {
-        Err(Error::InvalidPath {
-            path: key.to_owned(),
-            reason,
-        })
-    };
+fn describe_keys(keys: &[(String, &'static str)]) -> String {
+    keys.iter()
+        .map(|(key, reason)| format!("{key:?} ({reason})"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+/// Where one specification's tree lives in a directory of trees:
+/// `namespace/name/version`, Typst's package directory layout.
+fn tree_key(spec: &PackageSpec) -> String {
+    format!("{}/{}/{}", spec.namespace, spec.name, spec.version)
+}
+
+/// Where one specification's archive lives in a cache of raw archives.
+fn archive_cache_key(spec: &PackageSpec) -> String {
+    format!("{}.tar.gz", tree_key(spec))
+}
+
+/// Whether a storage key ends in a font container extension. Unlike a path,
+/// a key that is nothing but the extension, such as `.ttf`, qualifies.
+fn is_font_key(key: &str) -> bool {
+    key.rsplit_once('.')
+        .is_some_and(|(_, suffix)| font::is_container_extension(suffix))
+}
+
+/// Stats `path`; `Ok(None)` means the object is absent.
+async fn stat(op: &Operator, path: &str) -> Result<Option<::opendal::Metadata>, Error> {
+    match op.stat(path).await {
+        Ok(metadata) => Ok(Some(metadata)),
+        Err(error) if error.kind() == ::opendal::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(storage(path, "stat")(error)),
+    }
+}
+
+/// Opens one streamed read of the whole object that `metadata` (from
+/// [`stat`]) describes. When the operator supports conditional reads and the
+/// stat returned an ETag, the read is conditional on it, so a replaced object
+/// fails with [`ErrorKind::ConditionNotMatch`](::opendal::ErrorKind).
+async fn stream(
+    op: &Operator,
+    path: &str,
+    metadata: &::opendal::Metadata,
+) -> Result<::opendal::BufferStream, Error> {
+    let mut reader = op.reader_with(path);
+    if op.info().capability().read_with_if_match
+        && let Some(etag) = metadata.etag()
+    {
+        reader = reader.if_match(etag);
+    }
+    let reader = reader.await.map_err(storage(path, "read"))?;
+    // The whole object in one request: a range capped at the stat length
+    // would silently return a prefix of a grown object.
+    reader.into_stream(..).await.map_err(storage(path, "read"))
+}
+
+/// The error for an object whose read disagrees with its stat: it was
+/// replaced, grew, or shrank in between. Retrying the operation is safe.
+fn changed(path: &str) -> Error {
+    storage(path, "read")(
+        ::opendal::Error::new(
+            ::opendal::ErrorKind::ConditionNotMatch,
+            "the object changed between stat and read",
+        )
+        .set_temporary(),
+    )
+}
+
+/// Why `key` is not a relative, normalized object key, if it is not: keys are
+/// nonempty segments separated by single slashes, with no `.`/`..`,
+/// backslashes, control characters, or surrounding whitespace. Such a key
+/// cannot alias another key after OpenDAL's path normalization or escape the
+/// prefix it is joined to.
+fn key_issue(key: &str) -> Option<&'static str> {
     if key.is_empty() {
-        return invalid("an object key cannot be empty");
+        return Some("an object key cannot be empty");
     }
     if key.trim() != key {
         // OpenDAL trims surrounding whitespace from every path.
-        return invalid("an object key cannot start or end with whitespace");
+        return Some("an object key cannot start or end with whitespace");
     }
     if key.chars().any(|c| c == '\\' || c.is_control()) {
-        return invalid("an object key cannot contain backslashes or control characters");
+        return Some("an object key cannot contain backslashes or control characters");
     }
-    for segment in key.split('/') {
-        match segment {
-            "" => return invalid("an object key cannot have empty segments or slash ends"),
-            "." | ".." => return invalid("an object key cannot contain dot segments"),
-            _ => {}
-        }
+    key.split('/').find_map(|segment| match segment {
+        "" => Some("an object key cannot have empty segments or slash ends"),
+        "." | ".." => Some("an object key cannot contain dot segments"),
+        _ => None,
+    })
+}
+
+/// Checks that `key` is a relative, normalized object key (see [`key_issue`]).
+pub(crate) fn check_key(key: &str) -> Result<(), Error> {
+    match key_issue(key) {
+        Some(reason) => Err(Error::InvalidPath {
+            path: key.to_owned(),
+            reason,
+        }),
+        None => Ok(()),
     }
-    Ok(())
 }
 
 /// Checks that `prefix` is the root (`""`) or a normalized key followed by `/`.
@@ -140,7 +217,37 @@ pub(crate) fn check_prefix(prefix: &str) -> Result<(), Error> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_key, check_prefix};
+    use super::*;
+
+    #[test]
+    fn layouts_derive_from_namespace_name_and_version() {
+        let spec: PackageSpec = "@preview/nested-name:10.0.1".parse().unwrap();
+        assert_eq!(tree_key(&spec), "preview/nested-name/10.0.1");
+        assert_eq!(
+            archive_cache_key(&spec),
+            "preview/nested-name/10.0.1.tar.gz"
+        );
+    }
+
+    #[test]
+    fn font_container_names_are_matched_case_insensitively() {
+        for (key, supported) in [
+            ("container.ttf", true),
+            ("container.TTF", true),
+            ("fonts/nested/container.otc", true),
+            ("container.Ttc", true),
+            ("container.oTf", true),
+            (".ttf", true),
+            ("container.woff", false),
+            ("container.ttf.txt", false),
+            ("container", false),
+            ("ttf", false),
+            ("fonts.ttf/container", false),
+            ("", false),
+        ] {
+            assert_eq!(is_font_key(key), supported, "{key:?}");
+        }
+    }
 
     #[test]
     fn keys_must_be_relative_and_normalized() {

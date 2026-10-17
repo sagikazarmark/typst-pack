@@ -18,7 +18,7 @@ fuzz_target!(|data: &[u8]| {
     };
     let _ = expand_archive(data, varied_limits);
 
-    let mode = data.first().copied().unwrap_or_default() % 8;
+    let mode = data.first().copied().unwrap_or_default() % 9;
     let payload = &data[data.len().min(1)..data.len().min(16 * 1024 + 1)];
     let mut builder = tar::Builder::new(flate2::write::GzEncoder::new(
         Vec::new(),
@@ -32,9 +32,7 @@ fuzz_target!(|data: &[u8]| {
             payload,
         ),
         2 => {
-            builder
-                .append_pax_extensions([("path", payload)])
-                .unwrap();
+            builder.append_pax_extensions([("path", payload)]).unwrap();
             append(&mut builder, "placeholder", payload);
         }
         3 => {
@@ -55,7 +53,9 @@ fuzz_target!(|data: &[u8]| {
             header.set_entry_type(tar::EntryType::Directory);
             header.set_size(payload.len() as u64);
             header.set_mode(0o755);
-            builder.append_data(&mut header, "directory", payload).unwrap();
+            builder
+                .append_data(&mut header, "directory", payload)
+                .unwrap();
         }
         5 => {
             append(&mut builder, "path", payload);
@@ -73,6 +73,23 @@ fuzz_target!(|data: &[u8]| {
                 .unwrap();
             append(&mut builder, "placeholder", payload);
         }
+        7 => {
+            // A PAX global header, as `git archive` writes, describes no
+            // member.
+            let mut record = format!(" comment={}\n", String::from_utf8_lossy(payload));
+            let length = (record.len()..)
+                .find(|length| length.to_string().len() + record.len() == *length)
+                .unwrap();
+            record.insert_str(0, &length.to_string());
+            let mut global = tar::Header::new_ustar();
+            global.set_entry_type(tar::EntryType::XGlobalHeader);
+            global.set_size(record.len() as u64);
+            global.set_mode(0o644);
+            global.set_path("pax_global_header").unwrap();
+            global.set_cksum();
+            builder.append(&global, record.as_bytes()).unwrap();
+            append(&mut builder, "fuzz.typ", payload);
+        }
         _ => {
             let mut header = tar::Header::new_gnu();
             header.set_size(payload.len() as u64);
@@ -87,11 +104,7 @@ fuzz_target!(|data: &[u8]| {
     let _ = expand_archive(&archive, varied_limits);
 });
 
-fn append(
-    builder: &mut tar::Builder<flate2::write::GzEncoder<Vec<u8>>>,
-    path: &str,
-    data: &[u8],
-) {
+fn append(builder: &mut tar::Builder<flate2::write::GzEncoder<Vec<u8>>>, path: &str, data: &[u8]) {
     let mut header = tar::Header::new_gnu();
     header.set_size(data.len() as u64);
     header.set_mode(0o644);
