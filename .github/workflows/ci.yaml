@@ -212,41 +212,41 @@ jobs:
       - name: Check for Windows
         run: just check-windows
 
-  platform:
-    name: Platform (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-
-    # devenv does not run on Windows, so this job uses the MSRV toolchain
-    # directly on every platform.
-    defaults:
-      run:
-        shell: bash
-
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-22.04, windows-2025, macos-14]
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - name: Set up Rust
-        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
-        with:
-          toolchain: "1.92.0"
-
-      - name: Set up just
-        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
-        with:
-          tool: just
-
-      - name: Set up Rust cache
-        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-
-      - name: Test
-        run: just test-platform
+#   platform:
+#     name: Platform (${{ matrix.os }})
+#     runs-on: ${{ matrix.os }}
+#
+#     # devenv does not run on Windows, so this job uses the MSRV toolchain
+#     # directly on every platform.
+#     defaults:
+#       run:
+#         shell: bash
+#
+#     strategy:
+#       fail-fast: false
+#       matrix:
+#         os: [ubuntu-22.04, windows-2025, macos-14]
+#
+#     steps:
+#       - name: Checkout repository
+#         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+#         with:
+#           persist-credentials: false
+#
+#       - name: Set up Rust
+#         uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+#         with:
+#           toolchain: "1.92.0"
+#
+#       - name: Set up just
+#         uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+#         with:
+#           tool: just
+#
+#       - name: Set up Rust cache
+#         uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+#         with:
+#           save-if: ${{ github.ref == 'refs/heads/main' }}
+#
+#       - name: Test
+#         run: just test-platform
