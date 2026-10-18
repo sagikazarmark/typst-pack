@@ -1,0 +1,252 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    # Every step runs in the devenv shell, with the project's toolchain.
+    shell: devenv shell -- bash -e {0}
+
+jobs:
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv shell -- {0}
+
+      - name: Build
+        run: just build
+
+  fmt:
+    name: Format
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Check formatting
+        run: just fmt
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv shell -- {0}
+
+      - name: Clippy
+        run: just clippy
+
+  doc:
+    name: Doc
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv shell -- {0}
+
+      - name: Doc
+        run: just doc
+
+  audit:
+    name: Audit
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Audit
+        run: just audit
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv shell -- {0}
+
+      - name: Test
+        run: just test
+
+  test-features:
+    name: Test (${{ matrix.suite }})
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        suite: [core, fs, opendal, cli]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv shell -- {0}
+          key: ${{ matrix.suite }}
+
+      - name: Test
+        run: just test-${{ matrix.suite }}
+
+  test-cli-parity:
+    name: Test (CLI parity)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv shell -- {0}
+
+      - name: Test
+        run: just test-cli-parity
+
+  cross:
+    name: Cross-target
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@f2d55def32daee3f89bb3dfa0499b439a988392a # v0.2.0
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+          cmd-format: devenv shell -- {0}
+
+      - name: Build for wasm
+        run: just build-wasm
+
+      - name: Check for Windows
+        run: just check-windows
+
+  platform:
+    name: Platform (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+
+    # devenv does not run on Windows, so this job uses the MSRV toolchain
+    # directly on every platform.
+    defaults:
+      run:
+        shell: bash
+
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-22.04, windows-2025, macos-14]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: "1.92.0"
+
+      - name: Set up just
+        uses: taiki-e/install-action@8cca0918f8471c33515202b73f56ab27f2bed283 # v2.87.29
+        with:
+          tool: just
+
+      - name: Set up Rust cache
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
+
+      - name: Test
+        run: just test-platform

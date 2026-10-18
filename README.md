@@ -1,6 +1,6 @@
 # typst-pack
 
-[![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/sagikazarmark/typst-pack/dagger.yaml?style=flat-square)](https://github.com/sagikazarmark/typst-pack/actions/workflows/dagger.yaml)
+[![GitHub Workflow Status](https://img.shields.io/github/actions/workflow/status/sagikazarmark/typst-pack/ci.yaml?style=flat-square)](https://github.com/sagikazarmark/typst-pack/actions/workflows/ci.yaml)
 [![OpenSSF Scorecard](https://api.securityscorecards.dev/projects/github.com/sagikazarmark/typst-pack/badge?style=flat-square)](https://securityscorecards.dev/viewer/?uri=github.com/sagikazarmark/typst-pack)
 [![crates.io](https://img.shields.io/crates/v/typst-pack?style=flat-square)](https://crates.io/crates/typst-pack)
 [![docs.rs](https://img.shields.io/docsrs/typst-pack?style=flat-square)](https://docs.rs/typst-pack)
@@ -396,12 +396,13 @@ keys, so a producer can add compatible fields without a new version.
 
 ## Development
 
-Minimum verification:
+The development environment is defined with [devenv](https://devenv.sh), and
+CI runs the [just](https://just.systems) recipes in it. Minimum verification:
 
-- `cargo fmt --all -- --check`
-- `cargo clippy --workspace --all-targets --all-features -- -D warnings`
-- `cargo test --workspace --all-features`
-- `dagger check`
+- `just ci`
+- `just test-cli-parity` (x86_64 Linux only)
+
+`just` lists every recipe.
 
 Maintainers changing the embedded compiler must follow the
 [embedded Typst upgrade procedure](https://github.com/sagikazarmark/typst-pack/blob/main/docs/embedded-typst-upgrade.md).

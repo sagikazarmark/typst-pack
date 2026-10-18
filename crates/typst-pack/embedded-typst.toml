@@ -6,7 +6,7 @@
 version = "0.15.1"
 
 # The official Typst CLI used as the differential oracle, installed by
-# scripts/install-official-typst.sh (Dagger and the release workflow).
+# scripts/install-official-typst.sh (`just test-cli-parity` and the release workflow).
 [official-cli]
 version = "0.15.1"
 platform = "x86_64-unknown-linux-musl"

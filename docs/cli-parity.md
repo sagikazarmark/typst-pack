@@ -7,7 +7,7 @@ the embedded Typst release changes. Follow the complete
 release and the official CLI artifact live in
 `crates/typst-pack/embedded-typst.toml`.
 
-The process differential gate is `crates/typst-pack-cli/tests/official_typst_cli.rs`. Dagger downloads
+The process differential gate is `crates/typst-pack-cli/tests/official_typst_cli.rs`. `just test-cli-parity` downloads
 the official Typst 0.15.1 release artifact, verifies its published SHA-256
 digest, and exposes it through `TYPST_PACK_OFFICIAL_TYPST`. The test then checks
 the binary's version against the embedded Typst release that
@@ -30,7 +30,7 @@ that dedicated gate; missing, replaced, or version-mismatched tooling fails it.
 
 `World`, `Library`, the synchronous Typst compiler call, and all official
 exporter calls in this table are private mechanisms of the embedded adapter.
-They are not typst-pack extension interfaces. Public Rust, CLI, and Dagger
+They are not typst-pack extension interfaces. Public Rust and CLI
 callers provide validated Pack-bound lifecycle values and all converge on that
 adapter.
 

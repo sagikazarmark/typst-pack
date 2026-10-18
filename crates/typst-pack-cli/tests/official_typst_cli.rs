@@ -106,7 +106,7 @@ fn read_eventually(path: &Path) -> String {
 #[test]
 fn official_typst_compile_is_the_process_level_parity_baseline() {
     let Some(official) = OfficialTypstCli::from_environment() else {
-        eprintln!("skipping official CLI parity outside its pinned Dagger gate");
+        eprintln!("skipping official CLI parity outside its pinned gate (just test-cli-parity)");
         return;
     };
     let directory = tempfile::tempdir().unwrap();
@@ -205,7 +205,7 @@ fn official_typst_compile_is_the_process_level_parity_baseline() {
 #[test]
 fn official_typst_compile_gates_shared_environment_diagnostics_and_exit_behavior() {
     let Some(official) = OfficialTypstCli::from_environment() else {
-        eprintln!("skipping official CLI parity outside its pinned Dagger gate");
+        eprintln!("skipping official CLI parity outside its pinned gate (just test-cli-parity)");
         return;
     };
     let directory = tempfile::tempdir().unwrap();
@@ -335,7 +335,7 @@ fn timezone_off_the_utc_date() -> &'static str {
 #[test]
 fn official_typst_compile_gates_the_local_date_without_a_timestamp() {
     let Some(official) = OfficialTypstCli::from_environment() else {
-        eprintln!("skipping official CLI parity outside its pinned Dagger gate");
+        eprintln!("skipping official CLI parity outside its pinned gate (just test-cli-parity)");
         return;
     };
     let directory = tempfile::tempdir().unwrap();
@@ -382,7 +382,7 @@ fn official_typst_compile_gates_the_local_date_without_a_timestamp() {
 #[test]
 fn official_typst_compile_gates_errors_before_warnings() {
     let Some(official) = OfficialTypstCli::from_environment() else {
-        eprintln!("skipping official CLI parity outside its pinned Dagger gate");
+        eprintln!("skipping official CLI parity outside its pinned gate (just test-cli-parity)");
         return;
     };
     let directory = tempfile::tempdir().unwrap();
@@ -443,7 +443,7 @@ fn official_typst_compile_gates_errors_before_warnings() {
 #[test]
 fn official_typst_compile_gates_shared_spelling_parsing_and_conflicts() {
     let Some(official) = OfficialTypstCli::from_environment() else {
-        eprintln!("skipping official CLI parity outside its pinned Dagger gate");
+        eprintln!("skipping official CLI parity outside its pinned gate (just test-cli-parity)");
         return;
     };
     let directory = tempfile::tempdir().unwrap();
@@ -530,7 +530,7 @@ fn official_typst_compile_gates_shared_spelling_parsing_and_conflicts() {
 #[test]
 fn official_typst_compile_gates_package_font_and_offline_request_routing() {
     let Some(official) = OfficialTypstCli::from_environment() else {
-        eprintln!("skipping official CLI parity outside its pinned Dagger gate");
+        eprintln!("skipping official CLI parity outside its pinned gate (just test-cli-parity)");
         return;
     };
     let directory = tempfile::tempdir().unwrap();
@@ -620,7 +620,7 @@ fn official_typst_compile_gates_templates_automation_dependencies_and_viewing() 
     use std::os::unix::fs::PermissionsExt;
 
     let Some(official) = OfficialTypstCli::from_environment() else {
-        eprintln!("skipping official CLI parity outside its pinned Dagger gate");
+        eprintln!("skipping official CLI parity outside its pinned gate (just test-cli-parity)");
         return;
     };
     let directory = tempfile::tempdir().unwrap();

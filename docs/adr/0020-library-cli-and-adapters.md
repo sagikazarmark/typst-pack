@@ -12,17 +12,16 @@ the filesystem confinement analysis in
 2026 simplification (`docs/research/2026-10-simplification.md`). Earlier ADRs
 are in git history; this record does not depend on them.
 
-typst-pack is used as a Rust library, as a CLI that should feel like `typst`,
-and through a Dagger module. Hosts differ in what they can read from: local
-files, object storage, or bytes already in memory.
+typst-pack is used as a Rust library and as a CLI that should feel like
+`typst`. Hosts differ in what they can read from: local files, object
+storage, or bytes already in memory.
 
 ## Decision
 
 **Two crates, one release.** `crates/typst-pack` is the library;
 `crates/typst-pack-cli` is the `typst-pack` executable, depends on the same
 workspace version, and uses only the public library API. The library has no
-`cli` feature. The Dagger module is a typed adapter over the CLI and contains
-no compiler or semantic defaults (`docs/dagger-adapter.md`).
+`cli` feature.
 
 **An adapter-neutral core.** Pack construction, creation, compilation, archive
 encoding and decoding, extraction planning, and package archive expansion work

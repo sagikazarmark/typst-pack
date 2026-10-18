@@ -29,9 +29,9 @@ and note in the upgrade change what changed in:
 2. Set `[typst] version` in `embedded-typst.toml`. The engine version is part of
    `typst_pack::VERSION`, so every compilation identity changes with it.
 3. Update `[official-cli]` (version, URL, SHA-256) in `embedded-typst.toml`.
-   Verify the published digest independently. Dagger and the release workflow
-   both install the oracle through `scripts/install-official-typst.sh`; do not
-   copy the pin elsewhere.
+   Verify the published digest independently. `just test-cli-parity` and the
+   release workflow both install the oracle through
+   `scripts/install-official-typst.sh`; do not copy the pin elsewhere.
 4. Update differential expectations only with a stated reason in the change:
    upstream behavior, a pack invariant, or an intentional difference recorded
    in `docs/cli-parity.md`.
@@ -47,6 +47,7 @@ TYPST_PACK_TEST_BINARY=/path/to/packaged/typst-pack \
 cargo test --locked -p typst-pack-cli --all-features --test official_typst_cli
 ```
 
-Finish with `dagger check`. Before a release, the release workflow extracts the
+Finish with `just ci` and `just test-cli-parity` (x86_64 Linux). Before a
+release, the release workflow extracts the
 cargo-dist Linux binary, installs the pinned official CLI, and runs the gate and
 the workspace tests against that exact binary.
