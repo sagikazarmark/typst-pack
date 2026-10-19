@@ -176,7 +176,7 @@ fn members(archive: &[u8]) -> Members {
             let mut entry = zip.by_index(index).unwrap();
             let mut data = Vec::new();
             entry.read_to_end(&mut data).unwrap();
-            (entry.name().to_owned(), data)
+            (entry.name().unwrap().into_owned(), data)
         })
         .collect()
 }

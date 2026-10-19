@@ -210,7 +210,7 @@ fn pack_identity_ignores_archive_order_and_compression() {
             let mut entry = source.by_index(index).unwrap();
             let mut data = Vec::new();
             std::io::Read::read_to_end(&mut entry, &mut data).unwrap();
-            (entry.name().to_owned(), data)
+            (entry.name().unwrap().into_owned(), data)
         })
         .collect::<Vec<_>>();
     members.reverse();

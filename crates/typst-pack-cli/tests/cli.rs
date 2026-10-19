@@ -1728,9 +1728,10 @@ fn produced_by(archive: &[u8], typst_version: &str) -> Vec<u8> {
     let mut output = zip::ZipWriter::new(std::io::Cursor::new(Vec::new()));
     for index in 0..source.len() {
         let mut member = source.by_index(index).unwrap();
+        let name = member.name().unwrap().into_owned();
         let mut data = Vec::new();
         member.read_to_end(&mut data).unwrap();
-        if member.name() == "typst-pack.toml" {
+        if name == "typst-pack.toml" {
             let current = format!("typst-version = \"{}\"", typst_pack::TYPST_VERSION);
             let text = String::from_utf8(data).unwrap();
             assert!(text.contains(&current), "{text}");
@@ -1738,7 +1739,7 @@ fn produced_by(archive: &[u8], typst_version: &str) -> Vec<u8> {
             data = text.replace(&current, &replaced).into_bytes();
         }
         let options = zip::write::SimpleFileOptions::default();
-        output.start_file(member.name(), options).unwrap();
+        output.start_file(name, options).unwrap();
         output.write_all(&data).unwrap();
     }
     output.finish().unwrap().into_inner()

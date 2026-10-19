@@ -409,7 +409,7 @@ fn classify_members(
     let mut declared_total = 0;
     for index in 0..zip.len() {
         let entry = zip.by_index_raw(index).map_err(DecodeError::zip)?;
-        let name = entry.name().to_owned();
+        let name = entry.name().map_err(DecodeError::zip)?.into_owned();
         let mode = entry.unix_mode().map(|mode| mode & 0o170000);
         let directory = entry.is_dir();
         let path = if directory {
