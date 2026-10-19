@@ -278,8 +278,9 @@ pub struct Packed {
     pub pack: Pack,
     /// Warnings of the discovery compiles.
     pub warnings: Vec<SourceDiagnostic>,
-    /// The sources the discovery compiles read; project files are named
-    /// relative to the current directory.
+    /// The sources of the base discovery compile, as
+    /// [`create::Created::sources`]; project files are named relative to the
+    /// current directory.
     pub sources: Sources,
     /// Font files and directories that could not be read and were left out.
     pub skipped_fonts: Vec<Error>,
@@ -410,6 +411,24 @@ impl Packer {
     /// only for containers still missing, [`font_paths`](Self::font_paths)
     /// before the system directories, so the shared
     /// [`font_limits`](Self::font_limits) never starve the explicit paths.
+    ///
+    /// ```no_run
+    /// use typst_pack::archive::DecodeLimits;
+    /// use typst_pack::compile::{self, Output, OutputFormat, Request};
+    /// use typst_pack::fs;
+    ///
+    /// # fn run() -> Result<(), Box<dyn std::error::Error>> {
+    /// let pack = fs::read_archive("project.typk", DecodeLimits::default())?;
+    /// let resolved = fs::Packer::default().resolve(&pack)?;
+    ///
+    /// let mut request = Request::new(pack, Output::new(OutputFormat::Pdf));
+    /// request.packages = resolved.packages;
+    /// request.fonts = resolved.fonts;
+    /// let compiled = compile::compile(&request)?;
+    /// fs::write_file("project.pdf", &compiled.artifacts[0].bytes, fs::WritePolicy::CreateNew)?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn resolve(&self, pack: &Pack) -> Result<Resolved, Error> {
         let mut resolved = Resolved::default();
         let packages = self.package_dirs();

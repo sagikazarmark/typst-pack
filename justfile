@@ -93,7 +93,7 @@ build-wasm:
 check-windows:
     cargo check --package typst-pack --no-default-features --features fs,opendal,package-reading,embedded-fonts --target x86_64-pc-windows-gnu --locked
 
-# Run the platform-dependent suites on the host (Linux, macOS and Windows in CI).
+# Run the platform-dependent suites on the host; run it on Linux, macOS, and Windows.
 test-platform:
     # Compile coverage only: the OpenDAL adapter has no platform-specific code.
     cargo check --package typst-pack --no-default-features --features opendal --locked

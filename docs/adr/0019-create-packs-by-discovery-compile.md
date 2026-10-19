@@ -10,7 +10,7 @@ This ADR consolidates the creation decisions of ADR-0003, ADR-0004, ADR-0006,
 ADR-0008, and ADR-0011, revised by the August 2026 architecture review and the
 October 2026 simplification (`docs/research/2026-10-simplification.md`).
 Earlier ADRs, including the Resource Slot and Pack Override designs, are in git
-history; this record does not depend on them.
+history (last at tag `v0.5.0`); this record does not depend on them.
 
 Typst offers no way to list the packages and fonts a document may use. The
 only reliable source is the set it actually requests while compiling. Project
@@ -19,9 +19,12 @@ files, by contrast, can be enumerated without compiling.
 ## Decision
 
 **Project membership is structural.** The project is every regular file beneath
-the project root, minus what the root `.typkignore` excludes (gitignore
-semantics; nested `.typkignore` files are ordinary files; `.typk` paths are
-always excluded). The source reader selects membership; compilation never adds
+the project root except `.typk` paths, which are always excluded. Filesystem
+reading also applies the root `.typkignore` (gitignore semantics; the root file
+is itself packed and nested `.typkignore` files are ordinary files); storage
+sources such as OpenDAL take every file below their prefix and treat
+`.typkignore` as an ordinary file. The source reader selects membership;
+compilation never adds
 or removes project files. The root and entrypoint follow Typst: the
 entrypoint's directory by default, or an ancestor chosen by `--root` /
 `TYPST_ROOT`.
@@ -42,7 +45,7 @@ the caller supplies the project snapshot, package trees, font containers, and
 recorded package read failures. When discovery reaches a package that was not
 supplied, creation returns the missing package specs; the caller fetches them
 and calls creation again. Source-specific reading and the retry loop live in
-assemblers (filesystem, OpenDAL), not in the core.
+the adapters (`fs::Packer` and `opendal::Assembler`), not in the core.
 
 **Inputs replace overrides.** A pack's project files never change between
 compilations. Per-recipient data is passed as `sys.inputs`: strings, or bytes

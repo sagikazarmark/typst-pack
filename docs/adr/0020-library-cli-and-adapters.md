@@ -10,7 +10,7 @@ This ADR consolidates ADR-0005, ADR-0007, ADR-0008, and ADR-0015, and replaces
 the filesystem confinement analysis in
 `docs/research/platform-confinement-guarantees.md`, as revised by the October
 2026 simplification (`docs/research/2026-10-simplification.md`). Earlier ADRs
-are in git history; this record does not depend on them.
+are in git history (last at tag `v0.5.0`); this record does not depend on them.
 
 typst-pack is used as a Rust library and as a CLI that should feel like
 `typst`. Hosts differ in what they can read from: local files, object
@@ -33,9 +33,10 @@ creation are synchronous; adapters choose blocking or async I/O around them.
 
 - `fs`: reads projects, package directories, and system fonts; writes packs,
   compiled artifacts, and extracted trees.
-- `opendal`: a thin layer over a caller-supplied `&Operator` and paths, with one
-  error type and an assembler. Services, transports, runtimes, and retries stay
-  the caller's choice.
+- `opendal`: a thin layer over a caller-supplied `&Operator` and paths, with
+  one adapter error (which writes wrap with their recovery state) and, with
+  `package-reading`, an assembler. Services, transports, runtimes, and retries
+  stay the caller's choice.
 - `egress`: downloads packages from Typst Universe. It is the only feature that
   links an HTTP client, so network isolation of a build is verifiable from its
   dependency graph.
@@ -46,10 +47,12 @@ Adapters share plain data shapes (limits, errors' common facts) but not
 behavioural traits: there is no universal storage, source, or sink trait.
 
 **Filesystem guarantees are proportionate.** The filesystem adapter is
-validation, not confinement, at the level of cargo, uv, or git. Reading is
-rooted (cap-std): symbolic links resolving inside the root are followed,
-links escaping it and special files are refused, and a font that cannot be
-read is skipped and reported rather than failing the catalog. Writing goes
+validation, not confinement, at the level of cargo, uv, or git. Project and
+package reading is rooted (cap-std): symbolic links resolving inside the root
+are followed, links escaping it and special files are refused. Font
+directories are host configuration: their links are followed wherever they
+lead, and a font that cannot be read is skipped and reported rather than
+failing the read. Writing goes
 through a temporary sibling and a rename (overwrite) or a hard link with an
 exclusive-create fallback (create-new). Writing an extraction plan first checks
 portable names, case collisions, conflicts, and linked ancestors under the
@@ -58,8 +61,9 @@ concurrent filesystem peer or about crash durability; a deployment that needs
 isolation from hostile input provides it outside the process.
 
 **The CLI tracks the embedded Typst release.** Shared flags, environment
-variables, parsing, defaults, and help follow `typst compile` of the exact
-embedded version; `typst-pack --version` reports both. Pack-specific behaviour
+variables, parsing, and defaults follow `typst compile` of the exact embedded
+version, and help follows its wording, shortened in places;
+`typst-pack --version` reports both versions. Pack-specific behaviour
 (no compile-time `--root`, host configuration that only supplies exact
 external requirements, `--offline`,
 `--no-vendor-packages`, `--input-file`, `--variant`, `.typkignore`) is an

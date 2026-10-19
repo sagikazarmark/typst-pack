@@ -277,7 +277,8 @@ pub struct Limits {
     pub max_total_artifact_bytes: u64,
     /// Number of pages exported concurrently; zero is treated as one. Pages
     /// export on the current rayon pool, or on a dedicated pool when this
-    /// exceeds the current pool's size.
+    /// exceeds the current pool's size. Without the `parallel` feature,
+    /// pages export one at a time and this has no effect.
     pub export_workers: u64,
 }
 

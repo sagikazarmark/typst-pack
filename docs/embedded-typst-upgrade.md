@@ -25,16 +25,22 @@ and note in the upgrade change what changed in:
 1. Pin every direct Typst dependency (workspace `Cargo.toml`,
    `crates/typst-pack/Cargo.toml`, `crates/typst-pack-cli/Cargo.toml`) to
    `=VERSION` and run `cargo update` so `Cargo.lock` resolves each `typst` and
-   `typst-*` crate exactly once at `VERSION`.
+   `typst-*` crate exactly once at `VERSION`. Do the same in
+   `fuzz/Cargo.toml` and `fuzz/Cargo.lock`, which the gate does not check.
 2. Set `[typst] version` in `embedded-typst.toml`. The engine version is part of
    `typst_pack::VERSION`, so every compilation identity changes with it.
-3. Update `[official-cli]` (version, URL, SHA-256) in `embedded-typst.toml`.
+3. Update `[official-cli]` (version, platform, URL, SHA-256) in
+   `embedded-typst.toml`.
    Verify the published digest independently. `just test-cli-parity` and the
    release workflow both install the oracle through
    `scripts/install-official-typst.sh`; do not copy the pin elsewhere.
 4. Update differential expectations only with a stated reason in the change:
    upstream behavior, a pack invariant, or an intentional difference recorded
    in `docs/cli-parity.md`.
+5. Update the prose that names the release: `docs/cli-parity.md`, the module
+   doc of `crates/typst-pack-cli/src/cli.rs`, the README's example manifest and
+   `implementation` example, and the advisory reasons in `deny.toml` and
+   `.cargo/audit.toml`.
 
 ## Verification
 
@@ -48,6 +54,6 @@ cargo test --locked -p typst-pack-cli --all-features --test official_typst_cli
 ```
 
 Finish with `just ci` and `just test-cli-parity` (x86_64 Linux). Before a
-release, the release workflow extracts the
-cargo-dist Linux binary, installs the pinned official CLI, and runs the gate and
-the workspace tests against that exact binary.
+release, the release workflow runs the pin gate, extracts the cargo-dist
+Linux binary, installs the pinned official CLI, and runs the workspace tests,
+whose official CLI differential runs against that exact binary.

@@ -80,7 +80,9 @@ pub struct Created {
     pub pack: Pack,
     /// Warnings of every discovery compile, without repeats.
     pub warnings: Vec<SourceDiagnostic>,
-    /// The sources the discovery compiles read.
+    /// The sources of the base discovery compile: [`Sources::files`] lists
+    /// the files it read, and spans in every discovery compile's warnings
+    /// resolve against it.
     pub sources: Sources,
 }
 
@@ -115,7 +117,8 @@ pub enum Error {
     InvalidPack(#[from] PackError),
 }
 
-/// Compiles the project once per variant and creates the pack whose
+/// Compiles the project with the base options and once more per variant, and
+/// creates the pack whose
 /// requirements are every package and font container those compiles used, or
 /// reports the packages they needed and were not given.
 ///

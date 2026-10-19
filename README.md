@@ -9,7 +9,7 @@
 compile on another machine.**
 
 A pack (`.typk`) contains an entrypoint, the project's source and data files,
-and the exact package and font requirements found during a representative
+and the exact package and font requirements found during a discovery
 compile. Packages and fonts can be embedded for offline, portable compilation
 or recorded as external requirements for the receiving application to supply.
 
@@ -75,10 +75,13 @@ typst-pack create report.typ --variant edition=print --variant edition=web,lang=
 typst-pack extract project.typk -o project/
 ```
 
-For PNG and SVG output, `{p}` is the one-based source page number, `{0p}` and
-`{n}` are zero-padded aliases, and `{t}` is the source-document page count.
-Multi-page output needs a page placeholder. All output paths are checked for
-duplicates before anything is written.
+Without an output path, `compile` writes next to the pack with the format's
+extension (`project.typk` to `project.pdf`), and `create` writes next to the
+entrypoint (`main.typ` to `main.typk`). For PNG and SVG output, `{p}` is the
+one-based source page number, `{0p}` and `{n}` are zero-padded aliases, and
+`{t}` is the source-document page count. Multi-page output needs `{p}`, `{0p}`,
+or `{n}`. All output paths are checked for duplicates before anything is
+written.
 
 See [CLI examples](https://github.com/sagikazarmark/typst-pack/blob/main/docs/cli-examples.md) for additional create, compile,
 extraction, input, and discovery-variant commands.
@@ -86,19 +89,19 @@ extraction, input, and discovery-variant commands.
 ### Project files
 
 `create` includes every eligible regular file beneath the project root, not
-only files reached by the representative compile. A root `.typkignore` uses
+only files reached by the discovery compile. A root `.typkignore` uses
 Gitignore-style ordered rules. It is included in the pack; nested
 `.typkignore` files are ordinary files. Symbolic links are followed when they
 resolve inside the project root. A link leading outside it, a FIFO, socket, or
-device is rejected unless ignored, and any path containing a `.typk` component
-is left out.
+device is rejected unless ignored, and any path with a component named `.typk`
+or ending in `.typk` (such as an earlier pack) is left out.
 
-The representative compile selects package and font requirements. Its target,
+The discovery compile selects package and font requirements. Its target,
 inputs, date, features, and control flow do not change which project files are
 included. Each `--variant KEY=VALUE[,KEY=VALUE...]` runs one more discovery
-compile with those inputs replacing or adding to `--input`, so packages and
-fonts reached only under other inputs are required too. Per-recipient data
-reaches a compile through `--input KEY=VALUE` (a string) and
+compile with those inputs replacing or adding to `--input` and `--input-file`,
+so packages and fonts reached only under other inputs are required too.
+Per-recipient data reaches a compile through `--input KEY=VALUE` (a string) and
 `--input-file KEY=PATH` (the file's bytes, which `image`, data loaders such as
 `json`, and `str` accept). In a Git checkout, add `.git/` to `.typkignore`.
 
@@ -128,7 +131,8 @@ differences from `typst compile` are listed in the
 
 The core in-memory packing, creation, and compilation APIs need no crate
 features. Add filesystem support when the library should read local projects,
-package directories, and system fonts:
+package directories, and system fonts, and read and write pack, extraction,
+and artifact files:
 
 ```toml
 [dependencies]
@@ -176,13 +180,14 @@ files added to it. Use `create` when the library should discover them by
 compiling the project over values the caller already holds, and `fs::Packer`
 or `opendal::Assembler` when it should also read those values from a source.
 
-Pack creation is stateless and resumable. If the representative compile reaches
+Pack creation is stateless and resumable. If a discovery compile reaches
 a package that is not in the supplied catalog, creation reports that exact
 specification instead of failing; add its tree and call `create` again. The
 `package::registry` module names the official registry URL of each
 specification, the `package-reading` feature adds bounded `.tar.gz` expansion
 without choosing an HTTP client, and
-`opendal::Assembler` runs the same loop over OpenDAL storage.
+`opendal::Assembler` (with `opendal` and `package-reading`) runs the same loop
+over OpenDAL storage.
 
 Compilation takes one `compile::Request`: the pack, the output and its
 controls, `sys.inputs` strings and bytes, document time, features, the packages
@@ -216,11 +221,11 @@ match compile::compile(&request) {
 
 ### Feature flags
 
-- `fs`: Read projects, local packages, caches, and system fonts from the filesystem; unavailable on wasm targets.
+- `fs`: Read projects, local packages, caches, and system fonts from the filesystem, and read and write pack, extraction, and artifact files; unavailable on wasm targets.
 - `egress`: Download missing packages during filesystem assembly; implies `fs` and `package-reading` and links HTTP/TLS dependencies.
 - `package-reading`: Expand bounded registry package archives without choosing a transport (`package::registry::expand_archive`).
-- `opendal`: Read, assemble, and write packs through caller-supplied OpenDAL operators, with caller-polled futures and no bundled runtime.
-- `embedded-fonts`: Make Typst's bundled fonts available to assembly and external fulfillment.
+- `opendal`: Read projects, fonts, packages, and packs, and write packs, extractions, and artifacts, through caller-supplied OpenDAL operators, with caller-polled futures and no bundled runtime. Together with `package-reading`, also assemble packs (`opendal::Assembler`).
+- `embedded-fonts`: Make Typst's embedded fonts available to assembly and external fulfillment.
 - `diagnostics`: Implement `typst-kit`'s `DiagnosticWorld` for `Sources`, so `typst_kit::diagnostics::emit` renders diagnostics with source context.
 - `parallel`: Export independent page artifacts in parallel.
 

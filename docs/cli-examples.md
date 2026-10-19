@@ -11,7 +11,7 @@ cargo install typst-pack-cli
 
 ## Create and inspect
 
-Create a pack. Packages observed during the representative compilation are
+Create a pack. Packages observed during the discovery compile are
 vendored by default:
 
 ```console
@@ -35,8 +35,8 @@ typst-pack create project/main.typ project.typk --embed-fonts
 
 Run additional discovery compiles for inputs that reach other packages or
 fonts. Each `--variant` takes comma-separated `KEY=VALUE` pairs that replace or
-add to the `--input` values for one more compile; the pack requires everything
-any compile used. Values cannot contain commas:
+add to the `--input` and `--input-file` values for one more compile; the pack
+requires everything any compile used. Values cannot contain commas:
 
 ```console
 typst-pack create report.typ report.typk \
@@ -55,8 +55,9 @@ typst-pack inspect project.typk
 identity, its files, and the packages and fonts it embeds or requires; a
 required font Typst ships is marked as provided by Typst. `inspect` and
 `compile` warn when the pack was created with another Typst version than the
-one typst-pack embeds, since its output may differ. `-` reads a pack from stdin for `inspect`, `extract` (which then needs
-`--output`), and `compile`, and `create` writes one to stdout with `-`:
+one typst-pack embeds, since its output may differ. `-` reads a pack from
+stdin for `inspect`, `extract` (which then needs `--output`), and `compile`
+(which then needs an output path), and `create` writes one to stdout with `-`:
 
 ```console
 typst-pack create project/main.typ - | typst-pack inspect -

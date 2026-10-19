@@ -9,7 +9,7 @@ in
   # code without a Windows runner. psm assembles per-architecture sources and
   # stacker compiles windows.c, so both need a Windows-targeting C toolchain
   # even though checking never links. The crate gates no code on target_env,
-  # so this reaches the same source the msvc CI job compiles.
+  # so this reaches the same source the msvc release build compiles.
   #
   # The toolchain is referenced by path rather than listed in `packages`: its
   # setup hook would export CC/AR for every target and break host builds.

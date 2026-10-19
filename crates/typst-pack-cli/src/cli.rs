@@ -1,5 +1,5 @@
-//! Command-line arguments. Shared options mirror Typst 0.15.1's spelling,
-//! defaults, and help.
+//! Command-line arguments. Shared options mirror Typst 0.15.1's spelling and
+//! defaults; their help follows Typst's, shortened in places.
 
 use std::path::PathBuf;
 
@@ -17,7 +17,8 @@ const ENV_PATH_SEPARATOR: char = if cfg!(windows) { ';' } else { ':' };
 #[derive(Debug, Parser)]
 #[command(name = "typst-pack", version = typst_pack::VERSION)]
 pub struct Cli {
-    /// Whether to use color. When set to `auto` if the terminal to supports it.
+    /// Whether to use color. When set to `auto`, color is used if the terminal
+    /// supports it.
     #[arg(long, default_value = "auto", default_missing_value = "always", num_args = 0..=1,
           value_parser = ["auto", "always", "never"])]
     pub color: String,
@@ -135,7 +136,7 @@ pub struct CreateArgs {
     pub target: Option<Target>,
 
     /// Also discover dependencies with these string inputs replacing or adding
-    /// to `--input`. Repeat for several variants.
+    /// to `--input` and `--input-file`. Repeat for several variants.
     #[arg(long = "variant", value_name = "key=value,...", value_parser = parse_variant,
           help_heading = "Creation")]
     pub variants: Vec<Variant>,
@@ -221,10 +222,13 @@ pub struct CompileArgs {
     #[arg(help_heading = "Compilation")]
     pub pack: PathBuf,
 
-    /// Path to output file (PDF, PNG, SVG, or HTML). Use `-` for stdout.
+    /// Path to output file (PDF, PNG, SVG, or HTML). Use `-` for stdout
+    /// [default: PACK with its extension replaced by the format's; required
+    /// when PACK is `-`].
     ///
-    /// PNG and SVG emit one file per page: with several pages, use `{p}`,
-    /// `{0p}` (zero padded), or `{t}` (page count), as in `page-{0p}-of-{t}.png`.
+    /// PNG and SVG emit one file per page: with several pages, the path needs
+    /// `{p}` or `{0p}` (zero padded) and may add `{t}` (page count), as in
+    /// `page-{0p}-of-{t}.png`.
     #[arg(help_heading = "Output")]
     pub output: Option<PathBuf>,
 

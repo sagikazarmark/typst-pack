@@ -158,7 +158,7 @@ impl Default for DecodeLimits {
 #[derive(Debug, thiserror::Error)]
 #[non_exhaustive]
 pub enum DecodeError {
-    /// The archive could not be read from its stream or file.
+    /// The archive could not be read from its stream.
     #[error("failed to read pack archive bytes")]
     Io(#[from] io::Error),
     /// A decode limit was exceeded.

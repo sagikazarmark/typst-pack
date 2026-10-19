@@ -4,7 +4,7 @@ The optional `opendal` feature reads projects, fonts, and packages, reads and
 writes pack archives, and writes extraction plans and compiled artifacts
 through caller-supplied OpenDAL [`Operator`]s. The application chooses the backend,
 credentials, transport, layers, retry policy, and async runtime; every
-function returns a caller-polled future and typst-pack owns no runtime.
+storage operation is a caller-polled future and typst-pack owns no runtime.
 
 ```toml
 [dependencies]
@@ -74,7 +74,7 @@ example to embed only some packages):
 | [`read_project`] | A [`ProjectSnapshot`](crate::ProjectSnapshot) of every file below a prefix except `.typk` paths. `.typkignore` is an ordinary file here; ignore rules belong to filesystem reading. |
 | [`read_fonts`] | The [`font::Entry`](crate::font::Entry) values of `.ttf`/`.ttc`/`.otf`/`.otc` objects below each [`FontSource`], in source then path order. An object that is not a readable font fails the read with [`Error::Font`]: font prefixes are curated inputs here, unlike the filesystem adapter's font directories, which are host configuration and whose unreadable fonts are skipped and reported. |
 | [`read_package`] | A [`PackageRead`]: a tree's files, cached or registry archive bytes, or `Unavailable`. Sources are tried in order; only definite absence advances. |
-| [`insert_package`] | Builds or expands the tree, adds it to a [`create::Request`](crate::create::Request), and keeps its package failures (with their reasons) in step. |
+| [`insert_package`] | Synchronously builds or expands the tree, adds it to a [`create::Request`](crate::create::Request), and keeps its package failures (with their reasons) in step. |
 | [`read_archive`] | The decoded [`Pack`](crate::Pack) of one archive object, as `fs::read_archive` reads a file; bytes that are not a valid pack fail with [`Error::Decode`]. |
 
 [`write_archive`] encodes the pack it is given, so copying a decoded pack
@@ -105,8 +105,10 @@ suggested limit for packages, and the [`Assembler`] uses it as its
 `package_limits` default. [`read_archive`] bounds the object by
 [`DecodeLimits::max_archive_bytes`](crate::archive::DecodeLimits::max_archive_bytes)
 and decodes it under the same [`DecodeLimits`](crate::archive::DecodeLimits).
-Exceeding a limit fails with [`Error::Limit`]; the [`Assembler`] records a
-package over a limit as a package failure instead. An object that grows
+Exceeding a read limit fails with [`Error::Limit`], and exceeding one while
+[`insert_package`] expands an archive fails with [`Error::PackageArchive`]
+holding `ExpandError::Limit`; the [`Assembler`] records a package over a limit
+as a package failure instead. An object that grows
 after its stat is abandoned as soon as the read passes the stat's length.
 Limits do not bound memory inside OpenDAL or its transport.
 
@@ -142,23 +144,26 @@ for the guarantees you need.
 Writes are sequential and not atomic across keys. A [`WriteError`] carries
 the failing key's `path` (`None` when the write was refused before any key
 was tried), the `completed` keys and their outcomes, the underlying
-[`Error`] as its `source`, and whether the failing key's effect is
-`indeterminate` (the write was issued but its outcome is unknown). Every write borrows its input, so the recovery
+[`Error`] in its `error` field (also its `source()`), and whether the failing
+key's effect is `indeterminate` (the write was issued but its outcome is
+unknown). Every write borrows its input, so the recovery
 path is to replay the whole write: with `CreateOrVerify`, keys that were
 already written complete as [`WriteOutcome::AlreadyMatching`].
 
 ## Errors
 
-[`Error`] is the one adapter error. Its `Display` names the path and the
+[`Error`] is the adapter error; writes wrap it in a [`WriteError`] with
+their recovery state. Its `Display` names the path and the
 storage operation but not the operator's endpoint or credentials; the native
 OpenDAL error, which may carry backend context, is the error's `source`, as
 is the [`LimitExceeded`](crate::LimitExceeded) of [`Error::Limit`]. As
 everywhere in the crate, a cause is exposed through `source()` and not
 repeated in `Display`; print the whole chain to show it.
 
-Every function takes its target (operator and path or prefix) first, then
-the data, then the policy, as the filesystem adapter does; limits are passed
-by value.
+Every function that takes an operator takes it and its path or prefix first;
+writes then take the data, then the policy, as the filesystem adapter does.
+[`read_package`] takes its package sources first instead, since each source
+names its own operator. Limits are passed by value.
 
 ## External compilation dependencies
 

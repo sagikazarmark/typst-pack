@@ -631,6 +631,8 @@ pub enum PackIssue {
 #[derive(Debug, Clone, Eq, PartialEq, thiserror::Error)]
 #[error("{}", list("invalid pack content", .issues))]
 pub struct PackError {
-    /// Every issue, in a canonical order independent of the input order.
+    /// Every issue: project and package issues in a canonical order
+    /// independent of the input order, then font issues in font order, which
+    /// is part of the pack's content.
     pub issues: Vec<PackIssue>,
 }

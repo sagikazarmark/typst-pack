@@ -1,4 +1,11 @@
 #![doc = include_str!("../../docs/opendal-integration.md")]
+// The guide and item docs link to `Assembler` and `insert_package`, which
+// need `package-reading`. The all-features doc build still denies broken
+// links, so only builds without those items tolerate them.
+#![cfg_attr(
+    not(feature = "package-reading"),
+    allow(rustdoc::broken_intra_doc_links)
+)]
 
 #[cfg(feature = "package-reading")]
 mod assembler;

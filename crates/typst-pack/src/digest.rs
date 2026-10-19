@@ -10,8 +10,9 @@ use sha2::{Digest as _, Sha256};
 /// A SHA-256 digest, written as `sha256:<64 lowercase hex digits>`.
 ///
 /// File and font container digests are the SHA-256 of the exact bytes.
-/// Package tree digests and pack identities are SHA-256 of a documented,
-/// domain-separated preimage (see the README's "Pack format" section).
+/// Package tree digests, pack identities, and compilation identities are
+/// SHA-256 of a documented, domain-separated preimage (see the README's "Pack
+/// format" section).
 ///
 /// A digest parses from and displays as the same text, so one can be stored
 /// or passed on the command line and read back, for example to check a pack

@@ -13,20 +13,22 @@ per-operation error vocabularies (about 120 error types), per-operation limits
 families with no custom call sites, parallel per-adapter type hierarchies, and
 specifications larger than the code they specified. The October 2026
 simplification (`docs/research/2026-10-simplification.md`) applied the
-conventions below. Earlier ADRs are in git history; this record does not
+conventions below. Earlier ADRs are in git history (last at tag `v0.5.0`);
+this record does not
 depend on them.
 
 ## Decision
 
 **Public API.**
 
-- Group the API in modules by concept (compile, archive, extract, fs, opendal,
-  package, font) rather than prefixing type names.
-- Adapters mirror each other: the same operation has the same name and
-  shape in `fs` and `opendal` (`read_archive` returns a `Pack` and
-  `write_archive` takes one; `write_extraction`, `write_artifacts`,
-  `embed_packages`), takes its target first, then the data, then the
-  policy, and takes its limits (`ReadLimits` or `DecodeLimits`) by value.
+- Group the API in modules by concept (compile, create, archive, extract, fs,
+  opendal, package, font) rather than prefixing type names.
+- Adapters mirror each other where they offer the same operation: it has the
+  same name and shape in `fs` and `opendal` (`read_archive` returns a `Pack`
+  and `write_archive` takes one; `write_extraction`, `write_artifacts`; the
+  `embed_packages` field of `fs::Packer` and `opendal::Assembler`), takes its
+  target first, then the data, then the policy, and takes its limits
+  (`ReadLimits` or `DecodeLimits`) by value.
   Core modules do no file or storage I/O.
 - The library forbids `unsafe` code.
 - A public type must be constructed or matched by a first-party caller or a

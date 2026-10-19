@@ -10,7 +10,7 @@ This ADR consolidates the pack-model decisions of ADR-0002, ADR-0009, ADR-0010,
 and the identity parts of ADR-0012, revised by the August 2026 architecture
 review (`docs/research/2026-08-architecture-review.md`) and the October 2026
 simplification (`docs/research/2026-10-simplification.md`). Earlier ADRs are
-in git history; this record does not depend on them.
+in git history (last at tag `v0.5.0`); this record does not depend on them.
 
 A pack must mean the same thing however it was produced (builder, creation, or
 archive decoding) and however it is stored. Earlier designs let identity depend

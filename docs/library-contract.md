@@ -6,8 +6,9 @@ but too detailed for the README.
 ## Pack and identities
 
 A `Pack` is valid only when its entrypoint, project paths, packages, and font
-containers agree. The builder, creation, and archive decoding all construct a
-pack through the same validation.
+containers agree. The builder and archive decoding validate every part;
+creation reuses the validation the `ProjectSnapshot` already passed and
+validates the dependencies it adds the same way.
 
 Every identity is a SHA-256 `Digest` over a documented preimage (see the README's
 "Pack format"). The pack identity covers the entrypoint, project paths and bytes,
@@ -48,7 +49,8 @@ Creation may return `create::Outcome::MissingPackages`. This is a normal
 resumable state: add exact trees to the package catalog (or record a failed
 read) and invoke the stateless operation again; a package any variant reached
 is reported. A creation whose compiles succeeded returns the pack, the warnings
-of all of them without repeats, and the `Sources` they read. A failed variant
+of all of them without repeats, and the `Sources` of the base compile, which
+resolve the spans of every compile's warnings. A failed variant
 compile's errors carry a hint naming the variant's inputs. A container supplied
 at several font positions becomes one requirement with the disposition of the
 first position used. `fs::Packer::pack`
@@ -212,7 +214,7 @@ I/O: `fs::read_archive` and `fs::write_archive` read and write pack files, and
 same shapes: reads take `DecodeLimits` and return a `Pack`, refusing an
 oversized file or object before reading it, and writes take a `&Pack`.
 `fs::read_archive` failures name the file (`fs::Error::Io`, `Limit`, or
-`Archive` with the `DecodeError` as its source); `opendal::read_archive`
+`Decode` with the `DecodeError` as its source); `opendal::read_archive`
 fails with `opendal::Error::Decode` for bytes that are not a pack.
 
 Decoding verifies every member against the digest the manifest declares, so a
@@ -227,7 +229,9 @@ member order, but never in its identity; it keeps the recorded Typst version
 Each public operation or adapter has one error type. An error that has a
 cause, such as an I/O, storage, ZIP, TOML, or limit error, exposes it through
 `std::error::Error::source` and does not repeat it in its own `Display`; print
-the whole chain (`error: source: ...`, as the CLI does) to show it. Wrappers
+the whole chain (`error: source: ...`, as the CLI does) to show it. The
+exceptions keep a parser's message as text: `package::registry::ExpandError::Malformed`
+(gzip and tar) and `fs::Error::InvalidIgnoreFile` (`.typkignore`). Wrappers
 that add nothing are transparent. Aggregate errors list every issue in their
 `Display`. Archive decoding exposes the ZIP and TOML parsers' errors only as
 opaque boxed sources. Error, issue, and outcome enums are `#[non_exhaustive]`,
