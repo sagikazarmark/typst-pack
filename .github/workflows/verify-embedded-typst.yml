@@ -7,25 +7,38 @@ on:
         required: true
         type: string
 
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    # Every step runs in the devenv shell, with the project's toolchain.
+    shell: devenv shell -- bash -e {0}
+
 jobs:
   verify:
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v7
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
           submodules: recursive
-      - uses: dtolnay/rust-toolchain@1.120.0
+
+      - name: Set up devenv
+        uses: sagikazarmark/setup-devenv@c36f9e57ca50ee1a6dad1a05a1a684e321f8096a # v0.3.0
+
       - name: Check the embedded Typst pins
         run: cargo test --locked -p typst-pack --test embedded_typst_gate
+
       - name: Fetch packaged first-party artifacts
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: artifacts-build-local-*
           path: target/distrib/
           merge-multiple: true
+
       - name: Extract Linux release binary
-        shell: bash
         run: |
           archive="$(find target/distrib -type f -name '*x86_64-unknown-linux-gnu.tar.xz' -print -quit)"
           test -n "$archive"
@@ -35,13 +48,14 @@ jobs:
           test -n "$binary"
           chmod +x "$binary"
           echo "TYPST_PACK_TEST_BINARY=$binary" >> "$GITHUB_ENV"
+
       - name: Fetch exact official Typst oracle
-        shell: bash
         run: |
           scripts/install-official-typst.sh \
             crates/typst-pack/embedded-typst.toml \
             "$RUNNER_TEMP/official-typst"
           echo "TYPST_PACK_OFFICIAL_TYPST=$RUNNER_TEMP/official-typst/typst" >> "$GITHUB_ENV"
+
       - name: Gate packaged binary against official Typst
         env:
           TYPST_PACK_REQUIRE_OFFICIAL_TYPST: "1"
