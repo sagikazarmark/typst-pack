@@ -9,7 +9,7 @@ function returns a caller-polled future and typst-pack owns no runtime.
 ```toml
 [dependencies]
 typst-pack = { version = "0.6", features = ["opendal", "package-reading"] }
-opendal = { version = "0.58", default-features = false, features = ["services-s3"] }
+opendal = { version = "0.59", default-features = false, features = ["services-s3"] }
 ```
 
 OpenDAL's Memory service needs no extra feature, which makes it convenient
