@@ -35,7 +35,7 @@ edition = "2024"
 rust-version = "1.92"
 
 [dependencies]
-opendal = { version = "0.58", default-features = false }
+opendal = { version = "0.59", default-features = false }
 typst-pack = { path = "${packaged[0]}", default-features = false, features = ["opendal"] }
 EOF
 cat >"$audit/enabled/src/main.rs" <<'EOF'
@@ -230,8 +230,8 @@ edition = "2024"
 rust-version = "1.92"
 
 [dependencies]
-opendal = { version = "0.58", default-features = false }
-opendal-service-s3 = { version = "0.58", default-features = false }
+opendal = { version = "0.59", default-features = false }
+opendal-service-s3 = { version = "0.59", default-features = false }
 EOF
 cat >"$audit/compatibility/src/lib.rs" <<'EOF'
 // Metadata-only compatibility probe.

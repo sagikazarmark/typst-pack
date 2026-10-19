@@ -9,8 +9,9 @@ use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use opendal::raw::{
-    OpCopier, OpCopy, OpCreateDir, OpList, OpPresign, OpRead, OpRename, OpStat, OpWrite,
-    RpCreateDir, RpPresign, RpRename, RpStat, Service, ServiceInfo, Servicer, oio,
+    OpCompose, OpCopy, OpCreateDir, OpList, OpPresign, OpRead, OpRename, OpRestore, OpStat,
+    OpWrite, RpCreateDir, RpPresign, RpRename, RpRestore, RpStat, Service, ServiceInfo, Servicer,
+    oio,
 };
 use opendal::{Buffer, Capability, Error, ErrorKind, Metadata, OperationContext, Operator, Result};
 
@@ -150,6 +151,7 @@ impl Service for FaultService {
     type Lister = oio::Lister;
     type Deleter = oio::Deleter;
     type Copier = oio::Copier;
+    type Composer = oio::Composer;
 
     fn info(&self) -> ServiceInfo {
         self.inner.info_dyn()
@@ -189,7 +191,9 @@ impl Service for FaultService {
         };
         let mut metadata: Metadata = self.inner.stat_dyn(ctx, path, args).await?.into_metadata();
         if let Some(etag) = etag {
-            metadata = metadata.with_etag(etag);
+            let mut builder = metadata.into_builder();
+            builder.etag(etag);
+            metadata = builder.build();
         }
         if let Some(bytes) = replacement {
             self.faults.target.write(path, bytes).await?;
@@ -260,9 +264,12 @@ impl Service for FaultService {
         from: &str,
         to: &str,
         args: OpCopy,
-        opts: OpCopier,
     ) -> Result<oio::Copier> {
-        self.inner.copy_dyn(ctx, from, to, args, opts)
+        self.inner.copy_dyn(ctx, from, to, args)
+    }
+
+    fn compose(&self, ctx: &OperationContext, to: &str, args: OpCompose) -> Result<oio::Composer> {
+        self.inner.compose_dyn(ctx, to, args)
     }
 
     async fn rename(
@@ -273,6 +280,15 @@ impl Service for FaultService {
         args: OpRename,
     ) -> Result<RpRename> {
         self.inner.rename_dyn(ctx, from, to, args).await
+    }
+
+    async fn restore(
+        &self,
+        ctx: &OperationContext,
+        path: &str,
+        args: OpRestore,
+    ) -> Result<RpRestore> {
+        self.inner.restore_dyn(ctx, path, args).await
     }
 
     async fn presign(
