@@ -89,9 +89,8 @@ fonts, discovery variants, inputs, output formats, extraction, and pipes.
 
 ## Library
 
-```toml
-[dependencies]
-typst-pack = { version = "0.6", features = ["embedded-fonts", "fs"] }
+```console
+cargo add typst-pack --features embedded-fonts,fs
 ```
 
 The core needs no features. `fs` reads projects, packages, and fonts from the
@@ -138,6 +137,14 @@ fonts a document uses, start from one of these:
 The [library guide](https://github.com/sagikazarmark/typst-pack/blob/main/docs/guides/library.md)
 walks through these with examples and lists every crate feature.
 
+## See it in action
+
+- [diotypst](https://github.com/sagikazarmark/diotypst): Typst integration for
+  [Dioxus](https://dioxuslabs.com) apps, which reads and writes `.typk` packs
+  in the browser with this library.
+- [Live demo](https://typst-demo.dioxus.cc/): diotypst rendering Typst
+  documents in the browser, including portable project packs.
+
 ## Documentation
 
 Guides:
@@ -155,9 +162,6 @@ Reference:
   guarantees about identity, environment independence, limits, writes, and errors
 - [CLI parity inventory](https://github.com/sagikazarmark/typst-pack/blob/main/docs/reference/cli-parity.md):
   how the CLI follows and differs from `typst compile`
-
-The [documentation index](https://github.com/sagikazarmark/typst-pack/blob/main/docs/README.md)
-also lists the development docs and architecture decisions.
 
 ## Development
 

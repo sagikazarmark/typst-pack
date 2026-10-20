@@ -11,9 +11,8 @@ examples on this page are compile-checked against the current source.
 
 ## Add the dependency
 
-```toml
-[dependencies]
-typst-pack = { version = "0.6", features = ["embedded-fonts", "fs"] }
+```console
+cargo add typst-pack --features embedded-fonts,fs
 ```
 
 All features are opt-in:
