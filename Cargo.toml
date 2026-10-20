@@ -20,6 +20,10 @@ typst = "=0.15.1"
 typst-kit = { version = "=0.15.1", default-features = false, features = ["datetime"] }
 typst-pdf = "=0.15.1"
 
+[workspace.lints.clippy]
+# Modules live in `foo.rs`, not `foo/mod.rs`.
+mod_module_files = "warn"
+
 # The profile that 'dist' will build with
 [profile.dist]
 inherits = "release"

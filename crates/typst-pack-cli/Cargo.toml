@@ -10,6 +10,9 @@ homepage.workspace = true
 keywords = ["typst", "documents", "packaging", "archive", "fonts"]
 categories = ["command-line-utilities", "text-processing", "filesystem"]
 
+[lints]
+workspace = true
+
 [features]
 _test-package-download-probe = ["typst-pack/_test-package-download-probe"]
 

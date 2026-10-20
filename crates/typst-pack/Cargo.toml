@@ -11,6 +11,9 @@ readme = "../../README.md"
 keywords = ["typst", "documents", "packaging", "archive", "fonts"]
 categories = ["command-line-utilities", "text-processing", "filesystem"]
 
+[lints]
+workspace = true
+
 [package.metadata.docs.rs]
 # Every public capability, so docs.rs documents the whole crate. Omitting `fs`
 # here previously hid the filesystem assembly and write APIs that the README's
