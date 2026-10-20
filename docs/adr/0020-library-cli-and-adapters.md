@@ -68,8 +68,9 @@ version, and help follows its wording, shortened in places;
 external requirements, `--offline`,
 `--no-vendor-packages`, `--input-file`, `--variant`, `.typkignore`) is an
 explicit, documented difference. The flag inventory and every difference live
-in `docs/cli-parity.md`; the release pin and the upgrade procedure live in
-`crates/typst-pack/embedded-typst.toml` and `docs/embedded-typst-upgrade.md`.
+in `docs/reference/cli-parity.md`; the release pin and the upgrade procedure
+live in `crates/typst-pack/embedded-typst.toml` and
+`docs/development/embedded-typst-upgrade.md`.
 A differential suite runs the official Typst CLI of that release against
 typst-pack.
 

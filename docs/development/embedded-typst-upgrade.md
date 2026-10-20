@@ -18,7 +18,7 @@ and note in the upgrade change what changed in:
 - package resolution and font discovery, selection, and fallback;
 - PDF, PNG, SVG, and HTML exporter APIs, defaults, and output;
 - official CLI commands, flags, defaults, and environment variables
-  (see `docs/cli-parity.md`).
+  (see `docs/reference/cli-parity.md`).
 
 ## Required changes
 
@@ -36,11 +36,11 @@ and note in the upgrade change what changed in:
    `scripts/install-official-typst.sh`; do not copy the pin elsewhere.
 4. Update differential expectations only with a stated reason in the change:
    upstream behavior, a pack invariant, or an intentional difference recorded
-   in `docs/cli-parity.md`.
-5. Update the prose that names the release: `docs/cli-parity.md`, the module
-   doc of `crates/typst-pack-cli/src/cli.rs`, the README's example manifest and
-   `implementation` example, and the advisory reasons in `deny.toml` and
-   `.cargo/audit.toml`.
+   in `docs/reference/cli-parity.md`.
+5. Update the prose that names the release: `docs/reference/cli-parity.md`,
+   the module doc of `crates/typst-pack-cli/src/cli.rs`, the example manifest
+   and `implementation` example in `docs/reference/pack-format.md`, and the
+   advisory reasons in `deny.toml` and `.cargo/audit.toml`.
 
 ## Verification
 

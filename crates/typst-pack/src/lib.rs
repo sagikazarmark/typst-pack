@@ -69,3 +69,9 @@ pub(crate) fn list(summary: &str, issues: &[impl std::fmt::Display]) -> String {
 
 #[cfg(test)]
 mod tests;
+
+/// Compile-checks the library guide's examples, which use the filesystem
+/// adapter. The guide is only staged in the workspace; see `build.rs`.
+#[cfg(all(doctest, feature = "fs", typst_pack_library_guide))]
+#[doc = include_str!(concat!(env!("OUT_DIR"), "/library-guide.md"))]
+struct LibraryGuide;

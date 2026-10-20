@@ -16,8 +16,8 @@ workspace = true
 
 [package.metadata.docs.rs]
 # Every public capability, so docs.rs documents the whole crate. Omitting `fs`
-# here previously hid the filesystem assembly and write APIs that the README's
-# first example uses. `_test-package-download-probe` is internal and stays off.
+# here previously hid the filesystem assembly and write APIs that the
+# documentation links to. `_test-package-download-probe` is internal and stays off.
 features = [
     "diagnostics",
     "egress",

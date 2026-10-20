@@ -1,7 +1,7 @@
 # Library contract
 
-This page collects guarantees that are useful when integrating the Rust library
-but too detailed for the README.
+This page collects guarantees that are useful when integrating the Rust library.
+The [library guide](../guides/library.md) shows how to use it.
 
 ## Pack and identities
 
@@ -10,8 +10,8 @@ containers agree. The builder and archive decoding validate every part;
 creation reuses the validation the `ProjectSnapshot` already passed and
 validates the dependencies it adds the same way.
 
-Every identity is a SHA-256 `Digest` over a documented preimage (see the README's
-"Pack format"). The pack identity covers the entrypoint, project paths and bytes,
+Every identity is a SHA-256 `Digest` over a documented preimage (see the
+[pack format](pack-format.md#digests)). The pack identity covers the entrypoint, project paths and bytes,
 each package's tree digest and whether it is embedded, and each font container's
 digest and whether it is embedded, in font book order. Metadata, informational
 manifest fields, archive compression and member order, storage locations, and
@@ -29,7 +29,8 @@ A compilation identity covers the pack identity, the normalized output and
 its controls, the `sys.inputs` strings and byte digests, document time,
 features, the digests of the externally supplied packages and font containers
 the pack requires, and the implementation string `typst_pack::VERSION`. Its
-preimage is documented in the README's "Compilation identity". Crate features,
+preimage is documented in the
+[pack format](pack-format.md#compilation-identity). Crate features,
 target, build profile, limits, and export workers do not contribute, so the
 identity is a cache key across build configurations of one release.
 

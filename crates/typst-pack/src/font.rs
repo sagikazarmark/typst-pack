@@ -78,8 +78,8 @@ impl Eq for Container {}
 
 /// The selection metadata of one face of a font container.
 ///
-/// A pack's manifest records faces in its own format; see the README's "Pack
-/// format" section.
+/// A pack's manifest records faces in its own format; see the
+/// [pack format](https://github.com/sagikazarmark/typst-pack/blob/main/docs/reference/pack-format.md#manifest).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Face {
     /// The face index within the container.

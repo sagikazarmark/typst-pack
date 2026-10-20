@@ -133,7 +133,8 @@ pub struct Compiled {
     pub page_count: Option<usize>,
     /// Compiler and exporter warnings, in Typst's order.
     pub warnings: Vec<SourceDiagnostic>,
-    /// The compilation identity; see the README's "Compilation identity".
+    /// The compilation identity; see the
+    /// [pack format](https://github.com/sagikazarmark/typst-pack/blob/main/docs/reference/pack-format.md#compilation-identity).
     pub identity: Digest,
     /// The sources the compilation read.
     pub sources: Sources,

@@ -1,6 +1,6 @@
 //! SHA-256 content digests and the documented preimages built from them.
 //!
-//! See the README's "Pack format" section for the exact byte layouts.
+//! See `docs/reference/pack-format.md` for the exact byte layouts.
 
 use std::fmt;
 use std::str::FromStr;
@@ -11,8 +11,8 @@ use sha2::{Digest as _, Sha256};
 ///
 /// File and font container digests are the SHA-256 of the exact bytes.
 /// Package tree digests, pack identities, and compilation identities are
-/// SHA-256 of a documented, domain-separated preimage (see the README's "Pack
-/// format" section).
+/// SHA-256 of a documented, domain-separated preimage (see the
+/// [pack format](https://github.com/sagikazarmark/typst-pack/blob/main/docs/reference/pack-format.md#digests)).
 ///
 /// A digest parses from and displays as the same text, so one can be stored
 /// or passed on the command line and read back, for example to check a pack

@@ -9,13 +9,9 @@
 compile on another machine.**
 
 A pack (`.typk`) contains an entrypoint, the project's source and data files,
-and the exact package and font requirements found during a discovery
-compile. Packages and fonts can be embedded for offline, portable compilation
-or recorded as external requirements for the receiving application to supply.
-
-Use the CLI to create, inspect, compile, and extract packs. Use the Rust library
-to build the same workflows in editors, web services, object-storage systems,
-and other applications.
+and the exact packages and fonts the document uses. Packages and fonts can be
+embedded for offline, portable compilation or recorded as requirements for the
+compiling machine to supply.
 
 This is unrelated to Typst's bundle output (`typst-bundle`). A pack is portable
 **input** for later compilation, not a collection of rendered output files.
@@ -31,373 +27,137 @@ This is unrelated to Typst's bundle output (`typst-bundle`). A pack is portable
 - 🏗️ Build packs from the filesystem, entirely in memory, or with caller-supplied OpenDAL storage.
 - 🔒 Keep filesystem access and network download support as separate build choices.
 
+## CLI or library?
+
+typst-pack comes as a command-line tool and as a Rust library. Both read and
+write the same `.typk` files.
+
+- **The CLI** (`typst-pack-cli`) packs projects on disk and compiles packs,
+  from a terminal, a script, or CI. Its flags follow `typst compile`.
+- **The library** (`typst-pack`) builds the same workflows into applications:
+  a web service that renders a document per customer, an editor, a system
+  that keeps projects in object storage, or a WebAssembly module. Its core
+  does no I/O, so the application decides where projects, packages, fonts,
+  and packs come from.
+
 ## CLI
 
-Install the command-line tool:
+Download a prebuilt binary from the
+[latest release](https://github.com/sagikazarmark/typst-pack/releases/latest),
+or build from source:
 
 ```console
 cargo install typst-pack-cli
 ```
 
+Pack a project, look inside, compile it, and get the editable project back:
+
 ```console
-# Pack a named source file, vendoring all observed packages:
-typst-pack create path/to/project/main.typ
-
-# Pack a specific entrypoint, embedding the fonts the document uses:
-typst-pack create letter.typ --embed-fonts
-
-# See what a pack contains:
+typst-pack create project/main.typ project.typk
 typst-pack inspect project.typk
-
-# Compile a pack with its vendored packages and embedded fonts:
-typst-pack compile project.typk output.pdf
-
-# Pass a recipient's file to the document as bytes, e.g. for `image(sys.inputs.logo)`
-# (create the pack with a sample input too, since discovery runs the document):
-typst-pack create invoice.typ --input-file logo=sample-logo.png
-typst-pack compile invoice.typk customer.pdf --input-file logo=customer-logo.png
-
-# PNG or SVG output, page selection, reproducible builds:
-typst-pack compile project.typk "page-{0p}.png" --ppi 300 --pages 1-3
-typst-pack compile project.typk reproducible.pdf --creation-timestamp 1700000000
-
-# Guarantee no network access (fails instead of downloading packages):
-typst-pack compile project.typk --offline
-
-# Experimental HTML export:
-typst-pack compile project.typk out.html
-typst-pack create project/main.typ --target html
-
-# Also discover packages and fonts reached only under other inputs:
-typst-pack create report.typ --variant edition=print --variant edition=web,lang=de
-
-# Unpack a pack back into an editable project directory:
-typst-pack extract project.typk -o project/
+typst-pack compile project.typk report.pdf
+typst-pack extract project.typk -o copy/
 ```
 
-Without an output path, `compile` writes next to the pack with the format's
-extension (`project.typk` to `project.pdf`), and `create` writes next to the
-entrypoint (`main.typ` to `main.typk`). For PNG and SVG output, `{p}` is the
-one-based source page number, `{0p}` and `{n}` are zero-padded aliases, and
-`{t}` is the source-document page count. Multi-page output needs `{p}`, `{0p}`,
-or `{n}`. All output paths are checked for duplicates before anything is
-written.
+`create` packs every file beneath the entrypoint's directory and stores every
+package the document imports. Fonts are recorded but not stored unless you
+ask, so the compiling machine needs the same fonts; Typst's own fonts are
+always available.
 
-See [CLI examples](https://github.com/sagikazarmark/typst-pack/blob/main/docs/cli-examples.md) for additional create, compile,
-extraction, input, and discovery-variant commands.
+### Common tasks
 
-### Project files
+```console
+# Make the pack fully self-contained by embedding the fonts it uses:
+typst-pack create project/main.typ project.typk --embed-fonts
 
-`create` includes every eligible regular file beneath the project root, not
-only files reached by the discovery compile. A root `.typkignore` uses
-Gitignore-style ordered rules. It is included in the pack; nested
-`.typkignore` files are ordinary files. Symbolic links are followed when they
-resolve inside the project root. A link leading outside it, a FIFO, socket, or
-device is rejected unless ignored, and any path with a component named `.typk`
-or ending in `.typk` (such as an earlier pack) is left out.
+# Keep files out of the pack with Gitignore rules:
+echo ".git/" >> project/.typkignore
 
-The discovery compile selects package and font requirements. Its target,
-inputs, date, features, and control flow do not change which project files are
-included. Each `--variant KEY=VALUE[,KEY=VALUE...]` runs one more discovery
-compile with those inputs replacing or adding to `--input` and `--input-file`,
-so packages and fonts reached only under other inputs are required too.
-Per-recipient data reaches a compile through `--input KEY=VALUE` (a string) and
-`--input-file KEY=PATH` (the file's bytes, which `image`, data loaders such as
-`json`, and `str` accept). In a Git checkout, add `.git/` to `.typkignore`.
+# Compile one document per recipient with `sys.inputs` (strings or file bytes):
+typst-pack compile invoice.typk acme.pdf --input locale=de --input-file logo=acme-logo.png
 
-### Packages and fonts
+# Render pages to images:
+typst-pack compile project.typk "page-{0p}.png" --ppi 300 --pages 1-3
 
-Observed packages are embedded by default. `--no-vendor-packages` records each
-exact package and its tree digest instead; compilation then requires the
-application's configured package sources to provide a matching tree. `--offline`
-prevents downloads during both creation and compilation.
+# Make sure nothing is downloaded:
+typst-pack compile project.typk --offline
+```
 
-Fonts are external by default and are matched by digest at compile time;
-`typst-pack inspect` names the families a pack expects. `--embed-fonts` stores
-the used font containers except those shipped by Typst; `--include-typst-embedded-fonts` stores those as
-well. Mind font licenses when redistributing embedded files. Every face of a
-required font file stays available, but text that needs a font file no
-discovery compile loaded falls back only among the pack's fonts (and may show
-missing glyphs); add a `--variant` whose inputs reach that text.
-
-### Output formats
-
-PDF and HTML produce one artifact. PNG and SVG produce one artifact for each
-selected source page. HTML is experimental in Typst. The complete intentional
-differences from `typst compile` are listed in the
-[CLI parity inventory](https://github.com/sagikazarmark/typst-pack/blob/main/docs/cli-parity.md).
+The [CLI guide](https://github.com/sagikazarmark/typst-pack/blob/main/docs/guides/cli.md)
+covers every command: choosing project files, vendoring packages, embedding
+fonts, discovery variants, inputs, output formats, extraction, and pipes.
 
 ## Library
-
-The core in-memory packing, creation, and compilation APIs need no crate
-features. Add filesystem support when the library should read local projects,
-package directories, and system fonts, and read and write pack, extraction,
-and artifact files:
 
 ```toml
 [dependencies]
 typst-pack = { version = "0.6", features = ["embedded-fonts", "fs"] }
 ```
 
-The `fs` feature links no network client. Add `egress` only when filesystem
-assembly should download missing Typst Universe packages.
+The core needs no features. `fs` reads projects, packages, and fonts from the
+filesystem and writes packs and outputs; it links no network client unless
+`egress` is enabled too.
 
-The [library contract](https://github.com/sagikazarmark/typst-pack/blob/main/docs/library-contract.md) describes identity,
-dependency fulfillment, environment independence, write policies, and partial
-effects. The [OpenDAL guide](https://github.com/sagikazarmark/typst-pack/blob/main/crates/typst-pack/docs/opendal-integration.md)
-documents asynchronous storage integration.
+Build a pack in memory, encode it, and compile it with an input:
 
-### Common workflows
+```rust
+use typst_pack::archive::{self, DecodeLimits};
+use typst_pack::compile::{self, Input, Output, OutputFormat, Request};
+use typst_pack::Pack;
 
-Each entry links to a compile-checked example on docs.rs, so the code shown
-there is verified against the release you are reading about.
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let pack = Pack::builder("main.typ")
+        .file("main.typ", b"Hello, #sys.inputs.name!".to_vec())
+        .build()?;
+
+    // Store or send the `.typk` bytes anywhere...
+    let typk: Vec<u8> = archive::encode(&pack);
+
+    // ...and compile them later.
+    let pack = archive::decode(&typk, DecodeLimits::default())?;
+    let mut request = Request::new(pack, Output::new(OutputFormat::Pdf));
+    request.options.inputs.push(("name".into(), Input::from("Jane")));
+    let compiled = compile::compile(&request)?;
+
+    assert!(compiled.artifacts[0].bytes.starts_with(b"%PDF"));
+    Ok(())
+}
+```
+
+`Pack::builder` packs exactly what it is given. To discover the packages and
+fonts a document uses, start from one of these:
 
 | Task | Start here |
 | --- | --- |
 | Pack a project directory from disk | [`fs::Packer`](https://docs.rs/typst-pack/latest/typst_pack/fs/struct.Packer.html) |
-| Pack in-memory bytes with no filesystem | [`Pack::builder`](https://docs.rs/typst-pack/latest/typst_pack/struct.Pack.html#method.builder) |
-| Supply packages yourself and resume creation | [`create`](https://docs.rs/typst-pack/latest/typst_pack/create/fn.create.html) |
-| Compile a pack with inputs | [`compile`](https://docs.rs/typst-pack/latest/typst_pack/compile/fn.compile.html) |
+| Pack in-memory files, supplying packages and fonts yourself | [`create`](https://docs.rs/typst-pack/latest/typst_pack/create/fn.create.html) |
 | Find a pack's external packages and fonts on disk | [`fs::Packer::resolve`](https://docs.rs/typst-pack/latest/typst_pack/fs/struct.Packer.html#method.resolve) |
+| Compile a pack | [`compile`](https://docs.rs/typst-pack/latest/typst_pack/compile/fn.compile.html) |
 | Read and write packs through object storage | [OpenDAL guide](https://github.com/sagikazarmark/typst-pack/blob/main/crates/typst-pack/docs/opendal-integration.md) |
 
-The shortest complete example — build a pack in memory and encode it:
+The [library guide](https://github.com/sagikazarmark/typst-pack/blob/main/docs/guides/library.md)
+walks through these with examples and lists every crate feature.
 
-```rust
-use typst_pack::{Pack, archive};
+## Documentation
 
-let pack = Pack::builder("main.typ")
-    .file("main.typ", b"= Report\n".to_vec())
-    .build()
-    .expect("the entrypoint is contained");
+Guides:
 
-let bytes = archive::encode(&pack);
-assert!(!bytes.is_empty());
-```
+- [CLI guide](https://github.com/sagikazarmark/typst-pack/blob/main/docs/guides/cli.md)
+- [Library guide](https://github.com/sagikazarmark/typst-pack/blob/main/docs/guides/library.md)
+- [OpenDAL guide](https://github.com/sagikazarmark/typst-pack/blob/main/crates/typst-pack/docs/opendal-integration.md)
 
-`Pack::builder` does not discover dependencies: the pack contains exactly the
-files added to it. Use `create` when the library should discover them by
-compiling the project over values the caller already holds, and `fs::Packer`
-or `opendal::Assembler` when it should also read those values from a source.
+Reference:
 
-Pack creation is stateless and resumable. If a discovery compile reaches
-a package that is not in the supplied catalog, creation reports that exact
-specification instead of failing; add its tree and call `create` again. The
-`package::registry` module names the official registry URL of each
-specification, the `package-reading` feature adds bounded `.tar.gz` expansion
-without choosing an HTTP client, and
-`opendal::Assembler` (with `opendal` and `package-reading`) runs the same loop
-over OpenDAL storage.
+- [API reference](https://docs.rs/typst-pack) on docs.rs
+- [Pack format](https://github.com/sagikazarmark/typst-pack/blob/main/docs/reference/pack-format.md):
+  the archive, manifest, digests, and identities
+- [Library contract](https://github.com/sagikazarmark/typst-pack/blob/main/docs/reference/library-contract.md):
+  guarantees about identity, environment independence, limits, writes, and errors
+- [CLI parity inventory](https://github.com/sagikazarmark/typst-pack/blob/main/docs/reference/cli-parity.md):
+  how the CLI follows and differs from `typst compile`
 
-Compilation takes one `compile::Request`: the pack, the output and its
-controls, `sys.inputs` strings and bytes, document time, features, the packages
-and font containers the pack requires externally, and limits. It returns
-`compile::Compiled` artifacts and warnings, or a `compile::Error` whose message
-names every invalid value or unsatisfied requirement. Diagnostics come with the
-`Sources` they point into:
-
-```rust
-use typst_pack::compile::{self, Input, Output, OutputFormat, Request};
-use typst_pack::Pack;
-
-let pack = Pack::builder("main.typ")
-    .file("main.typ", b"#str(sys.inputs.greeting)".to_vec())
-    .build()?;
-let mut request = Request::new(pack, Output::new(OutputFormat::Pdf));
-request.options.inputs.push(("greeting".into(), Input::from(b"Hello".to_vec())));
-
-match compile::compile(&request) {
-    Ok(compiled) => assert!(compiled.artifacts[0].bytes.starts_with(b"%PDF")),
-    Err(compile::Error::Failed { errors, sources, .. }) => {
-        for error in &errors {
-            let file = error.span.id().map(|id| sources.name(id));
-            eprintln!("{file:?}: {}", error.message);
-        }
-    }
-    Err(error) => return Err(error.into()),
-}
-# Ok::<(), Box<dyn std::error::Error>>(())
-```
-
-### Feature flags
-
-- `fs`: Read projects, local packages, caches, and system fonts from the filesystem, and read and write pack, extraction, and artifact files; unavailable on wasm targets.
-- `egress`: Download missing packages during filesystem assembly; implies `fs` and `package-reading` and links HTTP/TLS dependencies.
-- `package-reading`: Expand bounded registry package archives without choosing a transport (`package::registry::expand_archive`).
-- `opendal`: Read projects, fonts, packages, and packs, and write packs, extractions, and artifacts, through caller-supplied OpenDAL operators, with caller-polled futures and no bundled runtime. Together with `package-reading`, also assemble packs (`opendal::Assembler`).
-- `embedded-fonts`: Make Typst's embedded fonts available to assembly and external fulfillment.
-- `diagnostics`: Implement `typst-kit`'s `DiagnosticWorld` for `Sources`, so `typst_kit::diagnostics::emit` renders diagnostics with source context.
-- `parallel`: Export independent page artifacts in parallel.
-
-All features are opt-in. Featureless creation and compilation remain available
-on `wasm32-unknown-unknown`.
-
-## Pack format
-
-A pack is a ZIP archive, conventionally named `*.typk`, with this layout:
-
-```text
-typst-pack.toml                         manifest
-project/<path>                          every project file, root-relative
-packages/<ns>/<name>/<version>/<path>   files of embedded packages
-fonts/<hex digest>.<ext>                embedded font containers
-```
-
-Example manifest:
-
-```toml
-format-version = 2
-typst-version = "0.15.1"
-generator = "typst-pack 0.6.0"
-entrypoint = "main.typ"
-
-[[files]]
-path = "main.typ"
-digest = "sha256:8d5f78795df7052f5d6004f5d268ca4175c86ccdeaaf5a30d1c759c78e34fe60"
-
-[[packages]]
-spec = "@preview/cetz:0.3.4"
-digest = "sha256:59a7210040a1150688b50619e101f628b72234a06c7568ca5e556283642281fb"
-embedded = true
-
-[[fonts]]
-digest = "sha256:fcf06307a77367394fcb0ccb241e59eea70dba3d732be309647611224679c733"
-embedded = false
-
-[[fonts.faces]]
-index = 0
-family = "Libertinus Serif"
-style = "normal"
-weight = 400
-stretch = 1000
-
-[metadata]
-name = "Quarterly report"
-authors = ["Jane Doe"]
-```
-
-`[[files]]` lists every project file. `[[packages]]` lists every package the
-document needs, embedded or to be supplied at compile time. `[[fonts]]` lists
-every font container the document needs, in font book order; every face of a
-listed container is available to the document. `typst-version` and
-`generator` name the producer and are informational (`Pack::typst_version`,
-`Pack::generator`); `[metadata]` is descriptive only.
-
-Faces are informational too: they let a recipient see which fonts an external
-container provides. `index` is the face's index in the container, `family`
-its typographic family name, `style` one of `normal`, `italic`, or `oblique`,
-`weight` the CSS weight from 100 to 900 (400 is normal), and `stretch` the
-width in per mille of the normal width, from 500 to 2000 (1000 is normal).
-Readers are lenient with faces: `faces` reads as the entries that are tables,
-every field is optional (defaulting to index 0, an empty family, `normal`,
-400, and 1000), a value of the wrong type reads as the default, an unknown
-style reads as `normal`, and out-of-range numbers are clamped. A producer that
-does not know its Typst version omits `typst-version`.
-
-Paths, specifications, and digests are written in canonical form, each
-declared once: a path is root-relative with `/` separators and no `.`, `..`,
-or empty segments, and a specification is written exactly as Typst prints it
-(`@preview/cetz:0.3.4`, never `@preview/cetz:0.03.4`). An embedded font
-container is stored as `fonts/<hex digest>.<ext>`, where `<ext>` follows from
-its leading bytes: `otf` (`OTTO`), `ttc` (`ttcf`), `woff` (`wOFF`), `woff2`
-(`wOF2`), and `ttf` otherwise.
-
-### Digests
-
-Every digest is SHA-256, written `sha256:` followed by 64 lowercase
-hexadecimal digits.
-
-- **File digest:** SHA-256 of the file's bytes.
-- **Font container digest:** SHA-256 of the font file or collection bytes.
-- **Package tree digest:** SHA-256 of a preimage over every file of the
-  package, in byte-wise path order.
-- **Pack identity:** SHA-256 of a preimage over the entrypoint, the project
-  files, the packages, and the font containers. Metadata, informational fields,
-  member order, compression, and every other ZIP detail are excluded.
-
-Preimages are built from these fields: `str(s)` is the UTF-8 byte length of
-`s` as a big-endian 64-bit integer followed by the bytes; `count(n)` is `n` as a
-big-endian 64-bit integer; `digest(d)` is the 32 raw digest bytes; `bool(b)` is
-one byte, `0` or `1`. Each preimage starts with a domain tag. "By path" and "by
-spec" order records byte-wise by the path or by the specification's text, so
-`@preview/a:0.10.0` sorts before `@preview/a:0.9.0`.
-
-```text
-package tree = str("typst-pack/package-tree/v1") count(files)
-               { str(path) digest(file digest) }      per file, by path
-
-pack         = str("typst-pack/pack/v1") str(entrypoint)
-               count(files) { str(path) digest(file digest) }      by path
-               count(packages) { str(spec) digest(tree digest) bool(embedded) }
-                                                                  by spec
-               count(fonts) { digest(container digest) bool(embedded) }
-                                                       in manifest order
-```
-
-### Compilation identity
-
-`compile::Compiled::identity` is SHA-256 over this preimage, in the same encoding, plus
-`int(n)`, a big-endian two's-complement 64-bit integer:
-
-```text
-compilation = str("typst-pack/compilation/v1") str(implementation)
-              digest(pack identity) output
-              count(inputs) { str(key) input }        in effective order
-              time
-              count(features) { str(feature) }        "html", "a11y-extras"
-              count(packages) { str(spec) digest(tree digest) }
-                                       externally supplied, by spec
-              count(fonts) { digest(container digest) }
-                                       externally supplied, by digest
-input       = str("str") str(value) | str("bytes") digest(SHA-256 of the bytes)
-time        = str("absent") | str("unix") int(seconds)
-            | str("local") int(seconds) int(UTC offset seconds)
-            | str("date") int(year) int(month) int(day)
-output      = str("pdf") pages count(standards) { str(standard) }
-                identifier creator bool(tagged) timestamp bool(pretty)
-            | str("png") pages int(bits of the f64 PPI) bool(render bleed)
-            | str("svg") pages bool(render bleed) bool(pretty)
-            | str("html") bool(pretty)
-pages       = count(ranges) { count(first) int(last or -1 when open) }
-identifier  = str("auto") | str("custom") str(identifier)
-creator     = str("auto") | str("none") | str("custom") str(creator)
-timestamp   = str("omit") | str("utc") int(seconds)
-            | str("local") int(seconds) int(UTC offset seconds)
-```
-
-`implementation` is `typst_pack::VERSION`, for example `0.6.0 (Typst 0.15.1)`.
-Values are normalized first: a repeated input key keeps its first position and
-last value, HTML output adds the `html` feature, page ranges are sorted and
-merged, PDF standards are sorted by name, automatic PDF tagging is resolved,
-a fixed document time is reduced to its date, and the default PPI is filled
-in. Metadata, limits, export workers, and
-dependencies the pack does not require do not contribute.
-
-### Verification
-
-A reader decodes a pack only if every member matches the manifest: each
-project file and embedded font container matches its digest, each embedded
-package's files match its tree digest, and no member is missing or undeclared.
-Every member name must be exactly the canonical name the encoder writes, so an
-archive has one reading for every extractor: names that only normalize to a
-member (`project/./main.typ`, `./typst-pack.toml`), duplicates, and a font
-container under any name but the one its content implies are refused. A
-manifest that declares a path, package, or font container twice, or a path or
-specification in non-canonical form, is refused too. An embedded package tree
-that holds a `typst.toml` must declare its specification's name and version.
-Links and other special entries are refused; directory entries are ignored.
-Declared sizes and actual inflated bytes are both bounded by
-`archive::DecodeLimits`. External packages and fonts are matched by digest
-when the pack is compiled.
-
-The encoder is deterministic for a given build: fixed member order, timestamps,
-permissions, and compression level.
-
-### Compatibility
-
-`format-version` changes with every incompatible format change, and readers
-reject every version they do not implement. Readers ignore unknown manifest
-keys, so a producer can add compatible fields without a new version.
+The [documentation index](https://github.com/sagikazarmark/typst-pack/blob/main/docs/README.md)
+also lists the development docs and architecture decisions.
 
 ## Development
 
@@ -407,10 +167,9 @@ CI runs the [just](https://just.systems) recipes in it. Minimum verification:
 - `just ci`
 - `just test-cli-parity` (x86_64 Linux only)
 
-`just` lists every recipe.
-
-Maintainers changing the embedded compiler must follow the
-[embedded Typst upgrade procedure](https://github.com/sagikazarmark/typst-pack/blob/main/docs/embedded-typst-upgrade.md).
+`just` lists every recipe. Maintainers changing the embedded compiler must
+follow the
+[embedded Typst upgrade procedure](https://github.com/sagikazarmark/typst-pack/blob/main/docs/development/embedded-typst-upgrade.md).
 
 ## License
 

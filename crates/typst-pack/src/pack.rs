@@ -458,7 +458,7 @@ fn validate_fonts(
     (requirements, font_data)
 }
 
-/// The documented pack identity preimage; see the README's "Pack format".
+/// The documented pack identity preimage; see `docs/reference/pack-format.md`.
 fn pack_identity(
     project: &ProjectSnapshot,
     packages: &[package::Requirement],

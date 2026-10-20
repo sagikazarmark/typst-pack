@@ -1,7 +1,7 @@
 # The embedded Typst release. Every `typst` and `typst-*` crate is pinned to
 # this exact version; `build.rs` reports it through `typst_pack::VERSION`, and
 # `tests/embedded_typst_gate.rs` checks the manifests and `Cargo.lock` against
-# it. See docs/embedded-typst-upgrade.md.
+# it. See docs/development/embedded-typst-upgrade.md.
 [typst]
 version = "0.15.1"
 

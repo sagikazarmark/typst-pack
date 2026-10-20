@@ -1,6 +1,7 @@
 fn main() {
     emit_engine_version();
     stage_readme();
+    stage_library_guide();
 }
 
 /// Reports the embedded Typst release for `typst_pack::VERSION` and the pack
@@ -31,4 +32,23 @@ fn stage_readme() {
     .join("README.md");
     std::fs::copy(readme_path, output)
         .unwrap_or_else(|error| panic!("failed to stage {readme_path}: {error}"));
+}
+
+/// Copies the library guide into `OUT_DIR` and enables the
+/// `typst_pack_library_guide` cfg, so doctests compile-check its examples.
+/// The guide is not part of the published package, which skips it.
+fn stage_library_guide() {
+    println!("cargo::rustc-check-cfg=cfg(typst_pack_library_guide)");
+    let guide_path = "../../docs/guides/library.md";
+    if !std::path::Path::new(guide_path).is_file() {
+        return;
+    }
+    println!("cargo:rerun-if-changed={guide_path}");
+    let output = std::path::PathBuf::from(
+        std::env::var_os("OUT_DIR").expect("Cargo must provide OUT_DIR to build scripts"),
+    )
+    .join("library-guide.md");
+    std::fs::copy(guide_path, output)
+        .unwrap_or_else(|error| panic!("failed to stage {guide_path}: {error}"));
+    println!("cargo:rustc-cfg=typst_pack_library_guide");
 }

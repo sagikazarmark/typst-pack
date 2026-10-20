@@ -1,5 +1,5 @@
 //! The typst-pack command line: Pack-specific flows and one focused test per
-//! adapter behavior in `docs/cli-parity.md`. Shared Typst behavior is gated
+//! adapter behavior in `docs/reference/cli-parity.md`. Shared Typst behavior is gated
 //! against the official binary in `official_typst_cli.rs`.
 
 use std::ffi::OsStr;

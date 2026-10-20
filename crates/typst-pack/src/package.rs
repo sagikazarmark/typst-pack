@@ -122,7 +122,7 @@ impl Tree {
 }
 
 /// The documented package tree digest preimage over `(path, file digest)`
-/// records in path order; see the README's "Pack format".
+/// records in path order; see `docs/reference/pack-format.md`.
 fn tree_digest<'a>(files: impl ExactSizeIterator<Item = (&'a str, Digest)>) -> Digest {
     let mut preimage = Preimage::new("typst-pack/package-tree/v1");
     preimage.count(files.len());

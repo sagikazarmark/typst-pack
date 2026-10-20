@@ -1,8 +1,9 @@
 //! The pack archive: a ZIP file holding a `typst-pack.toml` manifest and the
 //! pack's content.
 //!
-//! See the README's "Pack format" section for the layout and verification
-//! rules.
+//! See the
+//! [pack format](https://github.com/sagikazarmark/typst-pack/blob/main/docs/reference/pack-format.md)
+//! for the layout and verification rules.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, Cursor, Read, Write};

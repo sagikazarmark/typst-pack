@@ -40,7 +40,7 @@ length-prefixed preimage:
   and the digests of the external packages and fonts it was fulfilled with.
 
 Limits, crate features, build profile, storage location, and host facts never
-contribute. The preimages are specified in the README's "Pack format" section,
+contribute. The preimages are specified in `docs/reference/pack-format.md`,
 which is the normative reference; a preimage change bumps its domain tag.
 
 **The archive is a self-verifying ZIP.** A `.typk` archive holds a

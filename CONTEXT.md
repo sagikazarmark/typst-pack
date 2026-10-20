@@ -1,7 +1,8 @@
 # Typst Pack
 
 Domain terms used across typst-pack. Decisions live in `docs/adr/`; exact
-formats and guarantees live in the README and `docs/library-contract.md`.
+formats and guarantees live in `docs/reference/pack-format.md` and
+`docs/reference/library-contract.md`.
 
 **Pack**:
 A validated, portable Typst project: one entrypoint, its project files, and the
