@@ -22,14 +22,14 @@ This is unrelated to Typst's bundle output (`typst-bundle`). A pack is portable
 
 ## Features
 
-- Put a whole Typst project in one `.typk` file, including images and data.
-- Vendor imported Typst Universe packages so compilation works offline.
-- Embed selected fonts so output does not depend on fonts installed elsewhere.
-- Compile to PDF, PNG, SVG, or experimental HTML without reading ambient project files.
-- Pass strings and file bytes to the document through `sys.inputs` at compile time.
-- Inspect or extract a pack before using it.
-- Build packs from the filesystem, entirely in memory, or with caller-supplied OpenDAL storage.
-- Keep filesystem access and network download support as separate build choices.
+- 📦 Put a whole Typst project in one `.typk` file, including images and data.
+- ✈️ Vendor imported Typst Universe packages so compilation works offline.
+- 🔤 Embed selected fonts so output does not depend on fonts installed elsewhere.
+- 🖨️ Compile to PDF, PNG, SVG, or experimental HTML without reading ambient project files.
+- 🎛️ Pass strings and file bytes to the document through `sys.inputs` at compile time.
+- 🔍 Inspect or extract a pack before using it.
+- 🏗️ Build packs from the filesystem, entirely in memory, or with caller-supplied OpenDAL storage.
+- 🔒 Keep filesystem access and network download support as separate build choices.
 
 ## CLI
 
