@@ -3578,7 +3578,7 @@ dependencies = [
 
 [[package]]
 name = "typst-pack"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "cap-fs-ext",
  "cap-std",
@@ -3616,7 +3616,7 @@ dependencies = [
 
 [[package]]
 name = "typst-pack-cli"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "chrono",
  "clap",
